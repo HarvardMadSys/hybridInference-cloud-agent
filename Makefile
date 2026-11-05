@@ -1,4 +1,4 @@
-.PHONY: help setup-dev format lint typecheck test test-db test-all check docs ci ci-backend ci-database ci-frontend clean
+.PHONY: help setup-dev format lint typecheck test test-db test-db-local test-db-local-clean test-db-local-down test-all check docs docs-gettext docs-translate docs-lang docs-verify ci ci-backend ci-database ci-frontend clean
 
 .DEFAULT_GOAL := help
 
@@ -30,11 +30,10 @@ format:  ## Format code with ruff
 	$(UV_RUN) ruff check --fix .
 	@echo "$(GREEN)OK Code formatted$(RESET)"
 
-lint:  ## Run linters (ruff format check, ruff lint, pydocstyle)
+lint:  ## Run linters (ruff format check, ruff lint)
 	@echo "$(YELLOW)Running linters...$(RESET)"
 	$(UV_RUN) ruff format --check .
 	$(UV_RUN) ruff check --no-fix .
-	$(UV_RUN) pydocstyle apps/backend/cloud_agent apps/backend/cloud_agent_host apps/backend/cloud_agent_shared
 	@echo "$(GREEN)OK Linting passed$(RESET)"
 
 typecheck:  ## Type-check all three packages (mypy; config in pyproject.toml)
@@ -50,17 +49,53 @@ test:  ## Run tests (exclude external and db-dependent)
 test-db:  ## Run the dbtest tier (needs Postgres; see TEST_DB_* in ENVIRONMENT.md)
 	$(UV_RUN) pytest -vv -m "dbtest"
 
+# ARGS passes pytest arguments through, e.g. ARGS="tests/integration/storage -x".
+test-db-local:  ## Run the dbtest tier on this machine's shared test PostgreSQL (needs Docker)
+	UV_RUN="$(UV_RUN)" ./scripts/test-db-local.sh run $(ARGS)
+
+test-db-local-clean:  ## Drop local test databases of checkouts that no longer exist
+	UV_RUN="$(UV_RUN)" ./scripts/test-db-local.sh clean
+
+# Discards every checkout's databases and fails their runs; never from an agent.
+test-db-local-down:  ## Remove the shared local test PostgreSQL container
+	./scripts/test-db-local.sh down
+
 test-all:  ## Run all tests except external (includes db-dependent)
 	$(UV_RUN) pytest -q -m "not external"
 
 check: format lint typecheck test  ## Format, lint, type-check, and test — the gate every task must pass
 
 # Warnings are errors, and --keep-going reports every one instead of stopping
-# at the first. CI's Docs Build job runs this target, so a build that is clean
-# here is clean there.
-docs:  ## Build the developer documentation into docs/build/html
+# at the first. conf.py builds each translation into docs/build/html/<code>/
+# from this one invocation, so this produces the whole published tree;
+# DOCS_LANGUAGES="en:English" builds English alone. CI's Docs Build job runs
+# docs-verify, which starts with this target.
+docs:  ## Build the developer documentation (every language) into docs/build/html
 	$(UV_RUN) sphinx-build -b html -W --keep-going docs/developer docs/build/html
 	@echo "$(GREEN)OK Docs built: docs/build/html/index.html$(RESET)"
+
+DOCS_LANG ?= zh_CN
+
+docs-gettext:  ## Extract translatable strings from the docs into docs/gettext/
+	$(UV_RUN) sphinx-build -b gettext -q docs/developer docs/gettext
+	@echo "$(GREEN)OK Catalog templates: docs/gettext/$(RESET)"
+
+# uvx rather than a pinned dev dependency: only translators run this.
+docs-translate: docs-gettext  ## Create or update the catalogs for DOCS_LANG (default zh_CN)
+	uvx sphinx-intl update -p docs/gettext -d docs/developer/locale -l $(DOCS_LANG)
+	@echo "$(GREEN)OK Edit docs/developer/locale/$(DOCS_LANG)/LC_MESSAGES/*.po$(RESET)"
+
+docs-lang:  ## Build one translated language into docs/build/html-$(DOCS_LANG)
+	$(UV_RUN) sphinx-build -b html -W --keep-going -D language=$(DOCS_LANG) \
+		docs/developer docs/build/html-$(DOCS_LANG)
+	@echo "$(GREEN)OK Docs built: docs/build/html-$(DOCS_LANG)/index.html$(RESET)"
+
+# A translation never fails loudly: Sphinx falls back to English for any string
+# it cannot translate, so a stale catalog builds clean under -W and reads as
+# English. The checker is what notices.
+docs-verify: docs docs-gettext  ## Build the site and check every translation still applies
+	$(UV_RUN) python scripts/check_docs_translations.py docs/build/html docs/developer/locale \
+		--gettext-dir docs/gettext
 
 ci:  ## Run all local CI tiers (check-only; needs uv, Python 3.12, Node 22, and Docker)
 	./scripts/ci-local.sh
@@ -75,5 +110,5 @@ ci-frontend:  ## Run local frontend CI (lint, format check, types, tests, and bu
 	./scripts/ci-local.sh frontend
 
 clean:  ## Remove caches and build artifacts
-	rm -rf .pytest_cache .ruff_cache .mypy_cache .coverage coverage.xml htmlcov build dist *.egg-info apps/backend/*.egg-info docs/build
+	rm -rf .pytest_cache .ruff_cache .mypy_cache .coverage coverage.xml htmlcov build dist *.egg-info apps/backend/*.egg-info docs/build docs/gettext
 	find . -type d \( -name .venv -o -name venv -o -name node_modules \) -prune -o -type d -name __pycache__ -exec rm -rf {} +

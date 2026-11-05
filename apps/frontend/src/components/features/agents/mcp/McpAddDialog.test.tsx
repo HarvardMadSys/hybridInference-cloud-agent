@@ -18,6 +18,7 @@ import {
   previewMcpImport,
   saveMcpImport,
 } from '@/lib/api/mcp';
+import { chooseOption } from '@/components/ui/__tests__/select';
 
 const template: McpTemplateApi = {
   name: 'github',
@@ -114,7 +115,7 @@ describe('McpAddDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: 'GitHub' }));
     expect(listMcpCatalog).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: 'Docs' })).not.toBeInTheDocument();
-    expect(screen.getByLabelText('Connect with')).toHaveValue('static');
+    expect(screen.getByLabelText('Connect with')).toHaveTextContent('Personal access token');
     expect(screen.getByRole('link', { name: 'Create a token on GitHub ↗' })).toHaveAttribute(
       'href',
       'https://github.com/settings/personal-access-tokens/new',
@@ -146,6 +147,47 @@ describe('McpAddDialog', () => {
     expect(added).toHaveBeenCalledWith([{ id: 1, label: 'GitHub' }]);
   });
 
+  it('adds a sandbox browser preset as a pinned stdio server with no sign-in', async () => {
+    const playwright: McpTemplateApi = {
+      name: 'playwright-sandbox',
+      label: 'Playwright browser',
+      description: 'Open the task’s own localhost app in the sandbox browser.',
+      url: '',
+      transport: 'stdio',
+      auth_kind: 'none',
+      location: 'sandbox',
+      launch: {
+        command: 'npx',
+        args: ['-y', '@playwright/mcp@0.0.83', '--cdp-endpoint', '${CLOUD_AGENT_BROWSER_CDP}'],
+      },
+      notes: ['Runs inside each chat’s sandbox with the agent’s own access.'],
+    };
+    vi.mocked(createMcpConnection).mockResolvedValue({
+      id: 3,
+      label: 'Playwright browser',
+    } as never);
+    const added = vi.fn();
+    render(<McpAddDialog templates={[template, playwright]} onClose={vi.fn()} onAdded={added} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Playwright browser' }));
+    expect(
+      screen.getByText('npx -y @playwright/mcp@0.0.83 --cdp-endpoint ${CLOUD_AGENT_BROWSER_CDP}'),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText('Access token')).not.toBeInTheDocument();
+    expect(screen.getByText(/Nothing to sign in to/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Connect Playwright browser' }));
+    await waitFor(() =>
+      expect(createMcpConnection).toHaveBeenCalledWith({
+        label: 'Playwright browser',
+        transport: 'stdio',
+        location: 'sandbox',
+        launch: { ...playwright.launch, env: {} },
+        auth_kind: 'none',
+        template: 'playwright-sandbox',
+      }),
+    );
+    expect(added).toHaveBeenCalledWith([{ id: 3, label: 'Playwright browser' }]);
+  });
+
   it('clears the token when switching connection methods', async () => {
     render(
       <McpAddDialog
@@ -156,8 +198,8 @@ describe('McpAddDialog', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: 'GitHub' }));
     fireEvent.change(screen.getByLabelText('Access token'), { target: { value: 'private-token' } });
-    fireEvent.change(screen.getByLabelText('Connect with'), { target: { value: 'oauth' } });
-    fireEvent.change(screen.getByLabelText('Connect with'), { target: { value: 'static' } });
+    chooseOption(screen.getByLabelText('Connect with'), 'Sign in with GitHub (recommended)');
+    chooseOption(screen.getByLabelText('Connect with'), 'Personal access token');
     expect(screen.getByLabelText('Access token')).toHaveValue('');
     expect(screen.getByRole('button', { name: 'Connect GitHub' })).toBeDisabled();
   });
@@ -172,7 +214,9 @@ describe('McpAddDialog', () => {
       />,
     );
     fireEvent.click(await screen.findByRole('button', { name: 'GitHub' }));
-    expect(screen.getByLabelText('Connect with')).toHaveValue('oauth');
+    expect(screen.getByLabelText('Connect with')).toHaveTextContent(
+      'Sign in with GitHub (recommended)',
+    );
     expect(screen.getByText(/No token or app setup needed/)).toBeInTheDocument();
     expect(screen.queryByLabelText('Access token')).not.toBeInTheDocument();
     expect(
@@ -239,7 +283,7 @@ describe('McpAddDialog', () => {
       />,
     );
     fireEvent.click(await screen.findByRole('button', { name: 'GitHub' }));
-    expect(screen.getByLabelText('Connect with')).toHaveValue('static');
+    expect(screen.getByLabelText('Connect with')).toHaveTextContent('Personal access token');
     fireEvent.change(screen.getByLabelText('Access token'), { target: { value: 'private-token' } });
     fireEvent.click(screen.getByRole('button', { name: 'Connect GitHub' }));
     await waitFor(() =>
@@ -265,14 +309,14 @@ describe('McpAddDialog', () => {
       expect(saveMcpImport).toHaveBeenCalledWith(text, { docs: 'remote' }, {}, undefined, {}),
     );
     expect(added).toHaveBeenCalledWith([{ id: 5, label: 'docs' }]);
-    expect(screen.queryByLabelText('Run location for docs')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Run docs on my computer')).not.toBeInTheDocument();
   });
 
-  it('shows exact command arguments and asks for unresolved credentials before adding', async () => {
+  it('adds a command as a program with its keys, asking for those it lacks', async () => {
     const command = {
       ...preview.drafts[0],
       transport: 'stdio' as const,
-      location: 'user-connector' as const,
+      location: 'sandbox' as const,
       url: null,
       argv: ['npx', '-y', 'package', '/my folder'],
       env_names: ['API_KEY'],
@@ -288,16 +332,15 @@ describe('McpAddDialog', () => {
     const add = await screen.findByRole('button', { name: 'Add 1 server' });
     expect(add).toBeDisabled();
     expect(screen.getByText('npx -y package /my folder')).toBeInTheDocument();
-    expect(screen.queryByRole('option', { name: 'Remote server' })).not.toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('Run location for docs'), {
-      target: { value: 'managed-worker' },
-    });
+    // No place to choose: a command runs with each chat.
+    expect(screen.queryByText('Cloud worker')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Run docs on my computer')).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('docs · Value for API_KEY'), {
       target: { value: 'private-token' },
     });
     fireEvent.click(add);
     await waitFor(() =>
-      expect(saveMcpImport).toHaveBeenCalledWith(text, { docs: 'managed-worker' }, {}, undefined, {
+      expect(saveMcpImport).toHaveBeenCalledWith(text, { docs: 'sandbox' }, {}, undefined, {
         docs: { API_KEY: 'private-token' },
       }),
     );

@@ -29,11 +29,10 @@ from __future__ import annotations
 
 import json
 import re
+import tomllib
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
-
-import tomllib
 
 from cloud_agent.mcp.models import (
     AuthKind,
@@ -47,7 +46,7 @@ from cloud_agent.mcp.models import (
 #: chooses a location on its own: a ``command`` from somebody's laptop means
 #: "their machine", and reading that as the control plane's own filesystem is
 #: the mistake the design calls out by name.
-DraftLocation = Literal["remote", "managed-worker", "user-connector"]
+DraftLocation = Literal["remote", "managed-worker", "user-connector", "sandbox"]
 
 _SECRET_NAME = re.compile(
     r"authorization|authentication|\bauth\b|token|secret|key|password|passwd|credential"
@@ -315,23 +314,20 @@ def _draft(
         paths = _paths(args)
         if paths:
             warnings.append(
-                "this server's arguments name local paths; choose where it runs before saving"
+                "this server's arguments name paths on your computer, which a chat cannot reach"
             )
         runner = command.rsplit("/", 1)[-1].lower()
         ecosystem = _PACKAGE_RUNNERS.get(runner)
-        if ecosystem:
-            warnings.append(
-                f"{runner} resolves a package at start; the platform pins the version it installs"
-            )
         return ImportDraft(
             label=name,
             transport=Transport.STDIO,
-            # Never inferred as the control plane's own host: an imported
-            # command is the user's, so it starts on their connector until
-            # they say otherwise.
-            location="user-connector",
+            # A command runs where the agent runs: in each chat's sandbox. The
+            # user's own computer (a connector) is an explicit choice.
+            location="sandbox",
             launch=LaunchSpec(command=command, args=args, env=env),
-            auth_kind=AuthKind.STATIC if env_secrets else AuthKind.NONE,
+            # Its keys are environment values, sealed with the launch, not a
+            # header the platform sends: there is nothing to sign in to.
+            auth_kind=AuthKind.NONE,
             secrets=env_secrets,
             paths=paths,
             package_runner=runner if ecosystem else None,

@@ -1,3 +1,5 @@
+import { mapThreadMessage } from './threadMessage';
+import { sandboxIncidentMessage } from './sandboxIncidentNotice';
 // Adapts the agent-jobs API shape to what the UI renders.
 //
 // The UI was designed against a richer mock than the API currently returns.
@@ -41,6 +43,7 @@ import {
 } from './trajectoryProtocol';
 import { agentLiveStatus } from './agentLiveStatus';
 import { projectKey } from '@/lib/temporaryWorkspace';
+import { workspaceGitProjection, type WorkspaceGitOptions } from './workspaceGitMetadata';
 
 /**
  * Preserve a server result as a per-turn display state.
@@ -186,7 +189,9 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
       ...(previewId ? { previewId } : {}),
     };
   }
-  if (type === 'usage') return { kind: 'usage', text: asText(payload, 'text'), sourceEventId };
+  // A model call's token counts: read by the usage and stats views, never a
+  // transcript row (it has no text, and each one counted as another step).
+  if (type === 'usage') return null;
   // A message the owner sent into the running turn reads where it arrived,
   // between what the agent did before it and what it did after.
   if (type === 'user_message') {
@@ -195,6 +200,7 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
 
   if (type === 'tool_use') {
     const name = asText(payload, 'name', 'tool') || 'Bash';
+    const mcpServer = asText(payload, 'mcp_server');
     const exitCode = payload.exit_code;
     const output = toolOutput(payload);
     const outputIsError =
@@ -205,6 +211,7 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
     return {
       kind: 'tool_use',
       tool: name,
+      ...(mcpServer ? { mcpServer } : {}),
       id: asText(payload, 'id') || undefined,
       ...(Object.hasOwn(payload, 'input') ? { input: payload.input } : {}),
       ...(owner ? { parentToolUseId: owner } : {}),
@@ -292,6 +299,9 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
     if (phase === 'shared_tool_errors_observed') {
       return { kind: 'lifecycle', text: 'Some tools encountered errors', sourceEventId };
     }
+    if (phase === 'sandbox_incident') {
+      return { kind: 'lifecycle', text: sandboxIncidentMessage(payload), sourceEventId };
+    }
     return Object.hasOwn(LIFECYCLE_LABELS, phase)
       ? { kind: 'lifecycle', text: phase, sourceEventId }
       : null;
@@ -321,12 +331,62 @@ export function toDisplayEvent(event: AgentJobEventApi): AgentEvent | null {
   return null;
 }
 
+// `diff --git <old> <new>`. Git quotes either name on its own when it holds a
+// double quote, a backslash, a control character or, unless core.quotePath is
+// off, a byte outside ASCII.
+const DIFF_HEADER = /^diff --git (?:a\/.+?|"(?:[^"\\]|\\.)*") (?:b\/(.+)|"b\/((?:[^"\\]|\\.)*)")$/;
+
+// The single-letter escapes Git's quote_c_style writes. Every other byte it
+// escapes is three octal digits, so a UTF-8 name arrives one byte at a time.
+const GIT_PATH_ESCAPES: Readonly<Record<string, number>> = {
+  a: 0x07,
+  b: 0x08,
+  t: 0x09,
+  n: 0x0a,
+  v: 0x0b,
+  f: 0x0c,
+  r: 0x0d,
+  '"': 0x22,
+  '\\': 0x5c,
+};
+
+/** The name a quoted Git path spells, or null when its bytes are not UTF-8. */
+function unquoteGitPath(quoted: string): string | null {
+  const encoder = new TextEncoder();
+  const bytes: number[] = [];
+  for (const [, escape, text] of quoted.matchAll(/\\([0-3][0-7]{2}|.)|([^\\]+)/g)) {
+    if (text !== undefined) bytes.push(...encoder.encode(text));
+    else if (escape.length === 3) bytes.push(Number.parseInt(escape, 8));
+    else bytes.push(GIT_PATH_ESCAPES[escape] ?? escape.charCodeAt(0));
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(bytes));
+  } catch {
+    // Read loosely, such a name would show a path with U+FFFD in it that no
+    // file has, and two names could read the same. The workspace leaves it
+    // out of its listing too.
+    return null;
+  }
+}
+
+/**
+ * The path a `diff --git` header gives the changed file, or null for any other
+ * line and for a header naming no file the workspace can open: one whose name
+ * is not UTF-8, or whose prefixes a repository's diff config changed.
+ */
+function diffHeaderPath(line: string): string | null {
+  const header = DIFF_HEADER.exec(line);
+  if (!header) return null;
+  const path = header[1] ?? unquoteGitPath(header[2]);
+  return path || null;
+}
+
 /** Extract the file list a patch touches, for the diff header. */
 export function toDiffFiles(patch: string): string[] {
   const files = new Set<string>();
   for (const line of patch.split('\n')) {
-    const match = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
-    if (match) files.add(match[2]);
+    const path = diffHeaderPath(line);
+    if (path !== null) files.add(path);
   }
   return [...files];
 }
@@ -336,22 +396,34 @@ export function toDiffFileDetails(patch: string): AgentDiffFile[] {
   if (!patch) return [];
   const files: AgentDiffFile[] = [];
   let current: AgentDiffFile | null = null;
+  // `---` and `+++` name the file only before its first hunk. Inside a hunk the
+  // first character says what a line is, so a removed `--count;` is a removal.
+  let inHunk = false;
 
   for (const line of patch.split('\n')) {
-    const header = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
-    if (header) {
-      current = { path: header[2], add: 0, del: 0, lines: [] };
-      files.push(current);
+    if (line.startsWith('diff --git ')) {
+      // Every header starts a new file but one naming the file just read: Git
+      // writes a change of file type, such as a file that became a symlink,
+      // as a deletion and a creation under one name. A file the workspace
+      // cannot name is left out with its lines, rather than adding them to
+      // the file before it.
+      const path = diffHeaderPath(line);
+      inHunk = false;
+      if (current !== null && path === current.path) continue;
+      current = path === null ? null : { path, add: 0, del: 0, lines: [] };
+      if (current) files.push(current);
       continue;
     }
     if (!current || line.startsWith('index ')) continue;
 
     let marker: DiffLine['marker'] = 'ctx';
-    if (line.startsWith('@@')) marker = 'hunk';
-    else if (line.startsWith('+') && !line.startsWith('+++')) {
+    if (line.startsWith('@@')) {
+      marker = 'hunk';
+      inHunk = true;
+    } else if (inHunk && line.startsWith('+')) {
       marker = 'add';
       current.add += 1;
-    } else if (line.startsWith('-') && !line.startsWith('---')) {
+    } else if (inHunk && line.startsWith('-')) {
       marker = 'del';
       current.del += 1;
     }
@@ -360,13 +432,24 @@ export function toDiffFileDetails(patch: string): AgentDiffFile[] {
   return files;
 }
 
+/**
+ * The lines a patch adds and removes, counted from its hunks.
+ *
+ * Not from the files its headers name: a repository's diff.noPrefix or
+ * diff.mnemonicPrefix writes headers `toDiffFileDetails` does not read, and the
+ * count must not drop to nothing for them. A line is read as there: by its first
+ * character inside a hunk, with `---` and `+++` headers only before one.
+ */
 function diffStat(patch: string): { add: number; del: number } | undefined {
   if (!patch) return undefined;
   let add = 0;
   let del = 0;
+  let inHunk = false;
   for (const line of patch.split('\n')) {
-    if (line.startsWith('+') && !line.startsWith('+++')) add += 1;
-    else if (line.startsWith('-') && !line.startsWith('---')) del += 1;
+    if (line.startsWith('diff --git ')) inHunk = false;
+    else if (line.startsWith('@@')) inHunk = true;
+    else if (inHunk && line.startsWith('+')) add += 1;
+    else if (inHunk && line.startsWith('-')) del += 1;
   }
   return { add, del };
 }
@@ -390,10 +473,11 @@ let lastPatch:
 
 function parsePatch(patch: string): NonNullable<typeof lastPatch> {
   if (lastPatch?.patch !== patch) {
+    const details = toDiffFileDetails(patch);
     lastPatch = {
       patch,
       files: toDiffFiles(patch),
-      details: toDiffFileDetails(patch),
+      details,
       stat: diffStat(patch),
     };
   }
@@ -431,19 +515,11 @@ export function sandboxDisplayLabel(backend: string, runtime?: string): string {
   return backend;
 }
 
-/** Render a token count compactly, or empty when there is no ledger. */
-function formatTokens(value: number | null): string {
-  if (value === null || value === undefined) return '';
-  if (value >= 1000) return `${(value / 1000).toFixed(1)}k`;
-  return String(value);
-}
-
-export interface AdaptOptions {
+export interface AdaptOptions extends WorkspaceGitOptions {
   events?: AgentJobEventApi[];
   threadEvents?: AgentThreadEventApi[];
   /** Keep complete durable replies visible while activity pages are still arriving. */
   historyLoading?: boolean;
-  patch?: string | null;
   thread?: AgentThreadApi | null;
 }
 
@@ -489,7 +565,9 @@ const LIFECYCLE_LABELS: Record<string, string> = {
  */
 export function lifecyclePhaseLabel(value: string): { text: string; milestone: boolean } {
   const phase = value.trim().toLowerCase();
-  const known = LIFECYCLE_LABELS[phase];
+  // Own entries only: the text can be the agent's own words, and `__proto__`
+  // must not find Object.prototype's.
+  const known = Object.hasOwn(LIFECYCLE_LABELS, phase) ? LIFECYCLE_LABELS[phase] : undefined;
   if (known) return { text: known, milestone: true };
   if (phase.includes('superseded')) {
     return { text: 'Run interrupted', milestone: true };
@@ -553,7 +631,7 @@ export function siteMisconfiguredReason(detail: string): string {
  * The original detail remains in the API and operator logs for diagnosis.
  */
 export function ownerFailureMessage(detail: string): string {
-  // The agent's own words for why it stopped, e.g. the gateway refusing the
+  // The agent's own words for why it stopped, e.g. the provider refusing the
   // request. The host records them with this prefix; the rest is the reason.
   const reported = /^agent reported an error: ([\s\S]+)$/.exec(detail);
   if (reported) return reported[1].trim();
@@ -876,7 +954,7 @@ export function ownedBySubagent(
 /**
  * One subagent's own transcript, read as if that subagent were the
  * conversation: the records `ownedBySubagent` assigns to it. Its turn
- * milestones and usage stay runtime bookkeeping rather than rows.
+ * milestones stay runtime bookkeeping rather than rows.
  */
 export function subagentDisplayEvents(
   events: AgentJobEventApi[],
@@ -889,7 +967,7 @@ export function subagentDisplayEvents(
     const { parent_tool_use_id: _parent, agent_thread_id: _thread, ...rest } = payload;
     return [{ ...event, payload: rest }];
   });
-  return displayEvents(own, job).filter((row) => row.kind !== 'lifecycle' && row.kind !== 'usage');
+  return displayEvents(own, job).filter((row) => row.kind !== 'lifecycle');
 }
 
 /** Rename the host's rollup into the UI's shape, keeping every null a null. */
@@ -1050,17 +1128,6 @@ function toDisplayGoal(goal: NonNullable<AgentJobApi['goal']>): AgentGoal {
     ...(goal.pause_reason ? { pauseReason: goal.pause_reason } : {}),
     ...(goal.pause_detail ? { pauseDetail: goal.pause_detail } : {}),
     ...(goal.completion_basis ? { completionBasis: goal.completion_basis } : {}),
-  };
-}
-
-function mapThreadMessage(message: AgentThreadMessageApi) {
-  return {
-    id: message.id,
-    role: message.role,
-    content: message.content,
-    jobId: message.job_id,
-    createdAt: message.created_at,
-    ...(message.mid_turn ? { midTurn: true } : {}),
   };
 }
 
@@ -1389,31 +1456,26 @@ function adaptJob(
     repo: projectKey(job.repo),
     baseRef: job.base_ref ?? undefined,
     baseSha: (job.base_sha ?? '').slice(0, 7),
-    // Every turn in a conversation publishes to the same branch/PR. A
-    // temporary workspace publishes nothing, so it has no branch at all.
+    // The conversation workspace's local branch, shared by every turn. A
+    // temporary workspace has no repository, so it has no branch at all.
     branch:
       job.output_branch ??
       (job.repo === null ? '' : `agent/${job.thread_id ?? options.thread?.thread_id ?? job.id}`),
     runtime: job.runtime,
     model: job.model,
+    ...(job.model_connection_id ? { modelConnectionId: job.model_connection_id } : {}),
     reasoningEffort: job.reasoning_effort ?? undefined,
     skills: job.skills ?? [],
     // The conversation's goal, and this turn's relationship to it. Assigned
     // after the literal rather than spread inside it: a ternary returning an
     // object, spread into another object, is indented differently by Prettier
-    // and ESLint and the two refuse to agree. Both fields are optional — a
-    // conversation without a goal carries neither, and a deployment older than
-    // this feature carries no fields at all.
+    // and ESLint and the two refuse to agree. Both fields are optional; a
+    // goalless conversation, or an older deployment, carries neither.
     ...(job.goal ? { goal: toDisplayGoal(job.goal) } : {}),
     // Through the same helper the stored turns use, not a second copy of it:
     // written out inline, every job got a `goalTurn` — including the ones whose
     // conversation has no goal at all — and "absent" stopped meaning anything.
     ...(storedGoalTurn(job) ? { goalTurn: storedGoalTurn(job) } : {}),
-    // Summed server-side from api_logs. Null there means no ledger is
-    // configured; 0 is the honest display for that, but the panel below reads
-    // `hasLedger` so it can say so rather than imply the job was free.
-    spentUsd: job.spent_usd ?? 0,
-    hasLedger: job.spent_usd !== null,
     ...(job.continuity_mode ? { continuityMode: job.continuity_mode } : {}),
     ...(job.context_status ? { contextStatus: job.context_status } : {}),
     ...(job.resident_state ? { residentState: job.resident_state } : {}),
@@ -1421,12 +1483,7 @@ function adaptJob(
     ...(job.workspace_shared ? { workspaceShared: true } : {}),
     ...(job.native_state ? { nativeState: job.native_state } : {}),
     ...(job.native_fork_available ? { nativeForkAvailable: true } : {}),
-    ...(job.workspace_publication_state
-      ? { workspacePublicationState: job.workspace_publication_state }
-      : {}),
-    ...(job.workspace_publication_unchanged ? { workspacePublicationUnchanged: true } : {}),
     ...(job.workspace_pr_url ? { workspacePrUrl: job.workspace_pr_url } : {}),
-    ...(job.workspace_unpublished_changes ? { workspaceUnpublishedChanges: true } : {}),
     ...(typeof job.workspace_epoch === 'number' ? { workspaceEpoch: job.workspace_epoch } : {}),
     ...(typeof job.duration_ms === 'number' ? { durationMs: job.duration_ms } : {}),
     ...(job.resources ? { resources: toTurnResources(job.resources) } : {}),
@@ -1439,17 +1496,11 @@ function adaptJob(
     events: renderedEvents,
     liveNote: liveStatus?.note,
     liveNoteStartedAt: liveStatus?.startedAt,
-    diffFiles: parsed.files,
+    ...workspaceGitProjection(parsed.files, options),
     workspaceDiffAvailable: typeof options.patch === 'string',
     diffFileDetails: parsed.details,
     diffStat: parsed.stat,
     gates: [],
-    usage: {
-      tokensIn: formatTokens(job.tokens_in),
-      tokensOut: formatTokens(job.tokens_out),
-      cachePct: 0,
-      turns: job.model_calls,
-    },
     prLabel: publishedPrUrl ? `draft PR ${publishedPrUrl.split('/').pop()}` : undefined,
     prUrl: publishedPrUrl ?? undefined,
     threadId: job.thread_id ?? options.thread?.thread_id ?? undefined,

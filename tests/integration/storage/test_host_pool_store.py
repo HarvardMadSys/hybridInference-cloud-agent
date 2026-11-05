@@ -15,8 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -24,7 +22,6 @@ import pytest_asyncio
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
 
-from cloud_agent.application import residency
 from cloud_agent.host_pool import (
     HOST_DISABLED,
     HOST_DRAINING,
@@ -36,13 +33,14 @@ from cloud_agent.host_pool import (
 from cloud_agent.storage._sql.hosts import release_host_slot
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories.host_pool import PostgresHostPoolRepository
-from cloud_agent_host.shared_protocol import (
+from cloud_agent_shared.runtime_downloads import MAX_TARGETS_PER_RUNTIME
+from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_S3_URI
+from cloud_agent_shared.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
-from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_S3_URI
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -95,6 +93,27 @@ async def db():
 async def store(db):
     """Everything else these tests need, to claim and settle work."""
     return Storage(db)
+
+
+async def _resident_host(db, thread_id: str) -> dict | None:
+    """The live hot residency of a thread, or ``None``: unexpired, whatever the reaper did."""
+    async with db.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT m.thread_id, m.sandbox_id, g.host, g.runtime_id, g.runtime_version,
+                   m.residency_generation AS generation,
+                   m.residency_status AS status,
+                   m.residency_lease_expires_at AS lease_expires_at,
+                   m.residency_grant_id AS grant_id,
+                   m.residency_binding_id AS ledger_binding_id
+            FROM agent_thread_sandbox_memberships m
+            JOIN agent_sandboxes g ON g.id = m.sandbox_id
+            WHERE m.thread_id = $1 AND m.residency_status = 'hot'
+              AND m.residency_lease_expires_at > clock_timestamp()
+            """,
+            thread_id,
+        )
+    return None if row is None else dict(row)
 
 
 @pytest_asyncio.fixture
@@ -2069,17 +2088,15 @@ async def test_only_a_draining_host_can_be_waiting_for_removal(
 
 
 async def test_a_forced_removal_ends_the_work_the_host_was_holding(
-    store, hosts: PostgresHostPoolRepository
+    db, store, hosts: PostgresHostPoolRepository
 ):
     """Revoking the credential also ends what the host's worker tokens open.
 
     Those tokens name the attempt, never the machine, so before the removal
-    expired the leases a removed host kept heartbeating them — and with the
-    lease alive its grant was renewed, the relay served it tools, and it could
-    mint fresh residency grants. From the commit on, none of that succeeds,
-    and the reaper's next pass (residencies, then attempts, then grants, as
-    the loop runs them) ends the work and hands both grants over for
-    revocation.
+    expired the leases a removed host kept heartbeating them, and with the
+    lease alive it could establish fresh residencies. From the commit on,
+    none of that succeeds, and the reaper's next pass (residencies, then
+    attempts) ends the work.
     """
     await _enrol(store, "runner-a", hosts=hosts)
     job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
@@ -2093,19 +2110,14 @@ async def test_a_forced_removal_ends_the_work_the_host_was_holding(
         ttl_seconds=600,
     )
     assert residency is not None
-    assert await store.grants.link_residency_grant(
-        thread_id=job["thread_id"], generation=residency["generation"], grant_id="agr_resident"
-    )
-    assert await store.grants.record_attempt_grant(**fence, grant_id="agr_attempt")
 
     assert await hosts.remove_host(host="runner-a", force=True) == "ok"
 
     assert await store.attempt_commands.heartbeat(**fence, lease_ttl_seconds=600) == {"ok": False}
-    assert await store.grants.list_renewable_grants() == []
     assert (
         await store.credential_queries.resolve_model_credential(job_id=job["id"], **fence) is None
     )
-    assert await store.residency.resident_host(thread_id=job["thread_id"]) is None
+    assert await _resident_host(db, job["thread_id"]) is None
     assert (
         await store.residency.establish_residency(
             thread_id=job["thread_id"],
@@ -2119,12 +2131,9 @@ async def test_a_forced_removal_ends_the_work_the_host_was_holding(
     )
 
     lapsed = await store.residency.reap_expired_residencies()
-    assert [row["grant_id"] for row in lapsed] == ["agr_resident"]
+    assert [row["thread_id"] for row in lapsed] == [job["thread_id"]]
     reaped = await store.attempt_commands.reap_expired(max_attempts=3)
     assert [row["attempt_id"] for row in reaped] == [claim["attempt_id"]]
-    assert [row["grant_id"] for row in await store.grants.take_revocable_grants()] == [
-        "agr_attempt"
-    ]
     assert (await hosts.get_host(host="runner-a"))["slots_used"] == 0
 
 
@@ -2407,7 +2416,7 @@ async def test_lock_wait_cannot_outlive_the_attempt_lease(db, store, hosts):
     assert await asyncio.wait_for(establish, timeout=2) is None
 
 
-async def test_a_takeover_bumps_the_generation_and_the_old_one_is_dead(store, hosts):
+async def test_a_takeover_bumps_the_generation_and_the_old_one_is_dead(db, store, hosts):
     """Contract tests 10 and 13: one winner, and late writers change nothing.
 
     A retained chat is never taken over by another machine — its writable
@@ -2441,7 +2450,7 @@ async def test_a_takeover_bumps_the_generation_and_the_old_one_is_dead(store, ho
     )
     assert second["generation"] == 2
 
-    live = await store.residency.resident_host(thread_id=job["thread_id"])
+    live = await _resident_host(db, job["thread_id"])
     assert (live["host"], live["generation"]) == ("runner-a", 2)
     # The previous generation can neither re-promote nor end its successor.
     assert (
@@ -2464,8 +2473,8 @@ async def test_a_takeover_bumps_the_generation_and_the_old_one_is_dead(store, ho
     )
 
 
-async def test_stale_attempt_cannot_rotate_the_current_residency(store, hosts):
-    """A delayed same-host attempt cannot revoke its successor's grant."""
+async def test_stale_attempt_cannot_rotate_the_current_residency(db, store, hosts):
+    """A delayed same-host attempt cannot take over its successor's residency."""
     await _enrol(store, "runner-a", hosts=hosts)
     job, stale, sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
     current, current_sandbox = await _reclaim_resident_chat(
@@ -2482,12 +2491,7 @@ async def test_stale_attempt_cannot_rotate_the_current_residency(store, hosts):
         sandbox_id=current_sandbox["sandbox_id"],
     )
     assert successor is not None
-    assert await store.grants.link_residency_grant(
-        thread_id=job["thread_id"],
-        generation=successor["generation"],
-        grant_id="agr-successor",
-    )
-    before = await store.residency.resident_host(thread_id=job["thread_id"])
+    before = await _resident_host(db, job["thread_id"])
 
     stale_result = await store.residency.establish_residency(
         thread_id=job["thread_id"],
@@ -2499,20 +2503,12 @@ async def test_stale_attempt_cannot_rotate_the_current_residency(store, hosts):
         ttl_seconds=60,
         sandbox_id=sandbox["sandbox_id"],
     )
-    after = await store.residency.resident_host(thread_id=job["thread_id"])
+    after = await _resident_host(db, job["thread_id"])
 
     assert stale_result is None
     assert before is not None and after is not None
-    assert (before["generation"], before["status"], before["grant_id"]) == (
-        successor["generation"],
-        "hot",
-        "agr-successor",
-    )
-    assert (after["generation"], after["status"], after["grant_id"]) == (
-        before["generation"],
-        before["status"],
-        before["grant_id"],
-    )
+    assert (before["generation"], before["status"]) == (successor["generation"], "hot")
+    assert (after["generation"], after["status"]) == (before["generation"], before["status"])
 
 
 async def test_residency_writes_are_scoped_to_the_holding_host(store, hosts):
@@ -2574,39 +2570,41 @@ async def test_an_expired_residency_cannot_be_revived_by_a_late_heartbeat(db, st
         )
         is None
     )
-    assert await store.residency.resident_host(thread_id=job["thread_id"]) is None
+    assert await _resident_host(db, job["thread_id"]) is None
     assert [item["thread_id"] for item in await store.residency.reap_expired_residencies()] == [
         job["thread_id"]
     ]
 
 
-async def test_an_expired_residency_rejects_and_revokes_a_late_grant(db, store, hosts):
-    """A mint that loses the clock race leaves neither a link nor a token."""
-    await _enrol(store, "runner-a", hosts=hosts)
-    job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
-    row = await store.residency.establish_residency(
-        thread_id=job["thread_id"],
-        attempt_id=claim["attempt_id"],
-        lease_generation=claim["lease_generation"],
-        host="runner-a",
-        runtime_id="claude-code",
-        runtime_version=None,
-        ttl_seconds=60,
-    )
-    await _expire_residency(db, thread_id=job["thread_id"])
-    grants = SimpleNamespace(
-        mint=AsyncMock(return_value={"grant_id": "agr-late", "token": "tok-late"}),
-        revoke=AsyncMock(return_value=True),
-    )
+async def test_residency_reaping_pages_and_skips_locked_members(db, store, hosts):
+    await _enrol(store, "runner-a", hosts=hosts, slots_total=4)
+    threads = []
+    for _ in range(3):
+        job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts)
+        threads.append(job["thread_id"])
+        await store.residency.establish_residency(
+            thread_id=job["thread_id"],
+            attempt_id=claim["attempt_id"],
+            lease_generation=claim["lease_generation"],
+            host="runner-a",
+            runtime_id="claude-code",
+            runtime_version=None,
+            ttl_seconds=-1,
+        )
+    async with db.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "SELECT 1 FROM agent_thread_sandbox_memberships WHERE thread_id=$1 FOR UPDATE",
+            threads[0],
+        )
+        first = await asyncio.wait_for(store.residency.reap_expired_residencies(limit=1), 2)
+        assert len(first) == 1
+        assert first[0]["thread_id"] != threads[0]
+    rest = await store.residency.reap_expired_residencies(limit=2)
+    assert {row["thread_id"] for row in first + rest} == set(threads)
+    assert await store.residency.reap_expired_residencies(limit=1) == []
 
-    credential = await residency._mint_residency_grant(store.grants, grants, row=row)
 
-    assert credential is None
-    grants.revoke.assert_awaited_once_with("agr-late")
-    assert [item["grant_id"] for item in await store.residency.reap_expired_residencies()] == [None]
-
-
-async def test_the_residency_reaper_leaves_an_unexpired_hot_lease_alone(store, hosts):
+async def test_the_residency_reaper_leaves_an_unexpired_hot_lease_alone(db, store, hosts):
     """The reaper is the expired complement, never a blanket hot-row revoke."""
     await _enrol(store, "runner-a", hosts=hosts)
     job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
@@ -2622,12 +2620,14 @@ async def test_the_residency_reaper_leaves_an_unexpired_hot_lease_alone(store, h
     assert live is not None
 
     assert await store.residency.reap_expired_residencies() == []
-    current = await store.residency.resident_host(thread_id=job["thread_id"])
+    current = await _resident_host(db, job["thread_id"])
     assert current is not None
     assert current["generation"] == live["generation"]
 
 
-async def test_the_reaper_lapses_expired_residencies_without_resetting_generations(store, hosts):
+async def test_the_reaper_lapses_expired_residencies_without_resetting_generations(
+    db, store, hosts
+):
     await _enrol(store, "runner-a", hosts=hosts)
     job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
     await store.residency.establish_residency(
@@ -2643,7 +2643,7 @@ async def test_the_reaper_lapses_expired_residencies_without_resetting_generatio
     lapsed = await store.residency.reap_expired_residencies()
 
     assert [(row["thread_id"], row["generation"]) for row in lapsed] == [(job["thread_id"], 1)]
-    assert await store.residency.resident_host(thread_id=job["thread_id"]) is None
+    assert await _resident_host(db, job["thread_id"]) is None
     # Re-establishing continues the count — a dead generation stays dead.
     revived = await store.residency.establish_residency(
         thread_id=job["thread_id"],
@@ -2680,159 +2680,12 @@ async def test_establish_returns_what_the_grant_mint_needs(store, hosts):
     assert row["previous_grant_id"] is None
 
 
-async def test_the_residency_grant_link_is_generation_scoped(store, hosts):
-    await _enrol(store, "runner-a", hosts=hosts)
-    job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
-    await store.residency.establish_residency(
-        thread_id=job["thread_id"],
-        attempt_id=claim["attempt_id"],
-        lease_generation=claim["lease_generation"],
-        host="runner-a",
-        runtime_id="claude-code",
-        runtime_version=None,
-        ttl_seconds=60,
-    )
-
-    # A link named for a generation that does not hold the row is refused —
-    # the one way it happens is a takeover between mint and link, and the
-    # caller must revoke the orphan grant rather than hand it over.
-    assert (
-        await store.grants.link_residency_grant(
-            thread_id=job["thread_id"], generation=2, grant_id="agr-orphan"
-        )
-        is False
-    )
-    assert (
-        await store.grants.link_residency_grant(
-            thread_id=job["thread_id"], generation=1, grant_id="agr-1"
-        )
-        is True
-    )
-
-
-async def test_beats_and_release_carry_the_grant_they_keep_alive(store, hosts):
-    """The beat that extends the lease renews the grant; the release that ends
-    it revokes the grant — so both hand their caller the grant id, and an
-    unlinked residency answers with the empty string, not a loss."""
-    await _enrol(store, "runner-a", hosts=hosts)
-    job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
-    await store.residency.establish_residency(
-        thread_id=job["thread_id"],
-        attempt_id=claim["attempt_id"],
-        lease_generation=claim["lease_generation"],
-        host="runner-a",
-        runtime_id="claude-code",
-        runtime_version=None,
-        ttl_seconds=60,
-    )
-
-    assert (
-        await store.residency.heartbeat_residency(
-            thread_id=job["thread_id"], generation=1, ttl_seconds=60, host="runner-a"
-        )
-        == ""
-    )
-    await store.grants.link_residency_grant(
-        thread_id=job["thread_id"], generation=1, grant_id="agr-1"
-    )
-    assert (
-        await store.residency.heartbeat_residency(
-            thread_id=job["thread_id"], generation=1, ttl_seconds=60, host="runner-a"
-        )
-        == "agr-1"
-    )
-    assert (
-        await store.residency.release_residency(
-            thread_id=job["thread_id"], generation=1, host="runner-a"
-        )
-        == "agr-1"
-    )
-
-
-async def test_a_takeover_surfaces_the_predecessors_grant_for_revocation(store, hosts):
-    """A takeover is a credential rotation: the new establish must name the
-    old generation's grant so the endpoint can kill it now, not at TTL."""
-    await _enrol(store, "runner-a", hosts=hosts)
-    job, claim, sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
-    await store.residency.establish_residency(
-        thread_id=job["thread_id"],
-        attempt_id=claim["attempt_id"],
-        lease_generation=claim["lease_generation"],
-        host="runner-a",
-        runtime_id="claude-code",
-        runtime_version=None,
-        ttl_seconds=60,
-    )
-    await store.grants.link_residency_grant(
-        thread_id=job["thread_id"], generation=1, grant_id="agr-old"
-    )
-
-    reclaim, _sandbox = await _reclaim_resident_chat(store, job, claim, sandbox, host="runner-a")
-    second = await store.residency.establish_residency(
-        thread_id=job["thread_id"],
-        attempt_id=reclaim["attempt_id"],
-        lease_generation=reclaim["lease_generation"],
-        host="runner-a",
-        runtime_id="claude-code",
-        runtime_version=None,
-        ttl_seconds=60,
-    )
-    assert second["generation"] == 2
-    assert second["previous_grant_id"] == "agr-old"
-
-
-async def test_reaped_residencies_carry_their_grant_id(db, store, hosts):
-    """The reaper revokes what the lapse orphans — it needs the id to do it.
-
-    The grant is linked while the lease is live. Once that lease is in the
-    past, a further link is refused and cannot replace the id the reaper
-    returns.
-    """
-    await _enrol(store, "runner-a", hosts=hosts)
-    job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
-    await store.residency.establish_residency(
-        thread_id=job["thread_id"],
-        attempt_id=claim["attempt_id"],
-        lease_generation=claim["lease_generation"],
-        host="runner-a",
-        runtime_id="claude-code",
-        runtime_version=None,
-        ttl_seconds=60,
-    )
-    assert (
-        await store.grants.link_residency_grant(
-            thread_id=job["thread_id"], generation=1, grant_id="agr-lapsed"
-        )
-        is True
-    )
-    async with db.acquire() as conn:
-        await conn.execute(
-            "UPDATE agent_thread_sandbox_memberships "
-            "SET residency_lease_expires_at = NOW() - INTERVAL '1 second' "
-            "WHERE thread_id = $1",
-            job["thread_id"],
-        )
-    assert (
-        await store.grants.link_residency_grant(
-            thread_id=job["thread_id"], generation=1, grant_id="agr-after-expiry"
-        )
-        is False
-    )
-    await _expire_residency(db, thread_id=job["thread_id"])
-
-    lapsed = await store.residency.reap_expired_residencies()
-    assert [(row["thread_id"], row["grant_id"]) for row in lapsed] == [
-        (job["thread_id"], "agr-lapsed")
-    ]
-
-
 async def test_a_live_lease_heartbeats_and_links_and_an_expired_lease_does_not(db, store, hosts):
     """The clock ends a generation's authority before the reaper runs.
 
-    A live lease still heartbeats and accepts its grant. The same generation,
-    once the lease is in the past and the row is still hot, cannot extend
-    itself or take another grant. Reaping and an explicit release of that
-    expired row stay available.
+    A live lease still heartbeats. The same generation, once the lease is in
+    the past and the row is still hot, cannot extend itself. Reaping and an
+    explicit release of that expired row stay available.
     """
     await _enrol(store, "runner-a", hosts=hosts)
     job, claim, _sandbox = await _resident_chat(store, "runner-a", hosts=hosts)
@@ -2853,18 +2706,12 @@ async def test_a_live_lease_heartbeats_and_links_and_an_expired_lease_does_not(d
         == ""
     )
     assert (
-        await store.grants.link_residency_grant(
-            thread_id=job["thread_id"], generation=1, grant_id="agr-live"
-        )
-        is True
-    )
-    assert (
         await store.residency.heartbeat_residency(
             thread_id=job["thread_id"], generation=1, ttl_seconds=60, host="runner-a"
         )
-        == "agr-live"
+        == ""
     )
-    assert (await store.residency.resident_host(thread_id=job["thread_id"]))["generation"] == 1
+    assert (await _resident_host(db, job["thread_id"]))["generation"] == 1
 
     async with db.acquire() as conn:
         await conn.execute(
@@ -2874,25 +2721,17 @@ async def test_a_live_lease_heartbeats_and_links_and_an_expired_lease_does_not(d
             job["thread_id"],
         )
 
-    assert await store.residency.resident_host(thread_id=job["thread_id"]) is None
+    assert await _resident_host(db, job["thread_id"]) is None
     assert (
         await store.residency.heartbeat_residency(
             thread_id=job["thread_id"], generation=1, ttl_seconds=60, host="runner-a"
         )
         is None
     )
-    assert (
-        await store.grants.link_residency_grant(
-            thread_id=job["thread_id"], generation=1, grant_id="agr-late"
-        )
-        is False
-    )
     # The late beat did not push the lease forward, so the reaper still owns it.
-    assert await store.residency.resident_host(thread_id=job["thread_id"]) is None
+    assert await _resident_host(db, job["thread_id"]) is None
     lapsed = await store.residency.reap_expired_residencies()
-    assert [(row["thread_id"], row["generation"], row["grant_id"]) for row in lapsed] == [
-        (job["thread_id"], 1, "agr-live")
-    ]
+    assert [(row["thread_id"], row["generation"]) for row in lapsed] == [(job["thread_id"], 1)]
 
     expired_job, expired_claim, _expired_sandbox = await _resident_chat(
         store, "runner-a", hosts=hosts
@@ -2906,7 +2745,7 @@ async def test_a_live_lease_heartbeats_and_links_and_an_expired_lease_does_not(d
         runtime_version=None,
         ttl_seconds=-1,
     )
-    assert await store.residency.resident_host(thread_id=expired_job["thread_id"]) is None
+    assert await _resident_host(db, expired_job["thread_id"]) is None
     assert (
         await store.residency.heartbeat_residency(
             thread_id=expired_job["thread_id"],
@@ -2915,12 +2754,6 @@ async def test_a_live_lease_heartbeats_and_links_and_an_expired_lease_does_not(d
             host="runner-a",
         )
         is None
-    )
-    assert (
-        await store.grants.link_residency_grant(
-            thread_id=expired_job["thread_id"], generation=1, grant_id="agr-born-expired"
-        )
-        is False
     )
     assert (
         await store.residency.release_residency(
@@ -3287,8 +3120,46 @@ async def test_until_an_update_switches_hosts_also_hold_the_version_in_use(
 
     await _offering(hosts, "runner-a", ["2.1.220", "2.1.235", "2.1.301"])
     assert await hosts.activate_ready_runtime_upgrades() == ["claude-code"]
-    # Switched: only the update is sent; hosts keep their copy for a rollback.
-    assert [t["version"] for t in await hosts.runtime_download_targets()] == ["2.1.301"]
+    # Switched: the update comes first now, and the version it replaced is
+    # still sent, as what Roll back returns to.
+    assert [t["version"] for t in await hosts.runtime_download_targets()] == ["2.1.301", "2.1.235"]
+
+
+async def test_after_the_switch_every_host_keeps_what_roll_back_returns_to(
+    db, store, hosts: PostgresHostPoolRepository
+):
+    """Roll back stays instant everywhere, on a host that joins later too.
+
+    The switch does not wait for that version, and Roll back holds only the
+    version it chose.
+    """
+    await _menu_host(store, "runner-a", menu=["2.1.220", "2.1.235"], hosts=hosts)
+    assert await hosts.set_runtime_version(runtime="claude-code", version="2.1.235")
+    await _age_record(db, "claude-code", "2026-01-01T00:00:00Z")
+    update = await hosts.request_runtime_upgrade(
+        runtime="claude-code", version="2.1.300", requested_by="admin@test"
+    )
+
+    # runner-a no longer holds 2.1.235, as after a new sandbox image: the
+    # switch waits only for the update's own version.
+    await _offering(hosts, "runner-a", ["2.1.220", "2.1.300"])
+    assert await hosts.activate_ready_runtime_upgrades() == ["claude-code"]
+    _, _, selected, _ = await hosts.runner_pool()
+    assert selected == {"claude-code": "2.1.300"}
+
+    # The version new chats use first, then the one Roll back returns to,
+    # with the cutoff it was first downloaded with.
+    targets = await hosts.runtime_download_targets()
+    assert [(t["version"], t["before"]) for t in targets] == [
+        ("2.1.300", update["before"]),
+        ("2.1.235", "2026-01-01T00:00:00Z"),
+    ]
+    assert len(targets) <= MAX_TARGETS_PER_RUNTIME
+
+    # Roll back: the version rolled back from is no longer held.
+    await _offering(hosts, "runner-a", ["2.1.220", "2.1.235", "2.1.300"])
+    assert await hosts.set_runtime_version(runtime="claude-code", version="2.1.235")
+    assert [t["version"] for t in await hosts.runtime_download_targets()] == ["2.1.235"]
 
 
 async def test_rolling_back_keeps_the_version_on_every_host(

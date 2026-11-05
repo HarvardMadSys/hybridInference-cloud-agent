@@ -20,7 +20,6 @@ exactly as with archives disabled. The next clean stop archives normally.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import threading
 from dataclasses import dataclass, field, replace
@@ -31,17 +30,21 @@ from cloud_agent_host.sandbox_archive_s3 import (
     SandboxArchiveReceipt,
     SandboxArchiveS3Config,
     SandboxArchiveS3Uploader,
+    lifecycle_object_key,
 )
 from cloud_agent_host.sandbox_archives import (
+    DEFAULT_ARCHIVE_SPOOL_BUDGET_BYTES,
+    CaptureGate,
     SandboxArchiveService,
     SandboxInitialArchiveMarker,
+    carried_by_checkpoint,
+    check_marker_identity,
+    decode_marker,
+    encode_marker,
     safe_archive_error_type,
 )
-from cloud_agent_shared.sandbox_archive_settings import (
-    SANDBOX_ARCHIVE_BUCKET,
-    SANDBOX_ARCHIVE_PREFIX,
-    SandboxArchivePolicy,
-)
+from cloud_agent_host.sandbox_initial_uploads import InitialUploadSpool, InitialUploadWorker
+from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +53,22 @@ logger = logging.getLogger(__name__)
 # quarantined finish their lifecycle and continue after an upgrade.
 _UNARCHIVED_FINAL_STATES = frozenset({"skipped", "blocked"})
 _COMPLETED_FINAL_STATES = frozenset({"uploaded"}) | _UNARCHIVED_FINAL_STATES
+_FINAL_MARKER_KEYS = frozenset(
+    {
+        "container_id",
+        "format_version",
+        "generation",
+        "namespace_sha256",
+        "policy",
+        "receipt",
+        "sandbox_id",
+        "state",
+    }
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
+    from pathlib import Path
 
     from cloud_agent_host.chat_sandbox import (
         ChatSandboxInspection,
@@ -65,6 +81,7 @@ if TYPE_CHECKING:
         SandboxCheckpointCapture,
         SandboxCheckpointReceipt,
     )
+    from cloud_agent_host.sandbox_initial_uploads import SpooledInitialUpload
     from cloud_agent_host.shared_session_supervisor import SharedMemberManifest
     from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef
 
@@ -85,6 +102,7 @@ class _ArchiveService(Protocol):
         expected_container_id: str,
         preparation_id: str,
         members: Sequence[SharedMemberManifest],
+        marker_payload: object = ...,
     ) -> dict[str, object]: ...
 
     def capture_initial(
@@ -95,7 +113,11 @@ class _ArchiveService(Protocol):
         preparation_id: str,
         base_sha: str,
         members: Sequence[SharedMemberManifest],
+        marker_payload: object = ...,
+        defer_upload: bool = False,
     ) -> dict[str, object]: ...
+
+    def upload_spooled_initial(self, entry: SpooledInitialUpload) -> dict[str, object] | None: ...
 
     def queue_final(
         self,
@@ -174,22 +196,12 @@ class _FinalArchiveMarker:
         )
 
     def __post_init__(self) -> None:
-        if len(self.namespace_sha256) != 64 or any(
-            character not in "0123456789abcdef" for character in self.namespace_sha256
-        ):
-            raise ValueError("final archive marker namespace identity is invalid")
-        for name, value in (
-            ("sandbox id", self.sandbox_id),
-            ("container id", self.container_id),
-        ):
-            if not isinstance(value, str) or not value or len(value) > 256 or "\x00" in value:
-                raise ValueError(f"final archive marker {name} is invalid")
-        if (
-            isinstance(self.generation, bool)
-            or not isinstance(self.generation, int)
-            or self.generation < 1
-        ):
-            raise ValueError("final archive marker generation is invalid")
+        check_marker_identity(
+            "final archive marker",
+            namespace_sha256=self.namespace_sha256,
+            ids={"sandbox id": self.sandbox_id, "container id": self.container_id},
+            generation=self.generation,
+        )
         if self.state not in {"pending"} | _COMPLETED_FINAL_STATES:
             raise ValueError("final archive marker state is invalid")
         receipt_values = (
@@ -202,10 +214,11 @@ class _FinalArchiveMarker:
             if any(value is not None for value in receipt_values):
                 raise ValueError("non-uploaded final archive marker contains a receipt")
         else:
-            expected_key = (
-                f"{SANDBOX_ARCHIVE_PREFIX}/v1/{self.namespace_sha256}/"
-                f"{hashlib.sha256(self.sandbox_id.encode('utf-8')).hexdigest()}/"
-                f"g{self.generation}/final.tar.gz"
+            expected_key = lifecycle_object_key(
+                namespace_sha256=self.namespace_sha256,
+                sandbox_sha256=hashlib.sha256(self.sandbox_id.encode("utf-8")).hexdigest(),
+                generation=self.generation,
+                phase="final",
             )
             if not self.policy.enabled:
                 raise ValueError("disabled final archive marker cannot be uploaded")
@@ -231,7 +244,7 @@ class _FinalArchiveMarker:
     def with_receipt(self, receipt: SandboxArchiveReceipt) -> _FinalArchiveMarker:
         if self.state != "pending":
             raise SandboxError("only a pending final archive can accept an upload receipt")
-        if receipt.phase != "final" or receipt.bucket != SANDBOX_ARCHIVE_BUCKET:
+        if receipt.phase != "final" or receipt.bucket != self.policy.bucket:
             raise SandboxError("final archive upload returned an unexpected destination")
         return replace(
             self,
@@ -243,44 +256,31 @@ class _FinalArchiveMarker:
         )
 
     def encode(self) -> bytes:
-        payload = {
-            "container_id": self.container_id,
-            "format_version": 1,
-            "generation": self.generation,
-            "namespace_sha256": self.namespace_sha256,
-            "policy": self.policy.as_dict(),
-            "receipt": (
-                None
-                if self.state != "uploaded"
-                else {
-                    "archive_sha256": self.archive_sha256,
-                    "archive_size_bytes": self.archive_size_bytes,
-                    "object_key": self.object_key,
-                    "version_id": self.version_id,
-                }
-            ),
-            "sandbox_id": self.sandbox_id,
-            "state": self.state,
-        }
-        return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+        return encode_marker(
+            {
+                "container_id": self.container_id,
+                "format_version": 1,
+                "generation": self.generation,
+                "namespace_sha256": self.namespace_sha256,
+                "policy": self.policy.as_dict(),
+                "receipt": (
+                    None
+                    if self.state != "uploaded"
+                    else {
+                        "archive_sha256": self.archive_sha256,
+                        "archive_size_bytes": self.archive_size_bytes,
+                        "object_key": self.object_key,
+                        "version_id": self.version_id,
+                    }
+                ),
+                "sandbox_id": self.sandbox_id,
+                "state": self.state,
+            }
+        )
 
     @classmethod
     def decode(cls, payload: bytes) -> _FinalArchiveMarker:
-        try:
-            value = json.loads(payload)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise SandboxError("final archive marker is not canonical JSON") from exc
-        if not isinstance(value, dict) or set(value) != {
-            "container_id",
-            "format_version",
-            "generation",
-            "namespace_sha256",
-            "policy",
-            "receipt",
-            "sandbox_id",
-            "state",
-        }:
-            raise SandboxError("final archive marker has an invalid schema")
+        value = decode_marker(payload, keys=_FINAL_MARKER_KEYS, what="final archive marker")
         if value["format_version"] != 1 or isinstance(value["format_version"], bool):
             raise SandboxError("final archive marker format version is unsupported")
         if not isinstance(value["policy"], dict):
@@ -321,18 +321,33 @@ class SandboxArchiveController:
         namespace: str,
         service_factory: Callable[[SandboxArchiveS3Config], _ArchiveService] | None = None,
         checkpoint_capture: SandboxCheckpointCapture | None = None,
+        initial_upload_dir: Path | None = None,
     ) -> None:
         if not namespace:
             raise ValueError("sandbox archive namespace must not be empty")
         self._manager = manager
         self._namespace = namespace
         self._checkpoint_capture = checkpoint_capture
+        # A first prompt waits only for its initial bundle to be durable here,
+        # one directory per deployment namespace; a worker uploads it after.
+        # Without a directory every capture stores its bundle before it returns.
+        self._initial_uploads: InitialUploadSpool | None = None
+        self._initial_upload_worker: InitialUploadWorker | None = None
+        if initial_upload_dir is not None:
+            self._initial_uploads = InitialUploadSpool(
+                initial_upload_dir / hashlib.sha256(namespace.encode("utf-8")).hexdigest()
+            )
+            self._initial_upload_worker = InitialUploadWorker(
+                self._initial_uploads, self._upload_spooled_initial
+            )
         self._service_factory = service_factory or self._new_service
         # Every policy revision may temporarily retain its own service for an
         # in-flight capture or failed final retry. They nevertheless share one
         # host-wide spool admission gate, so rapid policy changes cannot
-        # multiply the service's documented aggregate scratch-space bound.
-        self._capture_slots = threading.BoundedSemaphore(1)
+        # multiply the service's documented aggregate scratch-space bound. A
+        # capture someone waits on spools beside a background one only while
+        # both worst cases fit that same bound.
+        self._capture_slots = CaptureGate(1, spool_budget_bytes=DEFAULT_ARCHIVE_SPOOL_BUDGET_BYTES)
         self._condition = threading.Condition()
         self._policy: SandboxArchivePolicy | None = None
         self._current: _ServiceSlot | None = None
@@ -370,6 +385,7 @@ class SandboxArchiveController:
             config=config,
             capture_slots=self._capture_slots,
             checkpoint_capture=self._checkpoint_capture,
+            initial_uploads=self._initial_uploads,
         )
 
     @property
@@ -408,9 +424,62 @@ class SandboxArchiveController:
                 with self._condition:
                     self._started = False
                 raise
+        self._start_initial_uploads()
+
+    def _start_initial_uploads(self) -> None:
+        """Upload what a restart left; without the directory, captures stay synchronous."""
+        if self._initial_uploads is None or self._initial_upload_worker is None:
+            return
+        try:
+            self._initial_uploads.start()
+        except OSError as exc:
+            logger.error(
+                "initial archive hand-off unavailable; captures store synchronously",
+                extra={
+                    "event": "sandbox_initial_archive_handoff_unavailable",
+                    "error_type": safe_archive_error_type(exc),
+                },
+            )
+            return
+        self._initial_upload_worker.start()
+
+    def _wake_initial_uploads(self) -> None:
+        if self._initial_upload_worker is not None:
+            self._initial_upload_worker.wake()
+
+    def _upload_spooled_initial(self, entry: SpooledInitialUpload) -> bool:
+        """Store one committed hand-off under the policy its marker pinned.
+
+        ``False`` until a policy has been delivered: the credentials a marker
+        omits come with it. A disabled or rotated policy does not abandon it,
+        as for a baseline whose upload result is unresolved.
+        """
+        try:
+            marker = SandboxInitialArchiveMarker.decode(entry.marker)
+        except SandboxError:
+            assert self._initial_uploads is not None
+            # Written canonical and fsynced; unreadable, it names nothing.
+            self._initial_uploads.remove(entry)
+            raise
+        with self._condition:
+            if self._closed or not self._started or self._policy is None:
+                return False
+            slot = self._slot_for_policy_locked(marker.policy)
+            slot.active += 1
+        try:
+            slot.service.upload_spooled_initial(entry)
+        finally:
+            self._release(slot)
+        return True
 
     def close(self) -> None:
-        """Stop policy changes after lifecycle callers have drained."""
+        """Stop policy changes after lifecycle callers have drained.
+
+        The background upload stops after its attempt in flight; what it has
+        not stored stays committed on disk for the next start.
+        """
+        if self._initial_upload_worker is not None:
+            self._initial_upload_worker.close()
         with self._condition:
             if self._closed:
                 return
@@ -425,7 +494,7 @@ class SandboxArchiveController:
             self._final_receipts.clear()
         self._close_services([slot.service for slot in slots])
 
-    def apply(self, settings: Mapping[str, Any]) -> dict[str, object]:
+    def apply(self, settings: Mapping[str, Any]) -> dict[str, object]:  # noqa: PLR0912 complexity baseline, #771
         """Validate and atomically apply one complete DB policy revision."""
         policy = SandboxArchivePolicy.from_mapping(settings)
         # Heartbeats re-offer the complete current revision.  Resolve that
@@ -493,6 +562,8 @@ class SandboxArchiveController:
         self._close_services(services_to_close)
         if error is not None:
             raise error
+        # A restart's committed hand-offs wait for the credentials this brings.
+        self._wake_initial_uploads()
         return self.status()
 
     def status(self) -> dict[str, object]:
@@ -530,7 +601,7 @@ class SandboxArchiveController:
         members: Sequence[SharedMemberManifest],
     ) -> dict[str, object]:
         """Probe using the immutable service revision acquired for this call."""
-        slot, marker = self._acquire_initial_slot(
+        slot, marker, payload = self._acquire_initial_slot(
             backend,
             expected_container_id=expected_container_id,
             preparation_id=preparation_id,
@@ -550,6 +621,7 @@ class SandboxArchiveController:
                 expected_container_id=expected_container_id,
                 preparation_id=effective_preparation_id,
                 members=members,
+                marker_payload=payload,
             )
         finally:
             self._release(slot)
@@ -562,9 +634,14 @@ class SandboxArchiveController:
         preparation_id: str,
         base_sha: str,
         members: Sequence[SharedMemberManifest],
+        defer_upload: bool = False,
     ) -> dict[str, object]:
-        """Capture using the immutable service revision acquired for this call."""
-        slot, marker = self._acquire_initial_slot(
+        """Capture using the immutable service revision acquired for this call.
+
+        ``defer_upload`` lets the service return once the bundle is durable in
+        the hand-off spool (``upload: pending``) when this host has one.
+        """
+        slot, marker, payload = self._acquire_initial_slot(
             backend,
             expected_container_id=expected_container_id,
             preparation_id=preparation_id,
@@ -580,16 +657,22 @@ class SandboxArchiveController:
                     expected_container_id=expected_container_id,
                     preparation_id=marker.preparation_id,
                     members=members,
+                    marker_payload=payload,
                 )
-            return slot.service.capture_initial(
+            receipt = slot.service.capture_initial(
                 backend,
                 expected_container_id=expected_container_id,
                 preparation_id=preparation_id,
                 base_sha=base_sha,
                 members=members,
+                marker_payload=payload,
+                defer_upload=defer_upload and self._initial_upload_worker is not None,
             )
         finally:
             self._release(slot)
+        if receipt.get("upload") == "pending":
+            self._wake_initial_uploads()
+        return receipt
 
     def prepare_final(
         self,
@@ -714,7 +797,7 @@ class SandboxArchiveController:
             },
         )
 
-    def _prepare_final_marker(
+    def _prepare_final_marker(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self,
         spec: ChatSandboxSpec,
         inspection: ChatSandboxInspection,
@@ -734,14 +817,24 @@ class SandboxArchiveController:
         existing: _FinalArchiveMarker | None = None
         if existing_payload is not None:
             existing = _FinalArchiveMarker.decode(existing_payload)
-            if (
-                existing.sandbox_id != spec.sandbox_id
-                or existing.generation != spec.generation
-                or existing.container_id != inspection.container_id
-                or existing.namespace_sha256
-                != hashlib.sha256(self._namespace.encode("utf-8")).hexdigest()
-            ):
-                raise SandboxError("final archive marker does not match the sandbox")
+        if existing is not None and carried_by_checkpoint(
+            marker_sandbox_id=existing.sandbox_id,
+            marker_generation=existing.generation,
+            sandbox_id=spec.sandbox_id,
+            generation=spec.generation,
+        ):
+            # The stopped generation's marker, committed into the checkpoint
+            # this container was restored from. This container's lifecycle has
+            # no marker yet; the one written below replaces it.
+            existing = None
+        if existing is not None and (
+            existing.sandbox_id != spec.sandbox_id
+            or existing.generation != spec.generation
+            or existing.container_id != inspection.container_id
+            or existing.namespace_sha256
+            != hashlib.sha256(self._namespace.encode("utf-8")).hexdigest()
+        ):
+            raise SandboxError("final archive marker does not match the sandbox")
         # An uploaded or skipped final completed the prior stopped lifecycle.
         replace_uploaded_history = bool(
             stopped and existing is not None and existing.state in _COMPLETED_FINAL_STATES
@@ -1079,45 +1172,33 @@ class SandboxArchiveController:
         with self._condition:
             if self._closed or not self._started:
                 raise SandboxError("sandbox archive controller is not running")
-            slot = self._final_pins.get(key)
-            if slot is None:
-                slot = next(
-                    (
-                        candidate
-                        for candidate in self._all_slots_locked()
-                        if candidate.policy == marker.policy
-                    ),
-                    None,
-                )
-            if slot is None:
-                service = self._service_factory(self._config_for(marker.policy))
-                try:
-                    service.start()
-                except BaseException:
-                    self._close_services([service])
-                    raise
-                slot = _ServiceSlot(
-                    revision=marker.policy.revision,
-                    policy=marker.policy,
-                    service=service,
-                    retired=True,
-                )
-                self._retired.add(slot)
+            slot = self._final_pins.get(key) or self._slot_for_policy_locked(marker.policy)
             self._final_pins[key] = slot
             slot.pins.add(key)
             slot.active += 1
             return slot
 
-    def _acquire_current(self) -> _ServiceSlot | None:
-        with self._condition:
-            if self._closed or not self._started:
-                raise SandboxError("sandbox archive controller is not running")
-            if self._policy is None:
-                raise SandboxError("sandbox archive policy has not been delivered")
-            slot = self._current
-            if slot is not None:
-                slot.active += 1
-            return slot
+    def _slot_for_policy_locked(self, policy: SandboxArchivePolicy) -> _ServiceSlot:
+        """The slot serving ``policy``, or a retired one rebuilt for it from a marker."""
+        slot = next(
+            (candidate for candidate in self._all_slots_locked() if candidate.policy == policy),
+            None,
+        )
+        if slot is None:
+            service = self._service_factory(self._config_for(policy))
+            try:
+                service.start()
+            except BaseException:
+                self._close_services([service])
+                raise
+            slot = _ServiceSlot(
+                revision=policy.revision,
+                policy=policy,
+                service=service,
+                retired=True,
+            )
+            self._retired.add(slot)
+        return slot
 
     def _acquire_initial_slot(
         self,
@@ -1125,13 +1206,15 @@ class SandboxArchiveController:
         *,
         expected_container_id: str,
         preparation_id: str,
-    ) -> tuple[_ServiceSlot | None, SandboxInitialArchiveMarker | None]:
+    ) -> tuple[_ServiceSlot | None, SandboxInitialArchiveMarker | None, bytes | None]:
         """Resolve a prepared baseline before consulting the current policy.
 
         A response-lost initial upload can outlive a disable or key/size
         rotation. The root-owned marker is therefore authoritative for that
         immutable baseline, and recovery reconstructs its exact original
         service instead of probing or overwriting it with current settings.
+        The marker read here is returned too, as read: the service is handed
+        it rather than reading it again inside the same frozen boundary.
         """
         with self._condition:
             if self._closed or not self._started:
@@ -1144,6 +1227,13 @@ class SandboxArchiveController:
             expected_container_id=expected_container_id,
         )
         marker = None if payload is None else SandboxInitialArchiveMarker.decode(payload)
+        if marker is not None and carried_by_checkpoint(
+            marker_sandbox_id=marker.sandbox_id,
+            marker_generation=marker.generation,
+            sandbox_id=backend.spec.sandbox_id,
+            generation=backend.spec.generation,
+        ):
+            marker = None
         if marker is not None:
             expected_namespace = hashlib.sha256(self._namespace.encode("utf-8")).hexdigest()
             if (
@@ -1159,34 +1249,10 @@ class SandboxArchiveController:
                 raise SandboxError("sandbox archive controller is not running")
             if self._policy is None:
                 raise SandboxError("sandbox archive policy has not been delivered")
-            if marker is None:
-                slot = self._current
-            else:
-                slot = next(
-                    (
-                        candidate
-                        for candidate in self._all_slots_locked()
-                        if candidate.policy == marker.policy
-                    ),
-                    None,
-                )
-                if slot is None:
-                    service = self._service_factory(self._config_for(marker.policy))
-                    try:
-                        service.start()
-                    except BaseException:
-                        self._close_services([service])
-                        raise
-                    slot = _ServiceSlot(
-                        revision=marker.policy.revision,
-                        policy=marker.policy,
-                        service=service,
-                        retired=True,
-                    )
-                    self._retired.add(slot)
+            slot = self._current if marker is None else self._slot_for_policy_locked(marker.policy)
             if slot is not None:
                 slot.active += 1
-            return slot, marker
+            return slot, marker, payload
 
     def _release(self, slot: _ServiceSlot) -> None:
         with self._condition:

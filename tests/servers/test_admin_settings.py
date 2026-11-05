@@ -12,7 +12,7 @@ from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.api import admin_settings
 from cloud_agent.app import install_admin_no_store
-from cloud_agent.source_control import SourceControlError
+from cloud_agent.settings import SettingsEncryptionError
 
 ADMIN = {"Authorization": "Bearer test-settings-admin"}
 SECRET = "private-settings-credential"
@@ -120,7 +120,7 @@ async def test_settings_read_hides_secrets_and_is_not_cached(settings_api) -> No
     assert audit.calls == []
 
 
-async def test_recovery_access_can_read_missing_setup_before_gateway_sign_in(monkeypatch) -> None:
+async def test_recovery_access_can_read_missing_setup_before_any_sign_in(monkeypatch) -> None:
     from cloud_agent import settings
 
     settings.reset_settings()
@@ -143,30 +143,11 @@ async def test_recovery_access_can_read_missing_setup_before_gateway_sign_in(mon
         assert response.headers["cache-control"] == "no-store"
         snapshot = response.json()
         assert snapshot["setup"]["required"] is True
-        assert snapshot["values"]["session_signing_secret"] is None
-        assert snapshot["secret_configured"]["session_signing_secret"] is False
+        assert snapshot["values"]["control_signing_secret"] is None
+        assert snapshot["secret_configured"]["control_signing_secret"] is False
         assert snapshot["setup"]["bootstrap_missing"][0]["key"] == "AGENT_SETTINGS_ENCRYPTION_KEY"
     finally:
         settings.reset_settings()
-
-
-async def test_identity_conflict_is_a_safe_refusal_without_applying_or_auditing(
-    settings_api, monkeypatch
-) -> None:
-    from cloud_agent.identity_namespace import IdentityNamespaceError
-
-    client, repository, audit, _, applied = settings_api
-
-    async def conflict(changes, **_kwargs):
-        raise IdentityNamespaceError("Gateway issuer does not match the database binding.")
-
-    monkeypatch.setattr(repository, "update_settings", conflict)
-    response = await client.put(
-        "/admin/agent/settings", headers=ADMIN, json={"settings": {"limit": 7}}
-    )
-    assert response.status_code == 409
-    assert response.headers["cache-control"] == "no-store"
-    assert repository.updates == audit.calls == applied == []
 
 
 async def test_a_change_reviewed_before_another_admin_saved_is_refused(settings_api) -> None:
@@ -269,7 +250,7 @@ async def test_secret_encryption_failure_is_safe_and_does_not_write(
     client, repository, audit, _, applied = settings_api
 
     def unavailable(values):
-        raise SourceControlError(SECRET)
+        raise SettingsEncryptionError(SECRET)
 
     monkeypatch.setattr(admin_settings.settings, "encode_changes", unavailable)
     response = await client.put(
@@ -289,7 +270,7 @@ async def test_settings_require_database(settings_api) -> None:
     assert response.headers["cache-control"] == "no-store"
 
 
-@pytest.mark.parametrize("error_type", [SourceControlError, ValueError])
+@pytest.mark.parametrize("error_type", [SettingsEncryptionError, ValueError])
 async def test_unreadable_stored_configuration_returns_a_safe_error(
     settings_api, monkeypatch, error_type
 ) -> None:
@@ -323,14 +304,14 @@ async def test_real_registry_encrypts_secrets_and_exposes_only_configured_status
         response = await client.put(
             "/admin/agent/settings",
             headers=ADMIN,
-            json={"settings": {"max_attempts": 2, "github_publish_token": SECRET}},
+            json={"settings": {"max_attempts": 2, "serper_api_key": SECRET}},
         )
     assert response.status_code == 200
-    assert response.json()["values"]["github_publish_token"] is None
-    assert response.json()["secret_configured"]["github_publish_token"] is True
+    assert response.json()["values"]["serper_api_key"] is None
+    assert response.json()["secret_configured"]["serper_api_key"] is True
     assert SECRET not in response.text + repr(repository.values) + repr(audit.calls)
-    assert set(repository.values["github_publish_token"]) == {"ciphertext"}
-    assert settings.text_setting("github_publish_token") == SECRET
+    assert set(repository.values["serper_api_key"]) == {"ciphertext"}
+    assert settings.text_setting("serper_api_key") == SECRET
     assert settings.integer_setting("max_attempts") == 2
 
 

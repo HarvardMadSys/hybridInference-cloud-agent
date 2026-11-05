@@ -37,6 +37,10 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar
 
 from cloud_agent_host.bounded_output import OutputPump
+from cloud_agent_host.claude_background import BackgroundWork, SessionTasks, is_task_notification
+from cloud_agent_host.codex_app_server import CodexTurnUsage, codex_error_text, codex_tool_output
+from cloud_agent_host.harness_event import LINE, HarnessEvent
+from cloud_agent_host.http_bridge_parts import ContextRecords, answer_preview, tool_call_event
 from cloud_agent_host.runtimes import (
     DIFF,
     EMPTY_RUNTIME_MCP_CONFIG,
@@ -47,18 +51,19 @@ from cloud_agent_host.runtimes import (
     THINKING,
     TOOL_RESULT,
     TOOL_USE,
+    USAGE,
     AgentRuntime,
     ClaudeCodeRuntime,
     CodexRuntime,
-    KiloRuntime,
     NormalizedEvent,
-    OpencodeRuntime,
     PiRuntime,
     ReplyPreview,
     RuntimeMCPConfig,
     get_runtime,
 )
+from cloud_agent_host.runtimes.context_snapshot import bridge_report
 from cloud_agent_host.sandbox import STATE_MOUNT_TARGET
+from cloud_agent_host.stream_deltas import DeltaBatcher, StreamDelta
 from cloud_agent_host.tool_windows import TOOL_MARK_FILE, hook_settings
 from cloud_agent_shared.event_payloads import subagent_owned
 from cloud_agent_shared.shared_protocol import (
@@ -106,7 +111,7 @@ class ResidentLiveRuntime(DialectRuntime, Protocol):
         *,
         workdir: str,
         model: str,
-        gateway_base_url: str,
+        model_base_url: str,
         credential: str,
         provides_isolation: bool = False,
         mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
@@ -131,10 +136,6 @@ TURN_STARTED = "turn_started"
 TURN_COMPLETED = "turn_completed"
 TURN_FAILED = "turn_failed"
 FLOOR_EVENT_TYPES = frozenset({TURN_STARTED, TURN_COMPLETED, TURN_FAILED})
-
-#: Yielded for a stdout line the dialect adapter had no event for. Carries the
-#: raw line so the caller can keep its tail; never uploaded.
-LINE = "line"
 
 
 class DriverError(Exception):
@@ -266,31 +267,6 @@ def _json_object(line: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def _record_text(record: dict[str, Any]) -> str:
-    """The text blocks of one stream-json message record, joined."""
-    message = record.get("message")
-    content = message.get("content") if isinstance(message, dict) else None
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return ""
-    return "\n".join(
-        str(block.get("text") or "")
-        for block in content
-        if isinstance(block, dict) and block.get("type") == "text"
-    )
-
-
-def _codex_error_text(message: str) -> str:
-    """Codex's error message without the request diagnostics it appends.
-
-    0.145.0 appends ``, url: <address>`` and then cf-ray, request id and auth
-    details to an HTTP error's message. The address is the sandbox's gateway
-    relay, which means nothing to the owner; the full error stays in the event.
-    """
-    return message.split(", url: ", 1)[0][:2000]
-
-
 def _http_agent_error_text(error: Any) -> str:
     """Read an OpenCode/Kilo session error the way their own CLI prints it.
 
@@ -368,25 +344,6 @@ class TurnResult:
 
 
 @dataclass(frozen=True)
-class HarnessEvent:
-    """One item of a turn's stream.
-
-    Dialect events carry their ``raw_line``; floor events carry none. A line
-    the adapter had no event for is yielded as :data:`LINE` so the caller can
-    keep its tail without this layer deciding what to drop.
-    """
-
-    event_type: str
-    payload: dict[str, Any] = field(default_factory=dict)
-    raw_line: str | None = None
-
-    @property
-    def is_floor(self) -> bool:
-        """Whether this is driver control flow rather than a stream row."""
-        return self.event_type in FLOOR_EVENT_TYPES
-
-
-@dataclass(frozen=True)
 class LaunchContext:
     """Everything a session needs that is not the turn itself.
 
@@ -397,7 +354,7 @@ class LaunchContext:
     """
 
     workdir: str
-    gateway_base_url: str
+    model_base_url: str
     credential: str
     provides_isolation: bool
     base_env: dict[str, str] = field(default_factory=dict)
@@ -529,20 +486,12 @@ class HarnessTurn(Generic[_RuntimeT]):
             return InputOutcome(True)
 
     def iter_events(self) -> Iterator[HarnessEvent]:
-        """Yield floor and dialect events as the harness produces them.
-
-        Blocking, line-driven iteration. The caller that must interleave
-        deadline/lease checks reads the process on its own thread exactly as
-        before — this iterator is the single place a line becomes an event.
-        """
-        yield HarnessEvent(TURN_STARTED)
-        for line in self._process.lines():
-            yield from self.events_for_line(line)
-        yield self.finish_event()
+        """Yield floor and dialect events as the harness produces them."""
+        raise NotImplementedError
 
     def events_for_line(self, line: str) -> list[HarnessEvent]:
         """Every event one stdout line stands for; usually exactly one."""
-        return [self.event_for_line(line)]
+        raise NotImplementedError
 
     def flush_events(self) -> list[HarnessEvent]:
         """Rows still gathered from earlier lines; none unless a driver batches."""
@@ -560,41 +509,27 @@ class HarnessTurn(Generic[_RuntimeT]):
         return HarnessEvent(event.event_type, dict(event.payload or {}), raw_line=line)
 
     def raw_lines(self) -> Iterator[str]:
-        """The transport's line stream, for callers that pump on their own thread.
-
-        The runner reads stdout on a dedicated thread so deadline, lease and
-        cancel checks keep running while the agent is silent; it feeds each
-        line back through :meth:`event_for_line`. Iterating :meth:`iter_events`
-        directly is the single-threaded equivalent.
-        """
-        return self._process.lines()
+        """The transport's line stream, for callers that pump on their own thread."""
+        raise NotImplementedError
 
     def stderr_text(self) -> str:
         """Whatever the harness wrote to stderr, once it has exited."""
         return self._process.stderr_text()
 
     def cancel(self) -> None:
-        """Stop this turn now. The kill is the platform's backstop, kept here."""
-        self._cancelled = True
-        self._clear_questions()
-        self._process.kill()
+        """Stop this turn now."""
+        raise NotImplementedError
 
     def inject(self, text: str, *, message_id: str) -> InputOutcome:
         """Hand ``text`` to this running turn, as the owner's next message in it.
 
-        A driver that declares ``steering="mid_turn"`` overrides this. Called
-        from a thread other than the one reading the turn's stream.
+        Called from a thread other than the one reading the turn's stream.
         """
-        return InputOutcome(False, INPUT_UNSUPPORTED)
+        raise NotImplementedError
 
     def wait(self) -> TurnResult:
         """Wait for exit and return the contract-checked result."""
-        if self._result is None:
-            exit_code = self._process.wait()
-            self._result = self._build_result(exit_code)
-            self._clear_questions()
-            self._session.turn_finished()
-        return self._result
+        raise NotImplementedError
 
     def finish_event(self) -> HarnessEvent:
         """The floor event describing how this turn ended."""
@@ -620,7 +555,7 @@ class HarnessTurn(Generic[_RuntimeT]):
 class HarnessSession(Generic[_RuntimeT]):
     """Common state for a live Agent CLI session."""
 
-    def __init__(self, driver: HarnessDriver[_RuntimeT], context: LaunchContext) -> None:
+    def __init__(self, driver: LiveDriver[_RuntimeT], context: LaunchContext) -> None:
         self._driver = driver
         self._context = context
         self._closed = False
@@ -652,132 +587,79 @@ class HarnessSession(Generic[_RuntimeT]):
         """Return a resident process status when this session owns one."""
         return None
 
+    def ensure_started(self, *, model: str, reasoning_effort: str | None) -> None:
+        """Start the resident process and prove it is ready for a turn."""
+        raise NotImplementedError
 
-class HarnessDriver(Generic[_RuntimeT_co]):
-    """Base metadata for one registered live harness."""
+    def process_alive(self) -> bool:
+        """Whether the resident process still runs."""
+        raise NotImplementedError
 
-    def __init__(self, runtime: _RuntimeT_co) -> None:
+    def start_turn(self, turn_input: TurnInput) -> HarnessTurn[_RuntimeT]:
+        """Send one prompt to this already-open native session."""
+        raise NotImplementedError
+
+
+class _SessionType(Protocol):
+    """How :class:`LiveDriver` constructs the session class of its CLI."""
+
+    def __call__(
+        self,
+        driver: LiveDriver[Any],
+        context: LaunchContext,
+        *,
+        resume_session_id: str | None = None,
+    ) -> HarnessSession[Any]:
+        """Open a session, new or resuming ``resume_session_id``."""
+        ...
+
+
+class LiveDriver(Generic[_RuntimeT_co]):
+    """The live transport of one registered Agent CLI, owned by the host supervisor.
+
+    Every CLI holds one resident process per member: it resumes natively,
+    forks at an anchor, restarts on a model change, and runs beside its
+    siblings in one workspace. CLIs differ only in the session class that
+    speaks their protocol, and in whether a message reaches a running turn
+    (:meth:`HarnessTurn.inject`). :data:`_LIVE_SESSIONS` records both.
+    """
+
+    def __init__(
+        self, runtime: _RuntimeT_co, *, session_type: _SessionType, mid_turn: bool
+    ) -> None:
         self._runtime = runtime
+        self._session_type = session_type
+        self._mid_turn = mid_turn
 
     @property
     def runtime(self) -> _RuntimeT_co:
         """The dialect adapter this driver speaks through."""
         return self._runtime
 
-    @property
-    def id(self) -> str:
-        """The registry id this driver answers for."""
-        return self.runtime.name
-
     def capabilities(self) -> HarnessCapabilities:
         """The semantic capability row for this live harness."""
-        raise NotImplementedError
-
-
-class CodexDriver(HarnessDriver[CodexRuntime]):
-    """Codex app-server over its persisted rollout files."""
-
-    def capabilities(self) -> HarnessCapabilities:
-        """Advertise Codex app-server live, interrupt, and native-fork support."""
         return HarnessCapabilities(
             continuity="resume",
-            steering="mid_turn",
+            steering="mid_turn" if self._mid_turn else "none",
             fork="at_anchor",
             model_switch="restart",
             resident_transport="supervisor_live",
             concurrent_shared_workspace=True,
         )
 
-    def launch_live(self, context: LaunchContext) -> CodexAppServerSession:
-        """Start a new persistent Codex app-server thread."""
-        return CodexAppServerSession(self, context)
+    def launch_live(self, context: LaunchContext) -> HarnessSession[Any]:
+        """Open a new persistent session."""
+        return self._session_type(self, context)
 
     def launch_resident_live(
         self, context: LaunchContext, *, session_id: str
-    ) -> CodexAppServerSession:
-        """Resume one Codex thread through a persistent app-server transport."""
+    ) -> HarnessSession[Any]:
+        """Resume one native session through its persistent transport."""
         if context.state_dir is None:
-            raise SessionStateUnavailable("a resident Codex session needs native state")
-        return CodexAppServerSession(self, context, resume_session_id=session_id)
-
-
-class PiDriver(HarnessDriver[PiRuntime]):
-    """pi RPC over its persisted JSONL session tree."""
-
-    def capabilities(self) -> HarnessCapabilities:
-        """Advertise Pi RPC live, interrupt, and prompt-free fork support."""
-        return HarnessCapabilities(
-            continuity="resume",
-            steering="none",
-            fork="at_anchor",
-            model_switch="restart",
-            resident_transport="supervisor_live",
-            concurrent_shared_workspace=True,
-        )
-
-    def launch_live(self, context: LaunchContext) -> PiRpcSession:
-        """Start a new persistent Pi RPC session."""
-        return PiRpcSession(self, context)
-
-    def launch_resident_live(self, context: LaunchContext, *, session_id: str) -> PiRpcSession:
-        """Resume one Pi session through its persistent RPC transport."""
-        if context.state_dir is None:
-            raise SessionStateUnavailable("a resident pi session needs native state")
-        return PiRpcSession(self, context, resume_session_id=session_id)
-
-
-class OpenCodeDriver(HarnessDriver[OpencodeRuntime]):
-    """OpenCode serve over its XDG data store."""
-
-    def capabilities(self) -> HarnessCapabilities:
-        """Advertise OpenCode serve live, interrupt, and native-fork support."""
-        return HarnessCapabilities(
-            continuity="resume",
-            steering="none",
-            fork="at_anchor",
-            model_switch="restart",
-            resident_transport="supervisor_live",
-            concurrent_shared_workspace=True,
-        )
-
-    def launch_live(self, context: LaunchContext) -> HttpAgentLiveSession:
-        """Start a new authenticated OpenCode serve session."""
-        return HttpAgentLiveSession(self, context)
-
-    def launch_resident_live(
-        self, context: LaunchContext, *, session_id: str
-    ) -> HttpAgentLiveSession:
-        """Resume one OpenCode session through its authenticated bridge."""
-        if context.state_dir is None:
-            raise SessionStateUnavailable("a resident OpenCode session needs native state")
-        return HttpAgentLiveSession(self, context, resume_session_id=session_id)
-
-
-class KiloDriver(HarnessDriver[KiloRuntime]):
-    """Kilo serve over its XDG data store."""
-
-    def capabilities(self) -> HarnessCapabilities:
-        """Advertise Kilo serve live, interrupt, and native-fork support."""
-        return HarnessCapabilities(
-            continuity="resume",
-            steering="none",
-            fork="at_anchor",
-            model_switch="restart",
-            resident_transport="supervisor_live",
-            concurrent_shared_workspace=True,
-        )
-
-    def launch_live(self, context: LaunchContext) -> HttpAgentLiveSession:
-        """Start a new authenticated Kilo serve session."""
-        return HttpAgentLiveSession(self, context)
-
-    def launch_resident_live(
-        self, context: LaunchContext, *, session_id: str
-    ) -> HttpAgentLiveSession:
-        """Resume one Kilo session through its authenticated bridge."""
-        if context.state_dir is None:
-            raise SessionStateUnavailable("a resident Kilo session needs native state")
-        return HttpAgentLiveSession(self, context, resume_session_id=session_id)
+            raise SessionStateUnavailable(
+                f"resuming a {self.runtime.name} session needs its native session state"
+            )
+        return self._session_type(self, context, resume_session_id=session_id)
 
 
 class _ProtocolReply:
@@ -823,35 +705,6 @@ class _InputReceipt:
         return self._outcome
 
 
-@dataclass(frozen=True)
-class StreamDelta:
-    """One native record that only adds a few characters to a stream.
-
-    ``path`` leads to the added text inside ``value``; ``render`` turns a
-    record and its line into the row the platform stores for it.
-    """
-
-    value: dict[str, Any]
-    path: tuple[str, ...]
-    delta: str
-    line: str
-    render: Callable[[dict[str, Any], str], HarnessEvent]
-
-
-def _with_delta(value: dict[str, Any], path: tuple[str, ...], delta: str) -> dict[str, Any]:
-    """A copy of ``value`` whose text at ``path`` is ``delta``."""
-    head, *rest = path
-    inner = value.get(head)
-    if rest and isinstance(inner, dict):
-        return {**value, head: _with_delta(inner, tuple(rest), delta)}
-    return {**value, head: delta}
-
-
-def _escaped_chars(text: str) -> int:
-    """How many characters ``text`` takes inside a JSON string."""
-    return len(json.dumps(text)) - 2
-
-
 def _codex_raw_row(
     value: dict[str, Any], line: str, owner: Mapping[str, str] | None = None
 ) -> HarnessEvent:
@@ -874,80 +727,6 @@ def _codex_raw_row(
 def _bridge_raw_row(value: dict[str, Any], line: str) -> HarnessEvent:
     """An OpenCode/Kilo bridge record stored as its bounded line."""
     return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
-
-
-class DeltaBatcher:
-    """Merge adjacent per-token deltas of one native stream into fewer rows.
-
-    Codex's reasoning and command-output deltas and OpenCode/Kilo's reasoning
-    deltas arrive a few characters at a time, and every row the runner gets is
-    a stored event and a synchronous control-plane request. Only *adjacent*
-    deltas of the *same* stream are merged, so no text is dropped or
-    reordered: the first piece of a quiet stream goes out at once, later ones
-    at most once per :attr:`INTERVAL_S`, and any other protocol line -- the
-    item's completion, the turn's boundary, an interrupt's settlement --
-    first flushes what is gathered (see ``_JsonResidentTurn.events_for_line``).
-    """
-
-    INTERVAL_S = ReplyPreview.INTERVAL_S
-    #: A merged row's line stays within the 4,000 characters a raw row keeps
-    #: of its line, so merging never clips text that separate rows kept whole.
-    MAX_LINE_CHARS = 4000
-
-    def __init__(self, clock: Callable[[], float] | None = None) -> None:
-        """``clock`` is for tests; it defaults to ``time.monotonic``."""
-        self._clock = clock or time.monotonic
-        self._first: StreamDelta | None = None
-        self._key = ""
-        self._pieces: list[str] = []
-        self._line_chars = 0
-        self._reported_at: dict[str, float] = {}
-
-    @property
-    def holding(self) -> bool:
-        """Whether the latest delta is gathered rather than reported yet."""
-        return self._first is not None
-
-    def add(self, item: StreamDelta) -> list[HarnessEvent]:
-        """Gather ``item``; return the rows now due, in stream order."""
-        empty = _with_delta(item.value, item.path, "")
-        key = json.dumps(empty, sort_keys=True)
-        added = _escaped_chars(item.delta)
-        rows: list[HarnessEvent] = []
-        if self._first is not None and (
-            key != self._key or self._line_chars + added > self.MAX_LINE_CHARS
-        ):
-            rows.extend(self.flush())
-        now = self._clock()
-        if self._first is None:
-            reported_at = self._reported_at.get(key)
-            if reported_at is None or now - reported_at >= self.INTERVAL_S:
-                self._reported_at[key] = now
-                rows.append(item.render(item.value, item.line))
-                return rows
-            self._first, self._key = item, key
-            self._pieces = [item.delta]
-            self._line_chars = len(json.dumps(empty, separators=(",", ":"))) + added
-            return rows
-        self._pieces.append(item.delta)
-        self._line_chars += added
-        if now - self._reported_at[key] >= self.INTERVAL_S:
-            rows.extend(self.flush())
-        return rows
-
-    def flush(self) -> list[HarnessEvent]:
-        """Report whatever is gathered, as one row."""
-        first = self._first
-        if first is None:
-            return []
-        if len(self._pieces) == 1:
-            value, line = first.value, first.line
-        else:
-            value = _with_delta(first.value, first.path, "".join(self._pieces))
-            line = json.dumps(value, separators=(",", ":"))
-        self._reported_at[self._key] = self._clock()
-        self._first, self._key, self._pieces, self._line_chars = None, "", [], 0
-        return [first.render(value, line)]
 
 
 class _JsonResidentTurn(HarnessTurn[_LiveRuntimeT], Generic[_LiveRuntimeT]):
@@ -1158,7 +937,7 @@ class _JsonResidentSession(HarnessSession[_LiveRuntimeT], Generic[_LiveRuntimeT]
 
     def __init__(
         self,
-        driver: HarnessDriver[_LiveRuntimeT],
+        driver: LiveDriver[_LiveRuntimeT],
         context: LaunchContext,
         *,
         resume_session_id: str | None = None,
@@ -1244,13 +1023,10 @@ class _JsonResidentSession(HarnessSession[_LiveRuntimeT], Generic[_LiveRuntimeT]
     def _prepare_live(
         self, *, model: str, reasoning_effort: str | None
     ) -> tuple[list[str], dict[str, str]]:
-        prepare_live = getattr(self.runtime, "prepare_live", None)
-        if prepare_live is None:
-            raise DriverError(f"runtime {self.runtime.name!r} has no live invocation")
-        return prepare_live(
+        return self.runtime.prepare_live(
             workdir=self._context.workdir,
             model=model,
-            gateway_base_url=self._context.gateway_base_url,
+            model_base_url=self._context.model_base_url,
             credential=self._context.credential,
             provides_isolation=self._context.provides_isolation,
             mcp_config=self._context.mcp_config,
@@ -1322,10 +1098,7 @@ class _JsonResidentSession(HarnessSession[_LiveRuntimeT], Generic[_LiveRuntimeT]
     def event_for_protocol_line(
         self, line: str, turn: _JsonResidentTurn[_LiveRuntimeT]
     ) -> HarnessEvent:
-        event = self.runtime.parse_event(line)
-        if event is None:
-            return HarnessEvent(LINE, raw_line=line)
-        return HarnessEvent(event.event_type, dict(event.payload or {}), raw_line=line)
+        raise NotImplementedError
 
     def stream_delta(self, line: str, turn: _JsonResidentTurn[_LiveRuntimeT]) -> StreamDelta | None:
         """The per-token delta ``line`` is, if it is one to merge; see :class:`DeltaBatcher`."""
@@ -1369,7 +1142,7 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
 
     def __init__(
         self,
-        driver: HarnessDriver[CodexRuntime],
+        driver: LiveDriver[CodexRuntime],
         context: LaunchContext,
         *,
         resume_session_id: str | None = None,
@@ -1378,6 +1151,7 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
         # Each subagent thread's spawning call, as the spawn items name it.
         # Kept for the process, whose threads outlive any one turn.
         self._agent_calls: dict[str, str] = {}
+        self._usage = CodexTurnUsage()
 
     def _thread_owner(self, params: dict[str, Any]) -> dict[str, str]:
         """Mark a notification from another thread as that subagent's.
@@ -1542,7 +1316,7 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
             lambda merged, merged_line: _codex_raw_row(merged, merged_line, owner),
         )
 
-    def event_for_protocol_line(
+    def event_for_protocol_line(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self, line: str, turn: _JsonResidentTurn[CodexRuntime]
     ) -> HarnessEvent:
         """Normalize one Codex app-server notification for the active turn."""
@@ -1575,8 +1349,12 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
             for receiver in item.get("receiverThreadIds") or []:
                 if isinstance(receiver, str) and receiver:
                     self._agent_calls.setdefault(receiver, str(item["id"]))
+                    self._usage.spawned(receiver, turn.protocol_turn_id)
         owner = self._thread_owner(params)
         raw_notification = _codex_raw_row(value, line, owner)
+        if method == "thread/tokenUsage/updated":
+            usage = self._usage.counted(params, turn.protocol_turn_id, owner)
+            return HarnessEvent(USAGE, usage, raw_line=line) if usage else raw_notification
         if method == "error" and params.get("willRetry") is not True and not owner:
             # The error that fails the turn (0.145.0 sends it before the failed
             # turn/completed); a retried one says ``willRetry`` and stays raw.
@@ -1585,7 +1363,7 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
             if message:
                 return HarnessEvent(
                     ERROR,
-                    {"text": _codex_error_text(str(message)), "error": error},
+                    {"text": codex_error_text(str(message)), "error": error},
                     raw_line=line,
                 )
         if method == "item/tool/requestUserInput":
@@ -1664,12 +1442,17 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
                 return raw_notification
             if item_id:
                 turn.reported_tools.add(item_id)
+            # An MCP call keeps the tool's own name, which a server may have
+            # called "task" or "list_agents"; the server it went to is what
+            # says it is not Codex's own delegation.
+            server = item.get("server") if item_type == "mcpToolCall" else None
             return HarnessEvent(
                 TOOL_USE,
                 {
                     "name": item.get("tool") or item_type,
                     "id": item_id or None,
                     "input": item.get("command") or item.get("arguments"),
+                    **({"mcp_server": server} if isinstance(server, str) and server else {}),
                     **owner,
                 },
                 raw_line=line,
@@ -1682,12 +1465,7 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
                     "tool_use_id": item.get("id"),
                     "is_error": (isinstance(exit_code, int) and exit_code != 0)
                     or bool(item.get("error")),
-                    "content": str(
-                        item.get("aggregatedOutput")
-                        or item.get("result")
-                        or item.get("error")
-                        or ""
-                    )[:4000],
+                    "content": codex_tool_output(item)[:4000],
                     "exit_code": exit_code,
                     **owner,
                 },
@@ -1698,15 +1476,14 @@ class CodexAppServerSession(_JsonResidentSession[CodexRuntime]):
                 DIFF, {"text": str(params.get("diff") or "")[:4000], **owner}, raw_line=line
             )
         if method == "turn/completed":
-            # A subagent's turn ending is not this turn's result; its usage
-            # still counts, so it stays a marked lifecycle record.
+            # A subagent's turn ending is not this turn's result, so it stays a
+            # marked lifecycle record; its usage came in tokenUsage notifications.
             completed = params.get("turn")
             return HarnessEvent(
                 LIFECYCLE,
                 {
                     "phase": "result",
                     "status": completed.get("status") if isinstance(completed, dict) else None,
-                    "usage": completed.get("usage") if isinstance(completed, dict) else None,
                     **owner,
                 },
                 raw_line=line,
@@ -1857,34 +1634,6 @@ class PiRpcSession(_JsonResidentSession[PiRuntime]):
     moved to, ``@earendil-works/pi-coding-agent``: the commands this uses, a
     turn, a fork, a clone, a resume, an abort and an automatic retry.
     """
-
-    def __init__(
-        self,
-        driver: HarnessDriver[PiRuntime],
-        context: LaunchContext,
-        *,
-        resume_session_id: str | None = None,
-    ) -> None:
-        super().__init__(driver, context, resume_session_id=resume_session_id)
-
-    def _prepare_live(
-        self, *, model: str, reasoning_effort: str | None
-    ) -> tuple[list[str], dict[str, str]]:
-        prepare_live = getattr(self.runtime, "prepare_live", None)
-        if prepare_live is None:
-            raise DriverError("pi has no live invocation")
-        return prepare_live(
-            workdir=self._context.workdir,
-            model=model,
-            gateway_base_url=self._context.gateway_base_url,
-            credential=self._context.credential,
-            provides_isolation=self._context.provides_isolation,
-            mcp_config=self._context.mcp_config,
-            reasoning_effort=reasoning_effort,
-            session_state_dir=self._context.session_state_dir,
-            resume_session_id=self._resume_session_id,
-            activation_dir=self._context.activation_dir,
-        )
 
     def _initialize_protocol(self) -> None:
         request_id = self._request_id("state")
@@ -2050,6 +1799,11 @@ class HttpAgentLiveTurn(_JsonResidentTurn[ResidentLiveRuntime]):
         #: Each part's kind, from its first update: a ``message.part.delta``
         #: does not say whether it extends answer text or reasoning.
         self.part_types: dict[str, str] = {}
+        #: The call of a tool part that ended without running, reported just
+        #: ahead of the result the same update carries.
+        self.unopened_call: HarnessEvent | None = None
+        #: What the server injected or pruned this turn (the Context events).
+        self.context = ContextRecords()
 
 
 class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
@@ -2129,7 +1883,7 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
             value, ("event", "properties", "delta"), properties["delta"], line, _bridge_raw_row
         )
 
-    def event_for_protocol_line(
+    def event_for_protocol_line(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         self, line: str, turn: _JsonResidentTurn[ResidentLiveRuntime]
     ) -> HarnessEvent:
         """Normalize one OpenCode/Kilo bridge event for the active turn."""
@@ -2214,9 +1968,11 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
                 # cannot turn the user's input into an assistant reply.
                 message_id = str(part.get("messageID") or "")
                 turn.text_parts[part_id] = (message_id, str(part.get("text") or ""))
+                if (injected := turn.context.text_part(part, part_id, turn)) is not None:
+                    return injected
                 timing = part.get("time")
                 ended = isinstance(timing, dict) and bool(timing.get("end"))
-                return self._answer_preview(turn, part_id, ended=ended, line=line)
+                return answer_preview(turn, part_id, ended=ended, line=line)
             if (
                 event_type == "message.part.delta"
                 and properties.get("field") == "text"
@@ -2229,7 +1985,7 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
                     delta_part, (str(properties.get("messageID") or ""), "")
                 )
                 turn.text_parts[delta_part] = (owner, text + str(properties.get("delta") or ""))
-                return self._answer_preview(turn, delta_part, ended=False, line=line)
+                return answer_preview(turn, delta_part, ended=False, line=line)
             if event_type == "message.part.updated" and part_type == "reasoning":
                 text = str(part.get("text") or "")
                 if part.get("time", {}).get("end") if isinstance(part.get("time"), dict) else False:
@@ -2240,18 +1996,22 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
                 state = state if isinstance(state, dict) else {}
                 call_id = str(part.get("callID") or part_id)
                 status = state.get("status")
-                if status in {"pending", "running"} and call_id not in turn.reported_tools:
+                pruned = turn.context.tool_part(self.runtime.name, part, call_id, line)
+                if pruned is not None:
+                    return pruned
+                # Both servers open a tool part as pending, with an empty input,
+                # while the model is still writing the call's arguments. The
+                # call is reported from the update that starts it running,
+                # which is the first to carry them.
+                if status == "running" and call_id not in turn.reported_tools:
                     turn.reported_tools.add(call_id)
-                    return HarnessEvent(
-                        TOOL_USE,
-                        {
-                            "name": part.get("tool"),
-                            "id": call_id,
-                            "input": state.get("input"),
-                        },
-                        raw_line=line,
-                    )
+                    return tool_call_event(part, state, call_id, line)
                 if status in {"completed", "error"}:
+                    if call_id not in turn.reported_tools:
+                        # It never ran, as when an interrupt stops a pending
+                        # call: the update that ends it opens it as well.
+                        turn.reported_tools.add(call_id)
+                        turn.unopened_call = tool_call_event(part, state, call_id, line)
                     content = str(state.get("output") or state.get("error") or "")
                     # A task's result is its subagent's whole answer, so only the
                     # marked event bound applies to it. Other tools keep a short
@@ -2277,31 +2037,17 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
         if bridge == "settled":
             # Reported by events_for_protocol_line, one message per part.
             return HarnessEvent(LIFECYCLE, {"phase": "result"}, raw_line=line)
+        if bridge == "context":
+            # The bridge's own read of what this turn's first request carries,
+            # sent only while the turn is active; nothing waits for it.
+            if value.get("turn_id") != turn.protocol_turn_id:
+                return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
+            return HarnessEvent(LIFECYCLE, bridge_report(value, runtime=self.runtime.name))
         if bridge in {"fatal", "command_error"}:
             return HarnessEvent(
                 ERROR, {"text": str(value.get("detail") or "")[:2000]}, raw_line=line
             )
         return HarnessEvent(RAW, {"text": line[:4000]}, raw_line=line)
-
-    @staticmethod
-    def _answer_preview(
-        turn: HttpAgentLiveTurn, part_id: str, *, ended: bool, line: str
-    ) -> HarnessEvent:
-        """Preview a text part, if it is already known to be the assistant's.
-
-        A part whose message metadata arrives later is previewed from its next
-        update on, with all the text it has by then.
-        """
-        message_id, text = turn.text_parts[part_id]
-        if turn.message_roles.get(message_id) != "assistant":
-            return HarnessEvent(LINE, raw_line=line)
-        piece = turn.preview.grow_to(part_id, text)
-        if piece is None and ended:
-            # A finished part may sit before a long tool call; show all of it.
-            piece = turn.preview.flush(part_id)
-        if piece is None:
-            return HarnessEvent(LINE, raw_line=line)
-        return HarnessEvent(RAW, piece, raw_line=line)
 
     def events_for_protocol_line(
         self, line: str, turn: _JsonResidentTurn[ResidentLiveRuntime]
@@ -2311,6 +2057,9 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
         Each carries its part's ``preview_id``, so the complete text takes the
         place of its preview, between the tool calls it was written around.
         The turn's final output is still every part joined, as before.
+
+        The update ending a call that never ran also stands for its call, which
+        comes first.
         """
         assert isinstance(turn, HttpAgentLiveTurn)
         value = self._object(line)
@@ -2319,14 +2068,19 @@ class HttpAgentLiveSession(_JsonResidentSession[ResidentLiveRuntime]):
             or value.get("bridge") != "settled"
             or value.get("turn_id") != turn.protocol_turn_id
         ):
-            return [self.event_for_protocol_line(line, turn)]
+            event = self.event_for_protocol_line(line, turn)
+            opened, turn.unopened_call = turn.unopened_call, None
+            return [event] if opened is None else [opened, event]
         turn.preview.clear()
+        injected = turn.context.pending(turn)
         answer = [
             HarnessEvent(MESSAGE, {"text": text, "preview_id": part_id}, raw_line=line)
             for part_id, (message_id, text) in turn.text_parts.items()
-            if text.strip() and turn.message_roles.get(message_id) == "assistant"
+            if text.strip()
+            and turn.message_roles.get(message_id) == "assistant"
+            and not turn.context.is_synthetic(part_id)
         ]
-        return answer or [self.event_for_protocol_line(line, turn)]
+        return [*injected, *(answer or [self.event_for_protocol_line(line, turn)])]
 
     def interrupt_turn(self, turn: _JsonResidentTurn[ResidentLiveRuntime]) -> None:
         """Interrupt only the active bridge turn on the resident session."""
@@ -2395,41 +2149,6 @@ CLAUDE_STATE_CONFIG_DIR = f"{STATE_MOUNT_TARGET}/claude"
 CLAUDE_TOOL_MARKS = f"{STATE_MOUNT_TARGET}/{TOOL_MARK_FILE}"
 
 
-class ClaudeCodeDriver(HarnessDriver[ClaudeCodeRuntime]):
-    """Claude Code native live transport, resume, and immediate fork."""
-
-    def capabilities(self) -> HarnessCapabilities:
-        """Native resume plus the supervisor-owned stream-json pipe."""
-        return HarnessCapabilities(
-            continuity="resume",
-            steering="mid_turn",
-            fork="at_anchor",
-            model_switch="restart",
-            resident_transport="supervisor_live",
-            concurrent_shared_workspace=True,
-        )
-
-    def launch_live(self, context: LaunchContext) -> ClaudeCodeLiveSession:
-        """Start a fresh stdin-fed multi-turn native session."""
-        return ClaudeCodeLiveSession(self, context)
-
-    def launch_resident_live(
-        self, context: LaunchContext, *, session_id: str
-    ) -> ClaudeCodeLiveSession:
-        """The HOT transport resumed over the retained native-state directory.
-
-        The process stays alive after the turn settles and takes the next turn
-        on stdin. It is only correct with a residency-lifetime credential in
-        ``context.credential`` — the thread-attributed residency grant from the
-        retained-session design's §6, renewed by host beats — because the pinned
-        CLI runs its whole life on its launch key. That measured behavior is why
-        the grant's lifetime and attribution follow the member residency.
-        """
-        if context.state_dir is None:
-            raise SessionStateUnavailable("a resident turn needs native session state")
-        return ClaudeCodeLiveSession(self, context, resume_session_id=session_id)
-
-
 class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
     """One turn on a resident process: borrows the shared stdout, ends as ``claude -p`` would."""
 
@@ -2442,14 +2161,12 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         self._saw_result = False
         self._error_result = False
         self._saw_api_retry = False
-        # Ending the turn the way the one-shot CLI ends its run (the pinned
-        # 2.1.220): it holds its result while a background agent runs, and a
-        # finished background task is answered in a turn Claude opens itself,
-        # whose result says ``origin: task-notification``.
+        # Ending the turn the way the one-shot CLI ends its run: it holds its
+        # result while a background agent runs, and until every finished
+        # background task is answered (see ``claude_background``).
         self._prompt_read = False
         self._answered = False
-        self._running_agents: set[str] = set()
-        self._unanswered: set[str] = set()
+        self._background = BackgroundWork(session._claude_tasks)
         # Tool calls the model made that have no result yet. Claude folds a
         # message written while one is running into this turn's next model
         # request; written at any other moment it opens a turn of its own.
@@ -2471,10 +2188,7 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         """Preserve terminal failure independently of the resident process exit."""
         # Inspect the wire record: the runtime deduplicates unknown system
         # subtypes, so normalized events can hide a later retry notification.
-        try:
-            record = json.loads(line)
-        except (ValueError, TypeError):
-            record = None
+        record = self._background.read(line)[0]
         if isinstance(record, dict) and not record.get("parent_tool_use_id"):
             observed = str(record.get("session_id") or "").strip()
             expected = self._runtime.session_id or self._session._resume_session_id
@@ -2504,50 +2218,35 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         """Whether this line ends the turn, as the one-shot CLI's run would end.
 
         Not while a background agent is still running, and not before Claude
-        has answered a finished background task: the notification turn it then
-        opens comes after this turn's result, and read by the next turn it
-        would end that one with this one's answer. A notification turn read
-        before this turn's prompt was answered, left by a task that finished
-        between turns, does not end it either.
+        has answered a finished background task. One whose notification it
+        read inside this turn is answered by this turn's result; any other gets
+        a notification turn after it, and read by the next turn that would end
+        that one with this one's answer. A notification turn read before this
+        turn's prompt was answered, left by a task that finished between
+        turns, does not end it either: a notification read is never the prompt.
         """
-        record = _json_object(line)
+        record, text, read = self._background.read(line)
         if record is None:
             return False
         kind = record.get("type")
-        if kind == "user" and record.get("isReplay") and self._prompt:
-            self._prompt_read = self._prompt_read or self._prompt in _record_text(record)
+        if read is not None:
+            self._background.observe_read(read)
+        elif text is not None and self._prompt:
+            self._prompt_read = self._prompt_read or self._prompt in text
         if kind == "system" and not record.get("parent_tool_use_id"):
-            subtype = record.get("subtype")
-            if subtype == "background_tasks_changed":
-                tasks = [task for task in record.get("tasks") or [] if isinstance(task, dict)]
-                listed = {str(task["task_id"]): task for task in tasks if task.get("task_id")}
-                self._session._background_tasks |= set(listed)
-                self._running_agents = {
-                    task_id
-                    for task_id, task in listed.items()
-                    if task.get("task_type") == "local_agent"
-                }
-            elif subtype == "task_notification":
-                task_id = str(record.get("task_id") or "")
-                # A stopped task gets no turn of its own; a foreground agent's
-                # notification is answered by its tool result.
-                if task_id in self._session._background_tasks and record.get("status") != "stopped":
-                    self._unanswered.add(task_id)
-            elif subtype == "init":
-                self._unanswered.clear()
+            self._background.observe_system(record)
         if kind == "control_response" and self._cancelled and self._answered:
             # An interrupt stops the background agents and opens no turn.
-            if self._running_agents:
+            if self._background.running_agents:
                 self._session.retire_after_turn = True
             return True
         if kind != "result":
             return False
-        origin = record.get("origin")
-        notification = isinstance(origin, dict) and origin.get("kind") == "task-notification"
+        notification = is_task_notification(record)
         self._answered = self._answered or not notification or self._prompt_read
-        if not self._answered or self._running_agents:
+        if not self._answered or self._background.running_agents:
             return False
-        return self._cancelled or not self._unanswered
+        return self._cancelled or not self._background.unanswered
 
     def raw_lines(self) -> Iterator[str]:
         """This turn's slice of the shared stream, up to the line that settles it."""
@@ -2585,11 +2284,11 @@ class ClaudeCodeLiveTurn(HarnessTurn[ClaudeCodeRuntime]):
         With ``--replay-user-messages`` the CLI echoes a message on stdout at
         the moment it reads it into the conversation: after the tool it was
         written during, before the model's next request (the pinned 2.1.220).
-        That echo is where the turn took the message.
+        That echo is where the turn took the message. A task notification's
+        echo is Claude reading the notification, never an owner's message.
         """
-        record = _json_object(line)
-        if record is not None and record.get("type") == "user" and record.get("isReplay"):
-            echoed = _record_text(record)
+        _, echoed, notice = self._background.read(line)
+        if echoed is not None and notice is None:
             with self._input_lock:
                 taken = [pending for pending in self._written if pending.text in echoed]
                 self._written = [pending for pending in self._written if pending not in taken]
@@ -2853,7 +2552,7 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
 
     def __init__(
         self,
-        driver: HarnessDriver[ClaudeCodeRuntime],
+        driver: LiveDriver[ClaudeCodeRuntime],
         context: LaunchContext,
         *,
         resume_session_id: str | None = None,
@@ -2875,7 +2574,7 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
         argv, extra_env = self.runtime.prepare_live(
             workdir=context.workdir,
             model="",  # pinned per session below, chosen by the first turn's model
-            gateway_base_url=context.gateway_base_url,
+            model_base_url=context.model_base_url,
             credential=context.credential,
             provides_isolation=context.provides_isolation,
             mcp_config=context.mcp_config,
@@ -2898,9 +2597,8 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
         #: only meaningful once ``_process`` exists.
         self._reasoning_effort: str | None = None
         self._live_turn: ClaudeCodeLiveTurn | None = None
-        # Every task Claude has listed as running in the background. A shell
-        # can outlive the turn that started it, and its end still opens a turn.
-        self._background_tasks: set[str] = set()
+        # Claude's background tasks across turns: see ``claude_background``.
+        self._claude_tasks = SessionTasks()
         # The turn's prompt, an interrupt and a mid-turn message can come from
         # different threads; stdin takes them one whole line at a time.
         self._write_lock = threading.Lock()
@@ -3132,28 +2830,27 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
             self._process.wait()
 
 
-_DRIVER_TYPES: dict[str, type[HarnessDriver[DialectRuntime]]] = {
-    "claude-code": ClaudeCodeDriver,
-    "codex": CodexDriver,
-    "pi": PiDriver,
-    "opencode": OpenCodeDriver,
-    "kilo": KiloDriver,
+#: Each registered CLI: the session class that speaks its live protocol, and
+#: whether a message reaches its running turn.
+_LIVE_SESSIONS: dict[str, tuple[_SessionType, bool]] = {
+    "claude-code": (ClaudeCodeLiveSession, True),
+    "codex": (CodexAppServerSession, True),
+    "pi": (PiRpcSession, False),
+    "opencode": (HttpAgentLiveSession, False),
+    "kilo": (HttpAgentLiveSession, False),
 }
 
 
-def get_driver(runtime_id: str) -> HarnessDriver[DialectRuntime]:
+def get_driver(runtime_id: str) -> LiveDriver[DialectRuntime]:
     """Resolve a registry id to its driver. Raises ``KeyError`` like get_runtime."""
     return driver_for(get_runtime(runtime_id))
 
 
-def driver_for(runtime: AgentRuntime) -> HarnessDriver[DialectRuntime]:
+def driver_for(runtime: AgentRuntime) -> LiveDriver[DialectRuntime]:
     """The driver for an already-resolved dialect adapter.
 
-    Only the five live-session drivers are executable. A dialect adapter with
-    no registered live transport is rejected instead of silently falling back
-    to the removed one-shot harness.
+    A new one each time: the adapter carries one session's state. A dialect
+    adapter with no live session is refused with ``KeyError``.
     """
-    driver_type = _DRIVER_TYPES.get(getattr(runtime, "name", ""))
-    if driver_type is None:
-        raise KeyError(getattr(runtime, "name", ""))
-    return driver_type(runtime)
+    session_type, mid_turn = _LIVE_SESSIONS[runtime.name]
+    return LiveDriver(runtime, session_type=session_type, mid_turn=mid_turn)

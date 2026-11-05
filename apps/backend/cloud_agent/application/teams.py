@@ -1,22 +1,22 @@
-"""Team flows that need more than the store: link tokens and Gateway checks.
+"""Team flows that need more than the team store: link tokens and account checks.
 
-The store decides membership and ownership. Two questions only the Gateway can
-answer are asked here, before the store commits:
+The team store decides membership and ownership. Two questions the account
+directory answers are asked here, before the store commits:
 
 - **Approving a request** asks whether the applicant may currently use Agent.
-  Holding a link and having once signed in is not admission; the Gateway's
-  current decision is.
+  Holding a link and having once signed in is not admission; the account's
+  current permissions are.
 - **Transferring ownership** asks the same of the new owner, so a team is never
   handed to an account that could not run anything in it.
 
 Both fail closed: an explicit "no" is a refusal the owner can read, and a
-Gateway that does not answer is :class:`~cloud_agent.owner_access.AgentAccessUnavailable`,
+directory that does not answer is :class:`~cloud_agent.owner_access.AgentAccessUnavailable`,
 which the API reports as temporarily unavailable rather than as a verdict.
 
 Display enrichment lives here too. Members and applicants are shown by the
-names their own profile chose, then by their Gateway account email, read per
-request and never stored; a Gateway that cannot answer leaves the email out
-rather than failing the whole roster.
+names their own profile chose, then by their account email, read per request
+and never stored; an email that cannot be read is left out rather than failing
+the whole roster.
 """
 
 from __future__ import annotations
@@ -26,15 +26,21 @@ import hashlib
 import secrets
 from typing import TYPE_CHECKING
 
+from cloud_agent.accounts.directory import OwnerDirectoryError
 from cloud_agent.domain.teams import INVITATION_TTL, TeamConflict, TeamForbidden, TeamNotFound
-from cloud_agent.gateway import GatewayError
 from cloud_agent.owner_access import owner_may_use_agent
 from cloud_agent.schemas import (
+    AdminTeamAuditEvent,
+    AdminTeamDetailResponse,
+    AdminTeamInvitationCounts,
+    AdminTeamMember,
+    AdminTeamSummary,
     InvitationCreatedResponse,
     InvitationResponse,
     JoinRequestResponse,
     OwnJoinRequestResponse,
     TeamMemberResponse,
+    TeamPerson,
 )
 from cloud_agent.user_avatar import generate_user_avatar
 
@@ -43,6 +49,9 @@ if TYPE_CHECKING:
     from typing import Any
 
     from cloud_agent.domain.teams import (
+        AdminAuditRecord,
+        AdminTeamDetail,
+        AdminTeamRecord,
         ApplicantRecord,
         InvitationRecord,
         MemberRecord,
@@ -51,7 +60,7 @@ if TYPE_CHECKING:
     )
     from cloud_agent.ports.teams import TeamRepository
 
-#: Gateway email lookups one roster read runs at once.
+#: Account email lookups one roster read runs at once.
 _EMAIL_CONCURRENCY = 8
 
 
@@ -66,15 +75,15 @@ def hash_invitation_token(token: str) -> bytes:
     return hashlib.sha256(token.encode("ascii")).digest()
 
 
-async def _emails(gateway: Any, user_ids: Iterable[str]) -> dict[str, str | None]:
+async def _emails(owners: Any, user_ids: Iterable[str]) -> dict[str, str | None]:
     """Read account emails for display; one that cannot be read is ``None``."""
     limit = asyncio.Semaphore(_EMAIL_CONCURRENCY)
 
     async def one(user_id: str) -> tuple[str, str | None]:
         async with limit:
             try:
-                return user_id, await gateway.user_email(user_id)
-            except GatewayError:
+                return user_id, await owners.user_email(user_id)
+            except OwnerDirectoryError:
                 return user_id, None
 
     unique = list(dict.fromkeys(user_ids))
@@ -86,16 +95,16 @@ def _display_name(first_name: str, last_name: str, email: str | None) -> str:
     return name or email or ""
 
 
-async def _require_admitted(gateway: Any, user_id: str, *, message: str, code: str) -> None:
-    if not await owner_may_use_agent(gateway, user_id=user_id):
+async def _require_admitted(owners: Any, user_id: str, *, message: str, code: str) -> None:
+    if not await owner_may_use_agent(owners, user_id=user_id):
         raise TeamConflict(message, code=code)
 
 
 async def member_responses(
-    gateway: Any, actor: str, members: list[MemberRecord]
+    owners: Any, actor: str, members: list[MemberRecord]
 ) -> list[TeamMemberResponse]:
     """Attach display names, emails and companions to the roster."""
-    emails = await _emails(gateway, (member.user_id for member in members))
+    emails = await _emails(owners, (member.user_id for member in members))
     return [
         TeamMemberResponse(
             user_id=member.user_id,
@@ -111,10 +120,10 @@ async def member_responses(
 
 
 async def applicant_responses(
-    gateway: Any, applicants: list[ApplicantRecord]
+    owners: Any, applicants: list[ApplicantRecord]
 ) -> list[JoinRequestResponse]:
     """Show each applicant the way the owner needs to recognize them."""
-    emails = await _emails(gateway, (applicant.user_id for applicant in applicants))
+    emails = await _emails(owners, (applicant.user_id for applicant in applicants))
     return [
         JoinRequestResponse(
             id=applicant.id,
@@ -133,7 +142,7 @@ async def applicant_responses(
 
 
 async def own_request_responses(
-    gateway: Any, requests: list[OwnJoinRequestRecord]
+    owners: Any, requests: list[OwnJoinRequestRecord]
 ) -> list[OwnJoinRequestResponse]:
     """Name each request's team and inviter, and nothing else of the team."""
     unnamed = (
@@ -141,7 +150,7 @@ async def own_request_responses(
         for request in requests
         if not (request.inviter_first_name or request.inviter_last_name)
     )
-    emails = await _emails(gateway, unnamed)
+    emails = await _emails(owners, unnamed)
     return [
         OwnJoinRequestResponse(
             id=request.id,
@@ -188,40 +197,40 @@ async def create_invitation(
 
 async def decide_join_request(
     teams: TeamRepository,
-    gateway: Any,
+    owners: Any,
     actor: str,
     team_id: str,
     request_id: str,
     *,
     approve: bool,
 ) -> JoinRequestResponse:
-    """Approve only an applicant the Gateway admits now; declining asks nothing."""
+    """Approve only an applicant whose account is admitted now; declining asks nothing."""
     if approve:
         request = await teams.get_join_request(actor, team_id, request_id)
         if request.state == "pending":
             await _require_admitted(
-                gateway,
+                owners,
                 request.user_id,
                 message="This account cannot use Agent right now, so it cannot join.",
                 code="applicant_not_admitted",
             )
     decided = await teams.decide_join_request(actor, team_id, request_id, approve=approve)
-    (response,) = await applicant_responses(gateway, [decided])
+    (response,) = await applicant_responses(owners, [decided])
     return response
 
 
 async def transfer_ownership(
     teams: TeamRepository,
-    gateway: Any,
+    owners: Any,
     actor: str,
     team_id: str,
     *,
     user_id: str,
     expected_revision: int,
 ) -> TeamRecord:
-    """Hand the team only to a member the Gateway admits now.
+    """Hand the team only to a member whose account is admitted now.
 
-    The roster is read first so the Gateway is only ever asked about someone
+    The roster is read first so the directory is only ever asked about someone
     already in the team; an owner cannot use this to learn another account's
     standing. The store checks owner, revision and membership again as it commits.
     """
@@ -233,7 +242,7 @@ async def transfer_ownership(
         if not any(member.user_id == user_id for member in members):
             raise TeamNotFound("No such member.")
         await _require_admitted(
-            gateway,
+            owners,
             user_id,
             message="This member cannot use Agent right now, so they cannot own the team.",
             code="owner_not_admitted",
@@ -241,3 +250,113 @@ async def transfer_ownership(
     return await teams.transfer_ownership(
         actor, team_id, user_id=user_id, expected_revision=expected_revision
     )
+
+
+# ── The platform administrator's read-only view ─────────────────────────────
+
+
+def _person(
+    user_id: str, first_name: str, last_name: str, emails: dict[str, str | None]
+) -> TeamPerson:
+    email = emails.get(user_id)
+    return TeamPerson(
+        user_id=user_id,
+        display_name=_display_name(first_name, last_name, email),
+        email=email,
+        avatar_data_url=generate_user_avatar(user_id).data_url,
+    )
+
+
+def _summary(team: AdminTeamRecord, emails: dict[str, str | None]) -> AdminTeamSummary:
+    return AdminTeamSummary(
+        id=team.id,
+        name=team.name,
+        state=team.state,
+        owner=_person(team.owner_user_id, team.owner_first_name, team.owner_last_name, emails),
+        member_count=team.member_count,
+        admin_count=team.admin_count,
+        pending_request_count=team.pending_request_count,
+        created_at=team.created_at,
+        deleted_at=team.deleted_at,
+    )
+
+
+async def admin_team_summaries(owners: Any, teams: list[AdminTeamRecord]) -> list[AdminTeamSummary]:
+    """Name each team's owner; an email that cannot be read is left out."""
+    emails = await _emails(owners, (team.owner_user_id for team in teams))
+    return [_summary(team, emails) for team in teams]
+
+
+async def admin_team_detail(owners: Any, detail: AdminTeamDetail) -> AdminTeamDetailResponse:
+    """The roster in every membership state, open requests and link counts.
+
+    Asks the directory about the people listed only, which the store bounds:
+    departures past the latest few are counted, not named.
+    """
+    emails = await _emails(
+        owners,
+        [
+            detail.team.owner_user_id,
+            *(member.user_id for member in detail.members),
+            *(request.user_id for request in detail.join_requests),
+        ],
+    )
+    return AdminTeamDetailResponse(
+        team=_summary(detail.team, emails),
+        members=[
+            AdminTeamMember(
+                **_person(member.user_id, member.first_name, member.last_name, emails).model_dump(),
+                role=member.role,
+                state=member.state,
+                joined_at=member.joined_at,
+                departed_at=member.departed_at,
+            )
+            for member in detail.members
+        ],
+        join_requests=[
+            JoinRequestResponse(
+                **_person(
+                    request.user_id, request.first_name, request.last_name, emails
+                ).model_dump(),
+                id=request.id,
+                state=request.state,
+                created_at=request.created_at,
+                expires_at=request.expires_at,
+            )
+            for request in detail.join_requests
+        ],
+        invitations=AdminTeamInvitationCounts(**detail.invitations),
+        departed_member_count=detail.departed_count,
+    )
+
+
+async def admin_audit_events(
+    owners: Any, events: list[AdminAuditRecord]
+) -> list[AdminTeamAuditEvent]:
+    """Name each event's actor and target the way the roster names them."""
+    emails = await _emails(
+        owners,
+        [
+            *(event.actor_user_id for event in events),
+            *(event.target_user_id for event in events if event.target_user_id),
+        ],
+    )
+    return [
+        AdminTeamAuditEvent(
+            id=event.id,
+            action=event.action,  # type: ignore[arg-type]
+            actor=_person(
+                event.actor_user_id, event.actor_first_name, event.actor_last_name, emails
+            ),
+            target_user=(
+                _person(
+                    event.target_user_id, event.target_first_name, event.target_last_name, emails
+                )
+                if event.target_user_id
+                else None
+            ),
+            target_id=event.target_id,
+            created_at=event.created_at,
+        )
+        for event in events
+    ]

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from tests.unit.test_live_sessions import _LiveProcess, _protocol_context, _turn_lines
 
-from cloud_agent_host.drivers import KiloDriver, OpenCodeDriver, TurnInput
+from cloud_agent_host.drivers import TurnInput, driver_for
 from cloud_agent_host.runtimes import KiloRuntime, OpencodeRuntime
 
 
@@ -681,17 +681,13 @@ def test_bridge_permission_reply_failure_aborts_instead_of_waiting_forever(abort
     }
 
 
-@pytest.mark.parametrize(
-    "driver,runtime", [(OpenCodeDriver, OpencodeRuntime), (KiloDriver, KiloRuntime)]
-)
+@pytest.mark.parametrize("runtime", [OpencodeRuntime, KiloRuntime])
 @pytest.mark.parametrize("metadata_first", [True, False])
-def test_reply_excludes_user_unknown_and_stale_turn_parts(
-    tmp_path, driver, runtime, metadata_first
-):
+def test_reply_excludes_user_unknown_and_stale_turn_parts(tmp_path, runtime, metadata_first):
     process = _LiveProcess()
     context, _ = _protocol_context(process, tmp_path)
     process.feed = _turn_lines({"bridge": "ready", "session_id": "session-a"})
-    session = driver(runtime()).launch_live(context)
+    session = driver_for(runtime()).launch_live(context)
     session.ensure_started(model="deepseek-v4-flash", reasoning_effort=None)
 
     for index in range(2):
@@ -733,17 +729,13 @@ def test_reply_excludes_user_unknown_and_stale_turn_parts(
         assert turn.wait().final_output == f"assistant answer {index}"
 
 
-@pytest.mark.parametrize(
-    "driver,runtime", [(OpenCodeDriver, OpencodeRuntime), (KiloDriver, KiloRuntime)]
-)
-def test_a_task_result_keeps_its_whole_answer_and_other_clipped_results_say_so(
-    tmp_path, driver, runtime
-):
+@pytest.mark.parametrize("runtime", [OpencodeRuntime, KiloRuntime])
+def test_a_task_result_keeps_its_whole_answer_and_other_clipped_results_say_so(tmp_path, runtime):
     """A subagent's answer is its task result; a shortened tool result is marked."""
     process = _LiveProcess()
     context, _ = _protocol_context(process, tmp_path)
     process.feed = _turn_lines({"bridge": "ready", "session_id": "session-a"})
-    session = driver(runtime()).launch_live(context)
+    session = driver_for(runtime()).launch_live(context)
     session.ensure_started(model="deepseek-v4-flash", reasoning_effort=None)
     turn = session.start_turn(TurnInput(prompt="delegate", model="deepseek-v4-flash"))
     turn_id = json.loads(process.sent[-1])["id"]
@@ -789,15 +781,94 @@ def test_a_task_result_keeps_its_whole_answer_and_other_clipped_results_say_so(
     assert results["bash-call"]["truncated"] is True
 
 
-@pytest.mark.parametrize(
-    "driver,runtime", [(OpenCodeDriver, OpencodeRuntime), (KiloDriver, KiloRuntime)]
-)
-def test_the_answer_is_previewed_and_each_part_completes_in_its_place(tmp_path, driver, runtime):
+@pytest.mark.parametrize("runtime", [OpencodeRuntime, KiloRuntime])
+def test_a_tool_call_is_reported_with_the_input_it_runs_with(tmp_path, runtime):
+    """The pinned 1.18.9 (and Kilo) open a tool part before its input is known.
+
+    The part is pending, with an empty input, while the model is still writing
+    the call's arguments; it carries them from the update that starts it
+    running. A call stopped while pending, as an interrupt stops one, goes
+    straight to an error and is reported with it, ahead of its result.
+    """
+    process = _LiveProcess()
+    context, _ = _protocol_context(process, tmp_path)
+    process.feed = _turn_lines({"bridge": "ready", "session_id": "session-a"})
+    session = driver_for(runtime()).launch_live(context)
+    session.ensure_started(model="deepseek-v4-flash", reasoning_effort=None)
+
+    def tool(turn_id, call_id, status, **state):
+        return {
+            "bridge": "event",
+            "turn_id": turn_id,
+            "event": {
+                "type": "message.part.updated",
+                "properties": {
+                    "part": {
+                        "id": f"part-{call_id}",
+                        "callID": call_id,
+                        "type": "tool",
+                        "tool": "bash",
+                        "state": {"status": status, **state},
+                    }
+                },
+            },
+        }
+
+    def tool_events(prompt, *lines):
+        turn = session.start_turn(TurnInput(prompt=prompt, model="deepseek-v4-flash"))
+        turn_id = json.loads(process.sent[-1])["id"]
+        process.feed = _turn_lines(
+            *(line(turn_id) for line in lines),
+            {"bridge": "settled", "turn_id": turn_id, "status": "completed"},
+        )
+        return [
+            (event.event_type, event.payload)
+            for event in turn.iter_events()
+            if event.event_type in {"tool_use", "tool_result"}
+        ]
+
+    command = {"command": "pwd"}
+    assert tool_events(
+        "where am I",
+        lambda turn_id: tool(turn_id, "call-1", "pending", input={}, raw=""),
+        lambda turn_id: tool(turn_id, "call-1", "running", input=command, time={"start": 1}),
+        lambda turn_id: tool(
+            turn_id, "call-1", "running", input=command, title="pwd", time={"start": 1}
+        ),
+        lambda turn_id: tool(
+            turn_id, "call-1", "completed", input=command, output="/w", time={"start": 1, "end": 2}
+        ),
+    ) == [
+        ("tool_use", {"name": "bash", "id": "call-1", "input": command}),
+        ("tool_result", {"tool_use_id": "call-1", "is_error": False, "content": "/w"}),
+    ]
+    assert tool_events(
+        "stop",
+        lambda turn_id: tool(turn_id, "call-2", "pending", input={}, raw=""),
+        lambda turn_id: tool(
+            turn_id,
+            "call-2",
+            "error",
+            input={},
+            error="Tool execution aborted",
+            time={"start": 3, "end": 3},
+        ),
+    ) == [
+        ("tool_use", {"name": "bash", "id": "call-2", "input": {}}),
+        (
+            "tool_result",
+            {"tool_use_id": "call-2", "is_error": True, "content": "Tool execution aborted"},
+        ),
+    ]
+
+
+@pytest.mark.parametrize("runtime", [OpencodeRuntime, KiloRuntime])
+def test_the_answer_is_previewed_and_each_part_completes_in_its_place(tmp_path, runtime):
     """The pinned 1.18.9 shape: an empty part, a delta per token, the whole part."""
     process = _LiveProcess()
     context, _ = _protocol_context(process, tmp_path)
     process.feed = _turn_lines({"bridge": "ready", "session_id": "session-a"})
-    session = driver(runtime()).launch_live(context)
+    session = driver_for(runtime()).launch_live(context)
     session.ensure_started(model="deepseek-v4-flash", reasoning_effort=None)
     turn = session.start_turn(TurnInput(prompt="look", model="deepseek-v4-flash"))
     turn_id = json.loads(process.sent[-1])["id"]
@@ -897,9 +968,7 @@ def test_the_answer_is_previewed_and_each_part_completes_in_its_place(tmp_path, 
     assert turn.wait().final_output == "Let me check.\n\nAll done."
 
 
-@pytest.mark.parametrize(
-    "driver,runtime", [(OpenCodeDriver, OpencodeRuntime), (KiloDriver, KiloRuntime)]
-)
+@pytest.mark.parametrize("runtime", [OpencodeRuntime, KiloRuntime])
 @pytest.mark.parametrize(
     ("error", "text"),
     [
@@ -911,12 +980,12 @@ def test_the_answer_is_previewed_and_each_part_completes_in_its_place(tmp_path, 
     ],
 )
 def test_a_session_error_reads_the_way_the_clis_own_output_prints_it(
-    tmp_path, driver, runtime, error, text
+    tmp_path, runtime, error, text
 ):
     process = _LiveProcess()
     context, _ = _protocol_context(process, tmp_path)
     process.feed = _turn_lines({"bridge": "ready", "session_id": "session-a"})
-    session = driver(runtime()).launch_live(context)
+    session = driver_for(runtime()).launch_live(context)
     session.ensure_started(model="deepseek-v4-flash", reasoning_effort=None)
     turn = session.start_turn(TurnInput(prompt="look", model="deepseek-v4-flash"))
     turn_id = json.loads(process.sent[-1])["id"]

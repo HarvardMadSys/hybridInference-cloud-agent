@@ -63,6 +63,9 @@ with os.fdopen(lock_fd, 'r+') as lock:
         if runtime == 'pi':
             install_env['npm_config_prefix'] = str(root)
             install_env['PI_CODING_AGENT_DIR'] = str(root / 'pi-config')
+            # No shared compile caches in /tmp, as for pi itself (runtimes/pi.py).
+            install_env['JITI_FS_CACHE'] = 'false'
+            install_env['NODE_DISABLE_COMPILE_CACHE'] = '1'
             subprocess.run(['pi', 'install', 'npm:' + spec], env=install_env,
                            cwd=home, check=True)
             # pi 0.75.0 moved its own installs from npm's global prefix into
@@ -152,7 +155,7 @@ def install_other_runtime_plugins(
     run_plugin_command(
         manager,
         spec,
-        ["python3", "-c", _INSTALL_SCRIPT, runtime_id, json.dumps(selections), home],
+        ["python3", "-I", "-c", _INSTALL_SCRIPT, runtime_id, json.dumps(selections), home],
         env={**env, "HOME": home, "CI": "1", "GIT_TERMINAL_PROMPT": "0"},
         slot_id=slot_id,
     )

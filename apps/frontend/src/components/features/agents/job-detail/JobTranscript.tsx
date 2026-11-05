@@ -21,7 +21,7 @@ import type { RecordedFileSelection, RecordedTurnOutputs } from '../recordedTurn
 import type { TranscriptPresentation } from '../transcriptPresentation';
 import { TurnDeliverables } from '../TurnDeliverables';
 import type { AgentEvent, AgentJob } from '../types';
-import { OutcomeCard, RunNotices } from './RunOutcome';
+import { OutcomeCard } from './RunOutcome';
 import type { JobDetailPanels } from './useJobDetailPanels';
 
 /** A stored turn of the transcript, with the results it recorded. */
@@ -74,7 +74,6 @@ export function JobTranscript({
   recordedOutputs,
   onReview,
   onWatchPr,
-  onPublish,
 }: {
   panels: JobDetailPanels;
   job: AgentJob;
@@ -97,7 +96,6 @@ export function JobTranscript({
   recordedOutputs: Map<string, RecordedTurnOutputs | null>;
   onReview?: () => void;
   onWatchPr?: () => void;
-  onPublish?: () => void;
 }) {
   const t = useT();
   const { inspectTranscriptEvent, openRecordedFile, openRun, openWorkspace } = panels;
@@ -189,7 +187,7 @@ export function JobTranscript({
               }
               onRewind={
                 rewindAnchor && canForkWorkspace
-                  ? () => void forkFrom(rewindAnchor, message.content)
+                  ? (content) => void forkFrom(rewindAnchor, content ?? message.content)
                   : undefined
               }
             />
@@ -345,9 +343,7 @@ export function JobTranscript({
           onOpenDiff={() => openWorkspace('git')}
           onReview={onReview}
           onWatchPr={onWatchPr}
-          onPublish={onPublish}
         />
-        {selectedAttemptIsCurrent ? <RunNotices job={job} /> : null}
         {usageFooter && lastVisibleMessageIndex < 0 && currentReplyId === undefined ? (
           <div className="mt-2">{usageFooter}</div>
         ) : null}

@@ -31,7 +31,7 @@ export function SearchControls({
     `inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md px-2 py-1 text-xs transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/30 disabled:cursor-default ${
       selected
         ? 'bg-crimson/[0.08] text-crimson-dark hover:bg-crimson/15 dark:bg-crimson/20 dark:text-rose-300 dark:hover:bg-crimson/30'
-        : 'text-gray-500 hover:bg-gray-200/60 hover:text-gray-700 disabled:hover:bg-transparent disabled:hover:text-gray-500 dark:text-gray-400 dark:hover:bg-white/10 dark:hover:text-gray-200 dark:disabled:hover:text-gray-400'
+        : 'text-muted hover:bg-surface-hover hover:text-foreground disabled:hover:bg-transparent disabled:hover:text-muted'
     }`;
   return (
     <div
@@ -44,9 +44,9 @@ export function SearchControls({
         }
       }}
     >
-      <div className="flex min-w-0 items-center gap-1 rounded-lg border border-gray-200 bg-white pl-2.5 pr-1 transition-colors focus-within:border-crimson/40 focus-within:ring-2 focus-within:ring-crimson/[0.06] dark:border-white/10 dark:bg-gray-800 dark:focus-within:border-crimson/60">
+      <div className="flex min-w-0 items-center gap-1 rounded-lg border border-border bg-surface pl-2.5 pr-1 transition-colors focus-within:border-accent/50 focus-within:ring-2 focus-within:ring-accent/10">
         <svg
-          className="h-3.5 w-3.5 shrink-0 text-gray-400 dark:text-gray-500"
+          className="h-3.5 w-3.5 shrink-0 text-muted"
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
@@ -63,14 +63,14 @@ export function SearchControls({
           placeholder={t('sidebar.searchPlaceholder')}
           onChange={(event) => onQueryChange(event.target.value)}
           onKeyDown={onInputKeyDown}
-          className="min-w-0 flex-1 bg-transparent px-1 py-2 text-[13px] text-gray-800 outline-none placeholder:text-gray-400 dark:text-gray-100 dark:placeholder:text-gray-500"
+          className="min-w-0 flex-1 bg-transparent px-1 py-2 text-[13px] text-foreground outline-none placeholder:text-muted"
         />
         <button
           type="button"
           onClick={onClose}
           aria-label={t('sidebar.closeSearch')}
           title={`${t('sidebar.closeSearch')} (Esc)`}
-          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crimson/30 dark:text-gray-500 dark:hover:bg-white/10 dark:hover:text-gray-200"
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/30"
         >
           <svg
             className="h-3.5 w-3.5"

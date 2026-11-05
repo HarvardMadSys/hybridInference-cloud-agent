@@ -73,10 +73,6 @@ class OperationMeasurements(Protocol):
         """Return the experiment catalogue, most recent first."""
         ...
 
-    async def get_profiling_run(self, run_id: str) -> dict[str, Any] | None:
-        """Return one experiment, or ``None`` when it was never recorded."""
-        ...
-
     async def list_operation_measurements(
         self,
         *,

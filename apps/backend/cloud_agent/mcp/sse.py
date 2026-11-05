@@ -163,7 +163,7 @@ class SseDecoder:
             events.append(self._dispatch())
         return events
 
-    def _consume_line(self, line: bytes) -> SseEvent | None:
+    def _consume_line(self, line: bytes) -> SseEvent | None:  # noqa: PLR0912 complexity baseline, #771
         """Apply one line, returning an event when the line completes one."""
         if len(line) > _MAX_LINE_BYTES:
             raise SseError("this stream has a line longer than the relay will buffer")

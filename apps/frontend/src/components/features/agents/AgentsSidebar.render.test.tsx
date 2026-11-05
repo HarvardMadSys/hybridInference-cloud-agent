@@ -43,6 +43,10 @@ vi.mock('@/lib/api/agents', () => ({
   unpinAgentJob: mocks.unpinAgentJob,
 }));
 
+vi.mock('@/lib/api/agents/readReceipts', () => ({
+  listAgentReadReceipts: vi.fn(async () => ({ user_id: 'ada', receipts: [], next_cursor: null })),
+  saveAgentReadReceipts: vi.fn(async () => ({ user_id: 'ada', receipts: [], next_cursor: null })),
+}));
 import { AgentsSidebar, SIDEBAR_WIDTH_STORAGE_KEY } from './AgentsSidebar';
 
 function apiJob(overrides: Partial<AgentJobApi> = {}): AgentJobApi {

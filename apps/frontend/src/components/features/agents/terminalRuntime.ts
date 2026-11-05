@@ -18,6 +18,12 @@ let pending: Promise<TerminalRuntime> | null = null;
 
 /** Begin (or join) the load of the xterm runtime. */
 export function loadTerminalRuntime(): Promise<TerminalRuntime> {
-  pending ??= Promise.all([import('@xterm/xterm'), import('@xterm/addon-fit')]);
+  pending ??= Promise.all([import('@xterm/xterm'), import('@xterm/addon-fit')]).catch(
+    (cause: unknown) => {
+      // A transient chunk-download failure must not poison every later pane.
+      pending = null;
+      throw cause;
+    },
+  );
   return pending;
 }

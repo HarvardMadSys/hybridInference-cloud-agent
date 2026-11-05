@@ -6,7 +6,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from cloud_agent_shared import operation_profiling as profiling
@@ -23,11 +23,27 @@ publishing = threading.Event()
 exiting = threading.Event()
 
 
+class NoOpLock:
+    # The events synchronize this handler. A do-nothing lock keeps
+    # logging.shutdown from draining it independently of the collector's exit
+    # callback, and works on every supported interpreter: 3.13's Handler.handle
+    # uses `with self.lock:`, which `lock = None` used to break.
+    def acquire(self):
+        return True
+
+    def release(self):
+        return None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return None
+
+
 class WaitForExit(logging.Handler):
     def createLock(self):
-        # The events synchronize this handler. Keep logging.shutdown from
-        # draining it independently of the collector's exit callback.
-        self.lock = None
+        self.lock = NoOpLock()
 
     def emit(self, record):
         publishing.set()
@@ -65,7 +81,7 @@ def test_interpreter_exit_drains_a_record_still_waiting_to_publish(tmp_path):
     descriptor = {
         "run_id": run_id,
         "operations": [profiling.STARTUP_OPERATION],
-        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+        "expires_at": (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
         "max_operations": 1,
         "target": {"host": "shutdown-host"},
     }

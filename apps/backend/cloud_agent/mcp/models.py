@@ -57,6 +57,10 @@ class ExecutionLocation(StrEnum):
     MANAGED_WORKER = "managed-worker"
     #: A connector the user runs on their own machine or private network.
     USER_CONNECTOR = "user-connector"
+    #: Inside the task's own sandbox, next to the agent, behind the sandbox's
+    #: MCP gateway: it sees the task's ``localhost``, files and browser. Pinned
+    #: packages only, and no secrets (cloud_agent_shared.sandbox_mcp).
+    SANDBOX = "sandbox"
 
 
 class AuthKind(StrEnum):
@@ -280,6 +284,9 @@ class LaunchSpec:
     #: The resolved package and version, once a dependency plan exists.
     pinned_package: str | None = None
     pinned_version: str | None = None
+    #: ``secret://NAME`` values as stored, sealed: ciphertext by name. Opened
+    #: only where a launch is about to run (a sandbox server's claim).
+    sealed_env: Mapping[str, str] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Refuse a launch spec that would be ambiguous or unsafe to run."""
@@ -319,7 +326,7 @@ class ConnectionConfig:
                 raise ValueError("a remote connection needs a URL")
         else:
             if self.transport is not Transport.STDIO:
-                raise ValueError("a managed or connector location is only valid for stdio")
+                raise ValueError("a managed, connector or sandbox location is only valid for stdio")
             if self.launch is None:
                 raise ValueError("a stdio connection needs a launch spec")
 
@@ -648,32 +655,6 @@ class McpServer:
     location: ExecutionLocation = ExecutionLocation.REMOTE
     launch: LaunchSpec | None = None
     connector_id: str | None = None
-
-    @property
-    def unfiltered(self) -> bool:
-        """Whether every tool this server exposes is reachable.
-
-        Always false. A connection's reachable set is its session binding's
-        decision, and an empty set means *nothing* rather than *everything* --
-        which is the opposite of the provider-catalogue model this replaced,
-        where an absent allowlist meant the whole tool surface. Keeping the
-        property, rather than deleting it, is what lets the filter below stay
-        readable while making the new answer unmissable: a server with no
-        allowed tools has no reachable tools.
-        """
-        return False
-
-    def allows_resource(self, uri: str) -> bool:
-        """Whether a resource read may reach this server."""
-        return uri in self.resources
-
-    def allows_prompt(self, name: str) -> bool:
-        """Whether a prompt fetch may reach this server."""
-        return name in self.prompts
-
-    def allows(self, tool: str) -> bool:
-        """Whether ``tool`` was allowed by this server's binding."""
-        return tool in self.tools
 
     def public(self) -> dict[str, Any]:
         """Render what a job owner may see: never the URL or the headers."""

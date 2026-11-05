@@ -24,6 +24,10 @@ from cloud_agent.agent_memory import (
     AgentMemoryTaskEnded,
     MemoryTask,
 )
+from cloud_agent.storage.repositories.agent_memory import (
+    PostgresAgentMemoryRepository,
+    _archive_page_sql,
+)
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -140,6 +144,223 @@ async def test_purge_forgets_expired_archives_only(store, pool):
     await store.agent_memory.purge_memories()
     archived = (await store.agent_memory.list_memories("alice", None))["archived"]
     assert [memory["id"] for memory in archived] == [recent["id"]]
+
+
+async def test_scope_read_keeps_one_snapshot_during_an_archive(store, pool):
+    saved = await store.agent_memory.add_memory("alice", None, "Archive during read")
+    between_reads = asyncio.Event()
+    archive_finished = asyncio.Event()
+
+    class CoordinatedConnection:
+        def __init__(self, connection):
+            self._connection = connection
+            self._fetches = 0
+
+        def transaction(self, **kwargs):
+            return self._connection.transaction(**kwargs)
+
+        async def fetch(self, query, *args):
+            self._fetches += 1
+            if self._fetches == 2:
+                between_reads.set()
+                await archive_finished.wait()
+            return await self._connection.fetch(query, *args)
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+    class CoordinatedAcquire:
+        async def __aenter__(self):
+            self._context = pool.acquire()
+            connection = await self._context.__aenter__()
+            return CoordinatedConnection(connection)
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return await self._context.__aexit__(exc_type, exc, traceback)
+
+    class CoordinatedPool:
+        def acquire(self):
+            return CoordinatedAcquire()
+
+    memories = PostgresAgentMemoryRepository(CoordinatedPool())
+    read = asyncio.create_task(memories.list_memories("alice", None))
+    await asyncio.wait_for(between_reads.wait(), timeout=2)
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE agent_memories SET status='archived', archived_at=NOW() WHERE id=$1",
+                saved["id"],
+            )
+    finally:
+        archive_finished.set()
+    scope = await read
+
+    assert [memory["id"] for memory in scope["memories"]] == [saved["id"]]
+    assert scope["archived"] == []
+
+
+async def test_retention_uses_bounded_index_access_with_100k_archives(store, pool):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO agent_memories "
+            "(id,user_id,content,description,status,origin,archived_at) "
+            "SELECT 'plan-' || n, 'owner-' || (n % 1000), 'Rule', 'Rule', 'archived', 'agent', "
+            "NOW() - make_interval(days => CASE WHEN n <= 1000 THEN 91 ELSE 1 END) "
+            "FROM generate_series(1,100000) n"
+        )
+        await conn.execute(
+            "UPDATE agent_memories SET superseded_by='plan-1' WHERE id='plan-100000'"
+        )
+        await conn.execute("ANALYZE agent_memories")
+        plans = []
+        for query in (
+            "SELECT id FROM agent_memories WHERE status='archived' "
+            "AND archived_at < statement_timestamp()-make_interval(days => 90) "
+            "ORDER BY archived_at,id LIMIT 500 FOR UPDATE SKIP LOCKED",
+            "SELECT id FROM agent_memories WHERE superseded_by='plan-1'",
+        ):
+            raw = await conn.fetchval("EXPLAIN (ANALYZE, FORMAT JSON) " + query)
+            plans.append(json.loads(raw)[0]["Plan"])
+
+    def nodes(plan):
+        yield plan
+        for child in plan.get("Plans", []):
+            yield from nodes(child)
+
+    retention = [node for node in nodes(plans[0]) if node.get("Index Name")]
+    assert [node["Index Name"] for node in retention] == ["idx_agent_memories_retention"]
+    assert retention[0]["Actual Rows"] == 500
+    assert "idx_agent_memories_superseded" in {node.get("Index Name") for node in nodes(plans[1])}
+
+
+async def test_retention_bounds_each_pass_and_cleans_self_references(store, pool, monkeypatch):
+    from cloud_agent.storage.repositories import agent_memory
+
+    monkeypatch.setattr(agent_memory, "_PURGE_BATCH_SIZE", 2)
+    monkeypatch.setattr(agent_memory, "_PURGE_MAX_BATCHES", 2)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO agent_memories (id,user_id,content,description,origin,status,archived_at) "
+            "SELECT 'old-' || n, 'alice', 'old', 'old', 'agent', 'archived', "
+            "NOW() - interval '91 days' FROM generate_series(1,7) n"
+        )
+        await conn.execute(
+            "INSERT INTO agent_memories (id,user_id,content,description,origin,superseded_by) "
+            "VALUES ('active','alice','keep','keep','manual','old-1')"
+        )
+    await store.agent_memory.purge_memories()
+    async with pool.acquire() as conn:
+        assert (
+            await conn.fetchval("SELECT count(*) FROM agent_memories WHERE status='archived'") == 3
+        )
+        assert (
+            await conn.fetchval("SELECT superseded_by FROM agent_memories WHERE id='active'")
+            is None
+        )
+    await store.agent_memory.purge_memories()
+    async with pool.acquire() as conn:
+        assert await conn.fetchval("SELECT count(*) FROM agent_memories") == 1
+        indexes = await conn.fetch(
+            "SELECT indexname FROM pg_indexes WHERE tablename='agent_memories'"
+        )
+        assert {
+            "idx_agent_memories_active_page",
+            "idx_agent_memories_archive_page",
+            "idx_agent_memories_retention",
+            "idx_agent_memories_superseded",
+        } <= {row["indexname"] for row in indexes}
+
+
+async def test_archives_page_survives_new_rows_and_a_purged_cursor(store, pool):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO agent_memories(id,user_id,content,description,origin,status,archived_at) "
+            "SELECT 'archive-' || lpad(n::text,6,'0'),'alice','old','old','agent','archived', "
+            "NOW()-make_interval(secs=>n) FROM generate_series(1,100000) n"
+        )
+    first = await store.agent_memory.list_memories("alice", None)
+    assert len(first["archived"]) == 50
+    assert first["archived_next_cursor"] is not None
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO agent_memories(id,user_id,content,description,origin,status,archived_at) "
+            "VALUES ('new','alice','new','new','agent','archived',NOW())"
+        )
+        await conn.execute(
+            "UPDATE agent_memories SET archived_at=NOW()-interval '91 days' WHERE id=$1",
+            first["archived"][-1]["id"],
+        )
+    await store.agent_memory.purge_memories()
+    async with pool.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM agent_memories WHERE id=$1)",
+                first["archived"][-1]["id"],
+            )
+            is False
+        )
+    second = await store.agent_memory.list_memories(
+        "alice", None, archive_cursor=first["archived_next_cursor"]
+    )
+    assert len(second["archived"]) == 50
+    assert {m["id"] for m in first["archived"]}.isdisjoint(m["id"] for m in second["archived"])
+    assert second["archived"][0]["id"] == "archive-000051"
+    assert (await store.agent_memory.list_memories("bob", None))["archived"] == []
+    assert (await store.agent_memory.set_memory_enabled("alice", None, False))["archived"][0][
+        "id"
+    ] == "new"
+    with pytest.raises(ValueError):
+        await store.agent_memory.list_memories("alice", None, archive_cursor="invalid")
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO agent_memories(id,user_id,content,description,origin) "
+            "SELECT 'active-' || n,'alice','active','active','agent' "
+            "FROM generate_series(1,1000) n"
+        )
+        timestamp = await conn.fetchval(
+            "SELECT archived_at FROM agent_memories WHERE id='archive-090000'"
+        )
+        await conn.execute("ANALYZE agent_memories")
+        active_plan = json.loads(
+            await conn.fetchval(
+                "EXPLAIN (ANALYZE,FORMAT JSON) "
+                "SELECT id FROM agent_memories "
+                "WHERE user_id='alice' AND COALESCE(repo,'')='' AND status='active' "
+                "ORDER BY created_at DESC,id"
+            )
+        )[0]["Plan"]
+        await conn.execute("SET plan_cache_mode=force_generic_plan")
+        try:
+            await conn.execute(
+                "PREPARE archive_page(text,text,timestamptz,text) AS "
+                + _archive_page_sql(has_cursor=True)
+            )
+            plan = json.loads(
+                await conn.fetchval(
+                    "EXPLAIN (ANALYZE,FORMAT JSON) EXECUTE archive_page"
+                    f"('alice','','{timestamp.isoformat()}','archive-090000')"
+                )
+            )[0]["Plan"]
+        finally:
+            await conn.execute("DEALLOCATE archive_page; RESET plan_cache_mode")
+
+    def nodes(node):
+        yield node
+        for child in node.get("Plans", []):
+            yield from nodes(child)
+
+    active_index = next(
+        node
+        for node in nodes(active_plan)
+        if node.get("Index Name") == "idx_agent_memories_active_page"
+    )
+    assert active_index["Actual Rows"] == 1000
+    assert active_index.get("Rows Removed by Filter", 0) == 0
+    index = next(
+        node for node in nodes(plan) if node.get("Index Name") == "idx_agent_memories_archive_page"
+    )
+    assert index["Actual Rows"] == 51
+    assert index.get("Rows Removed by Filter", 0) == 0
 
 
 async def test_migration_round_trip(store, pool):

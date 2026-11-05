@@ -36,7 +36,7 @@ nothing. That is the correct failure, but it is a failure, not a working path.
 **Re-keying invalidates every token in flight.** That is a cutover concern, not
 a bug: an attempt holding a token signed by the old root is an attempt from
 before the migration, and it must not keep writing to the new store. Drain
-before cutover; see MIGRATION.md.
+before cutover; see the repository extraction record.
 """
 
 from __future__ import annotations
@@ -48,7 +48,10 @@ import json
 import secrets
 from typing import Any
 
-from cloud_agent_shared.shared_protocol import RESIDENCY_MCP_CREDENTIAL_PREFIX
+from cloud_agent_shared.shared_protocol import (
+    RESIDENCY_GITHUB_CREDENTIAL_PREFIX,
+    RESIDENCY_MCP_CREDENTIAL_PREFIX,
+)
 
 # Domain separation: a signature over this prefix is meaningless anywhere else.
 _TOKEN_PREFIX = "ajt"
@@ -60,6 +63,11 @@ _HOST_TOKEN_PREFIX = "aht"
 # A resident process's MCP credential — see ``mint_residency_mcp_token``. The
 # host recognizes it by this prefix, so the two are spelled from one constant.
 _RESIDENCY_MCP_PREFIX = RESIDENCY_MCP_CREDENTIAL_PREFIX.rstrip(".")
+
+# A resident process's GitHub relay credential — see
+# ``mint_residency_github_token``. A prefix of its own, so neither residency
+# parser accepts the other's credential.
+_RESIDENCY_GITHUB_PREFIX = RESIDENCY_GITHUB_CREDENTIAL_PREFIX.rstrip(".")
 
 
 class InvalidAgentToken(Exception):
@@ -111,13 +119,14 @@ def _b64decode(value: str) -> bytes:
 # The two are deliberately not interchangeable, so a leaked MCP token buys no
 # inference and a leaked grant buys no tools.
 #
-# ``model`` is the sandbox's *previous* inference credential, kept while jobs
-# started before the cutover are still running. New attempts get a grant
-# instead. It is removed with the gateway's legacy MCP route at H4.
+# ``model`` was the sandbox's *previous* inference credential, kept only while
+# jobs started before the cutover were still running (issue #822). The H4
+# removal of the gateway's legacy MCP route (2026-08-09) ended the last use:
+# production mints only ``full`` and ``mcp`` (api/worker.py), model calls ride
+# the gateway's ``agr`` grant, and an old ``model`` token no longer parses.
 SCOPE_FULL = "full"
-SCOPE_MODEL = "model"
 SCOPE_MCP = "mcp"
-_VALID_SCOPES = (SCOPE_FULL, SCOPE_MODEL, SCOPE_MCP)
+_VALID_SCOPES = (SCOPE_FULL, SCOPE_MCP)
 
 # ``host`` is the third scope, and it is deliberately *not* in the tuple above.
 #
@@ -138,6 +147,14 @@ SCOPE_HOST = "host"
 # under that residency. Like a host token it has its own prefix, so neither
 # parser can be handed the other's credential.
 SCOPE_MCP_RESIDENCY = "mcp_residency"
+
+# ``github_residency`` is the placeholder a resident process hands git and
+# ``gh`` for GitHub. It buys nothing at GitHub itself: only the GitHub relay
+# accepts it, and exchanges it for the owner's own GitHub token while the
+# residency is serving a running turn, exactly as the MCP relay resolves an
+# ``mcp_residency`` credential. A separate scope and prefix, so a tool
+# credential cannot push and a GitHub credential cannot call tools.
+SCOPE_GITHUB_RESIDENCY = "github_residency"
 
 
 def mint_worker_token(
@@ -309,3 +326,74 @@ def parse_residency_mcp_token(token: str) -> dict[str, Any]:
         return {"thread_id": thread_id, "residency_generation": generation}
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         raise InvalidAgentToken("bad claims") from exc
+
+
+def _mint_residency(prefix: str, scope: str, *, thread_id: str, residency_generation: int) -> str:
+    """Sign a residency credential of one scope; see the two public minters."""
+    if not thread_id or residency_generation <= 0:
+        raise ValueError("a residency credential needs a thread and a residency generation")
+    payload = json.dumps(
+        {"t": thread_id, "r": residency_generation, "s": scope},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    signature = hmac.new(_signing_key(), payload, hashlib.sha256).digest()
+    return f"{prefix}.{_b64encode(payload)}.{_b64encode(signature)}"
+
+
+def _parse_residency(token: str, prefix: str, scope: str) -> dict[str, Any]:
+    """Verify a residency credential of one scope and return what it names."""
+    if not token:
+        raise InvalidAgentToken("empty token")
+    parts = token.split(".")
+    if len(parts) != 3 or parts[0] != prefix:
+        raise InvalidAgentToken("malformed token")
+    try:
+        payload = _b64decode(parts[1])
+        signature = _b64decode(parts[2])
+    except (ValueError, TypeError) as exc:
+        raise InvalidAgentToken("undecodable token") from exc
+
+    expected = hmac.new(_signing_key(), payload, hashlib.sha256).digest()
+    if not hmac.compare_digest(signature, expected):
+        raise InvalidAgentToken("bad signature")
+
+    try:
+        claims = json.loads(payload)
+        if str(claims.get("s")) != scope:
+            raise InvalidAgentToken(f"not a {scope} credential")
+        thread_id = str(claims["t"])
+        generation = int(claims["r"])
+        if not thread_id or generation <= 0:
+            raise InvalidAgentToken("bad claims")
+        return {"thread_id": thread_id, "residency_generation": generation}
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        raise InvalidAgentToken("bad claims") from exc
+
+
+def mint_residency_github_token(*, thread_id: str, residency_generation: int) -> str:
+    """Mint the GitHub relay placeholder a chat's resident process keeps.
+
+    Like :func:`mint_residency_mcp_token` it is stateless and deterministic,
+    so the process keeps it across turns and nothing is stored to recognize
+    it. It is not a GitHub credential: GitHub refuses it. The GitHub relay
+    accepts it only while that residency is the chat's current one and one of
+    the chat's turns is running under it, and only then exchanges it for the
+    owner's own GitHub token.
+    """
+    return _mint_residency(
+        _RESIDENCY_GITHUB_PREFIX,
+        SCOPE_GITHUB_RESIDENCY,
+        thread_id=thread_id,
+        residency_generation=residency_generation,
+    )
+
+
+def parse_residency_github_token(token: str) -> dict[str, Any]:
+    """Verify a GitHub relay placeholder and return the residency it names.
+
+    Returns ``{"thread_id", "residency_generation"}``. The signature proves only
+    that this service minted it; the relay's lookup decides whether it still
+    authorizes anything.
+    """
+    return _parse_residency(token, _RESIDENCY_GITHUB_PREFIX, SCOPE_GITHUB_RESIDENCY)

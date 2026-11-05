@@ -8,6 +8,11 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from cloud_agent.admin_observability import decode_cursor
+from cloud_agent.admin_sandbox_inventory import (
+    AdminSandboxInventoryPage,
+    decode_inventory_cursor,
+    inventory_scope,
+)
 from cloud_agent.admin_sandboxes import (
     AdminSandboxArchiveRequest,
     AdminSandboxDetail,
@@ -256,16 +261,24 @@ router = APIRouter(
 )
 
 
-@router.get("", response_model=AdminSandboxList)
+@router.get("", response_model=AdminSandboxList | AdminSandboxInventoryPage)
 async def list_admin_sandboxes(
-    cursor: str | None = Query(None, max_length=2048),
+    cursor: str | None = Query(None, max_length=32768),
     limit: int = Query(100, ge=1, le=200),
     state: SandboxStateFilter = Query("running"),
     include_archived: bool = Query(False),
+    sync: bool = Query(False),
     queries: AdminSandboxQueries = Depends(get_admin_sandbox_queries),
-) -> AdminSandboxList:
+) -> AdminSandboxList | AdminSandboxInventoryPage:
     """List lifecycle metadata, defaulting to retained running containers."""
     try:
+        if sync:
+            inventory_cursor = decode_inventory_cursor(
+                cursor, inventory_scope(state, include_archived, limit)
+            )
+            return await queries.inventory.read(
+                cursor=inventory_cursor, limit=limit, state=state, include_archived=include_archived
+            )
         parsed = decode_cursor(cursor, SandboxCursor, sandbox_cursor_scope(state, include_archived))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None

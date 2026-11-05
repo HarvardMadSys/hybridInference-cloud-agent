@@ -12,7 +12,8 @@ from tests.integration.storage.test_agent_job_store import (
     _shared_claim_attestation,
 )
 from tests.integration.storage.test_attempt_ledger import _seed_attempt, db as db, store as store
-from tests.unit.test_ledger_snapshots import END, START
+from tests.support.follow_ups import append_follow_up
+from tests.support.usage import END, START
 from tests.unit.test_sandbox_resource_protocol import sample
 
 from cloud_agent.admin_observability import decode_cursor
@@ -300,13 +301,10 @@ async def test_stale_host_removal_refuses_a_host_that_heartbeats_after_review(db
     "change",
     [
         "active_operation_count=1",
-        "snapshot_state='pending'",
-        "snapshot_state='snapshotting'",
-        "snapshot_state='importing'",
         "deletion_state='pending'",
     ],
 )
-async def test_stale_host_removal_keeps_operation_snapshot_and_deletion_fences(db, store, change):
+async def test_stale_host_removal_keeps_operation_and_deletion_fences(db, store, change):
     await seed(db, store, "asbx_stale_busy")
     async with db.acquire() as conn:
         await conn.execute(f"UPDATE agent_sandboxes SET {change} WHERE id='asbx_stale_busy'")
@@ -378,9 +376,6 @@ async def test_removed_inventory_pagination_and_counts_use_same_visibility(db, s
         ("state = 'stopped_dirty'", "not_stopped"),
         ("state = 'lost'", "not_stopped"),
         ("active_operation_count = 1", "busy"),
-        ("snapshot_state = 'pending'", "busy"),
-        ("snapshot_state = 'snapshotting'", "busy"),
-        ("snapshot_state = 'importing'", "busy"),
     ],
 )
 async def test_inventory_removal_refuses_live_or_busy_groups(db, store, change, reason):
@@ -627,7 +622,7 @@ async def test_admin_stop_survives_running_heartbeats_and_clears_on_confirmation
             == "stopping"
         )
         command = await store.sandbox.due_thread_sandbox_stop(**observed)
-        assert command is not None and command["reason"] == "idle"
+        assert command is not None and command["reason"] == "orphaned_attempt"
         assert command["member_activation_generations"] == {origin["thread_id"]: 0}
     detail = await store.admin_sandboxes.detail("asbx_stop")
     assert detail is not None and detail.sandbox.stop_requested_at is not None
@@ -651,13 +646,37 @@ async def test_admin_stop_survives_running_heartbeats_and_clears_on_confirmation
     assert logs[0]["target_user_id"] == origin["user_id"]
 
 
+@pytest.mark.parametrize("left", ["pending", "snapshotting", "importing"])
+async def test_stop_ignores_snapshot_state_left_by_the_removed_publisher(db, store, left):
+    # Nothing moves a group out of these states any more: the publisher and
+    # its snapshot worker are gone. A group upgraded while in one must still
+    # stop, or no stop would ever be accepted for it.
+    await seed(db, store, "asbx_left")
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET terminal_count=0, terminal_count_observed_at=NOW(), "
+            "snapshot_state=$1 WHERE id='asbx_left'",
+            left,
+        )
+    assert await stop_request(db, store, "asbx_left") == "accepted"
+
+
+@pytest.mark.parametrize("left", ["pending", "snapshotting", "importing"])
+async def test_inventory_removal_ignores_snapshot_state_left_by_the_removed_publisher(
+    db, store, left
+):
+    await seed(db, store, "asbx_left", state="stopped")
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET snapshot_state=$1 WHERE id='asbx_left'", left
+        )
+    assert await archive_request(store, "asbx_left") == "accepted"
+
+
 @pytest.mark.parametrize(
     ("change", "reason"),
     [
         ("active_operation_count = 1", "busy"),
-        ("snapshot_state = 'pending'", "busy"),
-        ("snapshot_state = 'snapshotting'", "busy"),
-        ("snapshot_state = 'importing'", "busy"),
         ("terminal_count = 1", "terminals_open"),
         ("terminal_count_observed_at = NOW() - INTERVAL '2 minutes'", "activity_unknown"),
         ("state = 'stopped'", "not_running"),
@@ -745,7 +764,8 @@ async def test_stop_fences_claims_until_confirmation_then_allows_native_resume(d
             "UPDATE agent_sandboxes SET snapshot_state='quiescent' WHERE id=$1",
             sandbox["sandbox_id"],
         )
-    follow_up = await store.conversation_commands.create_follow_up(
+    follow_up = await append_follow_up(
+        db,
         parent_job_id=job["id"],
         user_id=job["user_id"],
         prompt="Resume after the administrator stop",
@@ -900,8 +920,11 @@ async def test_follow_up_reservation_keeps_running_container_visible(db, store, 
                 "UPDATE agent_sandboxes SET state = 'stopped', idle_deadline = NULL WHERE id = $1",
                 sandbox["sandbox_id"],
             )
-    follow_up = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id=job["user_id"], prompt="Continue in the retained container"
+    follow_up = await append_follow_up(
+        db,
+        parent_job_id=job["id"],
+        user_id=job["user_id"],
+        prompt="Continue in the retained container",
     )
     assert follow_up is not None and follow_up.get("error") is None
     activated = await _claim(

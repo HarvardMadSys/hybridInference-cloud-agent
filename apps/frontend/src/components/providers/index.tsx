@@ -5,6 +5,7 @@
 // caller.
 
 import type { RuntimeSiteConfig } from '@/config/site';
+import { AccountLocaleSync } from './AccountLocaleSync';
 import { AuthProvider } from './AuthProvider';
 import { LocaleProvider } from './LocaleProvider';
 import { ThemeProvider } from './ThemeProvider';
@@ -27,6 +28,7 @@ export function Providers({
         <LocaleProvider>
           <AuthProvider>
             {children}
+            <AccountLocaleSync />
             <ToastProvider />
           </AuthProvider>
         </LocaleProvider>
@@ -35,6 +37,6 @@ export function Providers({
   );
 }
 
-export { useAuth } from './AuthProvider';
+export { useAuth, useSignedInAccount } from './AuthProvider';
 export { useLocale, useT } from './LocaleProvider';
 export { useTheme } from './ThemeProvider';

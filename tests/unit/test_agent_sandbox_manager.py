@@ -6,7 +6,7 @@ import asyncio
 import base64
 import contextlib
 import functools
-import hashlib
+import gc
 import json
 import logging
 import os
@@ -23,14 +23,21 @@ import httpx
 import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
+from tests.support.owners import launch_connection
 
 from cloud_agent.sandbox_manager_client import SandboxManagerClient
+from cloud_agent.schemas import RetainedSandboxStop
 from cloud_agent_host import sandbox_manager as sandbox_manager_mod
 from cloud_agent_host.chat_sandbox import (
     ACTIVATION_TMPFS,
     ChatSandboxManager,
     RetainedChatBackend,
     _RetainedExecProcess,
+)
+from cloud_agent_host.chat_sandbox_models import (
+    ENVIRONMENT_TEST_LABEL,
+    ChatSandboxInspection,
+    ChatSandboxStatus,
 )
 from cloud_agent_host.drivers import InputOutcome
 from cloud_agent_host.guest_observer import GuestObservation, GuestProcess
@@ -44,16 +51,12 @@ from cloud_agent_host.sandbox import (
     TerminalProcess,
 )
 from cloud_agent_host.sandbox_manager import (
-    MAX_TERMINAL_BUFFER_BYTES,
-    MAX_TERMINAL_BUFFER_EVENTS,
     MAX_TERMINAL_SESSIONS_PER_WORKSPACE,
+    SharedIdleStopRequest,
     SharedTurnRequest,
-    TerminalRequest,
-    _run_terminal,
+    _run_sandbox,
     _terminal_sse_frame,
-    _TerminalLimits,
     _TerminalManager,
-    _TerminalSession,
     create_app,
 )
 from cloud_agent_host.session_supervisor_client import (
@@ -65,8 +68,54 @@ from cloud_agent_host.shared_session_supervisor import (
     SharedSessionLease,
     SharedTurnTelemetry,
 )
+from cloud_agent_host.terminal_session import (
+    MAX_TERMINAL_BUFFER_BYTES,
+    MAX_TERMINAL_BUFFER_EVENTS,
+    _TerminalLimits,
+    _TerminalSession,
+)
 from cloud_agent_host.tool_windows import ToolMark
 from cloud_agent_shared.host_settings import SANDBOX_MANAGER_SETTING_KEYS, default_values
+
+
+def test_generation_zero_is_limited_to_fenced_group_stop_requests():
+    with pytest.raises(ValueError, match="generation zero requires"):
+        SharedIdleStopRequest(
+            generation=3,
+            activation_generation=0,
+            reason="idle",
+            member_activation_generations={"athr_source": 0},
+        )
+    with pytest.raises(ValueError, match="generation zero requires"):
+        SharedIdleStopRequest(
+            generation=3,
+            activation_generation=0,
+            reason="orphaned_attempt",
+        )
+
+    orphan_stop = SharedIdleStopRequest(
+        generation=3,
+        activation_generation=0,
+        reason="orphaned_attempt",
+        member_activation_generations={"athr_source": 0},
+    )
+    assert orphan_stop.activation_generation == 0
+
+    with pytest.raises(ValueError, match="generation zero requires"):
+        RetainedSandboxStop(
+            thread_id="athr_source",
+            generation=3,
+            activation_generation=0,
+            reason="idle",
+        )
+    control_plane_orphan_stop = RetainedSandboxStop(
+        thread_id="athr_source",
+        generation=3,
+        activation_generation=0,
+        reason="orphaned_attempt",
+        member_activation_generations={"athr_source": 0},
+    )
+    assert control_plane_orphan_stop.activation_generation == 0
 
 
 @pytest.mark.asyncio
@@ -86,7 +135,7 @@ async def test_resource_checkpoint_is_forwarded_before_any_native_event():
     supervisor.start_turn = lambda *_args, **_kw: QuietTurn()  # type: ignore[attr-defined]
     pending = [{"measurement_id": "sample", "state": "collecting", "report_seq": 1}]
     supervisor.take_reported_checkpoint = (  # type: ignore[attr-defined]
-        lambda _thread_id: pending.pop() if pending else None
+        lambda _thread_id, _turn: pending.pop() if pending else None
     )
     supervisor.abort_turn = lambda *_args: gate.set()  # type: ignore[attr-defined]
     app = _app(supervisor)
@@ -107,6 +156,68 @@ async def test_resource_checkpoint_is_forwarded_before_any_native_event():
     finally:
         gate.set()
         await response.body_iterator.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cli", ["silent", "speaks"])
+async def test_a_dropped_turn_stream_aborts_its_turn_without_a_collector(cli):
+    """A runner whose turn process dies leaves its turn stream with no reader.
+
+    The turn must be aborted as soon as the client is gone, whether or not the
+    CLI says anything more. A frames generator left suspended runs its cleanup
+    only when a garbage collector reaches it, and until then the member's
+    turn, lease and lock stay held.
+    """
+    disconnected = threading.Event()
+    released = threading.Event()
+    aborted = threading.Event()
+
+    class QuietTurn:
+        @staticmethod
+        def lines():
+            yield SimpleNamespace(event_type="message", payload={"text": "hi"}, raw_line="hi")
+            if cli == "speaks":
+                assert disconnected.wait(5)
+                yield SimpleNamespace(event_type="message", payload={"text": "and"}, raw_line="and")
+            released.wait(10)  # the model keeps working until someone interrupts it
+
+    supervisor = _SharedSupervisor()
+    supervisor.start_turn = lambda *_args, **_kw: QuietTurn()  # type: ignore[attr-defined]
+    supervisor.abort_turn = lambda *_args: aborted.set()  # type: ignore[attr-defined]
+    endpoint = next(
+        route.endpoint
+        for route in _app(supervisor).routes
+        if getattr(route, "path", None) == "/shared-sandboxes/{thread_id}/turn"
+    )
+    response = await endpoint(
+        "athr_source", SharedTurnRequest(token="lease", prompt="work", model="model")
+    )
+    first_frame = asyncio.Event()
+
+    async def send(message):
+        if message["type"] == "http.response.body" and message.get("body"):
+            first_frame.set()
+
+    async def receive():
+        # The runner reads the first frame, then its process dies while the
+        # stream waits on the CLI for the next one.
+        await first_frame.wait()
+        await asyncio.sleep(0.5)
+        disconnected.set()
+        return {"type": "http.disconnect"}
+
+    gc.disable()
+    serving = asyncio.ensure_future(
+        response({"type": "http", "asgi": {"spec_version": "2.3"}}, receive, send)
+    )
+    try:
+        done, _ = await asyncio.wait({serving}, timeout=3)
+        assert serving in done
+        assert aborted.is_set()
+    finally:
+        gc.enable()
+        released.set()
+        await asyncio.wait_for(serving, timeout=10)
 
 
 class _TerminalProcess(TerminalProcess):
@@ -184,8 +295,9 @@ class _WorkspaceBackend(RetainedChatBackend):
             stderr_text=lambda: "",
         )
 
-    def _import_base_bundle(self, _spec, bundle: bytes, *, commit: str, env):
-        self.imports.append((bundle, commit, env))
+    def _import_base_bundle(self, _spec, bundle, *, commit: str, env):
+        self.imports.append((bundle.read(), commit, env))
+        bundle.seek(0)
 
 
 def _descriptor(thread_id: str = "athr_source") -> SharedSessionDescriptor:
@@ -224,6 +336,8 @@ class _SharedSupervisor:
     def __init__(self, *, events: list[str] | None = None) -> None:
         self.workspace_backend = _WorkspaceBackend()
         self.calls: list[tuple] = []
+        # The proof time the last backend was handed, from its admission.
+        self.network_proved_at: float | None = None
         self.start_seqs: list[int | None] = []
         self.restores: list[object] = []
         self.imports = self.workspace_backend.imports
@@ -292,7 +406,7 @@ class _SharedSupervisor:
             raise SandboxError("unknown member")
         return _descriptor(thread_id)
 
-    def list(self):
+    def list(self, *, background_recovery=False):
         return [_descriptor("athr_source"), _descriptor("athr_child")]
 
     def list_for_thread(self, thread_id: str):
@@ -300,9 +414,8 @@ class _SharedSupervisor:
             raise SandboxError("unknown member")
         return [_descriptor("athr_source"), _descriptor("athr_child")]
 
-    def register_manifest(self, spec, members, *, expected_container_id=None, start_seq=None):
+    def register_manifest(self, spec, members, *, expected_container_id=None):
         self.calls.append(("manifest", spec, members, expected_container_id))
-        self.start_seqs.append(start_seq)
         self.threads.update(member.thread_id for member in members)
         return []
 
@@ -343,30 +456,29 @@ class _SharedSupervisor:
             stages=[],
         )
 
-    def operation_opened(self, thread_id: str):
+    def operation_opened(self, thread_id: str, *, start_seq: int | None = None):
         self.calls.append(("operation_opened", thread_id))
+        self.start_seqs.append(start_seq)
         return "operation-token", _descriptor(thread_id)
 
     def operation_closed(self, thread_id: str, token: str):
         self.calls.append(("operation_closed", thread_id, token))
         return _descriptor(thread_id)
 
-    def terminal_opened(self, thread_id: str):
+    def terminal_opened(self, thread_id: str, *, start_seq: int | None = None):
         self.calls.append(("terminal_opened", thread_id))
+        self.start_seqs.append(start_seq)
         return "terminal-token", _descriptor(thread_id)
 
     def terminal_closed(self, thread_id: str, token: str, **kwargs):
         self.calls.append(("terminal_closed", thread_id, token, kwargs))
         return _descriptor(thread_id)
 
-    def backend(self, thread_id: str):
+    def backend(self, thread_id: str, *, network_proved_at: float | None = None):
         assert self.owns(thread_id)
         self.calls.append(("backend", thread_id))
+        self.network_proved_at = network_proved_at
         return self.workspace_backend
-
-    def capture_snapshot(self, thread_id: str, *, capture):
-        self.calls.append(("snapshot", thread_id))
-        return {"patch": "diff --git a/a.txt b/a.txt\n"}
 
     def pending_questions(self, thread_id: str, *, owner: str):
         self.calls.append(("questions", thread_id, owner))
@@ -400,10 +512,10 @@ def _launch() -> dict[str, object]:
         "runtime_version": "2.1.220",
         "native_session_id": "native-source",
         "model": "glm-5.1",
-        "gateway_base_url": "http://gateway",
-        "credential": "grant",
+        "credential": "provider-key",
         "slot_id": 0,
         "residency_generation": 1,
+        **launch_connection("claude-code"),
     }
 
 
@@ -447,6 +559,18 @@ def _app(supervisor: _SharedSupervisor):
 def test_sandbox_manager_requires_a_container_backend_without_an_injected_supervisor():
     with pytest.raises(ValueError, match="require the container or kata backend"):
         create_app(backend=ProcessBackend(acknowledged_unsafe=True), token="x")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/openapi.json", "/docs", "/redoc"])
+async def test_sandbox_manager_serves_no_schema_or_docs_route(path):
+    """Every route requires the manager token; these would answer without it."""
+    async with AsyncClient(
+        transport=ASGITransport(app=_app(_SharedSupervisor())), base_url="http://sandbox_manager"
+    ) as client:
+        response = await client.get(path)
+
+    assert response.status_code == 404
 
 
 class _ArchiveService:
@@ -496,6 +620,124 @@ class _ArchiveController(_ArchiveService):
 
     def prepare_markerless_final(self, *_args, **_kwargs) -> bool:
         return self.revision is not None and not self.enabled
+
+
+class _SnapshotController(_ArchiveController):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__(events)
+        self.captured: list[str] = []
+
+    def capture_environment_snapshot(self, _spec, inspection, *, owner, snapshot_id):
+        self.captured.append(inspection.container_id)
+        return {"snapshot_id": snapshot_id}
+
+
+def _on_event_loop() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+_SNAPSHOT_CAPTURE = {
+    "run_id": "run1",
+    "lease_generation": 1,
+    "container_id": "container-run1",
+    "owner": "a" * 64,
+    "snapshot_id": "b" * 32,
+}
+
+
+def _snapshot_app(controller: _SnapshotController):
+    return create_app(
+        backend=ContainerBackend(image="img"),
+        token="sandbox-manager-secret",
+        shared_session_supervisor=_SharedSupervisor(),  # type: ignore[arg-type]
+        sandbox_archive_controller=controller,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.asyncio
+async def test_snapshot_capture_inspects_its_run_container_off_the_event_loop(monkeypatch):
+    inspected_on_loop: list[bool] = []
+
+    def inspect(_manager, container: str, *, verify_mounts: bool = True):
+        inspected_on_loop.append(_on_event_loop())
+        return ChatSandboxInspection(
+            container_id="container-run1",
+            name=container,
+            status=ChatSandboxStatus.STOPPED,
+            running=False,
+            image="img",
+            labels={ENVIRONMENT_TEST_LABEL: "run1"},
+            mounts=(),
+            networks=(),
+        )
+
+    monkeypatch.setattr(ChatSandboxManager, "inspect", inspect)
+    controller = _SnapshotController([])
+    app = _snapshot_app(controller)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
+        response = await client.post(
+            "/environment-snapshots/capture",
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
+            json=_SNAPSHOT_CAPTURE,
+        )
+
+    assert response.status_code == 200
+    assert inspected_on_loop == [False], "docker inspect must not block the event loop"
+    assert controller.captured == ["container-run1"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_snapshot_inspection_is_refused_like_a_failed_capture(monkeypatch):
+    def inspect(_manager, _container: str, *, verify_mounts: bool = True):
+        raise SandboxError("docker daemon did not answer")
+
+    monkeypatch.setattr(ChatSandboxManager, "inspect", inspect)
+    controller = _SnapshotController([])
+    app = _snapshot_app(controller)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
+        response = await client.post(
+            "/environment-snapshots/capture",
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
+            json=_SNAPSHOT_CAPTURE,
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "docker daemon did not answer"
+    assert controller.captured == []
+
+
+@pytest.mark.asyncio
+async def test_environment_cancel_takes_the_supervisor_lock_off_the_event_loop():
+    supervisor = _SharedSupervisor()
+    cancelled_on_loop: list[bool] = []
+
+    def cancel_environment(thread_id: str, activation_owner: str) -> None:
+        cancelled_on_loop.append(_on_event_loop())
+
+    supervisor.cancel_environment = cancel_environment  # type: ignore[attr-defined]
+
+    async with AsyncClient(
+        transport=ASGITransport(app=_app(supervisor)), base_url="http://sandbox_manager"
+    ) as client:
+        response = await client.post(
+            "/workspaces/athr_source/environment/cancel",
+            params={"activation_owner": "activation-1"},
+            headers={"X-Agent-Workspace-Token": "sandbox-manager-secret"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"cancelled": True}
+    assert cancelled_on_loop == [False]
 
 
 @pytest.mark.asyncio
@@ -709,6 +951,8 @@ async def test_health_and_sandbox_inventory_are_authenticated_and_shared_only():
 
     assert denied.status_code == 401
     assert health.json()["ok"] is True
+    # The trusted publisher's base import is gone, and so is its wire format.
+    assert "base-bundle-stream-v1" not in health.json()["capabilities"]
     rows = listed.json()["sandboxes"]
     assert len(rows) == 1
     assert rows[0]["shared_live"] is True
@@ -735,7 +979,8 @@ async def test_targeted_inventory_is_authenticated_and_isolated_from_full_invent
     supervisor = _SharedSupervisor()
     calls = []
 
-    def failed_inventory():
+    def failed_inventory(*, background_recovery=False):
+        assert background_recovery is True
         calls.append(("list",))
         raise SandboxError("unrelated sandbox reconciliation failed")
 
@@ -769,7 +1014,7 @@ async def test_targeted_inventory_is_authenticated_and_isolated_from_full_invent
 @pytest.mark.asyncio
 async def test_targeted_inventory_rejects_unknown_members_without_falling_back_to_full_inventory():
     supervisor = _SharedSupervisor()
-    supervisor.list = lambda: pytest.fail("targeted inventory must not list the host")
+    supervisor.list = lambda **_kwargs: pytest.fail("targeted inventory must not list the host")
     app = _app(supervisor)
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://sandbox_manager"
@@ -851,7 +1096,7 @@ async def test_sandbox_inventory_reports_terminals_across_all_shared_members(
         replace(_descriptor("athr_source"), terminal_count=origin_count),
         replace(_descriptor("athr_child"), terminal_count=child_count),
     ]
-    supervisor.list = lambda: descriptors
+    supervisor.list = lambda **_kwargs: descriptors
     supervisor.list_for_thread = lambda _thread_id: descriptors
     app = _app(supervisor)
     async with AsyncClient(
@@ -961,7 +1206,7 @@ async def test_native_question_reads_require_a_bounded_owner(params):
 @pytest.mark.parametrize("running", [True, False])
 async def test_inventory_syncs_one_group_and_reads_only_cached_resources(running):
     supervisor = _SharedSupervisor()
-    supervisor.list = lambda: [
+    supervisor.list = lambda **_kwargs: [
         replace(_descriptor("athr_source"), running=running),
         replace(_descriptor("athr_child"), running=running),
     ]
@@ -1030,8 +1275,8 @@ async def test_resource_collector_is_owned_and_cleaned_up_by_sandbox_manager_lif
         close=lambda: calls.append("close"),
     )
 
-    def factory():
-        calls.append("construct")
+    def factory(**kwargs):  # its readings feed the incident observer
+        calls.append("construct" if set(kwargs) == {"on_reading"} else f"construct {kwargs}")
         return collector
 
     monkeypatch.setattr(sandbox_manager_mod, "SandboxResourceCollector", factory)
@@ -1211,7 +1456,7 @@ def _resident_launch(**changes: object) -> ResidentLaunch:
     return ResidentLaunch(**fields)  # type: ignore[arg-type]
 
 
-def test_runner_github_token_survives_sandbox_manager_roundtrip_without_entering_the_response():
+def test_runner_github_credential_survives_sandbox_manager_roundtrip_without_entering_the_response():
     launches = []
 
     class RecordingSupervisor(_SharedSupervisor):
@@ -1224,15 +1469,15 @@ def test_runner_github_token_survives_sandbox_manager_roundtrip_without_entering
         answer = client.ensure_shared_resident(
             "athr_source",
             token="lease",
-            launch=_resident_launch(github_token="sandbox-write-token", github_repo="owner/repo"),
+            launch=_resident_launch(github_credential="agh.residency", github_repo="owner/repo"),
         )
     finally:
         client.close()
 
-    assert launches[0].github_token == "sandbox-write-token"
+    assert launches[0].github_credential == "agh.residency"
     assert launches[0].github_repo == "owner/repo"
-    assert "sandbox-write-token" not in repr(launches[0])
-    assert "sandbox-write-token" not in str(answer)
+    assert "agh.residency" not in repr(launches[0])
+    assert "agh.residency" not in str(answer)
 
 
 @pytest.mark.parametrize(
@@ -1324,10 +1569,9 @@ def test_a_request_the_sandbox_manager_rejects_names_the_field_but_never_its_val
 
 @pytest.mark.asyncio
 async def test_the_sandbox_manager_launches_tools_through_its_hosts_own_mcp_relay(monkeypatch):
-    """Like the gateway's, the MCP relay is this host's, whatever a caller names.
-
-    It is the relay the host rules admit for the group, so any other address
-    would only be refused at the bridge. A launch without tools is given none.
+    """The MCP relay is this host's, whatever a caller names: the one the host
+    rules admit for the group, so any other address would only be refused at
+    the bridge. A launch without tools is given none.
     """
     launches: list[ResidentLaunch] = []
 
@@ -1387,13 +1631,11 @@ def test_a_crash_an_older_sandbox_manager_answers_as_plain_text_still_names_the_
 
 
 @pytest.mark.asyncio
-async def test_shared_registration_snapshot_and_base_import_keep_identity():
+async def test_shared_registration_keeps_identity_and_removed_publication_routes_are_gone():
     supervisor = _SharedSupervisor()
     app = _app(supervisor)
     headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
     identity = _identity()
-    bundle = b"trusted-git-bundle"
-    commit_sha = "b" * 40
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://sandbox_manager"
@@ -1407,355 +1649,15 @@ async def test_shared_registration_snapshot_and_base_import_keep_identity():
             json={**identity, "snapshot_id": 9, "workspace_epoch": 12, "base_sha": "a" * 40},
         )
         imported = await client.post(
-            "/shared-sandboxes/athr_source/import-base",
-            headers=headers,
-            json={
-                **identity,
-                "snapshot_id": 9,
-                "commit_sha": commit_sha,
-                "bundle_b64": base64.b64encode(bundle).decode(),
-            },
+            "/shared-sandboxes/athr_source/import-base", headers=headers, content=b"bundle"
         )
 
-    patch = "diff --git a/a.txt b/a.txt\n"
     assert registered.status_code == 200
     assert registered.json()["sandbox_id"] == "asbx_shared"
-    assert captured.json()["content_sha256"] == hashlib.sha256(patch.encode()).hexdigest()
-    assert imported.json()["workspace_head_preserved"] is True
-    assert supervisor.imports == [
-        (
-            bundle,
-            commit_sha,
-            {
-                "GIT_CONFIG_COUNT": "1",
-                "GIT_CONFIG_KEY_0": "safe.directory",
-                "GIT_CONFIG_VALUE_0": "/workspace",
-            },
-        )
-    ]
-
-
-@pytest.mark.asyncio
-async def test_a_refused_snapshot_patch_keeps_its_final_status(monkeypatch):
-    """A patch that is not exact UTF-8 is refused for good, not retried.
-
-    The snapshot coordinator marks a capture that answered 502 dirty and
-    retries one that answered 503, so redacting the refusal's detail must not
-    turn it into a host failure.
-    """
-    supervisor = _SharedSupervisor()
-    supervisor.capture_snapshot = (  # type: ignore[method-assign]
-        lambda _thread_id, *, capture: capture(object())
-    )
-
-    def refuse(*_args, **_kwargs):
-        raise HTTPException(status_code=502, detail="workspace patch is not exact UTF-8 text")
-
-    # The workspace holds its base; only the patch is refused.
-    monkeypatch.setattr(sandbox_manager_mod, "_commit_missing", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(sandbox_manager_mod, "_run_git", refuse)
-    app = _app(supervisor)
-    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
-    ) as client:
-        captured = await client.post(
-            "/shared-sandboxes/athr_source/snapshot",
-            headers=headers,
-            json={**_identity(), "snapshot_id": 9, "workspace_epoch": 12, "base_sha": "a" * 40},
-        )
-
-    assert captured.status_code == 502
-    assert captured.json()["detail"] == "workspace patch is not exact UTF-8 text"
-
-
-_HERMETIC_GIT_ENV = {
-    "PATH": "/usr/bin:/bin:/usr/local/bin",
-    "GIT_CONFIG_GLOBAL": "/dev/null",
-    "GIT_CONFIG_SYSTEM": "/dev/null",
-    "GIT_AUTHOR_NAME": "Test",
-    "GIT_AUTHOR_EMAIL": "t@example.com",
-    "GIT_COMMITTER_NAME": "Test",
-    "GIT_COMMITTER_EMAIL": "t@example.com",
-}
-
-
-def _hermetic_git(args: list[str], cwd) -> str:
-    return subprocess.run(
-        ["git", *args],
-        cwd=str(cwd),
-        env=_HERMETIC_GIT_ENV,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-
-
-def _workspace_with_imported_bases(
-    tmp_path, monkeypatch, *, publications: int = 1
-) -> SimpleNamespace:
-    """A workspace that imported its published bases the way the host does.
-
-    The runner's shallow detached checkout, then per publication an edit, the
-    capture, the trusted publisher's commit and base bundle, and
-    :meth:`ChatSandboxManager.import_base_bundle` unbundling it with its exec
-    run here. No ref in the workspace names a published commit. Returns the
-    workspace, the origin's ``file://`` URL, the base the workspace started
-    from, the published commits in order, and the import.
-    """
-    from cloud_agent.publisher import publish_patch
-    from cloud_agent_host import chat_sandbox
-
-    monkeypatch.setenv("HOME", str(tmp_path))
-    source = tmp_path / "source"
-    source.mkdir()
-    _hermetic_git(["init", "-q", "--initial-branch=main", "."], source)
-    (source / "app.py").write_text("x = 0\n")
-    _hermetic_git(["add", "-A"], source)
-    _hermetic_git(["commit", "-qm", "init"], source)
-    base = _hermetic_git(["rev-parse", "HEAD"], source).strip()
-    origin = tmp_path / "origin.git"
-    _hermetic_git(["clone", "-q", "--bare", str(source), str(origin)], tmp_path)
-    _hermetic_git(["config", "uploadpack.allowAnySHA1InWant", "true"], origin)
-
-    workspace = tmp_path / "workspace"
-    _hermetic_git(["init", "-q", str(workspace)], tmp_path)
-    _hermetic_git(["fetch", "-q", "--depth", "2", f"file://{origin}", base], workspace)
-    _hermetic_git(["checkout", "-q", "--detach", "FETCH_HEAD"], workspace)
-
-    activation_tmpfs = tmp_path / "activation"
-    activation_tmpfs.mkdir()
-    monkeypatch.setattr(chat_sandbox, "ACTIVATION_TMPFS", str(activation_tmpfs))
-    manager = ChatSandboxManager(ContainerBackend(image="img"))
-
-    def exec_here(_spec, argv, *, env, workdir, timeout_s, input_bytes):
-        return subprocess.run(
-            argv,
-            cwd=workspace,
-            env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), **env},
-            input=input_bytes,
-            capture_output=True,
-            timeout=timeout_s,
-            check=False,
-        )
-
-    monkeypatch.setattr(manager, "exec_capture", exec_here)
-
-    def import_base(bundle: bytes, commit: str) -> None:
-        manager.import_base_bundle(SimpleNamespace(), bundle, commit=commit, env={})
-
-    published: list[str] = []
-    current = base
-    for number in range(1, publications + 1):
-        (workspace / "app.py").write_text(f"x = {number}\n")
-        captured = sandbox_manager_mod._run_git(
-            ProcessBackend(acknowledged_unsafe=True), str(workspace), current, exact_patch=True
-        )
-        result = publish_patch(
-            job_id=f"ajob_gc{number}",
-            branch_id="athr_source",
-            patch=captured["patch"],
-            clone_url=f"file://{origin}",
-            base_sha=current,
-            commit_message=f"agent: x = {number}",
-            include_base_bundle=True,
-        )
-        assert result.base_bundle
-        import_base(result.base_bundle, result.commit_sha)
-        published.append(result.commit_sha)
-        current = result.commit_sha
-    refs = _hermetic_git(["for-each-ref"], workspace)
-    assert not any(commit in refs for commit in published)
-    # The agent keeps working in its own Git state.
-    (workspace / "app.py").write_text(f"x = {publications + 1}\n")
-    return SimpleNamespace(
-        workspace=str(workspace),
-        origin=f"file://{origin}",
-        base=base,
-        published=published,
-        import_base=import_base,
-    )
-
-
-def _prune_unreferenced_objects(workspace: str) -> None:
-    """Three weeks on: age every pack past the default window and run ``git gc``."""
-    three_weeks_ago = time.time() - 21 * 24 * 3600
-    packs = os.path.join(workspace, ".git", "objects", "pack")
-    for name in os.listdir(packs):
-        os.utime(os.path.join(packs, name), (three_weeks_ago, three_weeks_ago))
-    _hermetic_git(["gc", "--quiet"], workspace)
-
-
-def _holds(workspace: str, commit: str) -> bool:
-    return (
-        subprocess.run(
-            ["git", "cat-file", "-e", commit],
-            cwd=workspace,
-            env=_HERMETIC_GIT_ENV,
-            capture_output=True,
-            check=False,
-        ).returncode
-        == 0
-    )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("pruned", [False, True], ids=["kept", "pruned"])
-async def test_a_capture_whose_base_git_pruned_asks_for_it_again(tmp_path, monkeypatch, pruned):
-    """A published base that Git pruned is refused as missing, not as a bad patch.
-
-    The import writes no ref, by design, so three weeks on any default
-    ``git gc`` prunes the published commit. ``read-tree`` then fails with the
-    same 502 as a refused patch, which fails the snapshot, and every later
-    request, cut from the same base, failed alike. The capture now tells the
-    two apart, so the control plane can import the base again and retry.
-    """
-    from cloud_agent_shared.shared_protocol import SNAPSHOT_BASE_MISSING
-
-    setup = _workspace_with_imported_bases(tmp_path, monkeypatch)
-    workspace, [published] = setup.workspace, setup.published
-    if pruned:
-        _prune_unreferenced_objects(workspace)
-        assert not _holds(workspace, published), "git gc must have pruned the published base"
-
-    supervisor = _SharedSupervisor()
-    supervisor.capture_snapshot = (  # type: ignore[method-assign]
-        lambda _thread_id, *, capture: capture(ProcessBackend(acknowledged_unsafe=True))
-    )
-    monkeypatch.setattr(sandbox_manager_mod, "CHAT_WORKDIR", workspace)
-    app = _app(supervisor)
-    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
-    ) as client:
-        captured = await client.post(
-            "/shared-sandboxes/athr_source/snapshot",
-            headers=headers,
-            json={**_identity(), "snapshot_id": 9, "workspace_epoch": 12, "base_sha": published},
-        )
-
-    if pruned:
-        assert captured.status_code == 409
-        assert captured.json() == {"detail": SNAPSHOT_BASE_MISSING}
-    else:
-        assert captured.status_code == 200
-        assert "-x = 1\n+x = 2\n" in captured.json()["patch"]
-
-
-@pytest.mark.asyncio
-async def test_the_import_retry_brings_back_a_base_git_pruned_with_the_one_before_it(
-    tmp_path, monkeypatch
-):
-    """Git prunes every published commit in one pass; the retry imports the newest again.
-
-    Two publications, then three weeks and a ``git gc``: both published
-    commits are gone, since no ref names either. A bundle of the second that
-    needs the first in the workspace, as the retry used to fetch, can never be
-    unbundled there again. It is cut from the base the workspace started from
-    instead, which the workspace's own history keeps, and the capture of the
-    published base works again after the import.
-    """
-    from cloud_agent import publish_worker, sandbox_manager_routing
-    from cloud_agent.publish_worker import GitHubCredential
-
-    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "o/n")
-    setup = _workspace_with_imported_bases(tmp_path, monkeypatch, publications=2)
-    first, second = setup.published
-    _prune_unreferenced_objects(setup.workspace)
-    assert not _holds(setup.workspace, first)
-    assert not _holds(setup.workspace, second)
-
-    class _LocalOrigin(GitHubCredential):
-        def clone_url(self, repo: str) -> str:
-            assert repo == "o/n"
-            return setup.origin
-
-    class _Host:
-        async def import_shared_base(self, _row, *, commit_sha: str, bundle: bytes):
-            await asyncio.to_thread(setup.import_base, bundle, commit_sha)
-            return {"ok": True}
-
-    async def route(_store, job_id: str) -> _Host:
-        assert job_id == "ajob_gc2"
-        return _Host()
-
-    outcomes: list[tuple[str, int, str]] = []
-
-    async def failed(*, snapshot_id: int, detail: str, delay_s: float | None = None) -> None:
-        outcomes.append(("failed", snapshot_id, detail))
-
-    async def completed(*, snapshot_id: int, commit_sha: str) -> bool:
-        outcomes.append(("completed", snapshot_id, commit_sha))
-        return True
-
-    monkeypatch.setattr(sandbox_manager_routing, "sandbox_manager_for_job", route)
-    store = SimpleNamespace(
-        snapshot=SimpleNamespace(
-            record_snapshot_base_import_failure=failed,
-            complete_snapshot_base_import=completed,
-        ),
-        host_pool=None,
-        source_control=None,
-    )
-    pending = {
-        "snapshot_id": 12,
-        "anchor_job_id": "ajob_gc2",
-        "repo": "o/n",
-        "user_id": "u1",
-        "published_commit_sha": second,
-        # The second publication was cut from the first: what the retry used.
-        "base_sha": first,
-        "origin_base_sha": setup.base,
-    }
-
-    imported = await publish_worker._retry_base_import(
-        store,  # type: ignore[arg-type]
-        pending,
-        credential=_LocalOrigin("local-test-token"),
-        app_credentials=None,
-    )
-
-    assert outcomes == [("completed", 12, second)], outcomes
-    assert imported is True
-    assert _holds(setup.workspace, second)
-    captured = sandbox_manager_mod._run_git(
-        ProcessBackend(acknowledged_unsafe=True), setup.workspace, second, exact_patch=True
-    )
-    assert "-x = 2\n+x = 3\n" in captured["patch"]
-
-
-@pytest.mark.asyncio
-async def test_base_import_resolves_its_workspace_off_the_event_loop(monkeypatch):
-    """The supervisor's metadata lock is never waited on by the event loop."""
-    supervisor = _SharedSupervisor()
-    loop_thread = threading.current_thread()
-    callers: list[threading.Thread] = []
-    resolve = supervisor.backend
-
-    def backend(thread_id: str):
-        callers.append(threading.current_thread())
-        return resolve(thread_id)
-
-    monkeypatch.setattr(supervisor, "backend", backend)
-    app = _app(supervisor)
-    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
-    ) as client:
-        imported = await client.post(
-            "/shared-sandboxes/athr_source/import-base",
-            headers=headers,
-            json={
-                **_identity(),
-                "snapshot_id": 9,
-                "commit_sha": "b" * 40,
-                "bundle_b64": base64.b64encode(b"trusted-git-bundle").decode(),
-            },
-        )
-
-    assert imported.status_code == 200
-    assert callers and all(caller is not loop_thread for caller in callers)
+    # The platform no longer captures or publishes a workspace: the agent does.
+    assert captured.status_code in {404, 405}
+    assert imported.status_code in {404, 405}
+    assert supervisor.imports == []
 
 
 @pytest.mark.asyncio
@@ -1927,17 +1829,6 @@ async def test_refused_terminal_creation_releases_its_activity_token():
         call for call in supervisor.calls if call[0] == "terminal_closed" and call[3] == {}
     ]
     assert failed_cleanup == [("terminal_closed", "athr_source", "terminal-token", {})]
-
-
-def test_shared_one_shot_terminal_uses_group_writable_umask():
-    backend = _WorkspaceBackend()
-    result = _run_terminal(
-        backend,  # type: ignore[arg-type]
-        "/workspace",
-        TerminalRequest(command="touch shared.txt", cwd="/workspace", timeout_seconds=1),
-    )
-    assert result["exit_code"] == 0
-    assert backend.spawned[0].argv[-1].startswith("umask 0002; ")
 
 
 @pytest.mark.asyncio
@@ -2112,6 +2003,61 @@ async def test_admin_file_limits_reach_the_retained_workspace_reader_and_writer(
     ]
 
 
+def _git_transcript(spec) -> list[str]:
+    """A clean Git inspection's output, using the tags the script asked for."""
+    tags = {
+        kind: tag
+        for tag, kind in re.findall(
+            r"(__HYI_[0-9a-f]{32}_(REVISION|RAW|STAT|DIFF|COMMITS|STATUS)__)", spec.argv[-1]
+        )
+    }
+    transcript = [
+        "## main\0",
+        f"\n{tags['REVISION']}\n",
+        f"\n{tags['RAW']}\n",
+        f"\n{tags['STAT']}\n",
+    ]
+    if "DIFF" in tags:
+        transcript.extend((f"\n{tags['DIFF']}\n", f"\n{tags['COMMITS']}\n"))
+    transcript.append(f"\n{tags['STATUS']}0\n")
+    return transcript
+
+
+@pytest.mark.asyncio
+async def test_git_metadata_endpoint_skips_patch_and_commit_log(monkeypatch):
+    supervisor = _SharedSupervisor()
+    scripts: list[str] = []
+
+    def spawn(spec):
+        scripts.append(spec.argv[-1])
+        return SimpleNamespace(
+            lines=lambda: iter(_git_transcript(spec)),
+            kill=lambda: None,
+            wait=lambda: 0,
+            stderr_text=lambda: "",
+        )
+
+    monkeypatch.setattr(supervisor.workspace_backend, "spawn", spawn)
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
+        response = await client.get(
+            "/workspaces/athr_source/git", params={"metadata": "true"}, headers=headers
+        )
+
+    assert response.status_code == 200
+    assert set(response.json()) == {"available", "revision", "branch", "changes", "change_count"}
+    assert len(response.json()["revision"]) == 64
+    assert response.json()["change_count"] == 0
+    assert len(scripts) == 1
+    assert scripts[0].count("git --no-pager diff") == 1
+    assert "git add -A -N" not in scripts[0]
+    assert "--binary" not in scripts[0]
+    assert "git --no-pager log" not in scripts[0]
+
+
 def test_lower_terminal_output_limits_apply_to_existing_terminals():
     manager = _TerminalManager(idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=8)
     session = _TerminalSession(
@@ -2162,11 +2108,7 @@ async def test_lower_command_output_limit_stops_an_oversized_command(monkeypatch
             headers=headers,
             json={"settings": {"workspace_command_output_max_mib": 1}},
         )
-        command = await client.post(
-            "/workspaces/athr_source/terminal",
-            headers=headers,
-            json={"command": "print_many_bytes"},
-        )
+        command = await client.get("/workspaces/athr_source/git", headers=headers)
 
     assert configured.status_code == 200
     assert command.status_code == 413
@@ -2177,7 +2119,7 @@ async def test_lower_command_output_limit_stops_an_oversized_command(monkeypatch
 async def test_owner_commands_are_bounded_and_never_wait_on_the_lifecycle_pool(monkeypatch):
     """A flood of slow owner commands is refused, not queued ahead of turns.
 
-    Commands and Git inspection run on a pool of their own, bounded for each
+    Git inspection and exports run on a pool of their own, bounded for each
     workspace and for the sandbox manager; every lifecycle call keeps the
     loop's default pool, so a turn's settle or acquire never waits behind them.
     """
@@ -2187,10 +2129,13 @@ async def test_owner_commands_are_bounded_and_never_wait_on_the_lifecycle_pool(m
     supervisor.threads.add("athr_third")
     release = threading.Event()
 
-    def spawn(_spec):
+    def spawn(spec):
         release.wait(10)
         return SimpleNamespace(
-            lines=lambda: iter(()), kill=lambda: None, wait=lambda: 0, stderr_text=lambda: ""
+            lines=lambda: iter(_git_transcript(spec)),
+            kill=lambda: None,
+            wait=lambda: 0,
+            stderr_text=lambda: "",
         )
 
     monkeypatch.setattr(supervisor.workspace_backend, "spawn", spawn)
@@ -2200,13 +2145,7 @@ async def test_owner_commands_are_bounded_and_never_wait_on_the_lifecycle_pool(m
         transport=ASGITransport(app=app), base_url="http://sandbox_manager"
     ) as client:
         commands = [
-            asyncio.create_task(
-                client.post(
-                    f"/workspaces/{workspace}/terminal",
-                    headers=headers,
-                    json={"command": "sleep 119"},
-                )
-            )
+            asyncio.create_task(client.get(f"/workspaces/{workspace}/git", headers=headers))
             for workspace in ("athr_source", "athr_child", "athr_third")
             for _ in range(4)
         ]
@@ -2221,9 +2160,7 @@ async def test_owner_commands_are_bounded_and_never_wait_on_the_lifecycle_pool(m
         finally:
             release.set()
         answered = [response.status_code for response in await asyncio.gather(*commands)]
-        again = await client.post(
-            "/workspaces/athr_source/terminal", headers=headers, json={"command": "true"}
-        )
+        again = await client.get("/workspaces/athr_source/git", headers=headers)
 
     assert refused == [429] * 10
     assert status.status_code == 200
@@ -2313,7 +2250,7 @@ def _finish_within(seconds: float, function):
     return outcome["result"]
 
 
-def test_one_shot_command_output_survives_a_byte_that_is_not_utf8(tmp_path):
+def test_command_output_survives_a_byte_that_is_not_utf8(tmp_path):
     """A stray byte is replaced; it must not drop the output or wedge the read.
 
     Enough output follows it to fill a pipe: had the read stopped at the byte,
@@ -2321,28 +2258,38 @@ def test_one_shot_command_output_survives_a_byte_that_is_not_utf8(tmp_path):
     forever.
     """
     backend = _LocalRetainedBackend(str(tmp_path))
-    request = TerminalRequest(
-        command="printf 'hello\\n\\377'; head -c 400000 /dev/zero | tr '\\000' y",
-        cwd=str(tmp_path),
-        timeout_seconds=20,
+
+    status, output, _stderr = _finish_within(
+        30,
+        lambda: _run_sandbox(
+            backend,  # type: ignore[arg-type]
+            workdir=str(tmp_path),
+            script="printf 'hello\\n\\377'; head -c 400000 /dev/zero | tr '\\000' y",
+            env={},
+            timeout_s=20,
+        ),
     )
 
-    result = _finish_within(30, lambda: _run_terminal(backend, str(tmp_path), request))  # type: ignore[arg-type]
-
-    assert result["exit_code"] == 0
-    assert result["output"] == "hello\n\ufffd" + "y" * 400000
+    assert status == 0
+    assert output == "hello\n\ufffd" + "y" * 400000
     assert backend.manager.calls == []
 
 
-def test_one_shot_command_deadline_covers_a_command_that_closed_its_output(tmp_path):
+def test_command_deadline_covers_a_command_that_closed_its_output(tmp_path):
     backend = _LocalRetainedBackend(str(tmp_path))
-    request = TerminalRequest(
-        command="exec >/dev/null; sleep 10", cwd=str(tmp_path), timeout_seconds=1
-    )
     started = time.monotonic()
 
     with pytest.raises(HTTPException) as timed_out:
-        _finish_within(8, lambda: _run_terminal(backend, str(tmp_path), request))  # type: ignore[arg-type]
+        _finish_within(
+            8,
+            lambda: _run_sandbox(
+                backend,  # type: ignore[arg-type]
+                workdir=str(tmp_path),
+                script="exec >/dev/null; sleep 10",
+                env={},
+                timeout_s=1,
+            ),
+        )
 
     assert timed_out.value.status_code == 408
     assert time.monotonic() - started < 5
@@ -2354,21 +2301,18 @@ def test_oversized_output_without_newlines_is_refused_before_it_is_buffered(tmp_
     """The limit holds for what the sandbox manager holds, not just what it returns."""
     backend = _LocalRetainedBackend(str(tmp_path))
     limit = 1024 * 1024
-    request = TerminalRequest(
-        command="head -c 33554432 /dev/zero | tr '\\000' x",
-        cwd=str(tmp_path),
-        timeout_seconds=20,
-    )
 
     tracemalloc.start()
     try:
         with pytest.raises(HTTPException) as refused:
             _finish_within(
                 30,
-                lambda: _run_terminal(
+                lambda: _run_sandbox(
                     backend,  # type: ignore[arg-type]
-                    str(tmp_path),
-                    request,
+                    workdir=str(tmp_path),
+                    script="head -c 33554432 /dev/zero | tr '\\000' x",
+                    env={},
+                    timeout_s=20,
                     max_output_bytes=limit,
                 ),
             )
@@ -2412,15 +2356,16 @@ def test_a_command_stopped_for_overrunning_answers_why_even_if_its_kill_fails(
     """
     backend = _LocalRetainedBackend(str(tmp_path))
     backend.manager = _ReceiptGoneManager()
-    request = TerminalRequest(command=command, cwd=str(tmp_path), timeout_seconds=timeout_seconds)
 
     with pytest.raises(HTTPException) as stopped:
         _finish_within(
             30,
-            lambda: _run_terminal(
+            lambda: _run_sandbox(
                 backend,  # type: ignore[arg-type]
-                str(tmp_path),
-                request,
+                workdir=str(tmp_path),
+                script=command,
+                env={},
+                timeout_s=timeout_seconds,
                 max_output_bytes=1024 * 1024,
             ),
         )
@@ -2580,40 +2525,14 @@ class _RunningTerminalProcess(_SuspendableTerminalProcess):
         self._killed.set()
 
 
-def test_a_shortened_terminal_lifetime_closes_terminals_already_past_it():
-    terminals = _TerminalManager(idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=8)
-    process = _RunningTerminalProcess()
-    session = _TerminalSession(
-        terminal_id="term_old",
-        process=process,
-        workdir=None,
-        rows=24,
-        cols=80,
-        now=time.monotonic() - 600,
-        idle_ttl_s=None,
-        on_closed=None,
-    )
-    session.start()
-    terminals._sessions["athr_source"] = {"term_old": session}
-
-    terminals.reap()
-    assert "athr_source" in terminals._sessions, "ten minutes is inside half an hour"
-
-    terminals.configure(idle_ttl_s=300, hard_ttl_s=28800, max_sessions=8)
-    assert terminals._reap_interval() == 30.0
-    terminals.reap()
-    assert "athr_source" not in terminals._sessions
-    assert process.killed
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("method", "path", "body"),
     [
         ("GET", "/workspaces/athr_source/terminals", None),
-        ("POST", "/workspaces/athr_source/terminals/suspend", {"lease_generation": 1}),
-        ("POST", "/workspaces/athr_source/terminals/resume", {"lease_generation": 1}),
-        ("POST", "/workspaces/athr_source/terminals/resume-settled", {}),
+        ("POST", "/workspaces/athr_source/terminals/suspend", {"job_id": "job-1"}),
+        ("POST", "/workspaces/athr_source/terminals/resume", {"job_id": "job-1"}),
+        ("POST", "/workspaces/athr_source/terminals/resume-settled", {"job_id": "job-1"}),
         ("GET", "/workspaces/athr_source/terminals/term_missing/stream", None),
         ("GET", "/workspaces/athr_source/terminals/term_missing/output", None),
         ("POST", "/workspaces/athr_source/terminals/term_missing/input", {"data": "eA=="}),
@@ -2738,34 +2657,24 @@ def test_terminal_limits_are_refused_outside_the_bounds_the_sandbox_manager_star
 def test_terminal_suspensions_are_reference_counted_per_concurrent_turn():
     terminals = _TerminalManager(idle_ttl_s=30, hard_ttl_s=60, max_sessions=8)
 
-    terminals.suspend("athr_source", lease_generation=2, job_id="job-parent")
-    terminals.suspend("athr_source", lease_generation=1, job_id="job-child")
-    assert terminals.resume("athr_source", lease_generation=2, job_id="job-parent") == {
+    terminals.suspend("athr_source", job_id="job-parent")
+    terminals.suspend("athr_source", job_id="job-child")
+    assert terminals.resume("athr_source", job_id="job-parent") == {
         "ok": True,
         "resumed": 0,
     }
     assert "athr_source" in terminals._suspended_workspaces
-    assert terminals.resume_settled("athr_source", job_id="job-parent") == {
+    # The parent's settled release, after its own resume, thaws nothing.
+    assert terminals.resume("athr_source", job_id="job-parent") == {
         "ok": True,
         "resumed": 0,
     }
     assert "athr_source" in terminals._suspended_workspaces
-    assert terminals.resume("athr_source", lease_generation=1, job_id="job-child") == {
+    assert terminals.resume("athr_source", job_id="job-child") == {
         "ok": True,
         "resumed": 0,
     }
     assert "athr_source" not in terminals._suspended_workspaces
-
-
-def test_legacy_settled_resume_resets_its_per_job_generation():
-    terminals = _TerminalManager(idle_ttl_s=30, hard_ttl_s=60, max_sessions=8)
-
-    terminals.suspend("athr_source", lease_generation=2)
-    assert terminals.resume_settled("athr_source") == {"ok": True, "resumed": 0}
-    terminals.suspend("athr_source", lease_generation=1)
-
-    assert terminals._workspace_generations["athr_source"] == 1
-    assert "athr_source" in terminals._suspended_workspaces
 
 
 def test_partial_terminal_resume_refreezes_every_process(tmp_path):
@@ -2784,10 +2693,10 @@ def test_partial_terminal_resume_refreezes_every_process(tmp_path):
         for index, process in enumerate(processes)
     ]
     terminals._sessions["athr_source"] = {session.id: session for session in sessions}
-    terminals.suspend("athr_source", lease_generation=1, job_id="job-parent")
+    terminals.suspend("athr_source", job_id="job-parent")
 
     with pytest.raises(HTTPException) as raised:
-        terminals.resume("athr_source", lease_generation=1, job_id="job-parent")
+        terminals.resume("athr_source", job_id="job-parent")
 
     assert raised.value.status_code == 503
     assert all(process.suspended for process in processes)
@@ -2835,9 +2744,7 @@ def test_a_slow_terminal_suspension_never_holds_up_another_workspace(tmp_path):
     _listed_session(terminals, "athr_source", slow, tmp_path)
     other = _listed_session(terminals, "athr_other", _TerminalProcess(), tmp_path)
     suspension = threading.Thread(
-        target=functools.partial(
-            terminals.suspend, "athr_source", lease_generation=1, job_id="job-parent"
-        ),
+        target=functools.partial(terminals.suspend, "athr_source", job_id="job-parent"),
         daemon=True,
     )
     suspension.start()
@@ -2861,6 +2768,103 @@ def test_a_slow_terminal_suspension_never_holds_up_another_workspace(tmp_path):
     assert terminals._workspace_locks == {}
 
 
+class _SlowSpawner:
+    """A terminal spawn, a Docker inspect and exec in production, held until released."""
+
+    def __init__(self) -> None:
+        self.spawning = threading.Event()
+        self.release = threading.Event()
+
+    @staticmethod
+    def base_env() -> dict[str, str]:
+        return {}
+
+    def spawn_terminal(self, _spec, *, rows: int, cols: int) -> TerminalProcess:
+        self.spawning.set()
+        assert self.release.wait(5)
+        return _RunningTerminalProcess()
+
+
+def test_a_slow_terminal_creation_never_holds_up_another_workspace(tmp_path):
+    """Opening a terminal is a Docker call too, and can take seconds.
+
+    Holding the manager's lock across it stalled every keystroke, listing and
+    suspension in every other workspace on the host, as a slow suspension
+    did. A suspension of its own workspace still waits for it.
+    """
+    terminals = _TerminalManager(idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=8)
+    other = _listed_session(terminals, "athr_other", _SuspendableTerminalProcess(), tmp_path)
+    spawner = _SlowSpawner()
+    creation = threading.Thread(
+        target=functools.partial(
+            terminals.create, "athr_source", "/workspace", rows=24, cols=80, backend=spawner
+        ),
+        daemon=True,
+    )
+    creation.start()
+    assert spawner.spawning.wait(2)
+    own_suspension = threading.Thread(
+        target=functools.partial(terminals.suspend, "athr_source", job_id="job-source"),
+        daemon=True,
+    )
+
+    try:
+        controlled, listed, suspended = _finish_within(
+            1,
+            lambda: (
+                terminals.get_for_control("athr_other", other.id),
+                terminals.list("athr_other"),
+                terminals.suspend("athr_other", job_id="job-other"),
+            ),
+        )
+        own_suspension.start()
+        own_suspension.join(0.3)
+        suspended_mid_creation = not own_suspension.is_alive()
+    finally:
+        spawner.release.set()
+        creation.join(5)
+    own_suspension.join(5)
+
+    assert controlled is other
+    assert [item["id"] for item in listed] == [other.id]
+    assert suspended == {"ok": True, "suspended": 1}
+    assert not suspended_mid_creation
+    [created] = terminals._sessions["athr_source"].values()
+    assert created._suspended
+    assert terminals._workspace_locks == {}
+    terminals.delete("athr_source", created.id)
+
+
+def test_a_terminal_still_being_created_counts_against_the_sandbox_managers_limit():
+    terminals = _TerminalManager(idle_ttl_s=1800, hard_ttl_s=28800, max_sessions=1)
+    spawner = _SlowSpawner()
+    creation = threading.Thread(
+        target=functools.partial(
+            terminals.create, "athr_source", "/workspace", rows=24, cols=80, backend=spawner
+        ),
+        daemon=True,
+    )
+    creation.start()
+    assert spawner.spawning.wait(2)
+
+    try:
+        with pytest.raises(HTTPException) as refused:
+            _finish_within(
+                1,
+                lambda: terminals.create(
+                    "athr_other", "/workspace", rows=24, cols=80, backend=_Spawner()
+                ),
+            )
+    finally:
+        spawner.release.set()
+        creation.join(5)
+
+    assert refused.value.status_code == 503
+    assert [row["state"] for row in terminals.list("athr_source")] == ["running"]
+    assert "athr_other" not in terminals._sessions
+    terminals.close()
+
+
 def test_a_resume_waits_for_its_own_workspaces_suspension_to_finish(tmp_path):
     """A workspace's freeze and thaw still run one at a time.
 
@@ -2873,17 +2877,13 @@ def test_a_resume_waits_for_its_own_workspaces_suspension_to_finish(tmp_path):
     for process in processes:
         _listed_session(terminals, "athr_source", process, tmp_path)
     suspension = threading.Thread(
-        target=functools.partial(
-            terminals.suspend, "athr_source", lease_generation=1, job_id="job-parent"
-        ),
+        target=functools.partial(terminals.suspend, "athr_source", job_id="job-parent"),
         daemon=True,
     )
     suspension.start()
     assert slow.stopping.wait(2)
     resumption = threading.Thread(
-        target=functools.partial(
-            terminals.resume, "athr_source", lease_generation=1, job_id="job-parent"
-        ),
+        target=functools.partial(terminals.resume, "athr_source", job_id="job-parent"),
         daemon=True,
     )
     resumption.start()
@@ -3361,7 +3361,7 @@ async def test_inventory_rows_carry_each_groups_latest_checkpoint(tmp_path):
         base_image="sha256:" + "b" * 64,
         runtime_id="claude-code",
         runtime_version=None,
-        object_key="key",
+        object_key="cloud-agent/sandbox/v2/" + "d" * 64 + "/g1/" + "c" * 32 + ".oci.tar",
         version_id="v1",
         sha256="e" * 64,
         size_bytes=10,
@@ -3420,3 +3420,32 @@ async def test_only_a_starting_turn_has_its_members_ssh_keys_written(monkeypatch
     assert response.status_code == 200, response.text
     assert response.json() == {"newest": True, "revision": 3, "running": True}
     assert applied == ["athr_source" if starting else None]
+
+
+async def test_workspace_routes_admit_each_request_under_the_fence_it_names(monkeypatch):
+    """The fence travels with the request to the admission that may start the group."""
+    supervisor = _SharedSupervisor()
+    monkeypatch.setattr(
+        "cloud_agent_host.sandbox_manager.read_retained_file",
+        lambda _backend, relative, **_kwargs: {"path": relative, "kind": "file", "content": ""},
+    )
+    monkeypatch.setattr(
+        "cloud_agent_host.sandbox_manager._run_git",
+        lambda *_args, **_kwargs: {"available": True},
+    )
+    app = _app(supervisor)
+    headers = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://sandbox_manager"
+    ) as client:
+        for fence in ("7", None, "not-a-fence"):
+            sent = headers if fence is None else {**headers, "X-Agent-Start-Seq": fence}
+            listed = await client.get("/workspaces/athr_source/files?path=a", headers=sent)
+            assert listed.status_code == 200, listed.text
+        inspected = await client.get(
+            "/workspaces/athr_source/git", headers={**headers, "X-Agent-Start-Seq": "8"}
+        )
+        assert inspected.status_code == 200, inspected.text
+
+    # Without a usable fence the request is served, and its run covers nothing.
+    assert supervisor.start_seqs == [7, None, None, 8]

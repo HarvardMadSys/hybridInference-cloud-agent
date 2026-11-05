@@ -1,9 +1,11 @@
 'use client';
 
 import Link from 'next/link';
+import dynamic from 'next/dynamic';
+import { WaitlistPanel } from '@/components/features/auth/WaitlistPanel';
+
 import { usePathname, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
-import { GatewayAccountBanner } from '@/components/features/auth/GatewayAccountBanner';
 import { ProtectedRoute } from '@/components/features/auth/ProtectedRoute';
 import { SessionSwitchWatcher } from '@/components/features/auth/SessionSwitchWatcher';
 import { AgentsSidebar } from '@/components/features/agents/AgentsSidebar';
@@ -18,7 +20,10 @@ import { DeploymentFooter } from '@/components/DeploymentFooter';
 import { McpApprovalsProvider } from '@/components/features/agents/mcp/McpApprovalsProvider';
 import { McpApprovalsLink } from '@/components/features/agents/mcp/McpApprovalsView';
 import { AccountMenu } from '@/components/features/agents/AccountMenu';
-import { useKeyboardShortcuts } from '@/components/features/settings/keyboardShortcutPreferences';
+import {
+  useApplePlatform,
+  useKeyboardShortcuts,
+} from '@/components/features/settings/keyboardShortcutPreferences';
 import { isChatPath, isSettingsPath } from '@/components/features/settings/navigation';
 import {
   matchesShortcut,
@@ -28,6 +33,11 @@ import {
 } from '@/lib/keyboardShortcuts';
 
 import { SIDEBAR_COLLAPSED_STORAGE_KEY } from './sidebarStorage';
+
+// The signed-out home page, loaded only for a visitor who will see it.
+const loadLandingPage = () =>
+  import('@/components/features/landing/LandingPage').then((module) => module.LandingPage);
+const LandingPage = dynamic(loadLandingPage, { ssr: false });
 
 const NAV_ITEM =
   'ui-focus-ring inline-flex min-h-8 shrink-0 items-center rounded-md px-2 py-1 text-muted transition-colors hover:bg-surface-hover hover:text-foreground [@media(pointer:coarse)]:min-h-11';
@@ -47,7 +57,7 @@ function AgentsHeader({
 }) {
   const pathname = usePathname() ?? '/';
   const { state } = useAuth();
-  const { branding, features } = useSiteConfig();
+  const { branding } = useSiteConfig();
   const t = useT();
 
   // Which nav item is lit has to follow the route. The highlight used to be
@@ -61,8 +71,12 @@ function AgentsHeader({
   const onTasks =
     !pathname.startsWith('/admin') && pathname !== '/approvals' && !isSettingsPath(pathname);
 
+  // One row at every width: on a phone a second row for the nav cost the
+  // conversation a touch target's height. Below `md` the nav is sized first and
+  // the app name truncates into what is left, down to the toggle and the mark;
+  // from `md` the name is sized first and the nav scrolls instead.
   return (
-    <header className="grid shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-1 border-b border-border bg-surface px-3 py-1.5 sm:px-4 md:grid-cols-[minmax(0,auto)_minmax(0,1fr)_auto]">
+    <header className="grid shrink-0 grid-cols-[minmax(4.75rem,1fr)_minmax(0,auto)_auto] items-center gap-x-2 border-b border-border bg-surface px-3 py-1.5 sm:px-4 md:grid-cols-[minmax(0,auto)_minmax(0,1fr)_auto]">
       <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
         {sidebarToggle}
         <Link
@@ -98,12 +112,12 @@ function AgentsHeader({
       </div>
       {/* Signing out, the theme and the language stay within reach when the
           task list is hidden: the sidebar's account row goes with it. */}
-      <div className="flex min-h-8 items-center md:col-start-3 md:row-start-1">
+      <div className="col-start-3 row-start-1 flex min-h-8 items-center">
         {accountMenu ? <AccountMenu variant="header" /> : null}
       </div>
       <nav
         aria-label={t('nav.aria')}
-        className="col-span-2 flex min-w-0 max-w-full items-center gap-1 overflow-x-auto text-xs font-medium md:col-span-1 md:col-start-2 md:row-start-1 md:justify-self-end"
+        className="col-start-2 row-start-1 flex min-w-0 max-w-full items-center gap-1 overflow-x-auto justify-self-end text-xs font-medium"
       >
         {/* Guarded like every other external link here, and for a sharper
             reason than tidiness: an anchor with an empty `href` resolves to the
@@ -120,15 +134,6 @@ function AgentsHeader({
             {t('nav.status')}
           </a>
         )}
-        {/* Docs Assistant and Dashboard are the gateway's pages, not ours. In
-            the monorepo they were same-origin routes; here they are absolute
-            links to the gateway, and they disappear on a deployment that has
-            not been told where the gateway is. */}
-        {features.rag && branding.gatewayUrl && (
-          <a href={`${branding.gatewayUrl}/chat`} className={NAV_ITEM}>
-            {t('nav.docsAssistant')}
-          </a>
-        )}
         <Link
           href="/"
           className={onTasks ? NAV_ITEM_CURRENT : NAV_ITEM}
@@ -142,13 +147,12 @@ function AgentsHeader({
             className={pathname === '/approvals' ? NAV_ITEM_CURRENT : NAV_ITEM}
           />
         )}
-        {/* This service's own operations page, so it is a route rather than a
-            link back to the gateway. Admin-only, matching the endpoints it
+        {/* Admin-only, matching the endpoints it
             calls — the guard on the page is the one that counts; hiding the
             link only keeps it out of the way of everyone else. */}
         {hasAgentPermission(state.user?.agent_access, 'agent.admin') && (
           <Link
-            href="/admin/hosts"
+            href="/admin/users"
             className={onAdmin ? NAV_ITEM_CURRENT : NAV_ITEM}
             aria-current={onAdmin ? 'page' : undefined}
           >
@@ -172,6 +176,7 @@ function SidebarToggleButton({
   settings?: boolean;
 }) {
   const t = useT();
+  const apple = useApplePlatform();
   const label = settings
     ? sidebarCollapsed
       ? t('settings.expandNavigation')
@@ -187,8 +192,8 @@ function SidebarToggleButton({
       aria-label={label}
       aria-expanded={!sidebarCollapsed}
       aria-controls="agents-sidebar"
-      aria-keyshortcuts={shortcutAriaLabel(shortcut)}
-      title={`${label}${shortcut ? ` (${shortcutLabel(shortcut)})` : ''}`}
+      aria-keyshortcuts={shortcutAriaLabel(shortcut, apple)}
+      title={`${label}${shortcut ? ` (${shortcutLabel(shortcut, apple)})` : ''}`}
       className="ui-focus-ring inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface-hover hover:text-foreground [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
     >
       <svg
@@ -228,27 +233,10 @@ function AgentsShell({
   settingsNavigation?: { backHref: string };
 }) {
   const { state } = useAuth();
-  const { branding } = useSiteConfig();
-  const t = useT();
 
-  // The Gateway decides admission; account role is only profile metadata.
-  if (!hasAgentPermission(state.user?.agent_access, 'agent.use')) {
-    return (
-      <div className="flex flex-1 flex-col items-center justify-center gap-3">
-        <h1 className="text-xl font-semibold text-gray-900 dark:text-gray-100">
-          {t('shell.accessRequired.title')}
-        </h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400">{t('shell.accessRequired.body')}</p>
-        {branding.gatewayUrl && (
-          <a
-            href={`${branding.gatewayUrl}/dashboard`}
-            className="text-sm font-medium text-crimson hover:underline dark:text-crimson-light"
-          >
-            {t('shell.accessRequired.back')}
-          </a>
-        )}
-      </div>
-    );
+  // Current admission decides access; without it the account applies or waits.
+  if (!hasAgentPermission(state.user?.agent_access, 'agent.use') && state.user) {
+    return <WaitlistPanel key={state.user.id} />;
   }
 
   // One first-run answer for the sidebar and every page, asked for here once
@@ -321,6 +309,16 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobile, setMobile] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  // Admin pages are wide tables, so the task list folds away on every visit
+  // there. Opening it lasts until the administrator leaves Admin and never
+  // changes the choice the task app remembers.
+  const onAdmin = pathname === '/admin' || !!pathname?.startsWith('/admin/');
+  const [adminSidebarOpen, setAdminSidebarOpen] = useState(false);
+  useEffect(() => {
+    if (!onAdmin) setAdminSidebarOpen(false);
+  }, [onAdmin]);
+  const desktopCollapsed = onAdmin ? !adminSidebarOpen : sidebarCollapsed;
+  const collapsed = mobile ? !mobileSidebarOpen : desktopCollapsed;
 
   const closeMobileSidebar = useCallback(() => {
     setMobileSidebarOpen(false);
@@ -345,6 +343,10 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
       setMobileSidebarOpen((current) => !current);
       return;
     }
+    if (onAdmin) {
+      setAdminSidebarOpen((current) => !current);
+      return;
+    }
     setSidebarCollapsed((current) => {
       const next = !current;
       try {
@@ -354,7 +356,7 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
       }
       return next;
     });
-  }, [mobile, mobileSidebarOpen, closeMobileSidebar]);
+  }, [mobile, mobileSidebarOpen, closeMobileSidebar, onAdmin]);
 
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return;
@@ -372,6 +374,10 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
     query.addEventListener('change', sync);
     return () => query.removeEventListener('change', sync);
   }, []);
+
+  useEffect(() => {
+    if (pathname === '/') void loadLandingPage().catch(() => undefined);
+  }, [pathname]);
 
   useEffect(() => setMobileSidebarOpen(false), [pathname]);
 
@@ -416,7 +422,7 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
 
   return (
     <SessionSwitchWatcher>
-      <ProtectedRoute>
+      <ProtectedRoute signedOut={pathname === '/' ? <LandingPage /> : undefined}>
         <McpApprovalsProvider
           ownerId={state.user?.id}
           enabled={hasAgentPermission(state.user?.agent_access, 'agent.use')}
@@ -430,31 +436,27 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
               {t('nav.skipToWorkspace')}
             </a>
             <AgentsHeader
-              accountMenu={
-                !hasAgentPermission(state.user?.agent_access, 'agent.use') ||
-                (mobile ? !mobileSidebarOpen : sidebarCollapsed)
-              }
+              accountMenu={!hasAgentPermission(state.user?.agent_access, 'agent.use') || collapsed}
               sidebarToggle={
-                mobile || sidebarCollapsed ? (
+                mobile || collapsed ? (
                   <SidebarToggleButton
                     shortcut={shortcuts.sidebar}
                     settings={onSettings}
-                    sidebarCollapsed={mobile ? !mobileSidebarOpen : sidebarCollapsed}
+                    sidebarCollapsed={collapsed}
                     onToggleSidebar={toggleSidebar}
                   />
                 ) : undefined
               }
             />
-            <GatewayAccountBanner />
             <AgentsShell
               settingsNavigation={
                 onSettings
                   ? { backHref: chatReturn.userId === state.user?.id ? chatReturn.href : '/' }
                   : undefined
               }
-              sidebarCollapsed={mobile ? !mobileSidebarOpen : sidebarCollapsed}
+              sidebarCollapsed={collapsed}
               sidebarToggle={
-                !mobile && !sidebarCollapsed ? (
+                !mobile && !collapsed ? (
                   <SidebarToggleButton
                     shortcut={shortcuts.sidebar}
                     settings={onSettings}
@@ -468,7 +470,9 @@ export default function AgentsLayout({ children }: { children: React.ReactNode }
             >
               {children}
             </AgentsShell>
-            <DeploymentFooter />
+            {/* Two wrapped lines of credits and build details on a phone, under
+                every page, came out of the conversation's height. */}
+            <DeploymentFooter className="max-md:hidden" />
           </div>
         </McpApprovalsProvider>
       </ProtectedRoute>

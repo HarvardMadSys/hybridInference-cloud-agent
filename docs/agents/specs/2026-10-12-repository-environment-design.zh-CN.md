@@ -236,7 +236,7 @@ Docker 客户端名单包含 `DOCKER_`、`BUILDKIT_`、`BUILDX_`、`COMPOSE_`、
 | `POST /v1/agent/environment-runs` | 固定环境和全局版本、repo/ref，创建独立测试 |
 | `GET /v1/agent/environment-runs/{id}` | 测试状态、步骤与有界脱敏输出 |
 | `POST /v1/agent/environment-runs/{id}/cancel` | 幂等取消测试并触发清理 |
-| `GET /v1/agent/jobs/{job_id}/thread/environment` | 读取实际绑定配置、来源和准备结果；另返回是否有新版本 |
+| `GET /v1/agent/jobs/{job_id}/thread/environment` | 读取实际绑定配置、来源和准备结果；另返回是否有新版本，以及每个操作最近一次运行（不含输出，供面板重新打开时恢复“停止”） |
 | `POST /v1/agent/jobs/{job_id}/thread/environment/retry` | 重试当前绑定的失败准备步骤；不更换版本、不重复提交 agent 消息 |
 | `POST /v1/agent/jobs/{job_id}/thread/environment/actions/{action_id}/runs` | 在当前工作区执行绑定版本中的操作，返回运行/终端 ID |
 | `GET /v1/agent/environment-action-runs/{id}` | 操作状态、退出码、有界输出摘要与终端链接 |
@@ -349,6 +349,8 @@ Agent 成员沿用独立 UID 和私有目录；不得把平台推理/MCP/GitHub 
 ## 9. 脱敏、历史 Secret 与发布检查
 
 可信快照扫描使用与快照捕获一致的临时 Git index：从固定 base `read-tree`，再 `git add -A -N`，扫描其中新增/修改的实际文件字节；包括未跟踪且未忽略的文件、二进制和符号链接目标文本，不跟随符号链接，不改动用户 index。扫描与捕获处于同一个共享写入冻结边界。受信 publisher 另外扫描暂存 blob，形成独立检查；不能因为发布层会拦截而允许明文 Secret 进入平台快照。
+
+（2026-10-17 修订）文件名按 Git 记下的原始字节读取，不要求是 UTF-8；工作区里另一个 Git 仓库（比如 agent 克隆进来的依赖）在补丁里只是一条提交 id，不带它的任何文件，所以跳过，publisher 会拒绝这种子模块条目。原来这两种情况会让扫描本身出错，和发现 Secret 报同一个错误：捕获返回 503，协调器每 5 秒重试一次，工作区永远发布不了。
 
 ### 9.1 有状态的输出脱敏
 

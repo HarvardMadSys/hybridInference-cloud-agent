@@ -1,49 +1,41 @@
 """The Usage settings page: an owner's containers, their past use, and model usage.
 
 Every read is the signed-in owner's own and never cached. Model usage is the
-admin Usage aggregation selected for this owner's runs: the same stored
-Gateway snapshots summed the same way, so the two pages cannot disagree.
+admin Usage aggregation selected for this owner's runs: the same
+agent-reported tokens summed the same way, so the two pages cannot disagree.
+The owner's provider keeps their bill; no cost is known here.
 """
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from cloud_agent.admin_observability import decode_cursor
-from cloud_agent.admin_usage import (
-    MAX_USAGE_LEDGER_ROWS,
-    MAX_USAGE_RUNS,
-    MAX_USAGE_SNAPSHOT_BYTES,
-    aggregate_prepared,
-    breakdown,
-    day_buckets,
-    days_breakdown,
-    prepare_jobs,
-)
+from cloud_agent.admin_usage import MAX_USAGE_RESPONSE_BYTES
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage, require_store
-from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.owner_usage import (
     CONTAINER_CURSOR_SCOPE,
     DEFAULT_CONTAINER_PAGE,
+    DEFAULT_HISTORY_DAYS,
     MAX_CONTAINER_PAGE,
     MAX_HISTORY_DAYS,
     OwnerContainerCursor,
     OwnerContainerList,
     OwnerResourceHistory,
     OwnerTokenUsage,
-    history_window,
 )
 from cloud_agent.storage.admin_usage_queries import (
     AdminUsageQueries,
     UsageQueryTooLarge,
     UsageQueryUnavailable,
 )
+from cloud_agent.usage_batches import owner_usage
+from cloud_agent.usage_range import RangePreset, UsageRange, buckets, day_range, resolve_range
 
 if TYPE_CHECKING:
     from cloud_agent.ports import OwnerUsageQueries
@@ -62,6 +54,12 @@ class _OwnerUsageStorage(Protocol):
     admin_usage: AdminUsageQueries
 
 
+class _UsageRangeStorage(Protocol):
+    """What resolving a range reads: the owner's first record, for ``all``."""
+
+    owner_usage: OwnerUsageQueries
+
+
 def _require_store(store: _OwnerUsageStorage | None) -> _OwnerUsageStorage:
     """This surface's capabilities, or 503 when no database is configured."""
     return require_store(store)
@@ -78,7 +76,66 @@ router = APIRouter(
     dependencies=[Depends(_no_store)],
 )
 
-_DAYS = Query(7, ge=1, le=MAX_HISTORY_DAYS)
+_DAYS = Query(
+    None,
+    ge=1,
+    le=MAX_HISTORY_DAYS,
+    description="The last N UTC days, today included. Prefer `range`.",
+)
+RANGE_QUERY = Query(
+    None,
+    alias="range",
+    description=(
+        "today, 7d, 30d or all, in UTC days. `all` starts at the owner's earliest "
+        "retained run or container and is never narrowed."
+    ),
+)
+#: ``all=true`` asks for all of it too (``all`` is a builtin, hence the alias).
+_ALL = Query(None, alias="all", description="Same as `range=all`.")
+
+_PERIOD_CONFLICT = "usage_period_conflict"
+_TOO_LARGE = "usage_query_too_large"
+_RESPONSE_TOO_LARGE = "usage_response_too_large"
+_UNAVAILABLE = "usage_temporarily_unavailable"
+
+
+def usage_error(status: int, error_type: str, message: str) -> HTTPException:
+    """The client's error envelope: its ``type`` is what a page translates."""
+    return HTTPException(
+        status_code=status,
+        detail={"error": {"type": error_type, "message": message, "code": status}},
+    )
+
+
+def usage_unavailable() -> HTTPException:
+    """Usage could not be read in time; never a partial sum."""
+    logger.warning("agent_owner_usage_read_failed")
+    return usage_error(503, _UNAVAILABLE, "Usage could not be read right now. Please try again.")
+
+
+async def resolve_period(
+    store: _UsageRangeStorage,
+    user_id: str,
+    preset: RangePreset | None,
+    days: int | None,
+    *,
+    all_time: bool | None = None,
+) -> UsageRange:
+    """Resolve the one range every half of the page reads.
+
+    Raises:
+        HTTPException: 422 when more than one of ``range``, ``days`` and
+            ``all`` is given.
+    """
+    given = [value for value in (preset, days, all_time) if value is not None]
+    if len(given) > 1:
+        raise usage_error(422, _PERIOD_CONFLICT, "Choose one of range, days or all.")
+    if all_time:
+        preset = "all"
+    if preset is None:
+        return day_range(days or DEFAULT_HISTORY_DAYS, max_days=MAX_HISTORY_DAYS)
+    first = await store.owner_usage.first_record_at(user_id) if preset == "all" else None
+    return resolve_range(preset, first_record_at=first)
 
 
 @router.get("/containers", response_model=OwnerContainerList)
@@ -100,85 +157,66 @@ async def list_owner_containers(
 
 @router.get("/resources", response_model=OwnerResourceHistory)
 async def read_owner_resources(
-    days: int = _DAYS,
+    days: int | None = _DAYS,
+    period: RangePreset | None = RANGE_QUERY,
+    all_time: bool | None = _ALL,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _OwnerUsageStorage | None = Depends(get_storage),
 ) -> OwnerResourceHistory:
-    """Running time and measured CPU and memory for each of the last ``days`` UTC days."""
-    since, until = history_window(days)
-    return await _require_store(store).owner_usage.resource_history(
-        user["user_id"], buckets=day_buckets(since=since, until=until)
+    """Running time and measured CPU and memory per UTC bucket of the range."""
+    usage_store = _require_store(store)
+    resolved = await resolve_period(usage_store, user["user_id"], period, days, all_time=all_time)
+    history = await usage_store.owner_usage.resource_history(
+        user["user_id"], buckets=buckets(resolved.since, resolved.until, resolved.bucket)
     )
+    history.period = resolved
+    return history
 
 
 @router.get("/tokens", response_model=OwnerTokenUsage)
 async def read_owner_tokens(
-    days: int = _DAYS,
+    days: int | None = _DAYS,
+    period: RangePreset | None = RANGE_QUERY,
+    all_time: bool | None = _ALL,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _OwnerUsageStorage | None = Depends(get_storage),
 ) -> OwnerTokenUsage:
-    """Model usage and cost of the owner's runs created in the last ``days`` UTC days.
+    """Agent-reported model usage of the owner's runs created in the range.
+
+    A range larger than one bounded selection is summed in bounded batches
+    (:mod:`cloud_agent.usage_batches`), never narrowed.
 
     Raises:
-        HTTPException: 422 when the selection exceeds the aggregation's bounds,
-            503 when it cannot be read inside them. Neither returns a partial sum.
+        HTTPException: 422 when even a minimal batch exceeds the aggregation's
+            bounds or the response would, 503 when it cannot be read in time.
+            Neither returns a partial sum.
     """
-    since, until = history_window(days)
+    usage_store = _require_store(store)
+    resolved = await resolve_period(usage_store, user["user_id"], period, days, all_time=all_time)
     generated_at = datetime.now(UTC)
     try:
-        cohort, rows = await _require_store(store).admin_usage.selection(
-            since=since,
-            until=until,
+        usage = await owner_usage(
+            usage_store.admin_usage,
             user_id=user["user_id"],
-            model=None,
-            runtime=None,
-            repo=None,
-            max_runs=MAX_USAGE_RUNS,
-            max_rows=MAX_USAGE_LEDGER_ROWS,
-            max_snapshot_bytes=MAX_USAGE_SNAPSHOT_BYTES,
+            since=resolved.since,
+            until=resolved.until,
+            size=resolved.bucket,
         )
     except UsageQueryTooLarge:
-        raise HTTPException(
-            status_code=422, detail="Too many runs to sum. Choose a shorter period."
-        ) from None
+        raise usage_error(422, _TOO_LARGE, "This usage is too large to sum.") from None
     except UsageQueryUnavailable:
-        logger.warning("agent_owner_usage_read_failed")
-        raise HTTPException(
-            status_code=503, detail="Usage could not be read right now. Please try again."
-        ) from None
-    # Resolving stored reports is CPU work that grows with the selection; the
-    # event loop also serves heartbeats and streams, as the admin page notes.
-    return await asyncio.to_thread(
-        _summarize, cohort, rows, since=since, until=until, generated_at=generated_at
-    )
-
-
-def _summarize(
-    cohort: list[dict[str, Any]],
-    rows: list[dict[str, Any]],
-    *,
-    since: datetime,
-    until: datetime,
-    generated_at: datetime,
-) -> OwnerTokenUsage:
-    """Reduce one owner's selection to totals, UTC days and models."""
-    ledger_by_job: dict[str, list[dict[str, Any]]] = {row["id"]: [] for row in cohort}
-    for row in rows:
-        ledger_by_job[row["job_id"]].append(row)
-    jobs = [{**row, "ledger": ledger_by_job[row["id"]]} for row in cohort]
-    prepared = prepare_jobs(jobs, terminal_states=TERMINAL_STATES)
-    return OwnerTokenUsage(
-        since=since,
-        until=until,
+        raise usage_unavailable() from None
+    result = OwnerTokenUsage(
+        since=resolved.since,
+        until=resolved.until,
         generated_at=generated_at,
-        summary=aggregate_prepared(prepared),
-        days=days_breakdown(
-            jobs,
-            buckets=day_buckets(since=since, until=until),
-            terminal_states=TERMINAL_STATES,
-            prepared=prepared,
-        ),
-        by_model=breakdown(
-            jobs, dimension="model", terminal_states=TERMINAL_STATES, prepared=prepared
-        ),
+        summary=usage.summary,
+        days=usage.buckets,
+        by_model=usage.by_model,
+        period=resolved,
+        batches=usage.batches,
     )
+    if len(result.model_dump_json().encode()) > MAX_USAGE_RESPONSE_BYTES:
+        # Refused whole, never trimmed.
+        raise usage_error(422, _RESPONSE_TOO_LARGE, "This period's usage is too large to send.")
+    return result

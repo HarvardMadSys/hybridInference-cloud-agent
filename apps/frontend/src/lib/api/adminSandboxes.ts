@@ -51,6 +51,7 @@ export interface AdminSandbox {
   deletion_size_bytes?: number | null;
   deleted_at?: string | null;
   deletion_error?: string | null;
+  deletion_retry_exhausted_at?: string | null;
   memory_limit: string;
   cpu_limit: string;
   /** Retained writable-layer quota; zero or absent on older responses means no quota. */
@@ -68,6 +69,9 @@ export interface AdminSandbox {
   idle_deadline: string | null;
   updated_at: string;
   host_last_heartbeat_at: string | null;
+  /** The newest incident's kind within 24 hours; listed sandboxes only. */
+  last_incident?: string | null;
+  last_incident_at?: string | null;
 }
 
 export type AdminSandboxState =
@@ -110,12 +114,42 @@ export interface AdminSandboxCheckpoint {
   durations_ms?: Record<string, number>;
 }
 
+export interface AdminSandboxDeletionAttempt {
+  correlation_id: string;
+  request_id: string;
+  host_id: string;
+  attempt_number: number;
+  stage:
+    | 'sandbox_manager_resolution'
+    | 'archive_prepare'
+    | 'upload_authorization'
+    | 'archive_upload'
+    | 'archive_verification'
+    | 'durable_receipt'
+    | 'container_removal'
+    | 'database_finalization'
+    | 'discard_container_removal'
+    | 'discard_receipt_validation'
+    | 'cleanup_claim_renewal'
+    | 'cleanup_abort';
+  outcome: 'running' | 'retrying' | 'succeeded' | 'failed' | 'lease_expired';
+  failure_code: string | null;
+  sandbox_manager_status: number | null;
+  retry_class: 'transient' | 'permanent' | 'operator_action' | null;
+  retry_scheduled: boolean | null;
+  cleanup_outcome: 'not_required' | 'pending' | 'acknowledged' | 'unconfirmed';
+  started_at: string;
+  updated_at: string;
+  finished_at: string | null;
+}
+
 export interface AdminSandboxDetail {
   sandbox: AdminSandbox;
   members: AdminSandboxMember[];
   observed_at: string;
   terminal_activity_error?: string | null;
   latest_checkpoint?: AdminSandboxCheckpoint | null;
+  deletion_attempts?: AdminSandboxDeletionAttempt[];
 }
 
 export interface AdminSandboxStopRequest {
@@ -157,7 +191,13 @@ export interface AdminSandboxesPage {
   sandboxes: AdminSandbox[];
   next_cursor: string | null;
   observed_at: string;
-  total_count: number;
+  total_count: number | null;
+  /** Present on the opt-in snapshot/change-feed protocol. */
+  change_cursor?: string | null;
+  mode?: 'snapshot' | 'delta';
+  deleted_ids?: string[];
+  hosts?: { host: string; last_heartbeat_at: string | null }[];
+  reset_required?: boolean;
 }
 
 export function getAdminSandboxes(
@@ -166,6 +206,7 @@ export function getAdminSandboxes(
     limit?: number;
     state?: AdminSandboxState | 'all';
     include_archived?: boolean;
+    sync?: boolean;
   } = {},
   signal?: AbortSignal,
 ): Promise<AdminSandboxesPage> {
@@ -175,6 +216,7 @@ export function getAdminSandboxes(
   if (filters.state) params.set('state', filters.state);
   if (filters.include_archived !== undefined)
     params.set('include_archived', String(filters.include_archived));
+  if (filters.sync) params.set('sync', 'true');
   const query = params.size ? `?${params}` : '';
   return fetchWithAuth(config.apiBase, `/admin/agent/sandboxes${query}`, {
     signal,

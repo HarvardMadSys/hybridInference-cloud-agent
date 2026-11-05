@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import json
 from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -11,32 +9,28 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from tests.servers.test_owner_revalidation import _AccessGateway
+from tests.servers.test_owner_revalidation import _Directory
+from tests.support.owners import SESSIONS, use_session_secret
 from tests.support.storage import OneFake
-from tests.unit.test_ledger_snapshots import END, START, ledger_row
+from tests.support.usage import END, START
 
-from cloud_agent import identity
+from cloud_agent.accounts.config import LOCAL_SESSION_COOKIE
 from cloud_agent.admin_observability import (
-    AdminActivityPage,
     AdminRun,
     AdminRunList,
-    cursor_scope,
 )
 from cloud_agent.api import admin_runs, usage
 from cloud_agent.api._owner_auth import require_agent_owner
-from cloud_agent.api.deps import get_gateway_client, get_storage
+from cloud_agent.api.deps import get_owner_directory, get_storage
 from cloud_agent.app import create_app, create_mcp_app
 from cloud_agent.schemas import ResourceMetricBrief, RunResourceSummary
-from cloud_agent_shared.event_payloads import MAX_EVENT_PAYLOAD_BYTES
 
 ADMIN = {"Authorization": "Bearer admin-observations-test"}
 PREFIX = "/admin/agent/runs"
 PATHS = [
     ("GET", PREFIX),
     ("GET", PREFIX + "/ajob_other"),
-    ("GET", PREFIX + "/ajob_other/activity"),
     ("GET", PREFIX + "/ajob_other/attempts/10/resources"),
-    ("POST", PREFIX + "/ajob_other/events/20/content"),
 ]
 
 
@@ -67,17 +61,8 @@ def _admin_run_row() -> dict:
 @pytest.fixture
 def setup(monkeypatch):
     monkeypatch.setenv("ADMIN_TOKEN", "admin-observations-test")
-    monkeypatch.setenv(identity.ENV_SESSION_SECRET, "admin-observations-session-test-long-secret")
-    monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
+    use_session_secret(monkeypatch)
     run = _admin_run_row()
-    event = {
-        "id": 20,
-        "attempt_id": 10,
-        "seq": 1,
-        "event_type": "tool_use",
-        "created_at": START,
-        "payload": {"input": {"command": "private command"}},
-    }
     events = [
         {
             "job_id": run["id"],
@@ -105,7 +90,6 @@ def setup(monkeypatch):
         usage_inputs=AsyncMock(
             return_value={"job_ids": [run["id"]], "attempts": [], "events": events}
         ),
-        activity=AsyncMock(return_value=AdminActivityPage(events=[])),
         resources=AsyncMock(
             return_value={
                 "attempt_id": 10,
@@ -125,52 +109,64 @@ def setup(monkeypatch):
                 ],
             }
         ),
-        event_content=AsyncMock(return_value=event),
     )
+
+    async def job_usage_reads(*, job_id: str, user_id: str) -> dict | None:
+        # The one-snapshot owner read, scoped the way the real one is: None
+        # for a job that is not this caller's. The fixture's run belongs to
+        # another owner, so an owner-route read by the admin's own identity
+        # is refused here — the admin surface never comes through this read
+        # at all, it supplies its own projected inputs.
+        if job_id != run["id"] or user_id != run["user_id"]:
+            return None
+        return {
+            "job": run,
+            "inputs": {"job_ids": [run["id"]], "attempts": [], "events": []},
+            "version": "00000000000000000001.000000",
+        }
+
     store = OneFake(
         SimpleNamespace(
             get_job=AsyncMock(return_value=run),
-            ledger_rows_for_job=AsyncMock(return_value=[ledger_row()]),
             record_admin_action=AsyncMock(return_value=1),
-            queue_job_ledger_refresh=AsyncMock(),
-            job_usage_inputs=AsyncMock(),
+            job_usage_reads=AsyncMock(side_effect=job_usage_reads),
         )
     )
-    gateway = _AccessGateway(["agent.use", "agent.admin"])
+    store.local_accounts = SESSIONS
+    owners = _Directory(["agent.use", "agent.admin"])
     app = FastAPI()
     app.include_router(admin_runs.router)
     app.include_router(usage.router)
     app.dependency_overrides[admin_runs.get_admin_run_queries] = lambda: queries
     app.dependency_overrides[get_storage] = lambda: store
-    app.dependency_overrides[get_gateway_client] = lambda: gateway
+    app.dependency_overrides[get_owner_directory] = lambda: owners
     app.dependency_overrides[require_agent_owner] = lambda: {"user_id": "admin-person"}
-    return app, queries, store, gateway
+    return app, queries, store, owners
 
 
 @pytest.mark.parametrize("method,path", PATHS)
 @pytest.mark.parametrize("auth", ["missing", "invalid", "revoked"])
-async def test_every_read_and_reveal_requires_current_admin_permission(setup, method, path, auth):
-    app, queries, store, gateway = setup
-    gateway.permissions = ["agent.use"]
+async def test_every_read_requires_current_admin_permission(setup, method, path, auth):
+    app, queries, store, owners = setup
+    owners.permissions = ["agent.use"]
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         headers = {}
         if auth == "invalid":
             headers = {"Authorization": "Bearer not-an-admin-token"}
         elif auth == "revoked":
             client.cookies.set(
-                identity.SESSION_COOKIE,
-                identity.mint_session(user_id="admin-person"),
+                LOCAL_SESSION_COOKIE,
+                SESSIONS.sign_in("admin-person"),
             )
         response = await client.request(method, path, headers=headers)
     assert response.status_code == (403 if auth == "revoked" else 401)
     for function in vars(queries).values():
         function.assert_not_awaited()
-    store.ledger_rows_for_job.assert_not_awaited()
     store.record_admin_action.assert_not_awaited()
 
 
 async def test_admin_reads_another_owner_but_owner_routes_are_unchanged(setup):
-    app, queries, store, _ = setup
+    app, _queries, store, _ = setup
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         admin = await client.get(PREFIX + "/ajob_other", headers=ADMIN)
         owner = await client.get("/v1/agent/jobs/ajob_other/usage")
@@ -179,41 +175,37 @@ async def test_admin_reads_another_owner_but_owner_routes_are_unchanged(setup):
     assert owner.status_code == 404
     body = admin.json()
     assert body["run"]["user_id"] == "other-owner"
-    assert body["usage"]["ledger"]["totals"]["calls"] == 1
     assert body["usage"]["runtime"]["input_tokens"] == 200  # two attempts, not six blocks
     assert body["usage"]["runtime"]["normalized_input_tokens"] == 400
-    assert body["usage"]["conversation"] is None
-    assert body["capabilities"] == {"llm_requests": True}
-    assert body["usage"]["ledger"]["finalized"] is False
-    assert body["usage"]["ledger"]["unknown_rows"]["reasoning"] == 1
+    # The agent's report alone: no Gateway ledger, conversation total or cost.
+    assert set(body["usage"]) == {"runtime", "external_provider", "version"}
+    assert "capabilities" not in body
     assert "private" not in admin.text
     assert "grant_id" not in admin.text
     assert "binding_id" not in admin.text
-    store.job_usage_inputs.assert_not_awaited()
-    queries.event_content.assert_not_awaited()
+    # The owner route reached the snapshot read and was refused in it; the
+    # admin read above it must never come through this owner-scoped path.
+    store.job_usage_reads.assert_awaited_once_with(job_id="ajob_other", user_id="admin-person")
     store.record_admin_action.assert_not_awaited()
-    store.queue_job_ledger_refresh.assert_not_awaited()
 
 
 async def test_empty_terminal_turn_has_no_promised_future_usage(setup):
-    app, queries, store, _ = setup
-    store.ledger_rows_for_job.return_value = []
+    app, queries, _store, _ = setup
     queries.usage_inputs.return_value = {"job_ids": ["ajob_other"], "attempts": [], "events": []}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get(PREFIX + "/ajob_other", headers=ADMIN)
-    assert response.json()["usage"]["ledger"]["status"] == "unavailable"
     assert response.json()["usage"]["runtime"]["input_tokens"] is None
     assert response.json()["session_statistics"] == {
         "model_seconds": None,
         "tool_seconds": None,
-        "ttft_seconds": None,
+        "first_output_seconds": None,
         "output_tokens_per_second": None,
         "timing_source": "message_events",
     }
 
 
 async def test_session_statistics_reuses_safe_usage_inputs_without_additional_reads(setup):
-    app, queries, store, gateway = setup
+    app, queries, store, owners = setup
     queries.usage_inputs.return_value = {
         "job_ids": ["ajob_other"],
         "attempts": [{"job_id": "ajob_other", "attempt_id": 10, "started_at": START}],
@@ -243,18 +235,17 @@ async def test_session_statistics_reuses_safe_usage_inputs_without_additional_re
     assert response.json()["session_statistics"] == {
         "model_seconds": 4,
         "tool_seconds": 6,
-        "ttft_seconds": 2,
+        "first_output_seconds": 2,
         "output_tokens_per_second": 20,
         "timing_source": "message_events",
     }
     assert "hashed-identity" not in response.text
     queries.usage_inputs.assert_awaited_once_with("ajob_other")
-    queries.event_content.assert_not_awaited()
     queries.resources.assert_not_awaited()
     store.get_job.assert_not_awaited()
-    store.job_usage_inputs.assert_not_awaited()
+    store.job_usage_reads.assert_not_awaited()
     store.record_admin_action.assert_not_awaited()
-    assert gateway.asked == []
+    assert owners.asked == []
 
 
 async def test_resource_read_keeps_message_timing_and_unavailable_whole_turn(setup):
@@ -268,7 +259,6 @@ async def test_resource_read_keeps_message_timing_and_unavailable_whole_turn(set
     assert resource["tool_calls"][0]["timing_source"] == "message"
     assert resource["tool_calls"][0]["duration_ms"] == 25
     queries.resources.assert_awaited_once_with("ajob_other", 10)
-    queries.event_content.assert_not_awaited()
     store.get_job.assert_not_awaited()
 
 
@@ -397,74 +387,12 @@ async def test_the_runs_list_carries_the_compact_resource_summary(setup):
     assert listed["attempts_total"] == 3
 
 
-@pytest.mark.parametrize("browser", [False, True])
-async def test_explicit_reveal_records_actor_owner_and_event_before_return(setup, browser):
-    app, queries, store, gateway = setup
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        if browser:
-            client.cookies.set(
-                identity.SESSION_COOKIE,
-                identity.mint_session(user_id="admin-person"),
-            )
-        response = await client.post(
-            PREFIX + "/ajob_other/events/20/content", headers={} if browser else ADMIN
-        )
-    assert response.status_code == 200
-    assert response.headers["cache-control"] == "no-store"
-    assert response.json()["payload"]["input"]["command"] == "private command"
-    record = store.record_admin_action.await_args.kwargs
-    assert record["target_user_id"] == "other-owner"
-    assert record["details"] == {
-        "actor": "admin:admin-person" if browser else "admin-token",
-        "job_id": "ajob_other",
-        "event_id": 20,
-        "attempt_id": 10,
-        "seq": 1,
-    }
-    assert record["action"] == "agent.run.event_content.read"
-    assert "private command" not in str(record)
-    assert gateway.asked == (["admin-person"] if browser else [])
-    queries.event_content.assert_awaited_once_with("ajob_other", 20)
-
-
-async def test_audit_failure_never_returns_content(setup):
-    app, _, store, _ = setup
-    store.record_admin_action.side_effect = RuntimeError("private database diagnostic")
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(PREFIX + "/ajob_other/events/20/content", headers=ADMIN)
-    assert response.status_code == 503
-    assert "private" not in response.text
-
-
-async def test_missing_audit_receipt_never_returns_content(setup):
-    app, _, store, _ = setup
-    store.record_admin_action.return_value = None
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(PREFIX + "/ajob_other/events/20/content", headers=ADMIN)
-    assert response.status_code == 503
-    assert "private command" not in response.text
-
-
-@pytest.mark.parametrize("text", ["a" * MAX_EVENT_PAYLOAD_BYTES, '😀\n"' * 100_000])
-async def test_reveal_bounds_the_actual_response_including_envelope_and_escaping(setup, text):
-    app, queries, _, _ = setup
-    queries.event_content.return_value["payload"] = {"text": text}
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(PREFIX + "/ajob_other/events/20/content", headers=ADMIN)
-    assert response.status_code == 200
-    assert len(response.content) <= MAX_EVENT_PAYLOAD_BYTES
-    assert response.json()["truncated"] is True
-    assert response.json()["payload"]["truncation_notice"]
-
-
-async def test_event_and_attempt_ids_are_scoped_to_the_requested_job(setup):
+async def test_attempt_ids_are_scoped_to_the_requested_job(setup):
     app, queries, store, _ = setup
-    queries.event_content.return_value = None
     queries.resources.return_value = None
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        event = await client.post(PREFIX + "/ajob_other/events/21/content", headers=ADMIN)
         resources = await client.get(PREFIX + "/ajob_other/attempts/11/resources", headers=ADMIN)
-    assert event.status_code == resources.status_code == 404
+    assert resources.status_code == 404
     store.record_admin_action.assert_not_awaited()
 
 
@@ -500,34 +428,10 @@ async def test_invalid_or_unbounded_queries_are_rejected_before_store_reads(setu
     queries.list_runs.assert_not_awaited()
 
 
-@pytest.mark.parametrize("field", ["snapshot_id", "attempt_id", "attempt_no", "seq"])
-async def test_cursor_integer_overflow_is_rejected_before_sql(setup, field):
-    app, queries, _, _ = setup
-    raw = {
-        "version": 1,
-        "scope": cursor_scope(["ajob_other", None]),
-        "snapshot_id": 100,
-        "attempt_id": 10,
-        "attempt_no": 1,
-        "seq": 1,
-    }
-    raw[field] = 10**100
-    cursor = base64.urlsafe_b64encode(json.dumps(raw).encode()).decode()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get(
-            PREFIX + "/ajob_other/activity", params={"cursor": cursor}, headers=ADMIN
-        )
-    assert response.status_code == 422
-    queries.get_run.assert_not_awaited()
-    queries.activity.assert_not_awaited()
-
-
 @pytest.mark.parametrize(
     "method,path",
     [
-        ("GET", f"/ajob_other/activity?attempt_id={2**63}"),
         ("GET", f"/ajob_other/attempts/{2**63}/resources"),
-        ("POST", f"/ajob_other/events/{2**63}/content"),
     ],
 )
 async def test_path_and_query_identity_overflow_never_reaches_sql(setup, method, path):
@@ -543,7 +447,7 @@ def test_admin_observation_routes_are_registered_only_on_the_control_plane():
     control = create_app().openapi()["paths"]
     relay = create_mcp_app().openapi()["paths"]
     paths = {path for path in control if path.startswith(PREFIX)}
-    assert len(paths) == 7
+    assert len(paths) == 3
     assert not paths.intersection(relay)
 
 
@@ -560,3 +464,16 @@ async def test_resource_read_preserves_the_measured_cpu_quota_and_nested_window(
     assert summary["cpu"]["capacity_cores"] == 2.0
     assert summary["window"]["duration_ms"] == 130_000
     assert "duration_ms" not in summary
+
+
+@pytest.mark.parametrize("external", [False, True])
+async def test_admin_usage_preserves_the_turns_provider_source(setup, external):
+    """Whether the owner's provider bills the turn survives; which connection does not."""
+    app, queries, _store, _ = setup
+    connection = "mconn_" + "a" * 32
+    queries.get_run.return_value["model_connection_id"] = connection if external else None
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(PREFIX + "/ajob_other", headers=ADMIN)
+    assert response.status_code == 200
+    assert response.json()["usage"]["external_provider"] is external
+    assert connection not in response.json()["usage"].__repr__()

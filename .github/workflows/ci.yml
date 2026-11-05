@@ -135,26 +135,32 @@ jobs:
             backend=false
           fi
 
-          # Web: the app itself.
-          if matches '^apps/frontend/'; then web=true; else web=false; fi
+          # Web: the app itself, and the backend's OpenAPI snapshot its client
+          # tests check their requests against.
+          if matches '^(apps/frontend/|apps/backend/openapi.json$)'; then
+            web=true
+          else
+            web=false
+          fi
 
           # Every source input to a release image must select image checks.
           # Tests derive COPY inputs from every artifact's Dockerfile, including
           # control-only code and migrations. .dockerignore changes every build
           # context even though no Dockerfile explicitly COPYs it. External
           # integration tests also select the jobs that provide their images.
-          if matches '^(deploy/|apps/backend/|apps/frontend/|migrations/|tests/external/)' \
-             || matches '^(pyproject\.toml|uv\.lock|README\.md|LICENSE|alembic\.ini|\.dockerignore)$'; then
+          if matches '^(deploy/|apps/backend/|apps/frontend/|tests/external/)' \
+             || matches '^(pyproject\.toml|uv\.lock|README\.md|LICENSE|\.dockerignore)$'; then
             docker=true
           else
             docker=false
           fi
 
-          # Docs: the site's sources, any Markdown file a page includes or
-          # links to, and the locked Sphinx toolchain and the target that runs it.
+          # Docs: the site's sources and translations, any Markdown file a
+          # page includes or links to, and the locked Sphinx toolchain, the
+          # target that runs it and the translation checker.
           if matches '\.md$' \
              || matches '^docs/developer/' \
-             || matches '^(pyproject\.toml|uv\.lock|Makefile)$'; then
+             || matches '^(pyproject\.toml|uv\.lock|Makefile|scripts/check_docs_translations\.py)$'; then
             docs=true
           else
             docs=false
@@ -171,11 +177,11 @@ jobs:
           # Keep backend's sandbox: MCP parity runs backend/host code against it.
           image_scope=all
           image_files="$(printf '%s\n' "${files}" | grep -E \
-            '^(deploy/|apps/backend/|apps/frontend/|migrations/|tests/external/|\.github/workflows/|scripts/ci_image_matrix\.py$|pyproject\.toml$|uv\.lock$|README\.md$|LICENSE$|alembic\.ini$|\.dockerignore$)' || true)"
+            '^(deploy/|apps/backend/|apps/frontend/|tests/external/|\.github/workflows/|scripts/ci_image_matrix\.py$|pyproject\.toml$|uv\.lock$|README\.md$|LICENSE$|\.dockerignore$)' || true)"
           if [ "${docker}" = true ] && [ -n "${image_files}" ]; then
             if ! printf '%s\n' "${image_files}" | grep -vE '^apps/frontend/' | grep . >/dev/null; then
               image_scope=web
-            elif ! printf '%s\n' "${image_files}" | grep -vE '^(apps/backend/|migrations/|alembic\.ini$)' | grep . >/dev/null; then
+            elif ! printf '%s\n' "${image_files}" | grep -vE '^apps/backend/' | grep . >/dev/null; then
               image_scope=backend
             fi
           fi
@@ -268,11 +274,6 @@ jobs:
         continue-on-error: true
         run: uv run ruff check --no-fix .
 
-      - name: Pydocstyle
-        id: pydocstyle
-        continue-on-error: true
-        run: uv run pydocstyle apps/backend/cloud_agent apps/backend/cloud_agent_host apps/backend/cloud_agent_shared
-
       # Blocking, and the store is inside it on purpose: a checker that cannot
       # see the class it validates callers against proves nothing about the
       # wiring, which is the point of cloud_agent/ports. Scope and strictness
@@ -290,7 +291,6 @@ jobs:
           RESULTS: >-
             ruff-format=${{ steps.ruff_format.outcome }}
             ruff-lint=${{ steps.ruff_lint.outcome }}
-            pydocstyle=${{ steps.pydocstyle.outcome }}
             mypy=${{ steps.mypy.outcome }}
         run: |
           set -euo pipefail
@@ -367,7 +367,39 @@ jobs:
           fi
           uv run pytest -n 4 --dist loadfile -q -m "not external and not dbtest" "${paths[@]}"
 
-      # The external checks below run once per commit, in the first shard.
+  # The checks that need a real Docker, systemd or the sandbox's own CLI.
+  # They ran after pytest in the first `test` shard and were most of its time
+  # (pytest 2.5 min, these 3.5 min), so the whole of CI waited on them in series.
+  # A job of their own runs them beside pytest. Like `test`, it runs whatever
+  # changed, and once per commit: it has no shards.
+  test-docker:
+    name: Real Docker checks
+    needs: changes
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Isolate uv and npm cache dirs
+        run: |
+          echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
+          echo "npm_config_cache=${RUNNER_TEMP}/npm-cache" >> "${GITHUB_ENV}"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          prune-cache: false
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
       # Each test skips when what this job hands it is missing, and pytest
       # calls a run that only skipped a success, so every external step in this
       # workflow keeps a junit report and `scripts/ci_tests_ran.py` fails the
@@ -376,7 +408,6 @@ jobs:
       # A single OS user cannot reproduce a sibling CLI's 0700 process registry.
       # Check the real normalizer across Linux UIDs before allowing deployment.
       - name: Shared member permissions survive a sibling CLI restart
-        if: matrix.shard == 1
         timeout-minutes: 5
         env:
           AGENT_PERMISSION_TEST_IMAGE: python:3.12-slim
@@ -387,17 +418,76 @@ jobs:
             --junitxml="${RUNNER_TEMP}/shared-member-permissions.xml"
           uv run python scripts/ci_tests_ran.py "${RUNNER_TEMP}/shared-member-permissions.xml"
 
+      # Moving a Host is systemd, sshd's forced command, rsync and Docker's
+      # on-disk state between two machines. Unit doubles replace all of them.
+      # Run the control plane's own steps over SSH between two systemd nodes.
+      #
+      # Their image apt-installs systemd, Docker and sshd from Ubuntu's mirror.
+      # When the test built it, the build used up the test's whole 300s pytest
+      # timeout before the move began (#985), most likely on a slow mirror.
+      # Built here, within a limit of its own, the image takes as long as the
+      # mirror needs, a broken build fails under this step's name, and the
+      # test's own build then takes every layer from the cache.
+      - name: Build the node image for the Host move
+        timeout-minutes: 15
+        run: docker build -t cloud-agent-test-compute-node:local tests/external/compute_node
+
+      - name: A Host moves between two nodes over SSH
+        timeout-minutes: 10
+        env:
+          AGENT_HOST_NODE_TEST_IMAGE: alpine:3.20
+        run: |
+          set -euo pipefail
+          docker pull "${AGENT_HOST_NODE_TEST_IMAGE}"
+          uv run pytest -q -m external tests/external/test_host_move_out_two_nodes.py \
+            --junitxml="${RUNNER_TEMP}/host-move-out.xml"
+          uv run python scripts/ci_tests_ran.py "${RUNNER_TEMP}/host-move-out.xml"
+
+      # A checkpoint commits the container whole, the Sandbox Manager's own
+      # markers included. Unit doubles never do, so a restore that every unit
+      # test passed failed on staging. Commit, load and start one for real.
+      - name: A restored chat starts from its checkpoint
+        timeout-minutes: 5
+        env:
+          AGENT_RESTORE_TEST_IMAGE: python:3.12-slim
+        run: |
+          set -euo pipefail
+          docker pull "${AGENT_RESTORE_TEST_IMAGE}"
+          uv run pytest -q -m external tests/external/test_checkpoint_restore_roundtrip.py \
+            --junitxml="${RUNNER_TEMP}/checkpoint-restore.xml"
+          uv run python scripts/ci_tests_ran.py "${RUNNER_TEMP}/checkpoint-restore.xml"
+
+      # Release runs its node scripts against a Docker that restarts the
+      # runner and removes containers while they are read. Unit doubles do
+      # neither, so release passed them all and refused on staging. Run the
+      # same scripts on a Docker-in-Docker node of their own.
+      #
+      # Every test starts its own node and loads the base image into it, about
+      # twenty seconds before the test begins; one after another the eight took
+      # 173s. Nodes share nothing but the image they are built from, so `-n 4
+      # --dist load` hands the tests to four workers (loadfile would keep each
+      # file on one).
+      - name: A released node stops its runner and inventories clean
+        timeout-minutes: 8
+        env:
+          AGENT_HOST_NODE_TEST_IMAGE: alpine:3.20
+        run: |
+          set -euo pipefail
+          docker pull "${AGENT_HOST_NODE_TEST_IMAGE}"
+          uv run pytest -q -n 4 --dist load -m external tests/external/test_host_release_real_docker.py \
+            tests/external/test_stopped_network_release.py \
+            --junitxml="${RUNNER_TEMP}/host-release.xml"
+          uv run python scripts/ci_tests_ran.py "${RUNNER_TEMP}/host-release.xml"
+
       # Completion can precede the native CLI's history flush. Unit doubles
       # cannot catch that race; exercise the shipped pin before CI can deploy.
       # Inference is a loopback protocol fixture, with no API key or model cost.
       - name: Set up Node for native CLI regression
-        if: matrix.shard == 1
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Install the sandbox's pinned Claude CLI
-        if: matrix.shard == 1
         run: |
           set -euo pipefail
           version=$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' deploy/sandbox/Dockerfile.agent-sandbox)
@@ -407,7 +497,6 @@ jobs:
           echo "CLOUD_AGENT_TEST_CLAUDE_BINARY=${RUNNER_TEMP}/claude-context/node_modules/.bin/claude" >> "${GITHUB_ENV}"
 
       - name: Install the sandbox's pinned Claude SDK
-        if: matrix.shard == 1
         run: |
           set -euo pipefail
           version=$(sed -n 's/^[[:space:]]*org\.freeinference\.helper\.claude-agent-sdk\.version="\([^"]*\)".*/\1/p' deploy/sandbox/Dockerfile.agent-sandbox)
@@ -423,7 +512,6 @@ jobs:
       # port — `FakeAnthropicGateway` binds port 0 — so there is nothing for
       # parallel workers to collide over.
       - name: Native history survives close, restore and failed-turn retry
-        if: matrix.shard == 1
         timeout-minutes: 10
         env:
           PYTHONPATH: ${{ runner.temp }}/claude-context-sdk
@@ -630,39 +718,10 @@ jobs:
       # it cannot reach turns a broken service container into a passing job,
       # and a `pytest -m` that silently matches nothing exits 0 too. Neither is
       # distinguishable from success in the check list, so assert the shape of
-      # the run rather than trusting its exit code.
+      # the run rather than trusting its exit code. The floor is not the exact
+      # count, so adding tests never fails it.
       - name: The tier actually ran
-        run: |
-          uv run python - <<'PY'
-          import os, sys, xml.etree.ElementTree as ET
-
-          root = ET.parse(os.environ["RUNNER_TEMP"] + "/dbtest.xml").getroot()
-          suite = root if root.tag == "testsuite" else root.find("testsuite")
-          ran = int(suite.get("tests", 0))
-
-          # Per-testcase, not the suite's `skipped` attribute: junit counts an
-          # xfail as a skip, although an xfail ran. Only type="pytest.skip" is a
-          # test that declined to run, which is what a database-less run
-          # produces.
-          skipped = [
-              tc.get("name")
-              for tc in suite.iter("testcase")
-              for sk in tc.findall("skipped")
-              if sk.get("type") == "pytest.skip"
-          ]
-          print(f"dbtest: {ran} collected, {len(skipped)} skipped")
-
-          # A floor, not the exact count, so adding tests never fails this. It
-          # only has to be high enough that a database-less run cannot clear
-          # it — that run skips all of them.
-          if ran < 100:
-              sys.exit(f"only {ran} dbtests ran; the tier is not being selected")
-          if skipped:
-              sys.exit(
-                  f"{len(skipped)} dbtests skipped — the fixtures skip when Postgres "
-                  f"is unreachable, so this job proved nothing: {skipped[:5]}"
-              )
-          PY
+        run: uv run python scripts/ci_tests_ran.py --min 100 --running-skips-only "${RUNNER_TEMP}/dbtest.xml"
   # -------------------------------------------------------------------- web
   # Two jobs: the checks, and the builds. The checks stay together for the
   # reason spelled out over `lint` above — and more sharply here, because Node
@@ -813,23 +872,52 @@ jobs:
         working-directory: ./apps/frontend
         run: node scripts/check-server-only-guard.mjs
 
-      # Builds both web variants — root and `/agents` — and boots each under
-      # two runtime environments. A unit test cannot see this: the failure
+      # Builds the web app and boots it under two runtime environments. A unit test cannot see this: the failure
       # being guarded against is configuration resolved at `next build` and
       # frozen into the bundle, and only the built server can show whether
       # that happened. See the script's header for the full list of
-      # assertions, including the sign-in and asset prefixes per variant.
+      # assertions.
       - name: Runtime site config
         id: runtime-config
         continue-on-error: true
         working-directory: ./apps/frontend
         run: node scripts/check-runtime-site-config.mjs
 
+      - name: Browser recovery regressions
+        id: browser
+        continue-on-error: true
+        working-directory: ./apps/frontend
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright
+          # Runtime site config intentionally leaves a verified root artifact.
+          CLOUD_AGENT_E2E_SKIP_BUILD: '1'
+        run: |
+          set -euo pipefail
+          # Only disposable hosted runners may install OS packages. Shared
+          # runners must have Chromium's runtime libraries provisioned already.
+          if [ "${{ runner.environment }}" = github-hosted ]; then
+            npx playwright install --with-deps chromium
+          else
+            npx playwright install chromium
+          fi
+          npm run test:browser
+
+      - name: Browser failure evidence
+        if: always() && steps.browser.outcome == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: browser-recovery-failure
+          path: |
+            apps/frontend/test-results/**
+            apps/frontend/playwright-report/**
+          retention-days: 7
+
       - name: Every check passed
         env:
           RESULTS: >-
             server-only=${{ steps.server-only.outcome }}
             runtime-config=${{ steps.runtime-config.outcome }}
+            browser=${{ steps.browser.outcome }}
         run: |
           set -euo pipefail
           failed=0
@@ -1534,16 +1622,12 @@ jobs:
           COMPOSE_PROJECT=freeinference-cloud-agent-sandbox-ci
           AGENT_SANDBOX_MANAGER_TOKEN=ci-placeholder-sandbox-manager-token
           AGENT_SANDBOX_IMAGE=cloud-agent-sandbox:ci
-          AGENT_GATEWAY_URL=http://agent-gateway:8080
-          AGENT_TUNNEL_SSH_DESTINATION=ci@gateway.invalid
-          AGENT_TUNNEL_SSH_KEY=/dev/null
-          AGENT_TUNNEL_SSH_KNOWN_HOSTS=/dev/null
           AGENT_MCP_TUNNEL_SSH_DESTINATION=ci@control-plane.invalid
           AGENT_MCP_TUNNEL_SSH_KEY=/dev/null
           AGENT_MCP_TUNNEL_SSH_KNOWN_HOSTS=/dev/null
-          # The third tunnel: the runner's own path to the control plane's main
-          # listener. Its own key, like the other two — one key opening both
-          # this and the MCP tunnel would make the 8000/8001 split cosmetic.
+          # The runner's own path to the control plane's main listener. Its own
+          # key: one key opening both this and the MCP tunnel would make the
+          # 8000/8001 split cosmetic.
           AGENT_CONTROL_PLANE_TUNNEL_SSH_DESTINATION=ci@control-plane.invalid
           AGENT_CONTROL_PLANE_TUNNEL_SSH_KEY=/dev/null
           AGENT_CONTROL_PLANE_TUNNEL_SSH_KNOWN_HOSTS=/dev/null
@@ -1552,9 +1636,11 @@ jobs:
           AGENT_EGRESS_CHAT_NETWORK_POOL=10.240.0.0/16
           AGENT_EGRESS_DNS_SERVER=192.0.2.53
           ENVFILE
+          # With the GitHub relay's profile, so its tunnel is part of what is checked.
           docker compose \
             -f deploy/host/docker-compose.sandbox.yml \
             --env-file .env \
+            --profile github-relay \
             config > ${RUNNER_TEMP}/rendered.yml
           echo "--- rendered services ---"
           docker compose -f ${RUNNER_TEMP}/rendered.yml config --services
@@ -1566,11 +1652,7 @@ jobs:
           set -euo pipefail
           cat > .env.control-plane <<'ENVFILE'
           AGENT_DATABASE_URL=postgresql://cloudagent:ci@postgres:5432/cloudagent
-          GATEWAY_BASE_URL=https://gateway.invalid
-          GATEWAY_ISSUER=https://gateway.invalid
-          GATEWAY_JWKS_URL=https://gateway.invalid/v1/identity/jwks
-          GATEWAY_GRANT_DISPATCH_TOKEN=ci-placeholder-dispatch-token-not-a-real-secret
-          AGENT_SESSION_SECRET=ci-placeholder-value-not-a-real-secret
+          AGENT_LOCAL_SESSION_SECRET=ci-placeholder-account-key-not-a-real-secret-32b
           AGENT_SETTINGS_ENCRYPTION_KEY=ci-settings-root-key-not-a-real-secret
           ADMIN_TOKEN=ci-administrator-recovery-not-a-real-secret
           AGENT_CONTROL_TOKEN_SECRET=ci-placeholder-value-not-a-real-secret
@@ -1578,21 +1660,9 @@ jobs:
           AGENT_DEPLOYMENT_SHA=ci-deployment-sha
           AGENT_POSTGRES_PASSWORD=ci-placeholder
           AGENT_SANDBOX_MANAGER_TOKEN=ci-placeholder-sandbox-manager-token
-          # Sign-in is assembled server-side now, so the control plane needs
-          # the consent page, its own callback as the gateway must see it
-          # (byte-identical to an IDENTITY_ALLOWED_REDIRECTS entry there),
-          # and where to land the browser afterwards.
-          GATEWAY_AUTHORIZE_URL=https://gateway.invalid/authorize
-          AGENT_SESSION_REDIRECT_URI=https://agents.invalid/agents/api/v1/session/callback
-          AGENT_WEB_BASE_URL=https://agents.invalid/agents
-          # The web build arguments are required rather than defaulted to
-          # empty: empty is a real answer for a deployment that owns its
-          # hostname and silently wrong for one mounted under a prefix, and
-          # the difference does not show at start. Their presence here is
-          # part of what this step checks.
-          AGENT_WEB_BASE_PATH=/agents
-          AGENT_WEB_API_URL=/agents/api
-          AGENT_WEB_GATEWAY_URL=https://gateway.invalid
+          # Account mail links and MCP OAuth callbacks are built from these two.
+          AGENT_PUBLIC_API_URL=https://agents.invalid/api
+          AGENT_WEB_BASE_URL=https://agents.invalid
           ENVFILE
           docker compose \
             -f deploy/control-plane/docker-compose.yml \
@@ -1628,7 +1698,7 @@ jobs:
         run: |
           set -euo pipefail
           cp .env.control-plane .env.setup
-          for imported in AGENT_SESSION_SECRET AGENT_CONTROL_TOKEN_SECRET AGENT_SOURCE_CONTROL_ENCRYPTION_KEY AGENT_SANDBOX_MANAGER_TOKEN GATEWAY_ISSUER GATEWAY_JWKS_URL; do
+          for imported in AGENT_CONTROL_TOKEN_SECRET AGENT_SOURCE_CONTROL_ENCRYPTION_KEY AGENT_SANDBOX_MANAGER_TOKEN; do
             sed -i "/^${imported}=/d" .env.setup
           done
           docker compose -f deploy/control-plane/docker-compose.yml \
@@ -1638,9 +1708,8 @@ jobs:
           stack = yaml.safe_load(open(os.environ["RUNNER_TEMP"] + "/setup.yml"))
           for name in ("control-plane", "mcp-relay"):
               env = stack["services"][name]["environment"]
-              for key in ("AGENT_SESSION_SECRET", "AGENT_CONTROL_TOKEN_SECRET",
-                          "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "AGENT_SANDBOX_MANAGER_TOKEN",
-                          "GATEWAY_ISSUER", "GATEWAY_JWKS_URL"):
+              for key in ("AGENT_CONTROL_TOKEN_SECRET",
+                          "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "AGENT_SANDBOX_MANAGER_TOKEN"):
                   assert not env.get(key), f"{name} supplied a default for {key}"
               assert env["AGENT_SETTINGS_ENCRYPTION_KEY"]
           print("setup can start without runtime keys; no default credentials are supplied")
@@ -1662,15 +1731,16 @@ jobs:
           if not relays.get("internal"):
               failures.append("agent-relays is not internal — the discovery network would have a route out")
 
-          # Named, not counted. Lifecycle attaches every relay it finds here to
-          # each sandbox group's bridge; a check that only counted them would
-          # pass on a stack where one had been swapped for something broader.
+          # Named, not counted. Lifecycle attaches what it finds here to each
+          # sandbox group's bridge; a check that only counted them would pass
+          # on a stack where one had been swapped for something broader.
           on_relays = {
               name
               for name, svc in stack["services"].items()
               if "agent-relays" in (svc.get("networks") or {})
           }
-          if on_relays != {"gateway-tunnel", "mcp-tunnel"}:
+          # The GitHub relay's tunnel is the second, rendered with its profile.
+          if on_relays != {"mcp-tunnel", "github-tunnel"}:
               failures.append(f"unexpected services on the relay network: {sorted(on_relays)}")
 
           # Either process may build or wake a group, so both must build the
@@ -1791,7 +1861,8 @@ jobs:
   # ------------------------------------------------------------------- docs
   # The developer documentation in docs/developer/ builds with warnings as
   # errors, so a broken link, a missing anchor or a page left out of the table
-  # of contents fails here rather than on the published site.
+  # of contents fails here rather than on the published site. The same target
+  # then checks the translations, which fall back to English silently.
   docs-build:
     name: Docs Build
     needs: changes
@@ -1822,16 +1893,19 @@ jobs:
       - name: Set up Python
         run: uv python install ${{ env.PYTHON_VERSION }}
 
-      # --only-group: the build needs Sphinx, myst-parser and the theme from
-      # the `dev` group, never the application or its runtime dependencies.
+      # --only-group: the build needs Sphinx, myst-parser, the theme and jieba
+      # from the `dev` group, never the application or its runtime dependencies.
       - name: Sync dependencies
         run: uv sync --locked --only-group dev
 
-      # Through the Makefile, so this job and a contributor's `make docs` run
-      # the same command. --no-sync keeps `uv run` from re-syncing the full
-      # project closure the step above deliberately left out.
-      - name: Build developer docs
-        run: make docs UV_RUN="uv run --no-sync"
+      # Through the Makefile, so this job and a contributor's `make docs-verify`
+      # run the same commands: `make docs` (every published language), then the
+      # translation check, which catches a stale, missing or dropped
+      # translation that -W cannot see. --no-sync keeps `uv run` from
+      # re-syncing the full project closure the step above deliberately left
+      # out.
+      - name: Build developer docs and verify translations
+        run: make docs-verify UV_RUN="uv run --no-sync"
 
   ci-gate:
     name: CI Gate
@@ -1844,6 +1918,7 @@ jobs:
       - changes
       - lint
       - test
+      - test-docker
       - test-db
       - check
       - web-build
@@ -1865,6 +1940,7 @@ jobs:
             changes=${{ needs.changes.result }}
             lint=${{ needs.lint.result }}
             test=${{ needs.test.result }}
+            test-docker=${{ needs.test-docker.result }}
             test-db=${{ needs.test-db.result }}
             web=${{ needs.check.result }}
             web-build=${{ needs.web-build.result }}

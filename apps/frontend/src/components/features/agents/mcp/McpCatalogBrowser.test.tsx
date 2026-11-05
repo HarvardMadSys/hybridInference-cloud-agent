@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { McpCatalogBrowser } from './McpCatalogBrowser';
 import { listMcpCatalog, previewMcpImport, saveMcpImport, type McpCatalogApi } from '@/lib/api/mcp';
+import { chooseOption } from '@/components/ui/__tests__/select';
 
 vi.mock('@/lib/api/mcp', () => ({
   listMcpCatalog: vi.fn(),
@@ -90,9 +91,9 @@ it('uses fetched publisher metadata and reviews generated configuration before a
 it('keeps endpoint selection and token configuration explicit', async () => {
   show();
   fireEvent.click(await screen.findByRole('button', { name: 'Docs' }));
-  fireEvent.change(screen.getByLabelText('Connection method'), { target: { value: '1' } });
+  chooseOption(screen.getByLabelText('Connection method'), 'Second endpoint');
   expect(screen.getByLabelText('MCP configuration')).toHaveValue(config.replace('/mcp', '/other'));
-  fireEvent.change(screen.getByLabelText('Authentication'), { target: { value: 'token' } });
+  chooseOption(screen.getByLabelText('Authentication'), 'Bearer access token');
   const body = JSON.parse(
     (screen.getByLabelText('MCP configuration') as HTMLTextAreaElement).value,
   );

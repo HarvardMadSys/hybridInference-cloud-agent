@@ -41,6 +41,7 @@ import {
 } from 'react';
 
 import { getAgentRunnerHosts, type AgentRunnerHost } from '@/lib/api/admin';
+import { Select } from '@/components/ui/Select';
 import {
   getProfilingControl,
   measurementOperationsFor,
@@ -61,7 +62,7 @@ const IDLE_POLL_MS = 30000;
 /** The countdown is local between polls, so it has to tick on its own. */
 const TICK_MS = 1000;
 
-/** The `<select>` value for "All hosts"; the API takes a null target for it. */
+/** The host select's value for "All hosts"; the API takes a null target for it. */
 const ALL_HOSTS = '\u0000all-hosts';
 
 const OPERATION_GROUPS: { group: MeasurementOperationGroup; label: string }[] = [
@@ -631,21 +632,18 @@ export function MeasurementControlPanel({
             >
               Host
             </label>
-            <select
+            <Select
               id="measurement-target-host"
               className={`${INPUT} mt-1 py-1.5`}
               value={host}
               disabled={busy}
-              onChange={(event) => setHost(event.target.value)}
-            >
-              <option value="">Choose a host…</option>
-              <option value={ALL_HOSTS}>All hosts</option>
-              {(hosts ?? []).map((option) => (
-                <option key={option.host} value={option.host}>
-                  {option.host}
-                </option>
-              ))}
-            </select>
+              onValueChange={setHost}
+              options={[
+                { value: '', label: 'Choose a host…' },
+                { value: ALL_HOSTS, label: 'All hosts' },
+                ...(hosts ?? []).map((option) => ({ value: option.host, label: option.host })),
+              ]}
+            />
           </div>
 
           <div className="flex items-center gap-2">

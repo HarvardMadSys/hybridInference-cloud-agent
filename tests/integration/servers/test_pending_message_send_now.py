@@ -823,3 +823,64 @@ async def test_a_report_for_a_message_no_longer_waiting_is_still_recorded_once(a
     assert [row["prompt"] for row in (await api.queue(thread_id))["messages"]] == [
         "also check the docs"
     ]
+
+
+_CONN_A = "mconn_" + "a" * 32
+_CONN_B = "mconn_" + "b" * 32
+
+
+@pytest.mark.parametrize(
+    ("message", "live", "steers"),
+    [
+        # No model named: it inherits the live turn's, whatever its source.
+        ((None, None), ("glm-5.1", None), True),
+        ((None, None), ("glm-5.1", _CONN_A), True),
+        # The same model from the same source.
+        (("glm-5.1", None), ("glm-5.1", None), True),
+        (("glm-5.1", _CONN_A), ("glm-5.1", _CONN_A), True),
+        # The same id from another source is another choice, billed elsewhere.
+        (("glm-5.1", _CONN_A), ("glm-5.1", None), False),
+        (("glm-5.1", None), ("glm-5.1", _CONN_A), False),
+        (("glm-5.1", _CONN_B), ("glm-5.1", _CONN_A), False),
+        # Another model from the same source.
+        (("glm-4.6", None), ("glm-5.1", None), False),
+    ],
+)
+async def test_a_message_never_steers_into_a_turn_on_another_model_or_source(
+    api, monkeypatch, message, live, steers
+):
+    """F3: the storage boundary refuses it; the message waits for its own turn."""
+    await _steerable(api)
+    sandbox_manager = _SandboxManager()
+    _route_input_to(monkeypatch, sandbox_manager)
+    job, thread_id, _running, waiting = await _waiting_behind_a_running_turn(api)
+    async with api.pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_jobs SET model = $2, model_connection_id = $3 WHERE id = $1",
+            job["id"],
+            *live,
+        )
+        revision = await conn.fetchval(
+            "UPDATE agent_pending_messages SET model = $2, model_connection_id = $3 "
+            "WHERE id = $1 RETURNING revision",
+            waiting["id"],
+            *message,
+        )
+
+    sent = await _send_now(api, thread_id, {**waiting, "revision": revision})
+
+    if steers:
+        assert sent.status_code == 200, sent.text
+        assert len(sandbox_manager.calls) == 1
+        return
+    assert sent.status_code == 409, sent.text
+    assert sent.json()["detail"]["error"]["type"] == "send_now_model_mismatch"
+    assert sandbox_manager.calls == []
+    async with api.pool.acquire() as conn:
+        kept = await conn.fetchrow(
+            "SELECT state, model, model_connection_id, send_now_job_id "
+            "FROM agent_pending_messages WHERE id = $1",
+            waiting["id"],
+        )
+    # Still waiting for its own turn, on its own model and source.
+    assert tuple(kept) == ("queued", *message, None)

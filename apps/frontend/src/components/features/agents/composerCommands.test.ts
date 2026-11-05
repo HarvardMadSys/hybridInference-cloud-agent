@@ -1,7 +1,12 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
 
-import { composerCommandMatches, composerCommandQuery, parseGoalCommand } from './composerCommands';
+import {
+  composerCommandMatches,
+  composerCommandQuery,
+  parseContextCommand,
+  parseGoalCommand,
+} from './composerCommands';
 
 // The composer takes prose and commands in the same box, so the rule that tells
 // them apart is the whole feature. Every case here is a message someone could
@@ -60,10 +65,19 @@ describe('parseGoalCommand', () => {
 });
 
 describe('composerCommandMatches', () => {
-  it('offers the command from the first slash, and narrows as it is typed', () => {
-    for (const typed of ['/', '/g', '/go', '/goa', '/goal', '/GOAL']) {
+  it('offers the commands from the first slash, and narrows as it is typed', () => {
+    expect(composerCommandMatches('/').map((command) => command.name)).toEqual(['goal', 'context']);
+    for (const typed of ['/g', '/go', '/goa', '/goal', '/GOAL']) {
       expect(composerCommandMatches(typed).map((command) => command.name)).toEqual(['goal']);
     }
+    for (const typed of ['/c', '/con', '/context', '/CONTEXT']) {
+      expect(composerCommandMatches(typed).map((command) => command.name)).toEqual(['context']);
+    }
+  });
+
+  it('offers only the commands a composer wires', () => {
+    expect(composerCommandMatches('/', ['goal']).map((command) => command.name)).toEqual(['goal']);
+    expect(composerCommandMatches('/con', ['goal'])).toEqual([]);
   });
 
   it('stands down once the command has been chosen', () => {
@@ -88,5 +102,21 @@ describe('composerCommandMatches', () => {
   it('reads a partial name without its case', () => {
     expect(composerCommandQuery('  /Go')).toBe('go');
     expect(composerCommandQuery('/goal now')).toBeNull();
+  });
+});
+
+describe('parseContextCommand', () => {
+  it('is the whole first token, and hands back the rest of the draft', () => {
+    expect(parseContextCommand('/context')).toEqual({ rest: '' });
+    expect(parseContextCommand('  /CONTEXT  ')).toEqual({ rest: '' });
+    expect(parseContextCommand('/context fix the login bug\nthen test')).toEqual({
+      rest: 'fix the login bug\nthen test',
+    });
+  });
+
+  it('leaves prose that only mentions it alone', () => {
+    expect(parseContextCommand('/contexts')).toBeNull();
+    expect(parseContextCommand('explain /context')).toBeNull();
+    expect(parseContextCommand('```\n/context\n```')).toBeNull();
   });
 });

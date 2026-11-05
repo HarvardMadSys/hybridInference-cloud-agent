@@ -27,56 +27,23 @@ import subprocess
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
-from cloud_agent_host.bounded_output import TextTail, protocol_lines, text_chunks
+from cloud_agent_host.bounded_output import TextTail, byte_chunks, protocol_lines, text_chunks
+from cloud_agent_host.docker_engine import DockerEngine, engine_from_env
 from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_host.runtime_images import DownloadedVersions
 from cloud_agent_shared.egress import SandboxNetwork, network_from_env
 from cloud_agent_shared.errors import SandboxError
+from cloud_agent_shared.shared_protocol import HOST_VERSION_MENU_MAX_ITEMS
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Collection, Iterator, Mapping
+    from typing import IO
 
     from cloud_agent_host.network_guard import HostNetworkGuard
 
 logger = get_logger(__name__)
-
-# Run inside one ephemeral preflight probe on the relay discovery network,
-# with $1 = the URL to probe and $2 = its hostname. Prints exactly one verdict.
-#
-# curl and python3 are both in the shipped sandbox image; a deployment-owned
-# image might have neither, and "dns-only" says so rather than letting a
-# weaker check pass for the same thing. Any HTTP status counts as reachable —
-# the question is whether packets arrive, not what the gateway makes of them.
-_GATEWAY_PROBE_SH = """
-url="$1"; host="$2"
-if command -v curl >/dev/null 2>&1; then
-    # Captured immediately: after an `if`, $? is the compound statement's own
-    # status, not curl's, and every failure would read as the same verdict.
-    curl -sS -o /dev/null --max-time 15 "$url"; rc=$?
-    # 6 is curl's "could not resolve host"; everything else got that far.
-    if [ "$rc" -eq 0 ]; then echo ok
-    elif [ "$rc" -eq 6 ]; then echo unresolved
-    else echo unreachable; fi
-    exit 0
-fi
-if command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import socket, sys, urllib.error, urllib.request
-try:
-    urllib.request.urlopen(sys.argv[1], timeout=15)
-except urllib.error.HTTPError:
-    print("ok")
-except urllib.error.URLError as exc:
-    print("unresolved" if isinstance(exc.reason, socket.gaierror) else "unreachable")
-except Exception:
-    print("unreachable")
-else:
-    print("ok")' "$url"
-    exit 0
-fi
-if getent hosts "$host" >/dev/null 2>&1; then echo dns-only; else echo unresolved; fi
-"""
 
 # There is no default image, deliberately. Upstream publishes none, and an
 # unqualified name is not an inert placeholder: `docker run hybridinference/
@@ -115,8 +82,17 @@ HELPER_VERSION_LABEL_SUFFIX = ".version"
 #: Where `deploy/sandbox/install-runtimes.sh` puts every version it installs.
 #: Selecting one is a PATH prepend and nothing more: all five CLIs resolve
 #: their binary through PATH, so neither the adapters in ``runtimes.py`` nor
-#: the pi/opencode/kilo wrappers have to know a choice was made.
+#: the pi/opencode/kilo wrappers have to know a choice was made. Codex's launch
+#: then reads the npm install behind the ``codex`` PATH found, to start that
+#: version's native binary without its Node shim (``runtimes.codex``).
 RUNTIME_BIN_ROOT = "/opt/runtimes"
+
+#: How a version stamp reads the versions downloaded since the image was built
+#: (``ContainerBackend.version_stamp``): ``"recent"``, the menu this process
+#: last read, without waiting for Docker once it has one; ``"fresh"``, Docker
+#: read now; ``"skip"``, none of them — the image's own menu alone, and no
+#: Docker listing at all.
+DownloadsRead = Literal["recent", "fresh", "skip"]
 
 # Must match `useradd --uid` in deploy/sandbox/Dockerfile.agent-sandbox. The
 # retained container creates the workspace for this id, so a drift between the
@@ -188,6 +164,25 @@ def _split_menu(menu: str | None, default: str) -> list[str]:
     return offered
 
 
+def _bounded_menu(menu: list[str], own: int, needed: Collection[str]) -> list[str]:
+    """``menu`` cut to what a heartbeat or a claim may carry.
+
+    ``menu`` is the image's ``own`` versions, default first, then the ones
+    downloaded since, oldest first. What nothing needs is left off first:
+    downloaded versions, oldest first, then the image's own, from its tail.
+    A version that is ``needed`` (a target, or what a chat runs) goes only
+    when nothing else is left, in the same order. The default, at the head
+    of the image's own, always stays.
+    """
+    excess = len(menu) - HOST_VERSION_MENU_MAX_ITEMS
+    if excess <= 0:
+        return menu
+    order = [*range(own, len(menu)), *range(own - 1, 0, -1)]
+    order.sort(key=lambda at: menu[at] in needed)
+    left_off = set(order[:excess])
+    return [version for at, version in enumerate(menu) if at not in left_off]
+
+
 class TerminalNotSupportedError(SandboxError):
     """Raised when a backend cannot safely provide persistent terminals."""
 
@@ -220,6 +215,21 @@ class SandboxProcess(ABC):
     def chunks(self) -> Iterator[str]:
         """Yield bounded stdout chunks; line-only test adapters may reuse lines."""
         yield from self.lines()
+
+    def byte_chunks(self) -> Iterator[bytes]:
+        """Yield bounded stdout chunks as read, before decoding, so they can be counted.
+
+        A text-only adapter's chunks are encoded again, which gives back the
+        bytes of valid UTF-8; an adapter reading a pipe yields what it read.
+        """
+        for chunk in self.chunks():
+            yield chunk.encode()
+
+    @staticmethod
+    def _pipe_bytes(pipe: IO[str] | None) -> Iterator[bytes]:
+        """Read an adapter's pipe in bounded chunks of raw bytes."""
+        assert pipe is not None
+        yield from byte_chunks(pipe)
 
     @abstractmethod
     def kill(self) -> None:
@@ -325,13 +335,15 @@ class SandboxBackend(ABC):
         """Return trusted, owner-visible metadata for this execution backend."""
         return {"sandbox_backend": self.name}
 
-    def version_stamp(self) -> dict[str, Any]:
+    def version_stamp(self, *, downloads: DownloadsRead = "recent") -> dict[str, Any]:
         """What actually runs here, for the host heartbeat to report.
 
         Empty for backends with nothing to attest. The container backend
         reports its isolation runtime, image digest and the CLI versions baked
         into the image, so the control plane can stamp attempts with what
         executed them (issue #54) instead of trusting documentation.
+        ``downloads`` says how to read the versions downloaded since
+        (:data:`DownloadsRead`); a backend without any ignores it.
         """
         return {}
 
@@ -356,6 +368,15 @@ class SandboxBackend(ABC):
         Called before a job is claimed so a misconfigured host fails loudly
         instead of taking a job off the queue and burning one of its attempts.
         Backends with nothing to check inherit this no-op.
+        """
+        return
+
+    def adopt_rules_verification(self, payload: Mapping[str, Any]) -> None:
+        """Take the host's verification of its network rules from the turn it handed over.
+
+        Called in a turn's child before it accepts the turn. Only a backend
+        that enforces host network rules has one to take; the rest inherit
+        this no-op.
         """
         return
 
@@ -445,6 +466,9 @@ class _PopenProcess(SandboxProcess):
     def chunks(self) -> Iterator[str]:
         assert self._process.stdout is not None
         yield from text_chunks(self._process.stdout)
+
+    def byte_chunks(self) -> Iterator[bytes]:
+        yield from self._pipe_bytes(self._process.stdout)
 
     def kill(self) -> None:
         """Kill the child process."""
@@ -536,7 +560,7 @@ class ContainerBackend(SandboxBackend):
 
     Networking is fixed rather than chosen: every chat group gets its own
     routable bridge, guarded on the host by one rule set (public IPv4 TCP
-    80/443, the named resolver, the group's two relays, and nothing else; see
+    80/443, the named resolver, the group's MCP relay, and nothing else; see
     :mod:`cloud_agent_shared.egress`). ``sandbox_network`` carries this
     deployment's pool, resolver and relays; event reporting stays in the
     trusted runner.
@@ -554,13 +578,19 @@ class ContainerBackend(SandboxBackend):
         sandbox_network: SandboxNetwork | None = None,
         sandbox_namespace: str = "default",
         network_helper_image: str | None = None,
+        keep_network_helper: bool = False,
         uid: int = SANDBOX_UID,
         gid: int = SANDBOX_GID,
         home: str = SANDBOX_HOME,
+        engine: DockerEngine | None = None,
     ) -> None:
         self.image = image
         self.runtime = runtime
         self.docker_binary = docker_binary
+        # Answers the retained-chat manager's plain inspects from the daemon's
+        # socket (docker_engine). Only build_backend_from_env attaches one, and
+        # only where the CLI reaches that same socket; None runs the CLI.
+        self.engine = engine
         self.extra_args = extra_args or []
         # None only for a backend that never builds a group network: the
         # candidate check, and unit tests of unrelated behaviour.
@@ -570,7 +600,17 @@ class ContainerBackend(SandboxBackend):
         # process that runs outside a container (a benchmark, the external
         # network test) names one. Deliberately not an environment setting.
         self.network_helper_image = network_helper_image
+        # Whether the guard keeps a long-lived host-rule helper between steps.
+        # Only a process that outlives its steps asks for one: the runner's host
+        # service and the sandbox manager. A turn's own process ends with its
+        # turn, and the runner's first process, which would inherit the
+        # helper's client, reaps nothing.
+        self.keep_network_helper = keep_network_helper
         self._network_guard: HostNetworkGuard | None = None
+        # Set in a turn's child that holds its host service's verification of
+        # the rules (adopt_rules_verification); everywhere else the network
+        # check installs and reads them back itself.
+        self._rules_handed_over = False
         if not sandbox_namespace or "\x00" in sandbox_namespace or len(sandbox_namespace) > 128:
             raise ValueError("sandbox_namespace must be a non-empty value of at most 128 bytes")
         if sandbox_network is not None and sandbox_network.namespace != sandbox_namespace:
@@ -587,8 +627,11 @@ class ContainerBackend(SandboxBackend):
         self._version_stamp: dict[str, Any] | None = None
         # Versions an admin updated to after this image was built. Unlike the
         # labels these change while the process runs, so they are read again
-        # (briefly cached) rather than frozen into the stamp.
+        # (cached, and refreshed in the background) rather than frozen into
+        # the stamp.
         self.downloaded_versions = DownloadedVersions(docker_binary, sandbox_namespace)
+        # What the last stamp too long to report left off, per runtime.
+        self._left_off: dict[str, list[str]] = {}
         # Filled by preflight from a real container under the exact runtime
         # passed to jobs. Kept separate so an early image stamp cannot freeze
         # out the later kernel observation.
@@ -612,7 +655,7 @@ class ContainerBackend(SandboxBackend):
             metadata["sandbox_runtime"] = self.runtime
         return metadata
 
-    def version_stamp(self) -> dict[str, Any]:
+    def version_stamp(self, *, downloads: DownloadsRead = "recent") -> dict[str, Any]:
         """Report runtime, image, CLI versions and the preflight kernel probe.
 
         ``sandbox_runtime`` is always present and ``""`` is a positive
@@ -623,25 +666,83 @@ class ContainerBackend(SandboxBackend):
 
         Digest and versions degrade to empty on inspect failure rather than
         failing the heartbeat: liveness reporting must not come to depend on
-        the local image store answering.
+        the local image store answering. For the same reason no runtime's menu
+        is ever longer than the control plane accepts (:meth:`_bounded`).
+
+        Everything but the downloaded versions is read once per image. Those
+        are listed from Docker, which takes seconds on a host holding many
+        images, so ``downloads`` says how (:data:`DownloadsRead`): the beat
+        and the claim take the ``"recent"`` menu, which seldom waits for
+        Docker (``DownloadedVersions.versions``); a turn that needs only the
+        image's facts ``"skip"``s it; and a check about to fail a turn for a
+        version missing from what it holds asks for it ``"fresh"``.
         """
         if self._version_stamp is None:
             self._version_stamp = self._collect_version_stamp()
         stamp = {**self._version_stamp, **self._kernel_probe}
-        downloaded = self.downloaded_versions.versions()
-        if downloaded:
+        own = stamp.get("runtime_versions_available") or {}
+        menus = {runtime: list(versions) for runtime, versions in own.items()}
+        downloaded = (
+            {}
+            if downloads == "skip"
+            else self.downloaded_versions.versions(fresh=downloads == "fresh")
+        )
+        for runtime, versions in downloaded.items():
             # After the image's own menu, whose head is the default: a
             # downloaded version is offered, never what a job with no
             # selection runs.
-            menus = {
-                runtime: list(versions)
-                for runtime, versions in (stamp.get("runtime_versions_available") or {}).items()
-            }
-            for runtime, versions in downloaded.items():
-                menu = menus.setdefault(runtime, [])
-                menu.extend(version for version in versions if version not in menu)
-            stamp["runtime_versions_available"] = menus
+            menu = menus.setdefault(runtime, [])
+            menu.extend(version for version in versions if version not in menu)
+        stamp["runtime_versions_available"] = self._bounded(menus, own, report=downloads != "skip")
         return stamp
+
+    def _bounded(
+        self, menus: dict[str, list[str]], own: dict[str, list[str]], *, report: bool = True
+    ) -> dict[str, list[str]]:
+        """Each runtime's menu, no longer than the control plane accepts.
+
+        It refuses a longer one with the whole beat or claim, which takes this
+        host out of the pool. Downloaded versions nothing needs are removed
+        (``runtime_downloads``), so a menu meets the cap only when chats still
+        run many versions, or when that cleanup cannot run.
+
+        Only a menu that ``report``s what it left off — one with the
+        downloaded versions in it — says so in the log: an image's own menu
+        is not the menu this host offers.
+        """
+        if all(len(menu) <= HOST_VERSION_MENU_MAX_ITEMS for menu in menus.values()):
+            if report:
+                self._left_off = {}
+            return menus
+        needed = self.downloaded_versions.needed()
+        bounded = {
+            runtime: _bounded_menu(
+                menu,
+                len(own.get(runtime) or []),
+                {version for held, version in needed if held == runtime},
+            )
+            for runtime, menu in menus.items()
+        }
+        left_off = {
+            runtime: [version for version in menu if version not in bounded[runtime]]
+            for runtime, menu in menus.items()
+            if len(menu) != len(bounded[runtime])
+        }
+        if report and left_off != self._left_off:
+            # Once per change, not on every beat and claim that asks.
+            self._left_off = left_off
+            logger.warning(
+                "agent_runtime_versions_left_off",
+                extra={
+                    "event": "agent_runtime_versions_left_off",
+                    "left_off": left_off,
+                    "detail": (
+                        f"a runtime's version menu lists at most {HOST_VERSION_MENU_MAX_ITEMS} "
+                        "versions; this host does not offer the ones left off"
+                    ),
+                },
+            )
+        return bounded
 
     def image_menu(self) -> dict[str, list[str]]:
         """The versions the sandbox image itself holds, default first.
@@ -723,14 +824,35 @@ class ContainerBackend(SandboxBackend):
     def network_guard(self) -> HostNetworkGuard:
         """The one guard of this process, shared by every manager it builds."""
         if self._network_guard is None:
+            from cloud_agent_host import network_guard_helper
             from cloud_agent_host.network_guard import HostNetworkGuard
 
             self._network_guard = HostNetworkGuard(
                 self.require_sandbox_network(),
                 docker_binary=self.docker_binary,
                 helper_image=self.network_helper_image,
+                spawn=network_guard_helper.spawn_helper if self.keep_network_helper else None,
             )
         return self._network_guard
+
+    def adopt_rules_verification(self, payload: Mapping[str, Any]) -> None:
+        """Take the host service's verification of the rules for this turn's child.
+
+        ``payload`` is the turn the host service handed over; it carries the
+        verification under ``network_guard.VERIFICATION_KEY``
+        (``HostQualification.handover``). The host service installed and read
+        back the rules at most ``GUARD_RENEW_S`` before handing the turn over,
+        so the child's network check does not start the two helper containers
+        that takes; it still checks the Docker version and the relay network
+        itself. Raises, and the child declines the turn before accepting it,
+        when the verification is missing, failed or malformed
+        (``HostNetworkGuard.adopt``). One already older than an activation
+        would trust, because the child was slow to start, is not taken: the
+        network check then installs and reads back the rules itself.
+        """
+        from cloud_agent_host.network_guard import VERIFICATION_KEY
+
+        self._rules_handed_over = self.network_guard().adopt(payload.get(VERIFICATION_KEY))
 
     def base_env(self) -> dict[str, str]:
         """The image's own environment, not the runner's.
@@ -748,25 +870,24 @@ class ContainerBackend(SandboxBackend):
         Retained chat workspaces live in Docker's writable layer, so this
         preflight deliberately has no host-path or bind-mount probe.
         ``check_network=False`` validates only the runtime: candidate checks
-        have no deployment network, and host qualification leaves mutable
-        host rules for each child to verify before accepting its turn.
+        have no deployment network, and host qualification leaves the
+        network, which can change between turns, to the check each child
+        makes before accepting its turn.
         """
         if self.runtime == KATA_RUNTIME:
             from cloud_agent_host.runtime_qualification import check_runtime_state
 
             check_runtime_state()
+        # One Docker process answers both questions preflight asks it: whether
+        # the daemon answers at all, and the versions the network check reads.
         try:
-            result = subprocess.run(
-                [self.docker_binary, "version", "--format", "{{.Server.Version}}"],
-                capture_output=True,
-                text=True,
-                timeout=20,
-                check=False,
-            )
+            versions = self._docker_versions()
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise SandboxError(f"{self.docker_binary} is not usable: {exc}") from exc
-        if result.returncode != 0:
-            raise SandboxError(f"{self.docker_binary} is not usable: {result.stderr.strip()[:200]}")
+        if versions.returncode != 0:
+            raise SandboxError(
+                f"{self.docker_binary} is not usable: {versions.stderr.strip()[:200]}"
+            )
         if self.runtime == KATA_RUNTIME:
             # Import here: retained operations depend on these base primitives.
             from cloud_agent_host.chat_sandbox import ChatSandboxManager
@@ -780,7 +901,7 @@ class ContainerBackend(SandboxBackend):
         else:
             self._probe_kernel_boundary()
         if check_network:
-            self._check_sandbox_network()
+            self._check_sandbox_network(versions)
         if not self.is_vm_isolated:
             logger.warning(
                 "agent_sandbox_shared_kernel",
@@ -854,34 +975,32 @@ class ContainerBackend(SandboxBackend):
             return None
         return guest_kernel
 
-    def _kata_relay_host_args(self, network: str) -> list[str]:
-        """Give disposable Kata probes the same fixed relay resolution as chats."""
-        if self.runtime != KATA_RUNTIME:
-            return []
-        from cloud_agent_host.chat_sandbox import ChatSandboxManager
-
-        addresses = ChatSandboxManager(self).relay_addresses(network)
-        return [
-            part
-            for alias, address in sorted(addresses.items())
-            for part in ("--add-host", f"{alias}={address}")
-        ]
-
     def check_network(self) -> None:
         """Revalidate mutable network state even when runtime evidence is inherited."""
         self._check_sandbox_network()
 
-    def _check_sandbox_network(self) -> None:
+    def _check_sandbox_network(
+        self, versions: subprocess.CompletedProcess[str] | None = None
+    ) -> None:
         """Refuse to accept work until this host enforces the sandbox network.
 
         Two things are checked. The relay discovery network must be
-        ``internal``: it is where the two relays are found, never a route a
-        sandbox could use, and nothing but the relays belong on it. Then the
+        ``internal``: it is where the MCP relay is found, never a route a
+        sandbox could use, and nothing but relays belong on it. Then the
         guard installs this deployment's rules and reads them back from the
         kernel, so a host that cannot enforce the boundary never claims.
+
+        A turn's child holding its host service's verification
+        (:meth:`adopt_rules_verification`) uses that instead, while an
+        activation would still trust it; if it lapsed during the checks
+        above, the guard makes a new one here. A child handed one that had
+        already lapsed holds none, and checks as every other caller does.
+
+        ``versions`` is the answer :meth:`preflight` has just had from
+        :meth:`_docker_versions`; without one, Docker is asked here.
         """
         network = self.require_sandbox_network()
-        self._require_gateway_priority()
+        self._require_gateway_priority(versions)
         probe = subprocess.run(
             [
                 self.docker_binary,
@@ -904,13 +1023,20 @@ class ContainerBackend(SandboxBackend):
         if probe.stdout.strip().lower() != "true":
             raise SandboxError(
                 f"the relay network {network.relay_network!r} is not `internal`. It is "
-                "where the two relays are discovered, and must not route anywhere."
+                "where the MCP relay is discovered, and must not route anywhere."
             )
-        self.network_guard().ensure(max_age_s=0)
+        if self._rules_handed_over:
+            self.network_guard().ensure()
+        else:
+            self.network_guard().ensure(max_age_s=0)
 
-    def _require_gateway_priority(self) -> None:
-        """Refuse a Docker too old to keep group bridges off the relays' routes."""
-        probe = subprocess.run(
+    def _docker_versions(self) -> subprocess.CompletedProcess[str]:
+        """Ask Docker for its client's version and its daemon's API version.
+
+        A daemon that does not answer fails the process, since the second
+        field is the daemon's, so this also asks whether Docker is usable.
+        """
+        return subprocess.run(
             [
                 self.docker_binary,
                 "version",
@@ -922,6 +1048,16 @@ class ContainerBackend(SandboxBackend):
             timeout=20,
             check=False,
         )
+
+    def _require_gateway_priority(
+        self, versions: subprocess.CompletedProcess[str] | None = None
+    ) -> None:
+        """Refuse a Docker too old to keep group bridges off the relays' routes.
+
+        ``versions`` is an answer :meth:`_docker_versions` has just given;
+        without one, Docker is asked here.
+        """
+        probe = versions if versions is not None else self._docker_versions()
         client, _, api = probe.stdout.strip().partition(" ")
         try:
             client_major = int(client.split(".")[0])
@@ -939,99 +1075,6 @@ class ContainerBackend(SandboxBackend):
                 f"becomes their default route (client {client or 'unknown'}, daemon API "
                 f"{api or 'unknown'})"
             )
-
-    def check_gateway_reachable(self, base_url: str) -> None:
-        """Fail startup if the sandbox cannot reach the gateway it will be given.
-
-        A sandbox reaches inference only through the fixed relay, which is
-        discovered on the relay network. This method proves that relay answers
-        there. If an operator points
-        AGENT_GATEWAY_URL at an unreachable remote address, every job dies at
-        its first model call and the error reads like a broken model rather
-        than a network that was never going to work.
-
-        Probed rather than inferred: one container on the relay network, making
-        a real request. A heuristic on the URL would be wrong for every
-        deployment that does route out.
-
-        The request matters, not just the name. This used to resolve DNS and
-        stop there, which passes for anything with a DNS record — including a
-        relay container that answers to the name and cannot reach the gateway
-        behind it. That is precisely the shape a cross-machine deployment has,
-        so the one topology needing the check hardest was the one it could not
-        see. Any HTTP response counts, 404 and 401 included: the question is
-        whether packets get there, not what the gateway thinks of them.
-        """
-        from urllib.parse import urlparse
-
-        parsed = urlparse(base_url)
-        host = (parsed.hostname or "").strip()
-        if not host:
-            return
-        network = self.require_sandbox_network().relay_network
-        probe_url = f"{base_url.rstrip('/').removesuffix('/v1')}/health"
-        argv = [self.docker_binary, "run", "--rm", "--network", network]
-        # Probe under the runtime jobs will actually use. Otherwise a Kata
-        # deployment could pass a runc-based probe while every real sandbox
-        # still fails at spawn.
-        if self.runtime:
-            argv += ["--runtime", self.runtime]
-        argv += self.extra_args
-        argv += self._kata_relay_host_args(network)
-        argv += [
-            "--entrypoint",
-            "/bin/sh",
-            self.image,
-            "-c",
-            _GATEWAY_PROBE_SH,
-            "sh",
-            probe_url,
-            host,
-        ]
-        probe = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=90,
-            check=False,
-        )
-        verdict = (probe.stdout or "").strip().splitlines()
-        outcome = verdict[-1] if verdict else ""
-        if outcome == "ok":
-            return
-        if outcome == "dns-only":
-            # A custom sandbox image with neither curl nor python3. Resolving
-            # is all that can be asked of it; say so rather than let the log
-            # imply the stronger check ran.
-            logger.warning(
-                "agent_sandbox_gateway_probe_degraded",
-                extra={
-                    "event": "agent_sandbox_gateway_probe_degraded",
-                    "detail": (
-                        f"{self.image!r} has neither curl nor python3, so the gateway "
-                        f"check for {probe_url!r} confirmed DNS only; a relay that "
-                        "resolves but cannot forward would still pass"
-                    ),
-                },
-            )
-            return
-        detail = {
-            "unresolved": (
-                f"cannot resolve {host!r}. The inference relay has to be on the relay "
-                "network under that name; a gateway on another machine is reached "
-                "through its tunnel container, not directly."
-            ),
-        }.get(
-            outcome,
-            (
-                f"resolves {host!r} but no HTTP response came back from {probe_url!r}. "
-                "Something answers to the name and cannot reach the gateway behind it — "
-                "a relay whose upstream is down, or a port nothing is listening on."
-            ),
-        )
-        raise SandboxError(
-            f"the relay network {network!r} {detail} Every job would fail at its first model call."
-        )
 
     def spawn(self, spec: SandboxSpec) -> SandboxProcess:
         """Reject the removed one-container-per-turn execution topology."""
@@ -1052,7 +1095,10 @@ class ContainerBackend(SandboxBackend):
 
 
 def build_backend_from_env(
-    env: dict[str, str] | None = None, *, with_network: bool = True
+    env: dict[str, str] | None = None,
+    *,
+    with_network: bool = True,
+    keep_network_helper: bool = False,
 ) -> SandboxBackend:
     """Construct the configured backend.
 
@@ -1065,7 +1111,9 @@ def build_backend_from_env(
     ``AGENT_SANDBOX_UID``/``AGENT_SANDBOX_GID``/``AGENT_SANDBOX_HOME`` for a
     custom sandbox image whose user differs from the one we ship. The network
     comes from :func:`cloud_agent_shared.egress.network_from_env`; only the
-    candidate check, which runs no group, passes ``with_network=False``.
+    candidate check, which runs no group, passes ``with_network=False``. Only
+    a process that outlives its guard steps passes ``keep_network_helper``
+    (``ContainerBackend``).
     """
     source = env if env is not None else dict(os.environ)
     choice = (source.get("AGENT_SANDBOX_BACKEND") or "kata").strip().lower()
@@ -1087,16 +1135,19 @@ def build_backend_from_env(
                 "runs inside."
             )
         namespace = source.get("AGENT_SANDBOX_NAMESPACE") or "default"
+        docker_binary = source.get("AGENT_SANDBOX_DOCKER") or "docker"
         return ContainerBackend(
             image=image,
             runtime=runtime,
-            docker_binary=source.get("AGENT_SANDBOX_DOCKER") or "docker",
+            docker_binary=docker_binary,
+            engine=engine_from_env(source, docker_binary),
             extra_args=shlex.split(source.get("AGENT_SANDBOX_EXTRA_ARGS") or ""),
             # No fallback: a missing namespace, pool, resolver or relay
             # network refuses here rather than building a group network, or
             # naming a host table, nobody specified.
             sandbox_network=network_from_env(source) if with_network else None,
             sandbox_namespace=namespace,
+            keep_network_helper=keep_network_helper,
             uid=int(source.get("AGENT_SANDBOX_UID") or SANDBOX_UID),
             gid=int(source.get("AGENT_SANDBOX_GID") or SANDBOX_GID),
             home=source.get("AGENT_SANDBOX_HOME") or SANDBOX_HOME,

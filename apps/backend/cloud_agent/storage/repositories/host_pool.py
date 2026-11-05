@@ -29,11 +29,12 @@ from cloud_agent.host_pool import (
     normalize_capabilities,
     transition_allowed,
 )
+from cloud_agent.host_settings_import import plan_settings_import
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_archive_credentials import (
     archive_settings_payload,
-    load_stored_archive_policy,
     seal_archive_storage,
+    stored_archive_policy,
 )
 from cloud_agent.settings import number_setting
 from cloud_agent.storage._sql.compute_admission import (
@@ -41,19 +42,36 @@ from cloud_agent.storage._sql.compute_admission import (
     lock_compute_entry,
     lock_compute_topology,
 )
+from cloud_agent.storage._sql.environment_runs import env_run_blocks_host, env_run_holds_slot
 from cloud_agent.storage._sql.hosts import (
+    COVERED_GROUP_SQL,
     HOST_CAPACITY_COLUMNS,
     HOST_COLUMNS,
+    HOST_RETAINED_GROUP,
+    JOB_HOST_SQL,
     QUALIFIED_HOST_COLUMNS,
+    lock_revocation_rows,
+    release_late_covered_sandboxes,
     revoke_host_credentials,
 )
+from cloud_agent.storage._sql.jobs import first_unfinished_turn, runnable_queued_turn
+from cloud_agent.storage._sql.move_out import (
+    MOVABLE_GROUP_SQL,
+    UNMOVABLE_GROUP_SQL,
+    UNMOVED_GROUP_SQL,
+    move_out_possible,
+)
 from cloud_agent.storage._sql.rows import load_json
+from cloud_agent.storage._sql.runner_policy import (
+    HEARTBEAT_POLICY_COLUMNS,
+    archive_settings,
+    download_of,
+    download_targets,
+    heartbeat_policy,
+)
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 from cloud_agent.storage.repositories.host_capacity import insert_capacity_history_point
 from cloud_agent_shared.host_settings import (
-    HOST_SETTINGS_BY_KEY,
-    RUNNER_SETTING_KEYS,
-    admin_values,
     reported_values,
 )
 from cloud_agent_shared.runtime_catalog import downloadable_runtimes
@@ -62,6 +80,7 @@ from cloud_agent_shared.sandbox_archive_settings import (
     SandboxArchivePolicy,
     SandboxArchivePolicyError,
 )
+from cloud_agent_shared.sandbox_restore import SANDBOX_RESTORE_CAPABILITY
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -72,6 +91,18 @@ if TYPE_CHECKING:
 
 
 logger = get_logger(__name__)
+
+#: A removal that moves groups out still waits on host ``h``: for a group that
+#: can still move, or for the administrator's word on one that never will.
+_REMOVAL_WAITS_SQL = (
+    "h.removal_moves_out AND ("
+    "EXISTS (SELECT 1 FROM agent_sandboxes g WHERE g.host = h.host AND "
+    + MOVABLE_GROUP_SQL
+    + ") OR (NOT h.removal_leaves_unmoved AND "
+    "EXISTS (SELECT 1 FROM agent_sandboxes g WHERE g.host = h.host AND "
+    + UNMOVABLE_GROUP_SQL
+    + ")))"
+)
 
 _LEGACY_SANDBOX_MANAGER_KEYS = frozenset(
     {"terminal_idle_ttl_s", "terminal_hard_ttl_s", "terminal_max_sessions"}
@@ -93,7 +124,7 @@ def _job_matches_host(job: _JobDemand, host: _HostShape) -> bool:
     )
 
 
-def _maximum_compatible_jobs(jobs: Sequence[_JobDemand], hosts: Sequence[_HostCapacity]) -> int:
+def _maximum_compatible_jobs(jobs: Sequence[_JobDemand], hosts: Sequence[_HostCapacity]) -> int:  # noqa: C901, PLR0912 complexity baseline, #771
     """Return the exact maximum cardinality of the job/host-capacity matching.
 
     Equal jobs and equal host shapes are aggregated before a small Dinic flow.
@@ -185,11 +216,6 @@ def _before(stamp: datetime) -> str:
     return stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _download_of(record: Mapping[str, Any]) -> dict[str, str]:
-    """The part of a stored record a heartbeat answer carries."""
-    return {key: str(record.get(key) or "") for key in ("version", "before", "nonce")}
-
-
 def _replaced(earlier: object, selected: object) -> dict[str, Any]:
     """What a new update returns to on Roll back, and how hosts hold it meanwhile.
 
@@ -204,7 +230,7 @@ def _replaced(earlier: object, selected: object) -> dict[str, Any]:
         }
     held = None
     if isinstance(earlier, dict) and selected is not None and earlier.get("version") == selected:
-        held = _download_of(earlier)
+        held = download_of(earlier)
     return {"previous_version": selected, "previous_download": held}
 
 
@@ -468,6 +494,7 @@ class PostgresHostPoolRepository:
         sandbox_archive_settings_applied_revision: int | None = None,
         sandbox_archive_settings_revision_reported: bool = False,
         runtime_downloads: Sequence[Mapping[str, Any]] | None = None,
+        config_reports: Mapping[str, str] | None = None,
     ) -> dict[str, Any] | None:
         """Record a heartbeat, promoting the host to ``online`` when it may.
 
@@ -525,20 +552,32 @@ class PostgresHostPoolRepository:
             settings_applied: The runtime settings the host is applying now.
             settings_local: Legacy environment observations, imported once as
                 per-host overrides. Either ``None`` leaves the report in place.
+            sandbox_archive_settings_applied_revision: The archive-policy
+                revision the host's sandbox manager confirmed, ``None`` for none.
+            sandbox_archive_settings_revision_reported: Whether the heartbeat
+                carried that revision at all; when it did not, the stored one
+                stays.
             runtime_downloads: This host's progress on each agent version it
                 was asked to hold, already validated. ``None`` leaves it.
+            config_reports: Non-numeric configuration the host says it uses
+                now, such as its npm registry. ``None`` leaves the report.
 
         Returns:
             The updated host row, or ``None`` when the host no longer exists
-            or no longer holds ``credential_hash``.
+            or no longer holds ``credential_hash``. The row also carries
+            ``runner_policy``, what the heartbeat answer needs of the policy
+            read that share-locks it (``heartbeat_policy``): the global
+            ``host_settings``, the ``sandbox_archive_settings``, the
+            ``runtime_download_targets`` and ``runtime_upgrade_waiting``, each
+            ``None`` when its stored value does not decode.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             # Match the admin writer's lock order: policy before host. Once
             # defaults are authoritative, a legacy observation is imported at
-            # most once and cannot resurrect an explicitly reset setting.
+            # most once and cannot resurrect an explicitly reset setting. The
+            # same read carries the policy the heartbeat answer is made of.
             policy = await conn.fetchrow(
-                "SELECT host_settings, host_settings_import_excluded "
-                "FROM agent_runner_policy WHERE id FOR SHARE"
+                f"SELECT {HEARTBEAT_POLICY_COLUMNS} FROM agent_runner_policy WHERE id FOR SHARE"
             )
             global_settings = (load_json(policy["host_settings"]) or {}) if policy else {}
             global_exclusions = set(policy["host_settings_import_excluded"]) if policy else set()
@@ -571,12 +610,14 @@ class PostgresHostPoolRepository:
                         WHEN $15 AND ($16::text IS NULL OR credential_hash = $16) THEN $14
                         ELSE sandbox_archive_settings_applied_revision
                     END,
-                    runtime_downloads = COALESCE($17::jsonb, runtime_downloads)
+                    runtime_downloads = COALESCE($17::jsonb, runtime_downloads),
+                    config_reports = COALESCE($18::jsonb, config_reports)
                 -- The credential the request authenticated with must still be
                 -- the row's: a beat delayed past a re-enrollment or a removal
                 -- must not mark the new machine online, or a removed one alive.
                 WHERE host = $1 AND ($16::text IS NULL OR credential_hash = $16)
-                RETURNING {HOST_COLUMNS}, settings_imported, settings_import_excluded
+                RETURNING {HOST_COLUMNS}, settings_imported, settings_import_excluded,
+                    settings_late_imported
                 """,
                 host,
                 slots_total,
@@ -603,46 +644,39 @@ class PostgresHostPoolRepository:
                 None
                 if runtime_downloads is None
                 else json.dumps([dict(report) for report in runtime_downloads]),
+                None if config_reports is None else json.dumps(dict(config_reports)),
             )
             if row is None:
                 return None
-            if (
-                not row["settings_imported"]
-                and settings_local is not None
-                and (
-                    credential_hash is None
-                    or await conn.fetchval(
-                        "SELECT credential_hash = $2 FROM agent_runner_hosts WHERE host = $1",
-                        host,
-                        credential_hash,
-                    )
+            plan = plan_settings_import(
+                dict(row),
+                reported_values(dict(settings_local)) if settings_local is not None else None,
+                global_settings=global_settings,
+                global_exclusions=global_exclusions,
+                legacy_sandbox_manager_keys=_LEGACY_SANDBOX_MANAGER_KEYS,
+            )
+            if plan is not None and (
+                credential_hash is None
+                or await conn.fetchval(
+                    "SELECT credential_hash = $2 FROM agent_runner_hosts WHERE host = $1",
+                    host,
+                    credential_hash,
                 )
             ):
-                observed = reported_values(dict(settings_local)) or {}
-                previous = dict(load_json(row["settings_desired"]) or {})
-                excluded = global_exclusions | set(row["settings_import_excluded"])
-                imports = {
-                    key: value
-                    for key, value in admin_values(observed).items()
-                    if value != HOST_SETTINGS_BY_KEY[key].default
-                    and key not in previous
-                    and key not in global_settings
-                    and key not in excluded
-                }
-                expected = RUNNER_SETTING_KEYS | (
-                    _LEGACY_SANDBOX_MANAGER_KEYS if row["sandbox_manager_url"] else frozenset()
-                )
-                complete = expected <= observed.keys()
+                desired, complete, offered = plan
                 row = await conn.fetchrow(
                     f"""
                     UPDATE agent_runner_hosts
-                    SET settings_desired = $2::jsonb, settings_imported = $3
+                    SET settings_desired = $2::jsonb, settings_imported = $3,
+                        settings_late_imported = $4::text[]
                     WHERE host = $1
-                    RETURNING {HOST_COLUMNS}, settings_imported, settings_import_excluded
+                    RETURNING {HOST_COLUMNS}, settings_imported, settings_import_excluded,
+                        settings_late_imported
                     """,
                     host,
-                    json.dumps({**previous, **imports}),
+                    json.dumps(desired),
                     complete,
+                    sorted(offered),
                 )
             if (
                 capacity is not None
@@ -656,7 +690,7 @@ class PostgresHostPoolRepository:
                     capacity=capacity,
                     sample_age_ms=capacity_sample_age_ms,
                 )
-        return self._host_row_to_dict(row)
+        return {**self._host_row_to_dict(row), "runner_policy": heartbeat_policy(policy)}
 
     async def set_host_status(self, *, host: str, status: str, force: bool = False) -> str:
         """Move a host to ``status``, refusing transitions the table forbids.
@@ -854,16 +888,36 @@ class PostgresHostPoolRepository:
             )
         return previous
 
-    async def remove_host(self, *, host: str, force: bool = False) -> str:
-        """Revoke a host's credential and take it out of the pool.
+    async def remove_host(
+        self, *, host: str, force: bool = False, allow_unmoved: bool = False
+    ) -> str:
+        """Take a host out of the pool, moving its groups out first when they can.
 
-        Returns ``"ok"``, ``"unknown"``, ``"fenced"``, ``"draining"`` or
-        ``"busy"``. A host still holding slots is not revoked on the spot:
-        that would end running attempts whose machine has officially stopped
-        existing. It moves to ``draining`` with the request recorded, so it
-        claims nothing more, and :meth:`finish_host_removals` revokes it once
-        its last slot comes back. ``"busy"`` is left for the busy host that
-        cannot drain at all.
+        Returns ``"ok"``, ``"unknown"``, ``"fenced"``, ``"moving_out"``,
+        ``"draining"``, ``"no_move_target"``, ``"cannot_move"`` or ``"busy"``.
+
+        A stopped group its checkpoint covers moves on revocation. When other
+        groups can move -- checkpoints work, another host would restore them,
+        and each can still stop into a checkpoint (``MOVABLE_GROUP_SQL``) --
+        the host moves to ``draining`` and moves out (``"moving_out"``): it
+        claims nothing, its idle groups stop into checkpoints and are handed
+        over one at a time, and :meth:`finish_host_removals` revokes it once
+        none is left and its last running turn has ended. Nothing running is
+        interrupted. A host still running turns moves out whenever it can,
+        even with no group to stop yet: a turn restoring a group, or one that
+        claimed a covered group before the removal, leaves that group running
+        here once it ends.
+
+        A removal that would leave groups bound to the host needs
+        ``allow_unmoved``: ``"no_move_target"`` when groups could move but no
+        host or checkpoint is there to take them, ``"cannot_move"`` when some
+        never can (``UNMOVABLE_GROUP_SQL``: a stopped group whose checkpoint
+        failed, say). With it, whatever can move still moves first; then a
+        host still holding slots drains (``"draining"``) and is revoked once
+        its running attempts end, and an idle one is revoked now. A group that
+        stops moving during the move, as when its checkpoint fails, holds the
+        removal until the administrator repeats it with ``allow_unmoved``.
+        ``"busy"`` is left for the busy host that cannot drain at all.
 
         ``force`` ends that work now instead of waiting for it — lease expiry
         *is* the recovery path, and the revocation brings it forward to now
@@ -871,7 +925,7 @@ class PostgresHostPoolRepository:
         host, so a lease left to run would let the removed machine keep
         renewing it. A retained activation cannot be replayed safely after its
         host disappears, so its expiry marks that chat LOST and fails
-        already-queued descendants instead.
+        already-queued descendants instead. Covered stopped groups still move.
 
         Disabling rather than deleting. The row is what
         ``agent_attempts.host_id`` points at, and what an operator reads when
@@ -881,6 +935,9 @@ class PostgresHostPoolRepository:
         Docker writable layer was deleted.
         """
         async with self._pool.acquire() as conn, conn.transaction():
+            # The fence a move-out is decided under, before any row: two hosts
+            # removed together cannot each count on the other as a target.
+            await lock_compute_entry(conn, exclusive=True)
             # The host's running attempts before its row: the order every
             # writer that ends an attempt keeps (move the attempt, then give
             # its slot back). Expiring those leases while holding the host row
@@ -890,8 +947,12 @@ class PostgresHostPoolRepository:
                 "ORDER BY id FOR UPDATE",
                 host,
             )
+            # Then its groups, which the counts below read and the revocation
+            # hands over: a start fenced in between would slip out of both.
+            await lock_revocation_rows(conn, [host])
             row = await conn.fetchrow(
-                "SELECT status, slots_used, drain_fence_active "
+                "SELECT status, slots_used, drain_fence_active, removal_requested_at, "
+                "removal_moves_out, removal_leaves_unmoved "
                 "FROM agent_runner_hosts WHERE host = $1 FOR UPDATE",
                 host,
             )
@@ -899,18 +960,63 @@ class PostgresHostPoolRepository:
                 return "unknown"
             if row["drain_fence_active"] and not force:
                 return "fenced"
-            if row["slots_used"] > 0 and not force:
-                if not transition_allowed(row["status"], HOST_DRAINING):
-                    return "busy"
+            if force:
+                await revoke_host_credentials(conn, [host])
+                return "ok"
+            # Covered stopped groups move on revocation; movable ones need
+            # stopping into a checkpoint first; unmovable ones would stay here.
+            groups = await conn.fetchrow(
+                f"""
+                SELECT count(*) FILTER (WHERE {MOVABLE_GROUP_SQL} AND NOT {COVERED_GROUP_SQL})
+                           AS to_stop,
+                       count(*) FILTER (WHERE {UNMOVABLE_GROUP_SQL}) AS unmovable
+                FROM agent_sandboxes g WHERE g.host = $1 AND {UNMOVED_GROUP_SQL}
+                """,
+                host,
+            )
+            leaves_unmoved = allow_unmoved
+            if row["removal_requested_at"] is not None and row["removal_moves_out"]:
+                # Already moving out: a repeat may only give the word for the
+                # groups that will never move.
+                leaves_unmoved = allow_unmoved or row["removal_leaves_unmoved"]
+                if groups["unmovable"] and not leaves_unmoved:
+                    return "cannot_move"
                 await conn.execute(
-                    "UPDATE agent_runner_hosts SET status = $2, "
-                    "removal_requested_at = COALESCE(removal_requested_at, NOW()) "
-                    "WHERE host = $1",
+                    "UPDATE agent_runner_hosts SET removal_leaves_unmoved = $2 WHERE host = $1",
                     host,
-                    HOST_DRAINING,
+                    leaves_unmoved,
                 )
-                return "draining"
-            await revoke_host_credentials(conn, [host])
+                return "moving_out"
+            # A running turn may leave a group running here that this count
+            # did not see: one it is restoring, or a covered one it claimed
+            # before the removal and starts after it. The revocation, which
+            # waits for the turn, would leave that group behind, so a host
+            # still running turns moves out whenever it can.
+            moving = bool(groups["to_stop"] or row["slots_used"]) and await move_out_possible(
+                conn, [host], need_target=True
+            )
+            if not allow_unmoved:
+                if groups["to_stop"] and not moving:
+                    return "no_move_target"
+                if groups["unmovable"]:
+                    return "cannot_move"
+            if row["slots_used"] == 0 and not moving:
+                await revoke_host_credentials(conn, [host])
+                return "ok"
+            if row["status"] != HOST_DRAINING and not transition_allowed(
+                row["status"], HOST_DRAINING
+            ):
+                return "busy"
+            await conn.execute(
+                "UPDATE agent_runner_hosts SET status = $2, "
+                "removal_requested_at = COALESCE(removal_requested_at, NOW()), "
+                "removal_moves_out = $3, removal_leaves_unmoved = $4 WHERE host = $1",
+                host,
+                HOST_DRAINING,
+                moving,
+                leaves_unmoved,
+            )
+            return "moving_out" if moving else "draining"
         return "ok"
 
     async def finish_host_removals(self) -> list[str]:
@@ -922,13 +1028,18 @@ class PostgresHostPoolRepository:
         lock: an attempt the reaper is ending at this moment must either be
         finished first or keep the host for the next pass.
 
+        Each pass then hands on any group of an already revoked host whose
+        checkpoint arrived with a beat still in flight at the revocation
+        (``release_late_covered_sandboxes``).
+
         Returns the hosts it revoked.
         """
         removed: list[str] = []
         async with self._pool.acquire() as conn:
             candidates = await conn.fetch(
-                "SELECT host FROM agent_runner_hosts "
-                "WHERE removal_requested_at IS NOT NULL AND slots_used = 0 ORDER BY host"
+                "SELECT h.host FROM agent_runner_hosts h "
+                "WHERE h.removal_requested_at IS NOT NULL AND h.slots_used = 0 "
+                "AND NOT (" + _REMOVAL_WAITS_SQL + ") ORDER BY h.host"
             )
             for candidate in candidates:
                 host = candidate["host"]
@@ -938,15 +1049,32 @@ class PostgresHostPoolRepository:
                         "ORDER BY id FOR UPDATE",
                         host,
                     )
+                    await lock_revocation_rows(conn, [host])
                     row = await conn.fetchrow(
-                        "SELECT slots_used, removal_requested_at "
-                        "FROM agent_runner_hosts WHERE host = $1 FOR UPDATE",
+                        "SELECT h.slots_used, h.removal_requested_at, "
+                        "(" + _REMOVAL_WAITS_SQL + ") AS moving "
+                        "FROM agent_runner_hosts h WHERE h.host = $1 FOR UPDATE",
                         host,
                     )
-                    if row is None or row["removal_requested_at"] is None or row["slots_used"]:
+                    if (
+                        row is None
+                        or row["removal_requested_at"] is None
+                        or row["slots_used"]
+                        or row["moving"]
+                    ):
                         continue
                     await revoke_host_credentials(conn, [host])
                 removed.append(host)
+            async with conn.transaction():
+                released = await release_late_covered_sandboxes(conn)
+        if released:
+            logger.info(
+                "agent_sandboxes_released_after_revocation",
+                extra={
+                    "event": "agent_sandboxes_released_after_revocation",
+                    "sandbox_ids": released,
+                },
+            )
         return removed
 
     async def reap_offline_hosts(
@@ -975,6 +1103,8 @@ class PostgresHostPoolRepository:
         operator had just decided it must not take. Drain is an instruction,
         not an observation, so nothing here overwrites it; ``remove`` is what
         ends a drained host's life.
+        A released drain receipt survives too: the next rollout finds its
+        predecessor by that token, and the status change rotates the epoch.
 
         Returns the hosts it changed.
         """
@@ -983,10 +1113,7 @@ class PostgresHostPoolRepository:
             rows = await conn.fetch(
                 f"""
                 UPDATE agent_runner_hosts
-                SET status = '{HOST_OFFLINE}',
-                    drain_fence_token = NULL,
-                    drain_fence_status_before = NULL,
-                    drain_fence_active = FALSE
+                SET status = '{HOST_OFFLINE}'
                 WHERE credential_hash IS NOT NULL
                   AND status IN ('{HOST_ENROLLING}', '{HOST_ONLINE}')
                   AND COALESCE(last_heartbeat_at, first_seen_at)
@@ -1017,13 +1144,8 @@ class PostgresHostPoolRepository:
         return None if row is None else self._host_row_to_dict(row)
 
     async def host_for_job(self, *, job_id: str) -> dict[str, Any] | None:
-        """The job's running attempt's host, else its retained thread's durable host.
-
-        A finished attempt names where the turn ran, which is not where the
-        group is once a restore has moved it to another host; the group's own
-        host is. Only a thread without a group falls back to that attempt.
-        """
-        owner = "COALESCE(CASE WHEN a.status = 'running' THEN a.host_id END, s.host, a.host_id)"
+        """The host holding the job's workspace, by the rule of ``JOB_HOST_SQL``."""
+        owner = JOB_HOST_SQL.format(attempt="a", group="s")
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
@@ -1087,7 +1209,13 @@ class PostgresHostPoolRepository:
             )
             rows = await conn.fetch(
                 f"""
-                SELECT {HOST_COLUMNS}, {HOST_CAPACITY_COLUMNS}
+                SELECT {HOST_COLUMNS}, {HOST_CAPACITY_COLUMNS},
+                       (SELECT count(*) FROM agent_sandboxes g
+                        WHERE g.host = agent_runner_hosts.host AND {MOVABLE_GROUP_SQL})
+                           AS sandboxes_left,
+                       (SELECT count(*) FROM agent_sandboxes g
+                        WHERE g.host = agent_runner_hosts.host AND {UNMOVABLE_GROUP_SQL})
+                           AS sandboxes_unmovable
                 FROM agent_runner_hosts
                 ORDER BY last_seen_at DESC
                 """
@@ -1151,26 +1279,24 @@ class PostgresHostPoolRepository:
             {str(row["host"]) for row in owner_rows},
         )
 
-    async def autoscaling_observation(self, *, expected_deployment_sha: str) -> dict[str, Any]:
+    async def autoscaling_observation(self, *, expected_deployment_sha: str) -> dict[str, Any]:  # noqa: PLR0915 complexity baseline, #771
         """Read the durable, content-free signal used by compute autoscaling.
 
         A retained turn is tied to its existing Host and therefore cannot be
-        relieved by adding a CloudLab node. Only the first runnable turn of a
-        thread with no sandbox membership is demand here. Capacity is the
-        effective claim ceiling (the lower of reported and desired slots),
-        after liveness, placement, release/rotation holds, deployment
-        attestation, and archive-policy gates have all been applied. Pressure
-        is an exact maximum compatibility matching, not queue depth minus an
-        interchangeable slot count. The shared topology lock stabilizes
-        bindings, but it deliberately remains compatible with claims; repeatable
-        read prevents a claim committed between the job and host queries from
-        combining pre-claim demand with post-claim capacity into a state that
-        never existed.
+        relieved by adding a CloudLab node. Only a turn a claim would hand out
+        now (:func:`runnable_queued_turn`), of a thread with no sandbox
+        membership, is demand here. One in claim backoff is not, but it is
+        counted apart: the pool is not idle while it waits. Capacity is the
+        effective claim ceiling (the lower of reported and desired slots), after
+        liveness, placement, release/rotation holds, deployment attestation, and
+        archive-policy gates have all been applied. Pressure is an exact maximum
+        compatibility matching, not queue depth minus an interchangeable slot
+        count. The shared topology lock stabilizes bindings, but it deliberately
+        remains compatible with claims; repeatable read prevents a claim
+        committed between the job and host queries from combining pre-claim
+        demand with post-claim capacity into a state that never existed.
         """
-        async with (
-            self._pool.acquire() as conn,
-            conn.transaction(isolation="repeatable_read"),
-        ):
+        async with self._pool.acquire() as conn, conn.transaction(isolation="repeatable_read"):
             policy = await conn.fetchrow(
                 """
                 SELECT active_host, sandbox_archive_settings, sandbox_archive_revision
@@ -1180,40 +1306,27 @@ class PostgresHostPoolRepository:
             await lock_compute_topology(conn)
             observed_at = await conn.fetchval("SELECT NOW()")
             job_rows = await conn.fetch(
-                """
+                f"""
                 SELECT t.execution_profile,
-                       COALESCE(j.metadata->'requires', '[]'::jsonb) AS requires
+                       COALESCE(j.metadata->'requires', '[]'::jsonb) AS requires,
+                       {runnable_queued_turn("j")} AS claimable
                 FROM agent_jobs j
                 JOIN agent_threads t ON t.id=j.thread_id
-                WHERE j.state='queued' AND NOT j.cancel_requested
+                WHERE {runnable_queued_turn("j", including_backoff=True)}
                   AND NOT EXISTS (
                       SELECT 1 FROM agent_thread_sandbox_memberships m
                       WHERE m.thread_id=j.thread_id
                   )
                   AND NOT EXISTS (
-                      SELECT 1 FROM agent_jobs earlier
-                      WHERE earlier.thread_id=j.thread_id
-                        AND earlier.turn_no < j.turn_no
-                        AND earlier.state IN ('queued','running')
-                  )
-                  AND NOT EXISTS (
                       SELECT 1 FROM agent_jobs parent
                       WHERE parent.id=j.parent_job_id AND parent.state='succeeded'
-                  )
-                  AND (
-                      j.turn_source <> 'goal'
-                      OR (
-                          t.goal_state='active'
-                          AND t.goal_id=j.goal_id
-                          AND t.goal_revision=j.goal_revision
-                      )
                   )
                 ORDER BY j.created_at, j.id
                 """
             )
             job_rows.extend(
                 await conn.fetch(
-                    "SELECT execution_profile, '[\"environment-v1\"]'::jsonb AS requires FROM agent_environment_runs WHERE state='queued'",
+                    "SELECT execution_profile, '[\"environment-v1\"]'::jsonb AS requires, TRUE AS claimable FROM agent_environment_runs WHERE state='queued'",
                 )
             )
             rows = await conn.fetch(
@@ -1231,16 +1344,8 @@ class PostgresHostPoolRepository:
                 """
             )
 
-            archive_raw = (
-                {}
-                if policy is None
-                else {
-                    **(load_json(policy["sandbox_archive_settings"]) or {}),
-                    "revision": policy["sandbox_archive_revision"],
-                }
-            )
             try:
-                archive_policy = SandboxArchivePolicy.from_mapping(archive_raw)
+                archive_policy = stored_archive_policy(policy)
             except SandboxArchivePolicyError:
                 archive_policy = None
 
@@ -1253,7 +1358,8 @@ class PostgresHostPoolRepository:
                     and all(isinstance(value, str) for value in raw_requires)
                     else None
                 )
-                jobs.append((required, str(row["execution_profile"])))
+                if row["claimable"]:
+                    jobs.append((required, str(row["execution_profile"])))
 
             hosts: list[dict[str, Any]] = []
             matching_hosts: list[_HostCapacity] = []
@@ -1262,14 +1368,14 @@ class PostgresHostPoolRepository:
             active_tests = {
                 row["host"]: int(row["count"])
                 for row in await conn.fetch(
-                    "SELECT host,COUNT(*) AS count FROM agent_environment_runs WHERE host IS NOT NULL AND NOT cleanup_complete AND lease_expires_at>NOW() AND started_at>NOW()-INTERVAL '30 minutes' GROUP BY host"
+                    f"SELECT host,COUNT(*) AS count FROM agent_environment_runs WHERE host IS NOT NULL AND {env_run_holds_slot()} GROUP BY host"
                 )
             }
             cleanup_blocked_hosts = {
                 row["host"]
                 for row in await conn.fetch(
-                    "SELECT DISTINCT host FROM agent_environment_runs WHERE host IS NOT NULL AND NOT cleanup_complete "
-                    "AND (lease_expires_at<=NOW() OR started_at<=NOW()-INTERVAL '30 minutes')"
+                    "SELECT DISTINCT host FROM agent_environment_runs WHERE host IS NOT NULL "
+                    f"AND {env_run_blocks_host()}"
                 )
             }
             for raw in rows:
@@ -1357,6 +1463,7 @@ class PostgresHostPoolRepository:
             "observed_at": observed_at,
             "active_host": None if policy is None else policy["active_host"],
             "runnable_new_group_jobs": len(jobs),
+            "backoff_new_group_jobs": len(job_rows) - len(jobs),
             "fresh_effective_free_slots": free_slots,
             "unmatched_new_group_jobs": len(matchable_jobs) - matched,
             "autoscaling_template_hosts": [host for host, _shape in templates],
@@ -1369,6 +1476,9 @@ class PostgresHostPoolRepository:
         Occupied slots are ordinary backpressure. Missing/stale/disabled hosts,
         lost deployment markers and a wrong placement pin are not. Retained
         members use their owner, independent of the pin for new conversations.
+        A ``cold`` group lives in its checkpoint instead: any host that
+        restores may take it, except the one it left while that one still
+        names its container, as the claim's cold branch reads it.
         No user content, job identifiers or credentials leave this projection.
         """
         async with self._pool.acquire() as conn, conn.transaction():
@@ -1379,14 +1489,7 @@ class PostgresHostPoolRepository:
                 """
             )
             try:
-                archive_policy = load_stored_archive_policy(
-                    {}
-                    if archive_row is None
-                    else {
-                        **(load_json(archive_row["sandbox_archive_settings"]) or {}),
-                        "revision": archive_row["sandbox_archive_revision"],
-                    }
-                )
+                archive_policy = stored_archive_policy(archive_row)
                 archive_required = archive_policy.enabled
                 archive_revision = archive_policy.revision
             except SandboxArchivePolicyError:
@@ -1395,9 +1498,11 @@ class PostgresHostPoolRepository:
                 archive_required = True
                 archive_revision = -1
             row = await conn.fetchrow(
-                """
+                f"""
                 WITH waiting AS (
                     SELECT g.host AS owner, t.execution_profile,
+                           COALESCE(g.state = 'cold', FALSE) AS cold,
+                           g.container_id IS NULL AS uncontained,
                            COALESCE(j.metadata->'requires', '[]'::jsonb) AS requires
                     FROM agent_jobs j
                     JOIN agent_threads t ON t.id = j.thread_id
@@ -1405,11 +1510,7 @@ class PostgresHostPoolRepository:
                     LEFT JOIN agent_sandboxes g ON g.id = m.sandbox_id
                     WHERE j.state = 'queued' AND NOT j.cancel_requested
                       AND j.updated_at < NOW() - $3 * INTERVAL '1 second'
-                      AND NOT EXISTS (
-                          SELECT 1 FROM agent_jobs earlier
-                          WHERE earlier.thread_id = j.thread_id AND earlier.turn_no < j.turn_no
-                            AND earlier.state IN ('queued', 'running')
-                      )
+                      AND {first_unfinished_turn("j")}
                 ), serving AS (
                     SELECT h.* FROM agent_runner_hosts h
                     WHERE h.status = 'online' AND h.credential_hash IS NOT NULL
@@ -1434,7 +1535,11 @@ class PostgresHostPoolRepository:
                            WHERE waiting.requires <@ h.capabilities
                              AND (waiting.execution_profile = 'trusted-v1' OR h.sandbox_runtime = $2)
                              AND (
-                                 (waiting.owner IS NOT NULL AND h.host = waiting.owner)
+                                 (waiting.owner IS NOT NULL AND NOT waiting.cold
+                                  AND h.host = waiting.owner)
+                                 OR (waiting.cold AND $4::boolean
+                                     AND h.capabilities @> $7::jsonb
+                                     AND (waiting.uncontained OR h.host <> waiting.owner))
                                  OR (waiting.owner IS NULL
                                      AND h.capabilities @> '["native-fork-at-anchor-v1"]'::jsonb
                                      AND ($1 = '' OR h.capabilities ? ('shared-sandbox-deployment:' || $1))
@@ -1447,10 +1552,11 @@ class PostgresHostPoolRepository:
                 """,
                 expected_deployment_sha,
                 KATA_RUNTIME,
-                number_setting("queue_alert_after_s", 600.0),
+                number_setting("queue_alert_after_s"),
                 archive_required,
                 archive_revision,
                 json.dumps([SANDBOX_ARCHIVE_CAPABILITY]),
+                json.dumps([SANDBOX_RESTORE_CAPABILITY]),
                 timeout=10,
             )
         return {key: int(row[key]) for key in ("queued", "unavailable", "running")}
@@ -1530,32 +1636,24 @@ class PostgresHostPoolRepository:
     async def runtime_download_targets(self) -> list[dict[str, str]]:
         """What every heartbeat answer tells hosts to hold, per runtime.
 
-        The record's version, and until an update switches new chats, also the
-        downloaded version they use now: a host that joins while the update is
-        downloading, or after it failed, must still run what every other host
-        runs. Done targets stay, so a host that joins later, or restarts on a
-        new sandbox image, downloads and checks the version again.
+        The record's version, and the downloaded version an update replaced.
+        Until the update switches new chats, they still use that one: a host
+        that joins while the update is downloading, or after it failed, must
+        run what every other host runs. After the switch it is what Roll back
+        returns to, so rolling back is instant on every host, one that joins
+        later included. The switch waits only for the record's own version.
+        The version new chats use comes first. Done targets stay, so a host
+        that joins later, or restarts on a new sandbox image, downloads and
+        checks the version again.
+
+        A selection record, Roll back's included, replaced nothing to hold:
+        the version rolled back from stays only where chats still run it.
         """
         async with self._pool.acquire() as conn:
             policy = await conn.fetchrow(
                 "SELECT runtime_versions, runtime_upgrades FROM agent_runner_policy WHERE id"
             )
-        selection = {} if policy is None else dict(load_json(policy["runtime_versions"]) or {})
-        upgrades = {} if policy is None else dict(load_json(policy["runtime_upgrades"]) or {})
-        targets: list[dict[str, str]] = []
-        for runtime, record in sorted(upgrades.items()):
-            if not isinstance(record, dict):
-                continue
-            held = record.get("previous_download")
-            if (
-                not record.get("activated_at")
-                and isinstance(held, dict)
-                and held.get("version") == selection.get(runtime)
-                and held.get("version") != record.get("version")
-            ):
-                targets.append({"runtime": runtime, **_download_of(held)})
-            targets.append({"runtime": runtime, **_download_of(record)})
-        return targets
+        return download_targets(policy)
 
     async def request_runtime_upgrade(
         self, *, runtime: str, version: str, requested_by: str
@@ -1687,7 +1785,8 @@ class PostgresHostPoolRepository:
             rows = await conn.fetch(
                 """
                 SELECT host, status, (credential_hash IS NOT NULL) AS enrolled,
-                       runtime_versions, runtime_versions_available, runtime_downloads
+                       runtime_versions, runtime_versions_available, runtime_downloads,
+                       config_reports
                 FROM agent_runner_hosts
                 ORDER BY host
                 """
@@ -1702,6 +1801,7 @@ class PostgresHostPoolRepository:
                 "runtime_versions": load_json(row["runtime_versions"]) or {},
                 "runtime_versions_available": load_json(row["runtime_versions_available"]) or {},
                 "runtime_downloads": load_json(row["runtime_downloads"]) or [],
+                "config_reports": load_json(row["config_reports"]) or {},
             }
             for row in rows
         ]
@@ -1767,14 +1867,7 @@ class PostgresHostPoolRepository:
                 FROM agent_runner_policy WHERE id
                 """
             )
-        if row is None:
-            # The baseline normally creates the singleton. Keep a missing row
-            # readable during restore/bootstrap; the first write recreates it.
-            return archive_settings_payload(SandboxArchivePolicy(), None)
-        raw = dict(load_json(row["sandbox_archive_settings"]) or {})
-        raw["revision"] = row["sandbox_archive_revision"]
-        policy = load_stored_archive_policy(raw)
-        return archive_settings_payload(policy, row["sandbox_archive_updated_at"])
+        return archive_settings(row)
 
     async def set_sandbox_archive_settings(
         self,
@@ -1795,9 +1888,7 @@ class PostgresHostPoolRepository:
                 """
             )
             assert current is not None
-            current_raw = dict(load_json(current["sandbox_archive_settings"]) or {})
-            current_raw["revision"] = current["sandbox_archive_revision"]
-            current_policy = load_stored_archive_policy(current_raw)
+            current_policy = stored_archive_policy(current)
             requested = SandboxArchivePolicy.from_mapping(
                 {**dict(settings), "revision": current_policy.revision}
             )
@@ -1886,10 +1977,13 @@ class PostgresHostPoolRepository:
         ``"retained_groups_present"``, ``"resource_bound"``,
         ``"active_attempts_present"`` and ``"pending_compute_operations"``.
         A sandbox whose deletion has completed is an audit row: it keeps the
-        host name and does not block forgetting. A live group, or one whose
-        deletion failed or is still in progress, does. A disabled attached
-        machine without external release capability may be deregistered after
-        dependency checks; this never shuts it down.
+        host name and does not block forgetting. Nor does a ``cold`` group,
+        which any restore-capable host may claim; it keeps naming this host as
+        the last it ran on until a claim moves it (``HOST_RETAINED_GROUP``).
+        A live or stopped group, or one whose deletion failed or is still in
+        progress, does block. A disabled attached machine without external
+        release capability may be deregistered after dependency checks; this
+        never shuts it down.
 
         The active-host refusal lives here rather than in the caller because
         checking there is a read the switch can outrun: the endpoint sees the
@@ -1905,7 +1999,7 @@ class PostgresHostPoolRepository:
             if active == host:
                 return "active"
             retained = await conn.fetchval(
-                "SELECT 1 FROM agent_sandboxes WHERE host=$1 AND deletion_state<>'deleted' LIMIT 1",
+                f"SELECT 1 FROM agent_sandboxes g WHERE g.host=$1 AND {HOST_RETAINED_GROUP} LIMIT 1",
                 host,
             )
             if retained:
@@ -1983,6 +2077,7 @@ class PostgresHostPoolRepository:
         host["settings_desired"] = load_json(host.get("settings_desired")) or {}
         host["settings_applied"] = load_json(host.get("settings_applied"))
         host["settings_local"] = load_json(host.get("settings_local"))
+        host["config_reports"] = load_json(host.get("config_reports")) or {}
         # Absent from most projections, so read with ``.get``: a row that never
         # selected the capacity columns must decode to "no observation", not
         # raise a KeyError on a path that has nothing to do with capacity.

@@ -70,11 +70,15 @@ class Queries:
         self.full_job_reads += 1
         return dict(self.job) if job_id == JOB else None
 
-    async def get_job_stream_state(self, *, job_id: str, user_id: str) -> JobStreamState | None:
+    async def job_stream_page(
+        self, *, job_id: str, user_id: str, after_id: int, limit: int
+    ) -> tuple[list[Any], JobStreamState] | None:
+        """One wake-up's read: the next events and the job's state, together."""
         self.state_reads += 1
         if job_id != JOB or self.job["user_id"] != user_id:
             return None
-        return JobStreamState(self.job["state"], self.job["published_pr_url"])
+        events = await self.list_events_after(job_id=job_id, after_id=after_id, limit=limit)
+        return events, JobStreamState(self.job["state"], self.job["published_pr_url"])
 
     async def list_events_after(self, *, job_id: str, after_id: int, limit: int) -> list[Any]:
         self.reads += 1

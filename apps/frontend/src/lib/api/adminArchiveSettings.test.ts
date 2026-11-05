@@ -40,7 +40,7 @@ describe('admin sandbox archive settings client', () => {
     );
   });
 
-  it('atomically writes the configurable fields and revision without the fixed URI', async () => {
+  it('atomically writes the fields and revision it is given, adding no destination', async () => {
     const fetch = vi.spyOn(client, 'fetchWithAuth').mockResolvedValue(
       new Response(JSON.stringify({ ...settings, enabled: true, revision: 4 }), {
         headers: { 'Content-Type': 'application/json' },

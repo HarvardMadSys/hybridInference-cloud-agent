@@ -19,6 +19,10 @@ from __future__ import annotations
 import pathlib
 from typing import Any
 
+from tests.support.owners import CONNECTION_ID, connection_row
+
+from cloud_agent.ports.sandbox import TerminalControlRoute
+
 _PORTS = pathlib.Path(__file__).resolve().parents[2] / "apps" / "backend" / "cloud_agent" / "ports"
 
 #: One name per port module, which is also the assembly's attribute name.
@@ -43,6 +47,65 @@ class AllCapabilities:
     async def ssh_group_state(self, *, thread_id: str):
         """Legacy fixtures have no chat that ever selected an SSH server."""
         return None
+
+    async def list_model_connections(self, *, user_id: str) -> list[dict[str, Any]]:
+        """Every fixture owner has one verified model connection, as every working owner does."""
+        return [connection_row(user_id)]
+
+    async def get_model_connection(self, *, user_id: str, connection_id: str):
+        """The owner's one connection (:data:`~tests.support.owners.CONNECTION_ID`); any other is missing."""
+        return connection_row(user_id) if connection_id == CONNECTION_ID else None
+
+    async def bind_residency(self, **_kwargs: Any) -> bool:
+        """The connection is unchanged, so a residency binds at its current revision."""
+        return True
+
+    async def scan_key_ciphertexts(self, *, sandbox_id: str, limit: int) -> list[str]:
+        """Legacy fixtures' sandbox groups were never handed a model connection key."""
+        return []
+
+    async def record_sandbox_incidents(self, **_kwargs: Any) -> list[dict[str, Any]]:
+        """Legacy fixtures store no sandbox incident."""
+        return []
+
+    async def untold_incidents(self, **_kwargs: Any) -> dict[str, Any] | None:
+        """Legacy fixtures' sandboxes have no incident to tell."""
+        return None
+
+    async def mark_attempt_incidents(self, **_kwargs: Any) -> None:
+        """Legacy fixtures keep no told-through cursor."""
+
+    async def owns_job(self, *, job_id: str, user_id: str) -> bool:
+        """Ownership as a fake's full job read answers it, as the routes once asked it."""
+        job = await self.get_job(job_id)  # type: ignore[attr-defined]
+        return job is not None and job["user_id"] == user_id and job.get("deleted_at") is None
+
+    async def terminal_control_route(
+        self, *, job_id: str, user_id: str
+    ) -> TerminalControlRoute | None:
+        """A terminal control call's one read, from the reads the route once made.
+
+        The fake's job, readiness and host reads. A shared group that records
+        no state reads as running, which is how the fake's start fence treats
+        it, and the fence's ``host_revoked`` state is the group's host removed.
+        """
+        if not await self.owns_job(job_id=job_id, user_id=user_id):
+            return None
+        job = await self.get_job(job_id)  # type: ignore[attr-defined]
+        sandbox = job.get("thread_sandbox")
+        thread_id = job.get("thread_id")
+        group = isinstance(sandbox, dict) and sandbox.get("shared_live") is True
+        state = (sandbox.get("state") or "running") if group else None
+        return TerminalControlRoute(
+            thread_id=thread_id,
+            workspace_ready=sandbox is not None
+            and bool(thread_id)
+            and await self.thread_workspace_ready(thread_id=str(thread_id)),  # type: ignore[attr-defined]
+            terminal_resume_pending=bool(job.get("terminal_resume_pending")),
+            group_state=state,
+            host_revoked=state == "host_revoked",
+            host=await self.host_for_job(job_id=job_id),  # type: ignore[attr-defined]
+        )
 
     def __getattr__(self, name: str) -> Any:
         """Resolve a capability name to this object; anything else is an error."""
@@ -81,6 +144,20 @@ class OneFake(AllCapabilities):
         raise AttributeError(name)
 
 
+class NoAccounts:
+    """Opt-in for fakes whose owners have connected neither GitLab nor GitHub."""
+
+    async def get_gitlab_connection(self, *, user_id: str) -> dict[str, Any] | None:
+        """No GitLab account connected."""
+        del user_id
+        return None
+
+    async def get_github_account(self, *, user_id: str) -> dict[str, Any] | None:
+        """No GitHub account connected either."""
+        del user_id
+        return None
+
+
 class EmptySkillLibrary:
     """Opt-in library for execution fakes whose scenarios do not select skills."""
 
@@ -102,7 +179,3 @@ class EmptyAttachments:
     async def count_thread_attachments(self, *, thread_id: str) -> int:
         """No conversation in these scenarios carries an upload."""
         return 0
-
-    async def list_thread_attachments(self, *, thread_id: str) -> list[dict[str, Any]]:
-        """Nothing to rebuild ``/uploads`` from."""
-        return []

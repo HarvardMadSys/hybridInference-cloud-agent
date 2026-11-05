@@ -193,6 +193,22 @@ RUN --mount=type=cache,id=cloud-agent-sandbox-apt,target=/var/cache/apt,sharing=
     && ln -s /usr/bin/fdfind /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
 
+# A headless browser, so an agent can open, operate and screenshot the pages
+# its own task serves (docs/agents/specs/2026-11-02-computer-use-base-capability.md).
+# Debian's build rather than a pinned upstream download: it exists for amd64
+# and arm64, takes Debian's security updates with every rebuild, and its
+# dependencies are exactly the shared libraries a browser a tool downloads for
+# itself (Playwright's, Puppeteer's) needs, which a member without root could
+# never install. The fonts make text and emoji render as they do for users.
+# Its own layer, so changing the list above does not re-download it.
+RUN --mount=type=cache,id=cloud-agent-sandbox-apt,target=/var/cache/apt,sharing=locked \
+    apt-get -o Acquire::Retries=3 -o APT::Update::Error-Mode=any update \
+    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+        chromium \
+        fonts-liberation \
+        fonts-noto-color-emoji \
+    && rm -rf /var/lib/apt/lists/*
+
 # Go, Rust and uv from their upstream releases: Debian's are years behind what
 # current repositories declare. Each download is pinned by version and checked
 # against its published SHA-256, so a build cannot quietly pick up another
@@ -270,24 +286,42 @@ RUN python3 -m venv /opt/uv \
 # last release before pi moved to `@earendil-works/pi-coding-agent`. Admin
 # updates download from the new name (`runtime_catalog.PI`); a pin that moves
 # here moves to the new name with it.
+#
+# Kilo's reviewed build is mounted read-only from its stage for this RUN alone,
+# and install-runtimes.sh copies it into Kilo's prefix. Copied into the image
+# instead, it would be a layer of its own, about 170 MB, that deleting the files
+# in a later layer only hides: every host would still pull it.
 COPY deploy/sandbox/install-runtimes.sh /tmp/install-runtimes.sh
-COPY --from=kilo-build /opt/kilo /opt/kilo
 RUN --mount=type=cache,id=cloud-agent-sandbox-npm,target=/root/.npm,sharing=locked \
+    --mount=type=bind,from=kilo-build,source=/opt/kilo,target=/opt/kilo \
     chmod 0755 /tmp/install-runtimes.sh \
     && /tmp/install-runtimes.sh claude-code @anthropic-ai/claude-code claude "${CLAUDE_CODE_VERSIONS}" \
     && /tmp/install-runtimes.sh codex @openai/codex codex "${CODEX_VERSIONS}" \
     && /tmp/install-runtimes.sh pi @mariozechner/pi-coding-agent pi "${PI_VERSIONS}" \
     && /tmp/install-runtimes.sh opencode opencode-ai opencode "${OPENCODE_VERSIONS}" \
     && /tmp/install-runtimes.sh kilo @kilocode/cli kilo "${KILO_VERSIONS}" \
-    && rm /tmp/install-runtimes.sh && rm -rf /opt/kilo
+    && rm /tmp/install-runtimes.sh
 
 # Claude's CLI has a live stdin transport but no prompt-free public fork RPC.
 # The exact-version Python SDK supplies that native transcript mutation. Keep
 # it in a dedicated immutable venv so the runtime helper never depends on a
 # package from the repository or the host.
+#
+# The wheel also bundles a Claude CLI of its own, about 214 MB, which the SDK
+# starts only for `query()` and `ClaudeSDKClient`. claude-session-fork imports
+# nothing but `fork_session` and `_resolve_session_file_path`, and neither
+# starts it: both work on the transcript files on disk. So the bundled CLI is
+# deleted in the RUN that installs it, before a layer can keep it. The helper's
+# own import lines then run against what is left, so an SDK bump that moves
+# either name fails the build rather than a user's Fork. A unit test keeps those
+# lines equal to the helper's (tests/unit/test_native_fork_helpers.py).
 RUN python3 -m venv /opt/claude-agent-sdk \
     && /opt/claude-agent-sdk/bin/pip install --no-cache-dir \
-        "claude-agent-sdk==0.2.148"
+        "claude-agent-sdk==0.2.148" \
+    && rm /opt/claude-agent-sdk/lib/python3*/site-packages/claude_agent_sdk/_bundled/claude \
+    && /opt/claude-agent-sdk/bin/python -I -c 'from claude_agent_sdk import fork_session' \
+    && /opt/claude-agent-sdk/bin/python -I -c \
+        'from claude_agent_sdk._internal.sessions import _resolve_session_file_path'
 
 # The version stamp the runner reads (issue #54): image labels, keyed by
 # registry id, derived from the pins above so a label can never disagree with
@@ -309,11 +343,13 @@ RUN python3 -m venv /opt/claude-agent-sdk \
 # comma-separated string it will happily stamp onto an attempt.
 LABEL org.freeinference.runtime.claude-code.version="${CLAUDE_CODE_VERSION}" \
       org.freeinference.helper.claude-agent-sdk.version="0.2.148" \
-      org.freeinference.helper.http-agent-live-bridge.version="4" \
+      org.freeinference.helper.http-agent-live-bridge.version="5" \
       org.freeinference.helper.guest-observer.version="2" \
       org.freeinference.helper.claude-session-fork.version="2" \
       org.freeinference.helper.member-window.version="1" \
       org.freeinference.helper.tool-mark.version="1" \
+      org.freeinference.helper.cloud-agent-browser.version="1" \
+      org.freeinference.helper.cloud-agent-mcp.version="1" \
       org.freeinference.runtime.codex.version="${CODEX_VERSION}" \
       org.freeinference.runtime.pi.version="${PI_VERSION}" \
       org.freeinference.runtime.opencode.version="${OPENCODE_VERSION}" \
@@ -345,6 +381,12 @@ COPY deploy/sandbox/pi-mcp-bridge.ts /usr/local/libexec/pi-mcp-bridge.ts
 COPY deploy/sandbox/http-agent-live-bridge /usr/local/bin/http-agent-live-bridge
 COPY deploy/sandbox/claude-session-fork /usr/local/bin/claude-session-fork
 COPY deploy/sandbox/member-process-reaper /usr/local/bin/member-process-reaper
+# The managed browser's launcher. Root-owned and read-only like the reaper:
+# every member trusts it with the sandbox's CDP token and browser traffic.
+COPY deploy/sandbox/cloud-agent-browser /usr/local/bin/cloud-agent-browser
+# The MCP gateway for servers a user runs in the sandbox. Root-owned and
+# read-only too: every member's CLI reaches its sandbox servers through it.
+COPY deploy/sandbox/cloud-agent-mcp /usr/local/bin/cloud-agent-mcp
 COPY --from=guest-observer-build /src/freeinference-guest-observer \
      /usr/local/libexec/freeinference-guest-observer
 COPY --from=guest-observer-build /src/freeinference-guest-observer.bpf.o \
@@ -359,7 +401,8 @@ RUN chmod 0755 /usr/local/bin/pi-freeinference /usr/local/bin/opencode-freeinfer
         /usr/local/libexec/freeinference-guest-observer \
         /usr/local/libexec/freeinference-tool-mark \
         /usr/local/libexec/freeinference-member-window \
-    && chmod 0555 /usr/local/bin/member-process-reaper \
+    && chmod 0555 /usr/local/bin/member-process-reaper /usr/local/bin/cloud-agent-browser \
+        /usr/local/bin/cloud-agent-mcp \
     && chmod 0644 /usr/local/libexec/freeinference-guest-observer.bpf.o \
     && chmod 0444 /usr/local/libexec/pi-mcp-bridge.ts
 
@@ -390,6 +433,27 @@ RUN groupadd --gid 10001 agent \
            "agent-member-$slot"; \
          slot=$((slot + 1)); \
        done \
+    # The sandbox's shared browser runs as its own user, in the agent group so
+    # members can read its endpoint and its downloads. No member's turn-end
+    # reap scans this uid, so the browser outlives the turn that started it.
+    && useradd --uid 10002 --gid 10001 --create-home --shell /usr/sbin/nologin agent-browser \
+    && chmod 0700 /home/agent-browser \
+    # The sandbox's MCP gateway (agent-mcp), and one runner per slot
+    # (agent-mcp-N) for the servers that slot's member chose. Their own
+    # users, so a server can reach neither the gateway nor another slot, and
+    # no member's turn-end reap stops them; in the agent group, so servers
+    # write the shared workspace and read the browser's endpoint.
+    && useradd --uid 10003 --gid 10001 --create-home --shell /usr/sbin/nologin agent-mcp \
+    && chmod 0700 /home/agent-mcp \
+    && install -d -m 0755 -o 0 -g 0 /run/agent-mcp-slots \
+    && slot=0; while [ "$slot" -lt 128 ]; do \
+         uid=$((12001 + slot)); \
+         useradd --uid "$uid" --gid 10001 --create-home \
+           --home-dir "/home/agent-mcp-$slot" --shell /usr/sbin/nologin "agent-mcp-$slot"; \
+         chmod 0700 "/home/agent-mcp-$slot"; \
+         install -d -m 0710 -o "$uid" -g 10001 "/run/agent-mcp-slots/$slot"; \
+         slot=$((slot + 1)); \
+       done \
     && install -d -m 2770 -o 10001 -g 10001 /workspace /agent-state \
     # Root-owned and unwritable: the sandbox reads its uploads and cannot add,
     # remove or alter one. docker cp extracts as root, so the daemon can still
@@ -398,7 +462,11 @@ RUN groupadd --gid 10001 agent \
     # create one under /.
     && install -d -m 0555 -o 0 -g 0 /uploads \
     && install -d -m 0700 -o 10001 -g 10001 /run/agent-activation \
-    && install -d -m 0711 -o 0 -g 10001 /run/agent-members
+    && install -d -m 0711 -o 0 -g 10001 /run/agent-members \
+    && install -d -m 0750 -o 10002 -g 10001 /run/agent-browser \
+    && install -d -m 0700 -o 10003 -g 10001 /run/agent-mcp \
+    # Admissions: written by the host as root, only read below it.
+    && install -d -m 0755 -o 0 -g 0 /run/agent-mcp-admissions
 USER agent
 WORKDIR /workspace
 
@@ -412,6 +480,23 @@ ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
     npm_config_update_notifier=false \
     CI=1 \
     PI_OFFLINE=1
+
+# The browser contract (v1). One browser serves the sandbox: the host starts
+# its service as agent-browser at every container start
+# (cloud_agent_host/sandbox_browser.py). Its endpoint and token are in the
+# state directory, and a new start writes a new token; its profile is in that
+# user's home, which the retained writable layer keeps. CHROME_PATH is what tools that look for an
+# installed Chrome (chrome-launcher, Karma, Lighthouse) read; nothing here
+# stops a tool or a repository from downloading a browser of its own.
+ENV CLOUD_AGENT_BROWSER_CONTRACT=1 \
+    CLOUD_AGENT_BROWSER_BIN=/usr/bin/chromium \
+    CLOUD_AGENT_BROWSER_STATE_DIR=/run/agent-browser \
+    CLOUD_AGENT_BROWSER_PROFILE=/home/agent-browser/profile \
+    CLOUD_AGENT_MCP_STATE_DIR=/run/agent-mcp \
+    CLOUD_AGENT_MCP_ADMISSIONS_DIR=/run/agent-mcp-admissions \
+    CLOUD_AGENT_MCP_SLOTS_DIR=/run/agent-mcp-slots \
+    CLOUD_AGENT_ARTIFACTS_DIR=/workspace/.cloud-agent-artifacts \
+    CHROME_PATH=/usr/bin/chromium
 
 # Fail loudly at build time if a runtime did not land, rather than at 3am when
 # a job claims it and dies — and prove each one *is* the version this image
@@ -480,6 +565,51 @@ RUN set -eu; \
     fd --version; \
     git lfs version; \
     gh --version
+
+# The managed browser, end to end, across users as a sandbox runs it: the
+# service starts as agent-browser, and a member (agent-member-0) runs the
+# self-test. The first client starts Chromium; two clients connect; one loads
+# and screenshots a page and the other cannot reach its session; and a
+# download lands in a directory only the member can write, through the
+# member's courier. Root only switches users here (setpriv); everything it
+# writes goes to /tmp and the member's home, and is removed, so no profile,
+# token or artifact lands in the image.
+USER root
+RUN set -eu; \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; \
+    check=/tmp/cloud-agent-browser-check; \
+    install -d -m 0755 "$check"; \
+    install -d -m 0750 -o 10002 -g 10001 "$check/run"; \
+    install -d -m 0700 -o 10002 -g 10001 "$check/profile"; \
+    install -d -m 2770 -o 11001 -g 10001 "$check/artifacts"; \
+    as() { uid=$1; home=$2; shift 2; \
+        setpriv --reuid="$uid" --regid=10001 --clear-groups \
+            env HOME="$home" CLOUD_AGENT_BROWSER_STATE_DIR="$check/run" \
+                CLOUD_AGENT_BROWSER_PROFILE="$check/profile" \
+                CLOUD_AGENT_ARTIFACTS_DIR="$check/artifacts" "$@"; }; \
+    as 10002 /home/agent-browser cloud-agent-browser service start; \
+    as 11001 /home/agent-member-0 cloud-agent-browser self-test \
+        || { tail -n 60 "$check/run/daemon.log"; exit 1; }; \
+    as 10002 /home/agent-browser cloud-agent-browser service stop; \
+    # The MCP gateway serves its fixed address and refuses an unknown token,
+    # and slot 0's runner starts as its own user. No server is admitted: one
+    # would install a package from the registry.
+    setpriv --reuid=10003 --regid=10001 --clear-groups env HOME=/home/agent-mcp \
+        cloud-agent-mcp service start; \
+    code="$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer nobody' \
+        -H 'Content-Type: application/json' -d '{}' http://127.0.0.1:47801/mcp)"; \
+    test "$code" = 401 || { echo "the MCP gateway answered $code, not 401" >&2; exit 1; }; \
+    setpriv --reuid=12001 --regid=10001 --clear-groups env HOME=/home/agent-mcp-0 \
+        cloud-agent-mcp runner start 0; \
+    test "$(stat -c %U:%a /run/agent-mcp-slots/0/runner.sock)" = agent-mcp-0:660; \
+    setpriv --reuid=12001 --regid=10001 --clear-groups env HOME=/home/agent-mcp-0 \
+        cloud-agent-mcp runner stop 0; \
+    setpriv --reuid=10003 --regid=10001 --clear-groups env HOME=/home/agent-mcp \
+        cloud-agent-mcp service stop; \
+    rm -rf "$check" /home/agent-member-0/.cloud-agent-browser /home/agent-browser/.cache \
+        /home/agent-browser/.config /home/agent-browser/.local /home/agent-browser/.pki \
+        /run/agent-mcp/gateway.* /run/agent-mcp-slots/0/runner.*
+USER agent
 
 # What this image is, in the two places a deployment looks: OCI's own labels,
 # and one of ours naming the artifact's role. A resolver reads both out of the

@@ -1,23 +1,20 @@
 'use client';
 
+import { KEYBOARD_INPUT_SELECTOR } from '@/lib/keyboardShortcuts';
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import toast from 'react-hot-toast';
 import { JobComposer } from './job-detail/JobComposer';
 import { JobDetailHeader } from './job-detail/JobDetailHeader';
+import { JobDetailProviders } from './job-detail/JobDetailProviders';
 import { JobDetailSidePanels } from './job-detail/JobDetailSidePanels';
 import { JobTranscript } from './job-detail/JobTranscript';
-import { TrajectoryView } from './job-detail/LazyPanels';
-import { useJobComposerSettings } from './job-detail/useJobComposerSettings';
+import { ContextView, TrajectoryView } from './job-detail/LazyPanels';
+import { inheritedFrom, useJobComposerSettings } from './job-detail/useJobComposerSettings';
 import { useJobConversation } from './job-detail/useJobConversation';
 import { useJobDetailPanels, type SubagentTarget } from './job-detail/useJobDetailPanels';
 import { useJobRunActions } from './job-detail/useJobRunActions';
-
 import { useT } from '@/components/providers';
-import { WorkspaceLinkProvider } from '@/components/ui/Markdown';
-import { basePath } from '@/config/env';
-import { publishAgentThread } from '@/lib/api/agents';
 import { submitThreadMessage, type ThreadMessageResultApi } from '@/lib/api/pendingMessages';
-import { isTemporaryWorkspace } from '@/lib/temporaryWorkspace';
 import { APIError } from '@/lib/utils/errors';
 
 import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
@@ -44,14 +41,13 @@ import { hasLostContext, isActiveConversationState, isBusyJob, latestJob } from 
 import { useFirstRun } from './firstRun';
 import { isGoalRevisionConflict, writeGoal } from './goal/goalApi';
 import { hasLiveWork } from './goal/liveWork';
-import { GOAL_COMMAND_PREFIX, useGoalCommand } from './goal/useGoalCommand';
+import { GOAL_COMMAND_PREFIX, type GoalCommandControls } from './goal/useGoalCommand';
 import { useThreadComposerMcp } from './mcp/useThreadComposerMcp';
 import { useThreadComposerSsh } from './ssh/useComposerSsh';
 import { createRecordedOutputsSelector } from './recordedTurnOutputs';
 import { useTranscriptPresentation } from './transcriptPresentation';
 import type { AgentJob } from './types';
-import { isActiveWorkspacePublicationState } from './useAgentJobs';
-import { useComposerDraft } from './useComposerDraft';
+import { useComposerDraftStore } from './useComposerDraft';
 import { usePendingMessages } from './usePendingMessages';
 import { watchPullRequestPrompt, watchPullRequestRequestId } from './watchPullRequest';
 
@@ -62,6 +58,9 @@ export {
 
 const EMPTY_STORED_EVENTS: (AgentJobEventApi | AgentThreadEventApi)[] = [];
 const EMPTY_THREAD_JOBS: AgentJobApi[] = [];
+
+/** The composer's `/goal` command, run before a send: true when the draft was one. */
+type GoalCommand = GoalCommandControls['submit'];
 
 // The rail needs room to sit beside the text rather than over it, and a band
 // tall enough that its marks mean something. Otherwise the transcript keeps
@@ -111,7 +110,6 @@ export function JobDetail({
     setTrajectoryQuery,
     trajectorySteps,
     layoutContainerRef,
-    openWorkspaceFile,
     selectStep,
     openRun,
   } = panels;
@@ -132,8 +130,9 @@ export function JobDetail({
   }, [job.id]);
   const [title, setTitle] = useState(job.title);
   useEffect(() => setTitle(job.title), [job.title, job.threadId]);
-  const draft = useComposerDraft({ userId, threadId });
-  const { value: followUp, setValue: setFollowUp } = draft;
+  // Only the composer reads the text, so a keystroke does not draw this page again.
+  const draft = useComposerDraftStore({ userId, threadId });
+  const { setValue: setFollowUp } = draft;
   const currentDraftScope = useRef(draft.capture().scope);
   currentDraftScope.current = draft.capture().scope;
   const composerMounted = useRef(true);
@@ -156,25 +155,21 @@ export function JobDetail({
   const followUpBox = useRef<HTMLTextAreaElement>(null);
   const [readingFiles, setReadingFiles] = useState(false);
   // Follow-ups append to the thread's latest turn, even from an older URL, and
-  // an omitted skill set, model or effort is inherited from that turn.
+  // an omitted skill set, model (with its source) or effort is inherited from it.
   const newestTurn = latestJob(threadJobs);
   const parentTurn =
     newestTurn && (newestTurn.turn_no ?? 1) > (job.turnNo ?? 1) ? newestTurn : undefined;
   const inheritedSkills = parentTurn ? (parentTurn.skills ?? []) : (job.skills ?? []);
-  const inherited = {
-    model: parentTurn ? parentTurn.model : job.model,
-    reasoningEffort: parentTurn ? (parentTurn.reasoning_effort ?? undefined) : job.reasoningEffort,
-  };
-  // Unsent composer choices belong to the conversation, including when a PR
-  // action advances it to another turn without sending the owner's draft.
-  // The composer settings reset the chosen model and effort by the same rule.
+  const inherited = inheritedFrom(parentTurn, job);
+  // Unsent choices (skills here; model and effort in the composer settings) belong
+  // to the conversation, even when a PR action advances it without the draft.
   useEffect(() => setChosenSkills(null), [threadId]);
   // The same rule for the goal guidance. This component is deliberately not
   // remounted when the conversation moves to its next turn, so anything that
   // belongs to *one* message has to be reset explicitly when that turn does.
   useEffect(() => setGoalHint(null), [job.id]);
   const settings = useJobComposerSettings(job, inherited);
-  const { config, model, effort } = settings;
+  const { config, choice, effort } = settings;
   const attachments = useAttachments(t, config?.attachment_limits);
   const mcp = useThreadComposerMcp(job.threadId);
   const ssh = useThreadComposerSsh(job.threadId);
@@ -184,11 +179,9 @@ export function JobDetail({
       ? t('attach.mcpUnsupported', { runtime: job.runtime })
       : undefined;
   const [submitting, setSubmitting] = useState(false);
-  const [rewriting, setRewriting] = useState(false);
   const sendRequestedRef = useRef(false);
   const watchPrRequestedRef = useRef(false);
   const [watchPrAcceptedJobId, setWatchPrAcceptedJobId] = useState<string | null>(null);
-  const [publishRequested, setPublishRequested] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const runActions = useJobRunActions({ job, userId, onReload, onError: setActionError });
   const { stopping, forking, stop, forkFrom, canForkWorkspace, canForkCurrent, canReview } =
@@ -201,14 +194,6 @@ export function JobDetail({
   // goes, and says where its draft PR is when it has one.
   const { onlyThreadId } = useFirstRun();
   const firstRun = (job.turnNo ?? 1) === 1 && onlyThreadId === threadId;
-  const goalCommand = useGoalCommand({
-    value: followUp,
-    setValue: setFollowUp,
-    focusComposer: () => followUpBox.current?.focus(),
-    onNeedsObjective: () => setGoalHint(t('goal.needsObjective')),
-    onApply: applyGoalObjective,
-    onError: setActionError,
-  });
   useEffect(() => setAttemptNo(liveAttempt), [liveAttempt]);
 
   // Edit & rewind creates the native child immediately, then leaves the
@@ -326,16 +311,15 @@ export function JobDetail({
     onReload?.();
   }
 
-  async function submitFollowUp(event: FormEvent<HTMLFormElement>) {
+  async function submitFollowUp(event: FormEvent<HTMLFormElement>, command: GoalCommand) {
     event.preventDefault();
-    await sendDraft();
+    await sendDraft(command);
   }
 
   /** Send what the composer holds; the result, or `null` if nothing went. */
-  async function sendDraft(): Promise<ThreadMessageResultApi | null> {
+  async function sendDraft(command: GoalCommand): Promise<ThreadMessageResultApi | null> {
     if (
       sendRequestedRef.current ||
-      rewriting ||
       watchPrRequestedRef.current ||
       contextLost ||
       isArchived ||
@@ -353,18 +337,21 @@ export function JobDetail({
     setActionError(null);
     try {
       // Commands use their own operation and are never queued as messages.
-      if (await goalCommand.submit()) return null;
+      if (await command()) return null;
+      if (settings.inheritedUnavailable) return null;
       // One request whatever the conversation is doing: idle, the message is
       // the next turn when this returns; busy, it waits in the queue above the
       // composer. ``queue.apply`` shows the card or, for a turn, moves to it.
-      const result = await submitThreadMessage(threadId, {
-        prompt,
-        ...(chosenSkills !== null ? { skill_ids: chosenSkills.map((skill) => skill.id) } : {}),
-        ...(attachments.ids.length ? { attachment_ids: attachments.ids } : {}),
-        // Omitted controls inherit the parent's validated model and effort.
-        // The parent is the latest turn, which need not be the one on screen.
-        ...composerOverrides(inherited, model, effort),
-      });
+      const result = await attachments.whileSending(
+        submitThreadMessage(threadId, {
+          prompt,
+          ...(chosenSkills !== null ? { skill_ids: chosenSkills.map((skill) => skill.id) } : {}),
+          ...(attachments.ids.length ? { attachment_ids: attachments.ids } : {}),
+          // Omitted controls inherit the parent's model, source and effort: the
+          // latest turn's, which need not be the one on screen.
+          ...composerOverrides(inherited, choice, effort),
+        }),
+      );
       draft.acknowledge(snapshot);
       if (!composerMounted.current || currentDraftScope.current !== snapshot.scope) return result;
       queue.apply(result);
@@ -388,9 +375,9 @@ export function JobDetail({
    * draft: what already waits was left for after the turn, and each has its
    * own ↑ for changing that.
    */
-  async function steerNow() {
-    const scope = draft.capture().scope;
-    const drafted = followUp.trim() ? await sendDraft() : null;
+  async function steerNow(command: GoalCommand) {
+    const { scope, value } = draft.capture();
+    const drafted = value.trim() ? await sendDraft(command) : null;
     if (!composerMounted.current || currentDraftScope.current !== scope) return;
     // Nothing to add, or nothing running: the draft simply became the next turn.
     if (!drafted?.pending || (drafted.pending.attachments ?? []).length) return;
@@ -411,9 +398,7 @@ export function JobDetail({
     setInspector(null);
   }
   const selectedAttemptIsCurrent = attemptNo === 0 || attemptNo === liveAttempt;
-  const usageFooter = selectedAttemptIsCurrent ? (
-    <LedgerUsage job={job} usage={usage} />
-  ) : undefined;
+  const usageFooter = selectedAttemptIsCurrent ? <LedgerUsage usage={usage} /> : undefined;
 
   const conversation = useJobConversation({ job, panels, attemptNo, liveAttempt, setAttemptNo });
   const {
@@ -497,9 +482,13 @@ export function JobDetail({
     );
   }, [events, openSubagent, openSubagentJobId, subagentScope, threadJobs]);
   const showingSubagent = tab === 'chat' && openSubagent !== undefined;
+  // Every delegating call reads this through context. It keeps one identity while
+  // the run streams, and reads the turns as they are whenever a call's row is drawn.
+  const turnOfRef = useRef(turnOf);
+  turnOfRef.current = turnOf;
   const subagentOfCall = useCallback<SubagentOfCall>(
     (jobId, event) => {
-      const turn = turnOf(jobId);
+      const turn = turnOfRef.current(jobId);
       const agent = turn && subagentStartedBy(turnActivityOverview(turn.events), event);
       if (!agent) return undefined;
       return {
@@ -510,7 +499,7 @@ export function JobDetail({
         },
       };
     },
-    [setSubagent, setTab, turnOf],
+    [setSubagent, setTab],
   );
   // Every turn's subagents, for narrowing the trajectory to one of them.
   const trajectorySubagents = useMemo(() => {
@@ -545,7 +534,7 @@ export function JobDetail({
         !target?.closest('#job-activity-window') ||
         // A maximized panel restores on Escape; only the floating one closes.
         target.closest('#job-activity-window[data-maximized]') ||
-        target.closest('input, textarea, select, [contenteditable="true"], [role="dialog"]')
+        target.closest(`${KEYBOARD_INPUT_SELECTOR}, [role="dialog"]`)
       )
         return;
       event.preventDefault();
@@ -564,7 +553,7 @@ export function JobDetail({
       // scroll:false and a stable JobDetail key. Native history updates Next's
       // usePathname without replacing the page, preserving the conversation
       // while useAgentJob loads the next turn. Reload and Back keep real URLs.
-      window.history.pushState(null, '', `${basePath}/${encodeURIComponent(jobId)}`);
+      window.history.pushState(null, '', `/${encodeURIComponent(jobId)}`);
       // The reader asked for this turn, so following its output is what they
       // asked for — the one place besides "back to bottom" that resumes it.
       scroll.followLatest();
@@ -582,11 +571,6 @@ export function JobDetail({
     },
   });
   const watchPrPrompt = watchPullRequestPrompt(job);
-  // These live fields describe the entire conversation/workspace. Other
-  // thread rows can retain older pending/running values after it settles.
-  const publicationState =
-    job.workspacePublicationState ?? latestQuestionTurn?.workspace_publication_state;
-  const publicationPending = Boolean(publicationState && publicationState !== 'published');
   const conversationBusy =
     job.conversationState !== undefined
       ? isActiveConversationState(job.conversationState)
@@ -596,16 +580,13 @@ export function JobDetail({
   const canWatchPr = Boolean(
     userId &&
     (job.prUrl ?? job.workspacePrUrl) &&
-    !job.workspaceUnpublishedChanges &&
     isSuccessful &&
     !isActive &&
     !isArchived &&
     !contextLost &&
     !submitting &&
-    !rewriting &&
     !mcp.saving &&
     !ssh.saving &&
-    !publicationPending &&
     watchPrAcceptedJobId !== job.id &&
     queue.loaded &&
     queue.latestJobId &&
@@ -614,38 +595,6 @@ export function JobDetail({
     !queue.resuming &&
     !conversationBusy,
   );
-
-  // The platform publishes only when the owner asks: Create PR, then Update PR.
-  // The newest turn offers it once nothing runs in the workspace; a request
-  // already on its way shows as the publication state instead.
-  const canPublish = Boolean(
-    userId &&
-    job.repo &&
-    !isTemporaryWorkspace(job.repo) &&
-    !parentTurn &&
-    !isActive &&
-    !contextLost &&
-    !publishRequested &&
-    !isActiveWorkspacePublicationState(publicationState) &&
-    !conversationBusy,
-  );
-
-  // A request stays closed until the page reads the publication it started.
-  useEffect(() => setPublishRequested(false), [publicationState, job.id]);
-
-  async function publish() {
-    if (!canPublish) return;
-    setPublishRequested(true);
-    setActionError(null);
-    try {
-      await publishAgentThread(threadId);
-      onReload?.();
-    } catch (cause: unknown) {
-      if (!composerMounted.current) return;
-      setPublishRequested(false);
-      setActionError(cause instanceof Error ? cause.message : t('publish.sendFailed'));
-    }
-  }
 
   async function watchPr() {
     const latestJobId = queue.latestJobId;
@@ -660,7 +609,7 @@ export function JobDetail({
       // selections belong to the owner's next message and stay in place.
       // The server replays this receipt under the thread lock, including for
       // another tab viewing a different turn of the same conversation. Fresh
-      // requests refuse atomically if its queue or published boundary changes.
+      // requests refuse atomically if its queue changes.
       const result = await submitThreadMessage(
         threadId,
         { prompt: watchPrPrompt, require_idle: true, expected_latest_job_id: latestJobId },
@@ -742,12 +691,12 @@ export function JobDetail({
                 inspector is not holding instead of a reading column. */}
             <div
               className={`flex w-full flex-1 flex-col pb-4 pt-4 ${
-                tab === 'trajectory'
-                  ? 'px-4'
-                  : `mx-auto max-w-4xl ${showRail ? 'pl-4 pr-10' : 'px-4'}`
+                tab !== 'chat' ? 'px-4' : `mx-auto max-w-4xl ${showRail ? 'pl-4 pr-10' : 'px-4'}`
               }`}
             >
-              {tab === 'trajectory' ? (
+              {tab === 'context' ? (
+                <ContextView job={job} onOpenPoint={panels.openContextPoint} onOpenTurn={openRun} />
+              ) : tab === 'trajectory' ? (
                 <div className="flex-1">
                   <TrajectoryView
                     events={events}
@@ -759,14 +708,7 @@ export function JobDetail({
                     subagentFilter={
                       openSubagent && subagent ? JSON.stringify([subagent.jobId, subagent.key]) : ''
                     }
-                    onSubagentFilterChange={(value) => {
-                      if (!value) {
-                        setSubagent(null);
-                        return;
-                      }
-                      const [jobId, key] = JSON.parse(value) as [string, string];
-                      setSubagent({ jobId, key });
-                    }}
+                    onSubagentFilterChange={panels.setSubagentFilter}
                     selectedKey={inspector?.kind === 'step' ? inspector.stepKey : null}
                     onSelectStep={selectStep}
                     onOpenRun={openRun}
@@ -806,7 +748,6 @@ export function JobDetail({
                     recordedOutputs={recordedOutputs}
                     onReview={canReview ? openReview : undefined}
                     onWatchPr={canWatchPr ? () => void watchPr() : undefined}
-                    onPublish={canPublish ? () => void publish() : undefined}
                   />
                 </SubagentLinks.Provider>
               )}
@@ -820,7 +761,7 @@ export function JobDetail({
                 mcp={mcp}
                 ssh={ssh}
                 queue={queue}
-                goalCommand={goalCommand}
+                applyGoalObjective={applyGoalObjective}
                 composerRef={scroll.composerRef}
                 followUpBox={followUpBox}
                 questionTurn={questionTurn}
@@ -830,16 +771,15 @@ export function JobDetail({
                 setChosenSkills={setChosenSkills}
                 mcpBlockedReason={mcpBlockedReason}
                 submitting={submitting}
-                rewriting={rewriting}
                 readingFiles={readingFiles}
                 setReadingFiles={setReadingFiles}
-                setRewriting={setRewriting}
                 actionError={actionError}
                 setActionError={setActionError}
                 submitFollowUp={submitFollowUp}
                 steerNow={steerNow}
                 insertGoalCommand={insertGoalCommand}
                 onReload={onReload}
+                todo={{ overview: activityOverview, open: activityVisible, toggle: toggleActivity }}
                 hidden={showingSubagent}
               />
             </div>
@@ -937,5 +877,5 @@ export function JobDetail({
       </div>
     </section>
   );
-  return <WorkspaceLinkProvider onOpenFile={openWorkspaceFile}>{content}</WorkspaceLinkProvider>;
+  return <JobDetailProviders panels={panels}>{content}</JobDetailProviders>;
 }

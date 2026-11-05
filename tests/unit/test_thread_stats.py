@@ -8,14 +8,21 @@ would read as a fact.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from cloud_agent.session_statistics import summarize_session_statistics
-from cloud_agent.thread_stats import summarize_thread
+from cloud_agent.thread_stats import (
+    AttemptStatsAccumulator,
+    attempt_rollup_from_payload,
+    attempt_rollup_payload,
+    summarize_session_statistics,
+    summarize_thread,
+    summarize_thread_rollups,
+)
 
-_T0 = datetime(2026, 8, 19, 12, 0, 0, tzinfo=timezone.utc)
+_T0 = datetime(2026, 8, 19, 12, 0, 0, tzinfo=UTC)
 
 
 def _event(
@@ -39,6 +46,167 @@ def _event(
 
 def _attempt(*, job_id: str = "job-1", offset: float = 0.0) -> dict:
     return {"job_id": job_id, "started_at": _T0 + timedelta(seconds=offset)}
+
+
+def _summarize_through_persisted_rollups(
+    *, job_ids: list[str], attempts: list[dict], events: list[dict]
+):
+    grouped: dict[tuple[str, int], list[dict]] = {}
+    for event in events:
+        key = (str(event.get("job_id")), int(event.get("attempt_id") or 0))
+        grouped.setdefault(key, []).append(event)
+    rollups = []
+    for (job_id, attempt_id), attempt_events in grouped.items():
+        accumulator = AttemptStatsAccumulator(attempt_id=attempt_id, job_id=job_id)
+        ordered = sorted(attempt_events, key=lambda event: int(event.get("seq") or 0))
+        for offset in range(0, len(ordered), 2):
+            accumulator.extend(ordered[offset : offset + 2])
+        reduced = accumulator.finish()
+        assert accumulator.finish() == reduced
+        # Exercise the JSON boundary the Postgres cache uses, not merely two
+        # functions sharing the same in-memory object.
+        payload = json.loads(json.dumps(attempt_rollup_payload(reduced)))
+        rollups.append(
+            attempt_rollup_from_payload(
+                attempt_id=attempt_id,
+                job_id=job_id,
+                payload=payload,
+            )
+        )
+    return summarize_thread_rollups(job_ids=job_ids, attempts=attempts, rollups=rollups)
+
+
+def test_persisted_attempt_rollups_match_the_legacy_reducer_bit_for_bit() -> None:
+    """A mixed legacy corpus keeps every public field exactly unchanged."""
+    retry_and_tools = [
+        _event(
+            seq=4,
+            event_type="tool_result",
+            payload={"tool_use_id": "a", "is_error": 1},
+            offset=7.25,
+        ),
+        _event(
+            seq=1,
+            event_type="thinking",
+            payload={
+                "usage_id": "response-a",
+                "usage": {"input_tokens": 100, "output_tokens": 0},
+            },
+            offset=0.25,
+        ),
+        _event(seq=2, event_type="tool_use", payload={"id": "a"}, offset=1.5),
+        _event(seq=3, event_type="tool_use", payload={"id": "b"}, offset=2.0),
+        _event(seq=5, event_type="tool_result", payload={"tool_use_id": "b"}, offset=8.5),
+        _event(
+            seq=6,
+            event_type="message",
+            payload={
+                "has_text": True,
+                "usage_id": "response-a",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 17,
+                    "cache_read_input_tokens": 50,
+                    "cache_creation_input_tokens": 3,
+                },
+            },
+            offset=10.75,
+        ),
+        _event(seq=1, attempt_id=2, event_type="thinking", offset=30.0),
+        _event(
+            seq=2,
+            attempt_id=2,
+            event_type="lifecycle",
+            payload={
+                "usage_scope": "attempt",
+                "usage": {"input_token_count": 9.0, "completion_tokens": 4},
+            },
+            offset=33.125,
+        ),
+        _event(
+            seq=3,
+            attempt_id=2,
+            event_type="lifecycle",
+            payload={"phase": "attempt_superseded"},
+            offset=34.5,
+        ),
+    ]
+    malformed_legacy = [
+        {
+            **_event(seq=1, event_type="message", offset=1),
+            "payload": "legacy-not-an-object",
+            "created_at": None,
+        },
+        _event(
+            seq=2,
+            event_type="usage",
+            payload={
+                "input_tokens": True,
+                "prompt_tokens": -1,
+                "output_token_count": 3.0,
+                "cached_tokens": 0,
+            },
+            offset=2,
+        ),
+        _event(seq=3, event_type="tool_use", payload={"id": 7}, offset=4),
+        _event(seq=4, event_type="tool_result", payload={"tool_use_id": "7"}, offset=3),
+        _event(seq=5, event_type="raw", payload={"unknown": [1, 2]}, offset=9),
+    ]
+    multiple_turns = [
+        _event(
+            job_id="job-2",
+            attempt_id=8,
+            seq=1,
+            event_type="usage",
+            payload={
+                "input_tokens": 20,
+                "output_tokens": 0,
+                "cache_read_tokens": 5,
+                "cache_write_tokens": 2,
+            },
+            offset=102,
+        ),
+        _event(
+            job_id="job-2",
+            attempt_id=8,
+            seq=2,
+            event_type="message",
+            payload={"has_text": True},
+            offset=106,
+        ),
+        _event(
+            job_id="legacy-detached",
+            attempt_id=9,
+            seq=1,
+            event_type="tool_use",
+            payload={"id": "detached"},
+            offset=200,
+        ),
+    ]
+    reverse_clock = [
+        _event(seq=1, attempt_id=11, event_type="raw", offset=9),
+        _event(seq=2, attempt_id=11, event_type="raw", offset=1),
+    ]
+    corpus = [
+        (["job-1"], [_attempt(), _attempt(offset=29)], retry_and_tools),
+        (["job-1"], [_attempt()], malformed_legacy),
+        (["job-1"], [_attempt()], reverse_clock),
+        (
+            ["job-1", "job-2", "job-3"],
+            [_attempt(), _attempt(job_id="job-2", offset=100)],
+            multiple_turns,
+        ),
+        (["job-1"], [], []),
+    ]
+
+    for job_ids, attempts, events in corpus:
+        legacy = summarize_thread(job_ids=job_ids, attempts=attempts, events=events)
+        persisted = _summarize_through_persisted_rollups(
+            job_ids=job_ids,
+            attempts=attempts,
+            events=events,
+        )
+        assert persisted == legacy
 
 
 def test_repeated_response_usage_is_counted_once_with_later_output_updates() -> None:
@@ -279,7 +447,7 @@ def test_runtime_without_usage_reports_none_not_zero() -> None:
     assert stats.tokens_source == "unavailable"
 
 
-def test_ttft_measures_from_attempt_start_to_first_output() -> None:
+def test_first_output_measures_from_attempt_start_to_first_output() -> None:
     stats = summarize_thread(
         job_ids=["job-1"],
         attempts=[_attempt(offset=0)],
@@ -292,23 +460,23 @@ def test_ttft_measures_from_attempt_start_to_first_output() -> None:
         ],
     )
 
-    assert stats.ttft_seconds == 3.0
+    assert stats.first_output_seconds == 3.0
 
 
-def test_ttft_uses_the_first_attempt_of_a_retried_turn() -> None:
+def test_first_output_uses_the_first_attempt_of_a_retried_turn() -> None:
     stats = summarize_thread(
         job_ids=["job-1"],
         attempts=[_attempt(offset=10), _attempt(offset=0)],
         events=[_event(seq=1, event_type="message", payload={"text": "hi"}, offset=12)],
     )
 
-    assert stats.ttft_seconds == 12.0
+    assert stats.first_output_seconds == 12.0
 
 
-def test_ttft_across_a_thread_is_the_mean_of_its_turns() -> None:
-    """A multi-turn thread reports the average first-token time, not one turn's.
+def test_first_output_across_a_thread_is_the_mean_of_its_turns() -> None:
+    """A multi-turn thread reports the average first-output time, not one turn's.
 
-    Every other ttft case here has exactly one sample, which makes the mean
+    Every other first-output case here has exactly one sample, which makes the mean
     indistinguishable from the max, the min, or the sum — mutation testing
     found that replacing the mean with `max()` left the suite green. A thread
     is the unit this stat is displayed for, so the aggregation across turns is
@@ -330,10 +498,10 @@ def test_ttft_across_a_thread_is_the_mean_of_its_turns() -> None:
     )
 
     # Samples are 2s, 4s and 12s: mean 6, max 12, min 2, sum 18.
-    assert stats.ttft_seconds == 6.0
+    assert stats.first_output_seconds == 6.0
 
 
-def test_ttft_ignores_a_turn_that_never_produced_output() -> None:
+def test_first_output_ignores_a_turn_that_never_produced_output() -> None:
     """A turn with no output contributes no sample, rather than a zero.
 
     The same rule the rest of this module follows: a measure we do not have
@@ -358,17 +526,17 @@ def test_ttft_ignores_a_turn_that_never_produced_output() -> None:
         ],
     )
 
-    assert stats.ttft_seconds == 4.0
+    assert stats.first_output_seconds == 4.0
 
 
-def test_ttft_is_absent_without_an_attempt_row() -> None:
+def test_first_output_is_absent_without_an_attempt_row() -> None:
     stats = summarize_thread(
         job_ids=["job-1"],
         attempts=[],
         events=[_event(seq=1, event_type="message", payload={"text": "hi"}, offset=2)],
     )
 
-    assert stats.ttft_seconds is None
+    assert stats.first_output_seconds is None
 
 
 def test_multiple_turns_aggregate_across_the_thread() -> None:
@@ -484,7 +652,7 @@ def test_empty_thread_is_all_zero_and_never_raises() -> None:
     assert stats.tool_calls == 0
     assert stats.wall_seconds == 0.0
     assert stats.model_seconds == 0.0
-    assert stats.ttft_seconds is None
+    assert stats.first_output_seconds is None
     assert stats.tokens_source == "unavailable"
 
 

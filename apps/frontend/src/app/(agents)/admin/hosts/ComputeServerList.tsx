@@ -2,9 +2,10 @@
 
 import { useState } from 'react';
 
+import { Select } from '@/components/ui/Select';
 import type { ComputeAllocation, ComputeCatalog, ComputeServerSnapshot } from '@/lib/api/compute';
 
-import { absoluteTime, inputClass, remainingTime } from './compute-ui';
+import { absoluteTime, inputClass, neverCreated, remainingTime } from './compute-ui';
 import { hostStatusLabel } from './format';
 
 type InventoryHost = ComputeServerSnapshot['hosts'][number];
@@ -20,7 +21,8 @@ export interface ComputeServerGroup {
 }
 
 function serverStatus(allocation: ComputeAllocation, hosts: InventoryHost[]): string {
-  if (allocation.state === 'absent') return 'Disconnected';
+  if (allocation.state === 'absent')
+    return neverCreated(allocation) ? 'Not created' : 'Disconnected';
   if (allocation.state === 'terminated') return 'Released';
   if (allocation.state !== 'ready') return allocation.state.replaceAll('_', ' ');
   if (hosts.length === 0) return 'Awaiting agent';
@@ -36,7 +38,7 @@ function serverStatus(allocation: ComputeAllocation, hosts: InventoryHost[]): st
 
 function State({ label }: { label: string }) {
   const ready = label === 'Online' || label === 'online';
-  const inactive = ['Disconnected', 'Released', 'disabled'].includes(label);
+  const inactive = ['Disconnected', 'Not created', 'Released', 'disabled'].includes(label);
   return (
     <span
       className={`inline-flex items-center gap-2 text-sm capitalize ${ready ? 'text-emerald-700 dark:text-emerald-400' : inactive ? 'text-gray-500 dark:text-gray-400' : 'text-amber-700 dark:text-amber-300'}`}
@@ -156,6 +158,18 @@ function ServerRow({
   );
 }
 
+/** Server sources to filter by: every provider, then servers added by hand. */
+function sourceOptions(catalog: ComputeCatalog | null) {
+  return [
+    { value: '', label: 'All sources' },
+    ...(catalog?.providers ?? []).map((provider) => ({
+      value: provider.id,
+      label: provider.label,
+    })),
+    { value: 'unmanaged', label: 'Existing server' },
+  ];
+}
+
 export default function ComputeServerList({
   allocations,
   inventory,
@@ -250,20 +264,13 @@ export default function ComputeServerList({
             value={search}
             onChange={(event) => setSearch(event.target.value)}
           />
-          <select
+          <Select
             aria-label="Filter server source"
             className={`${inputClass} sm:!w-48`}
             value={providerFilter}
-            onChange={(event) => setProviderFilter(event.target.value)}
-          >
-            <option value="">All sources</option>
-            {catalog?.providers.map((provider) => (
-              <option key={provider.id} value={provider.id}>
-                {provider.label}
-              </option>
-            ))}
-            <option value="unmanaged">Existing server</option>
-          </select>
+            onValueChange={setProviderFilter}
+            options={sourceOptions(catalog)}
+          />
           {releasedCount > 0 && (
             <button
               type="button"

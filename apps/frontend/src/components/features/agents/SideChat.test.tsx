@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { offering, TEST_CONNECTION } from '@/test/connectionConfig';
 import receiptContract from '../../../../../../tests/fixtures/side_chat_job_receipt.json';
 import { installSideChatLocks } from './sideChatTestSupport';
 import '@testing-library/jest-dom/vitest';
@@ -18,6 +19,7 @@ import {
   forkAgentJob,
   getAgentJob,
   getAgentJobGit,
+  getAgentJobGitMetadata,
   getAgentJobThread,
   listAllAgentThreadEvents,
   streamAgentJob,
@@ -35,7 +37,6 @@ import { codeReviewFixPrompt } from './codeReview';
 import { sideChatKeys } from './sideChatStorage';
 import { SideChat } from './SideChat';
 import { conversationReadStorageKey } from './useConversationReadState';
-import { sideChatStorageKey } from './useSideChatSession';
 import { answerThreadQuestion, listThreadQuestions } from '@/lib/api/questions';
 import type { SideChatTab } from './useWorkspaceTabs';
 import { deleteAttachment, uploadAttachment, type AttachmentApi } from '@/lib/api/attachments';
@@ -55,6 +56,7 @@ vi.mock('@/lib/api/agents', () => ({
   forkAgentJob: vi.fn(),
   getAgentJob: vi.fn(),
   getAgentJobGit: vi.fn(),
+  getAgentJobGitMetadata: vi.fn(),
   getAgentJobThread: vi.fn(),
   listAllAgentThreadEvents: vi.fn(),
   streamAgentJob: vi.fn(),
@@ -95,6 +97,7 @@ const anchor = {
   repo: 'owner/project',
   runtime: 'codex',
   model: 'model-a',
+  model_connection_id: TEST_CONNECTION,
   task_prompt: 'Inherited question',
   title: 'Main task',
   title_source: 'manual',
@@ -102,10 +105,6 @@ const anchor = {
   current_attempt_id: null,
   metadata: null,
   detail: null,
-  spent_usd: null,
-  tokens_in: null,
-  tokens_out: null,
-  model_calls: null,
 } as AgentJobApi;
 const copied: AgentJobApi = {
   ...anchor,
@@ -123,7 +122,7 @@ const next: AgentJobApi = {
   conversation_state: 'running',
   current_attempt_id: 12,
 };
-const config = { models: ['model-a', 'model-b'] } as AgentConfigApi;
+const config = { ...offering(['model-a', 'model-b']) } as AgentConfigApi;
 let jobs: AgentJobApi[];
 let events: AgentThreadEventApi[];
 let waiting: PendingMessageApi[];
@@ -173,6 +172,12 @@ beforeEach(() => {
   vi.mocked(getAgentJobGit).mockResolvedValue({ available: false } as Awaited<
     ReturnType<typeof getAgentJobGit>
   >);
+  vi.mocked(getAgentJobGitMetadata).mockResolvedValue({
+    available: false,
+    branch: '',
+    changes: [],
+    change_count: 0,
+  });
   vi.mocked(streamAgentJob).mockResolvedValue(undefined);
   // A message to an idle side chat is its next turn at once; one sent while a
   // side turn runs waits in the queue, as the control plane answers.
@@ -222,7 +227,9 @@ function props(active = true) {
   return { sourceJob: toDisplayJob(anchor), sourceJobs: [anchor], userId, config, active };
 }
 async function ready() {
-  await waitFor(() => expect(getAgentJobThread).toHaveBeenCalledWith('side-copy'));
+  await waitFor(() =>
+    expect(getAgentJobThread).toHaveBeenCalledWith('side-copy', { anchor: true }),
+  );
   await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
   fireEvent.change(screen.getByRole('textbox', { name: 'Message side chat' }), {
     target: { value: 'Why keep the files?' },
@@ -265,7 +272,7 @@ describe('Side Chat', () => {
     const [file, path] = vi.mocked(uploadAttachment).mock.calls[0]!;
     expect(file.name).toMatch(/^pasted-image-.+\.png$/);
     expect(path).toBe(file.name);
-    expect(screen.getByText(file.name)).toBeVisible();
+    expect(screen.getByRole('img', { name: file.name })).toBeVisible();
     expect(screen.getByText('uploading…')).toBeVisible();
     expect(screen.getByRole('button', { name: 'Send side chat message' })).toBeDisabled();
     fireEvent.keyDown(screen.getByRole('textbox', { name: 'Message side chat' }), {
@@ -283,7 +290,9 @@ describe('Side Chat', () => {
         attachment_ids: [42],
       }),
     );
-    await waitFor(() => expect(screen.queryByText(file.name)).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.queryByRole('img', { name: file.name })).not.toBeInTheDocument(),
+    );
     expect(screen.getByRole('textbox', { name: 'Message side chat' })).toHaveValue('');
   });
 
@@ -301,7 +310,7 @@ describe('Side Chat', () => {
     expect(screen.getByRole('textbox', { name: 'Message side chat' })).toHaveValue(
       'Why keep the files?',
     );
-    expect(screen.getByText(file.name)).toBeVisible();
+    expect(screen.getByRole('img', { name: file.name })).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: 'Send side chat message' }));
     await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(2));
     expect(submitThreadMessage).toHaveBeenLastCalledWith('side', {
@@ -309,7 +318,9 @@ describe('Side Chat', () => {
       attachment_ids: [42],
     });
     expect(uploadAttachment).toHaveBeenCalledTimes(1);
-    await waitFor(() => expect(screen.queryByText(file.name)).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.queryByRole('img', { name: file.name })).not.toBeInTheDocument(),
+    );
   });
 
   it('removes a pasted image before sending and preserves ordinary text paste', async () => {
@@ -347,12 +358,12 @@ describe('Side Chat', () => {
     await ready();
     pasteImage();
     const [file] = vi.mocked(uploadAttachment).mock.calls[0]!;
-    expect(screen.getByText(file.name)).toBeVisible();
+    expect(screen.getByRole('img', { name: file.name })).toBeVisible();
     act(() => {
       window.dispatchEvent(new CustomEvent('agents:side-chat-drafts-cleared', { detail: userId }));
     });
     expect(screen.getByRole('textbox', { name: 'Message side chat' })).toHaveValue('');
-    expect(screen.queryByText(file.name)).not.toBeInTheDocument();
+    expect(screen.queryByRole('img', { name: file.name })).not.toBeInTheDocument();
   });
 
   it('does not stage another image while the message is being submitted', async () => {
@@ -372,6 +383,32 @@ describe('Side Chat', () => {
     expect(uploadAttachment).not.toHaveBeenCalled();
     await act(async () => releaseSubmission());
     await screen.findByRole('button', { name: 'Stop side chat' });
+  });
+
+  it('keeps what was typed while a message was being sent', async () => {
+    let releaseSubmission!: () => void;
+    const submit = vi.mocked(submitThreadMessage).getMockImplementation()!;
+    vi.mocked(submitThreadMessage).mockImplementationOnce(async (...args) => {
+      await new Promise<void>((resolve) => {
+        releaseSubmission = resolve;
+      });
+      return submit(...args);
+    });
+    render(<SideChat {...props()} />);
+    await ready();
+    fireEvent.click(screen.getByRole('button', { name: 'Send side chat message' }));
+    await waitFor(() => expect(releaseSubmission).toBeDefined());
+    fireEvent.change(screen.getByRole('textbox', { name: 'Message side chat' }), {
+      target: { value: 'And what about the logs?' },
+    });
+    await act(async () => releaseSubmission());
+    await screen.findByRole('button', { name: 'Stop side chat' });
+    expect(submitThreadMessage).toHaveBeenCalledExactlyOnceWith('side', {
+      prompt: 'Why keep the files?',
+    });
+    expect(screen.getByRole('textbox', { name: 'Message side chat' })).toHaveValue(
+      'And what about the logs?',
+    );
   });
 
   it('opens and answers the child agent question without sending a chat message or stopping the child', async () => {
@@ -485,7 +522,7 @@ describe('Side Chat', () => {
     expect(screen.getByRole('textbox')).toHaveValue('Why keep the files?');
     expect(screen.queryByText('Later main question')).not.toBeInTheDocument();
     expect(forkAgentJob).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(localStorage.getItem(sideChatStorageKey(userId, 'main'))!)).toMatchObject({
+    expect(JSON.parse(localStorage.getItem(sideChatKeys(userId, 'main').session)!)).toMatchObject({
       anchorJobId: 'main-2',
       jobId: 'side-copy',
     });
@@ -503,6 +540,7 @@ describe('Side Chat', () => {
     expect(submitThreadMessage).toHaveBeenCalledExactlyOnceWith('side', {
       prompt: 'Why keep the files?',
       model: 'model-b',
+      model_connection_id: TEST_CONNECTION,
     });
     expect(push).not.toHaveBeenCalled();
     await waitFor(() => expect(streamAgentJob).toHaveBeenCalledWith('side-3', expect.anything()));
@@ -633,28 +671,19 @@ describe('Side Chat', () => {
 });
 
 describe('Side Chat review regressions', () => {
-  it('preserves model and effort choices made while the native fork is preparing', async () => {
+  it('preserves a model choice made while the native fork is preparing', async () => {
     let resolve!: (row: AgentJobApi) => void;
     vi.mocked(forkAgentJob).mockReturnValueOnce(
       new Promise((r) => {
         resolve = r;
       }),
     );
-    render(
-      <SideChat
-        {...props()}
-        config={{
-          ...config,
-          runtime_reasoning_efforts: { codex: ['low', 'medium', 'high'] },
-          model_reasoning_efforts: { 'model-a': ['high'], 'model-b': ['high'] },
-        }}
-      />,
-    );
+    render(<SideChat {...props()} />);
     await waitFor(() => expect(forkAgentJob).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole('button', { name: 'Side chat model' }));
     fireEvent.click(screen.getByRole('option', { name: 'model-b' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Side chat reasoning' }));
-    fireEvent.click(screen.getByRole('option', { name: 'low' }));
+    // A connection turn runs at its provider's default: there is no reasoning control.
+    expect(screen.queryByRole('button', { name: 'Side chat reasoning' })).not.toBeInTheDocument();
     await act(async () => {
       resolve(copied);
     });
@@ -664,7 +693,7 @@ describe('Side Chat review regressions', () => {
       expect(submitThreadMessage).toHaveBeenCalledWith(copied.thread_id, {
         prompt: 'Why keep the files?',
         model: 'model-b',
-        reasoning_effort: 'low',
+        model_connection_id: TEST_CONNECTION,
       }),
     );
   });
@@ -852,7 +881,7 @@ describe('fixing completed side chat reviews', () => {
     expect(screen.getByRole('textbox', { name: 'Message side chat' })).toHaveValue(
       'Unsent follow-up question',
     );
-    expect(screen.getByText(file.name)).toBeVisible();
+    expect(screen.getByRole('img', { name: file.name })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Side chat model' })).toHaveValue('model-b');
   });
 
@@ -965,4 +994,37 @@ describe('fixing completed side chat reviews', () => {
     expect(screen.queryByRole('button', { name: 'Fix issues' })).not.toBeInTheDocument();
     expect(submitThreadMessage).not.toHaveBeenCalled();
   });
+});
+
+it('an open side chat keeps a deleted source unavailable instead of sending to a namesake on another connection', async () => {
+  const source = 'mconn_0123456789abcdef0123456789abcdef';
+  const personal = { ...anchor, model_connection_id: source };
+  jobs = jobs.map((job) => ({ ...job, model_connection_id: source }));
+  const sourceProps = { ...props(), sourceJob: toDisplayJob(personal), sourceJobs: [personal] };
+  const view = render(
+    <SideChat
+      {...sourceProps}
+      config={{
+        ...config,
+        model_connections: [
+          {
+            id: source,
+            name: 'Mine',
+            models: ['model-a'],
+            model_runtimes: { 'model-a': ['codex'] },
+          },
+        ],
+      }}
+    />,
+  );
+  await ready();
+  // The connection is deleted; another one lists a model of the same name.
+  view.rerender(<SideChat {...sourceProps} config={{ ...config, ...offering(['model-a']) }} />);
+  expect(screen.getByRole('button', { name: 'Side chat model' })).toHaveAccessibleDescription(
+    'model-a · personal connection (unavailable)',
+  );
+  expect(screen.getByRole('button', { name: 'Send side chat message' })).toBeDisabled();
+  fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' });
+  fireEvent.submit(screen.getByRole('textbox').closest('form')!);
+  expect(submitThreadMessage).not.toHaveBeenCalled();
 });

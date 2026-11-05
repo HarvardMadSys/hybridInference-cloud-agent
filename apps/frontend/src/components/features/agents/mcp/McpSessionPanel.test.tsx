@@ -202,6 +202,49 @@ describe('McpSessionPanel', () => {
     );
   });
 
+  it('keeps unsaved permissions on other servers when one server is saved', async () => {
+    const tracker: McpBindingApi = {
+      ...binding,
+      connection_id: 5,
+      connection_label: 'Tracker',
+      alias: 'tracker',
+    };
+    mockedBindings.mockResolvedValue({ bindings: [binding, tracker] });
+    mockedUpdate.mockImplementation(async (_thread, request) => ({
+      bindings: [binding, tracker].map((item) =>
+        item.connection_id === request.connection_id
+          ? { ...item, ...request, selection_pending: request.use_defaults }
+          : item,
+      ),
+    }));
+    render(<McpSessionPanel jobId="job-1" threadId="thread-1" active />);
+    await screen.findByRole('switch', { name: /Use Tracker/ });
+    const [wiki, other] = screen.getAllByText('Tools and permissions').map((summary) => {
+      fireEvent.click(summary);
+      return summary.closest('details')!;
+    });
+    const search = (server: HTMLElement, policy: string) =>
+      within(within(server).getByRole('radiogroup', { name: 'Policy for search' })).getByRole(
+        'radio',
+        { name: policy },
+      );
+
+    fireEvent.click(search(wiki, 'Deny'));
+    fireEvent.click(search(other, 'Allow'));
+    fireEvent.click(within(other).getByRole('button', { name: 'Save permissions' }));
+    await screen.findByText(/^Permissions saved/);
+    expect(search(other, 'Allow')).toBeChecked();
+    expect(search(wiki, 'Deny')).toBeChecked();
+
+    fireEvent.click(within(wiki).getByRole('button', { name: 'Save permissions' }));
+    await waitFor(() =>
+      expect(mockedUpdate).toHaveBeenLastCalledWith(
+        'thread-1',
+        expect.objectContaining({ connection_id: 3, tools: { search: 'deny' } }),
+      ),
+    );
+  });
+
   it('resets explicit permissions to ask without enabling a disabled server', async () => {
     mockedBindings.mockResolvedValue({
       bindings: [

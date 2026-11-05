@@ -124,7 +124,7 @@ def _maps(
             yield list(pairs)
 
 
-def _values(variable: Variable, raw: str, spend: Callable[[int], None]) -> Iterator[Any]:
+def _values(variable: Variable, raw: str, spend: Callable[[int], None]) -> Iterator[Any]:  # noqa: PLR0912 complexity baseline, #771
     """Infer scalar, list and map candidates; expansion checks every candidate."""
     named = variable.operator in {";", "?", "&"}
     name = canonical_percent(variable.name)
@@ -169,7 +169,7 @@ def _compatible(previous: _Binding | None, value: Any) -> bool:
     return isinstance(value, str) and value.startswith(previous.value)
 
 
-def matches_expansion(expander: URITemplate, tokens: tuple[str | Variable, ...], uri: str) -> bool:
+def matches_expansion(expander: URITemplate, tokens: tuple[str | Variable, ...], uri: str) -> bool:  # noqa: C901, PLR0915 complexity baseline, #771
     """Match only with a consistent assignment that recreates the complete URI.
 
     RE2 has already rejected lexical mismatches. The search below handles
@@ -186,7 +186,7 @@ def matches_expansion(expander: URITemplate, tokens: tuple[str | Variable, ...],
         if steps > MAX_MATCH_STEPS:
             raise TemplateMatchLimit("The resource URI template is too ambiguous to authorize.")
 
-    def search(
+    def search(  # noqa: C901, PLR0912 complexity baseline, #771
         index: int, offset: int, bindings: dict[str, _Binding], emitted: bool = False
     ) -> bool:
         spend()

@@ -19,6 +19,8 @@ from cloud_agent.providers.compute.existing_ssh import ExistingSSHProvider
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    import httpx
+
     from cloud_agent.compute_config import ComputeConfiguration
     from cloud_agent.ports.external.compute_provider import ComputeProvider, SecretResolver
     from cloud_agent.ports.external.host_bootstrap import SshTransport
@@ -189,9 +191,17 @@ class ComputeProviderRegistry:
 
 
 def build_registry(
-    configuration: ComputeConfiguration, *, resolver: SecretResolver, transport: SshTransport
+    configuration: ComputeConfiguration,
+    *,
+    resolver: SecretResolver,
+    transport: SshTransport,
+    client: httpx.AsyncClient | None = None,
 ) -> ComputeProviderRegistry:
-    """Register only working adapters; future vendors add one entry here."""
+    """Register only working adapters; future vendors add one entry here.
+
+    ``client`` is the control plane's shared pool. Without one, CloudLab opens
+    a connection, and a TLS handshake, for every request it sends.
+    """
     entries = [
         ComputeProviderRegistration(
             id="existing_ssh",
@@ -240,7 +250,7 @@ def build_registry(
             if configuration.admin_settings
             else configuration.cloudlab_api_url
         )
-        cloudlab = CloudLabProvider(api_url=endpoint, resolver=resolver)
+        cloudlab = CloudLabProvider(api_url=endpoint, resolver=resolver, client=client)
         entries.append(
             ComputeProviderRegistration(
                 id="cloudlab",

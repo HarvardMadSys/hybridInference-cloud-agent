@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   getAgentAdminSettings,
@@ -11,13 +11,9 @@ import {
 } from '@/lib/api/adminSettings';
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
-import { SettingsSection } from '../SettingsSection';
 import { ApplicationSettingGroup, SettingsIcon } from './ApplicationSettingGroup';
-import {
-  applicationCategory,
-  applicationSettingGroup,
-  applicationSettingPriority,
-} from './settingsOrganization';
+import { applicationCategory, applicationSettingGroup } from './settingsOrganization';
+import { GOVERNING_SETTINGS, inactiveSettingGovernor, settingReader } from './settingsVisibility';
 
 const BUTTON_CLASS = 'ui-button ui-button-secondary min-h-11';
 
@@ -43,6 +39,7 @@ export function useApplicationSettings({
   const [saved, setSaved] = useState<Record<string, number>>({});
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [focusField, setFocusField] = useState<string | null>(null);
+  const [governingDrafts, setGoverningDrafts] = useState<Record<string, string>>({});
   const previousHash = useRef<string | null>(null);
   const mounted = useRef(false);
   const writing = useRef(false);
@@ -113,6 +110,24 @@ export function useApplicationSettings({
     };
   }, [enabled, load]);
 
+  const read = useMemo(() => settingReader(snapshot, governingDrafts), [snapshot, governingDrafts]);
+  const isSettingVisible = useCallback(
+    (key: string) => inactiveSettingGovernor(key, read) === null,
+    [read],
+  );
+  // A link to a field that does not apply opens the provider or switch that governs it.
+  const linkedDefinition = useCallback(
+    (key: string) => {
+      const definitions = snapshot?.definitions ?? [];
+      const governor = inactiveSettingGovernor(key, read);
+      return (
+        (governor && definitions.find((field) => field.key === governor)) ||
+        definitions.find((field) => field.key === key)
+      );
+    },
+    [snapshot, read],
+  );
+
   useEffect(() => {
     const revealHash = () => {
       const hash = window.location.hash;
@@ -130,17 +145,17 @@ export function useApplicationSettings({
       } catch {
         return;
       }
-      const definition = snapshot.definitions.find((field) => field.key === key);
+      const definition = linkedDefinition(key);
       if (!definition) return;
       const category = applicationCategory(definition);
       setSelectedCategory(category);
       onRevealCategory?.(category);
-      setFocusField(key);
+      setFocusField(definition.key);
     };
     revealHash();
     window.addEventListener('hashchange', revealHash);
     return () => window.removeEventListener('hashchange', revealHash);
-  }, [snapshot, onRevealCategory]);
+  }, [snapshot, onRevealCategory, linkedDefinition]);
 
   const save = async (
     changes: Record<string, AdminSettingValue | null>,
@@ -163,6 +178,7 @@ export function useApplicationSettings({
       if (!mounted.current || controller.signal.aborted || current !== sequence.current)
         return false;
       setSnapshot(next);
+      setGoverningDrafts((previous) => withoutKeys(previous, Object.keys(changes)));
       // Reset every saved row to its canonical value; unrelated edits stay intact.
       setSaved((previous) => {
         const updated = { ...previous };
@@ -195,15 +211,27 @@ export function useApplicationSettings({
       : groups.keys().next().value;
 
   const revealSetting = (key: string) => {
-    const definition = snapshot?.definitions.find((field) => field.key === key);
+    const definition = linkedDefinition(key);
     if (!definition) return;
     const category = applicationCategory(definition);
     setSelectedCategory(category);
     onRevealCategory?.(category);
-    setFocusField(key);
+    setFocusField(definition.key);
   };
 
   const clearFocusField = useCallback(() => setFocusField(null), []);
+
+  /** Share (or with `undefined`, withdraw) an editor's unsaved governing value. */
+  const setGoverningDraft = useCallback((key: string, value: string | undefined) => {
+    if (!GOVERNING_SETTINGS.has(key)) return;
+    setGoverningDrafts((previous) =>
+      value === undefined ? withoutKeys(previous, [key]) : { ...previous, [key]: value },
+    );
+  }, []);
+
+  const clearGoverningDrafts = useCallback((keys: string[]) => {
+    setGoverningDrafts((previous) => withoutKeys(previous, keys));
+  }, []);
 
   return {
     snapshot,
@@ -222,7 +250,15 @@ export function useApplicationSettings({
     save,
     revealSetting,
     recoveryToken,
+    isSettingVisible,
+    setGoverningDraft,
+    clearGoverningDrafts,
   };
+}
+
+function withoutKeys(values: Record<string, string>, keys: string[]): Record<string, string> {
+  if (!keys.some((key) => key in values)) return values;
+  return Object.fromEntries(Object.entries(values).filter(([key]) => !keys.includes(key)));
 }
 
 export type ApplicationSettingsState = ReturnType<typeof useApplicationSettings>;
@@ -355,30 +391,21 @@ export function ApplicationSettingsCategory({
   active: boolean;
   showHeading?: boolean;
 }) {
-  const { groups, focusField, clearFocusField } = settings;
+  const { groups, focusField, clearFocusField, isSettingVisible } = settings;
   const definitions = groups.get(category);
   const id = `application-settings-category-${encodeURIComponent(category)}`;
 
-  const renderGroups = (priority: 'important' | 'advanced') => {
-    const related = new Map<string, AdminSettingDefinition[]>();
-    for (const definition of definitions ?? []) {
-      if (applicationSettingPriority(definition) !== priority) continue;
-      const group = applicationSettingGroup(definition);
-      related.set(group, [...(related.get(group) ?? []), definition]);
-    }
-    if (related.size === 0) {
-      return <p className="py-4 text-sm text-muted">No {priority} settings on this page.</p>;
-    }
-    return [...related].map(([group, fields]) => (
-      <ApplicationSettingGroup key={group} title={group} fields={fields} settings={settings} />
-    ));
-  };
+  // Every related group appears exactly once, in registry order. A group whose
+  // fields do not apply stays mounted, hidden, so its unsaved edits survive.
+  const related = new Map<string, AdminSettingDefinition[]>();
+  for (const definition of definitions ?? []) {
+    const group = applicationSettingGroup(definition);
+    related.set(group, [...(related.get(group) ?? []), definition]);
+  }
 
   useEffect(() => {
     if (!active || !focusField || !definitions?.some((field) => field.key === focusField)) return;
     const input = document.getElementById(`application-setting-${focusField}`);
-    const advanced = input?.closest('details');
-    if (advanced) advanced.open = true;
     input?.focus();
     input?.scrollIntoView?.({ block: 'center' });
     clearFocusField();
@@ -401,49 +428,20 @@ export function ApplicationSettingsCategory({
       )}
       <div className={showHeading ? 'px-4 sm:px-5' : undefined}>
         <div className="mt-5">
-          <h3 className="sr-only">Important</h3>
-          <div>{renderGroups('important')}</div>
+          {!definitions?.some((field) => isSettingVisible(field.key)) && (
+            <p className="py-4 text-sm text-muted">No settings on this page.</p>
+          )}
+          {[...related].map(([group, fields]) => (
+            <ApplicationSettingGroup
+              key={group}
+              title={group}
+              fields={fields}
+              settings={settings}
+            />
+          ))}
         </div>
-        <SettingsSection title="Advanced" description="Connection details and operational tuning.">
-          {renderGroups('advanced')}
-        </SettingsSection>
       </div>
     </section>
-  );
-}
-
-export function ApplicationDeploymentSetup({ settings }: { settings: ApplicationSettingsState }) {
-  const { snapshot } = settings;
-  return (
-    <>
-      {(snapshot?.bootstrap.length ?? 0) > 0 && (
-        <details className="mt-6 border-t border-border pt-4">
-          <summary className="ui-focus-ring min-h-11 cursor-pointer rounded-lg py-3 text-sm font-medium text-foreground">
-            Deployment setup
-          </summary>
-          <p className="mt-2 text-sm leading-6 text-muted">
-            These settings are supplied when the service starts. Their values are hidden here.
-          </p>
-          <dl className="mt-3 space-y-3">
-            {snapshot?.bootstrap.map((definition) => (
-              <div
-                key={definition.key}
-                id={`application-bootstrap-${definition.key}`}
-                tabIndex={-1}
-              >
-                <dt className="text-sm font-medium text-foreground">
-                  {definition.label}{' '}
-                  <code className="ml-1 break-all rounded bg-surface-muted px-1.5 py-0.5 text-xs font-normal text-muted">
-                    {definition.key}
-                  </code>
-                </dt>
-                <dd className="mt-1 text-sm leading-6 text-muted">{definition.description}</dd>
-              </div>
-            ))}
-          </dl>
-        </details>
-      )}
-    </>
   );
 }
 
@@ -489,7 +487,7 @@ export default function ApplicationSettings(options: ApplicationSettingsOptions)
                   aria-hidden="true"
                   className="rounded bg-surface-muted px-1.5 py-0.5 text-xs text-muted"
                 >
-                  {definitions.length}
+                  {definitions.filter((field) => settings.isSettingVisible(field.key)).length}
                 </span>
               </button>
             ))}
@@ -512,7 +510,6 @@ export default function ApplicationSettings(options: ApplicationSettingsOptions)
           No application settings are available.
         </p>
       )}
-      <ApplicationDeploymentSetup settings={settings} />
     </section>
   );
 }

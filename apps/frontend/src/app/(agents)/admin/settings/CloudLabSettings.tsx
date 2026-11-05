@@ -68,7 +68,6 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
   const [denied, setDenied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const fail = useCallback(
     (cause: unknown) => {
@@ -113,7 +112,6 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
 
   function updateDraft(update: Partial<CloudLabDefaults>) {
     setDraft((current) => (current ? { ...current, ...update } : current));
-    setAdvancedOpen(false);
   }
 
   async function submit() {
@@ -125,11 +123,9 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
     const keyError = sshPublicKeyError(draft.ssh_public_key ?? '');
     if (keyError) {
       setError(keyError);
-      setAdvancedOpen(true);
       return;
     }
     setBusy(true);
-    setAdvancedOpen(false);
     setError(null);
     setNotice(null);
     try {
@@ -139,7 +135,6 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
       setNodeTypes(response.defaults.node_types.join('\n'));
       setNotice('CloudLab defaults saved. New allocations use the preferred order immediately.');
     } catch (cause) {
-      if (cause instanceof APIError && cause.statusCode === 422) setAdvancedOpen(true);
       fail(cause);
     } finally {
       setBusy(false);
@@ -197,16 +192,10 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
         >
           <fieldset disabled={busy} className="space-y-8">
             <SettingsSection
-              title="Important"
+              title="Allocation defaults"
               description="Choose the project, initial lifetime, and preferred hardware for new CloudLab servers."
             >
-              <section className="ui-card space-y-4 p-5" aria-labelledby="cloud-resource-heading">
-                <h3
-                  id="cloud-resource-heading"
-                  className="border-b border-border pb-3 text-sm font-semibold text-foreground"
-                >
-                  Cloud resource
-                </h3>
+              <section className="ui-card space-y-4 p-5">
                 <div className="grid gap-4 sm:grid-cols-2">
                   <label className="space-y-2 text-sm">
                     <span className="font-medium">CloudLab project</span>
@@ -262,24 +251,10 @@ function CloudLabSettingsForm({ onAccessDenied }: { onAccessDenied?: (cause: unk
             </SettingsSection>
 
             <SettingsSection
-              title="Advanced"
+              title="Machine template and access"
               description="Customize the machine template and SSH access used for new servers."
-              open={advancedOpen}
             >
-              <section
-                className="ui-card space-y-4 p-5"
-                aria-labelledby="machine-template-heading"
-                onInvalidCapture={(event) => {
-                  const section = event.currentTarget.closest('details');
-                  if (section) section.open = true;
-                }}
-              >
-                <h3
-                  id="machine-template-heading"
-                  className="border-b border-border pb-3 text-sm font-semibold text-foreground"
-                >
-                  Machine template and access
-                </h3>
+              <section className="ui-card space-y-4 p-5">
                 <div className="grid gap-4 sm:grid-cols-2">
                   <label className="space-y-2 text-sm">
                     <span className="font-medium">Template project</span>

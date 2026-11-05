@@ -24,7 +24,9 @@ export function sandboxActionState(
     ? Date.parse(detail.observed_at) + Math.max(0, nowMs - observedAtMs)
     : NaN;
   const terminalObserved = Date.parse(sandbox?.terminal_count_observed_at ?? '');
-  const deletionPending = ['pending', 'archived'].includes(sandbox?.deletion_state ?? 'none');
+  const deletionRetryExhausted = Boolean(sandbox?.deletion_retry_exhausted_at);
+  const deletionPending =
+    ['pending', 'archived'].includes(sandbox?.deletion_state ?? 'none') && !deletionRetryExhausted;
   const deletionComplete = sandbox?.deletion_state === 'deleted';
   const deletionBusyReason = deletionPending
     ? sandbox?.deletion_discard
@@ -104,6 +106,7 @@ export function sandboxActionState(
     staleInventoryEntry,
     deletionComplete,
     deletionPending,
+    deletionRetryExhausted,
   };
 }
 

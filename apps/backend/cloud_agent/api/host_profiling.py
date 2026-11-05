@@ -31,7 +31,7 @@ not something it asserts, because sync is allowed to lag and the page says so.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -102,7 +102,7 @@ async def build_policy_for_host(
     than a consensus. ``reported`` is accepted and ignored so a host written
     against the earlier shape keeps working; it is not trusted for anything.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     mode = profile_mode()
     if store is None:
         # A control plane without a database cannot state a configuration, so

@@ -37,7 +37,6 @@ def manifest() -> dict:
     for role, variant in (
         ("control", None),
         ("web", "root"),
-        ("web", "agents"),
         ("runner", None),
         ("sandbox", None),
         ("tunnel", None),
@@ -49,7 +48,7 @@ def manifest() -> dict:
             "platforms": ["linux/arm64" if role in {"control", "web"} else "linux/amd64"],
         }
         if variant:
-            entry.update(variant=variant, base_path="/agents" if variant == "agents" else "")
+            entry.update(variant=variant, base_path="")
         artifacts.append(entry)
     return {
         "schema_version": 1,
@@ -125,6 +124,11 @@ elif a[:1] == ["compose"]:
             if os.getenv("TEST_RUNNING", "1") == "1": print("existing-" + a[-1])
         else: print("test-" + a[-1])
 elif a[:1] == ["build"]: raise SystemExit(92)
+elif a[:2] == ["volume", "ls"]:
+    if os.getenv("TEST_DOCKER_DOWN") == "1": raise SystemExit(1)
+    print(os.getenv("TEST_LABELLED_VOLUMES" if "--filter" in a else "TEST_VOLUMES", ""))
+elif a[:2] == ["ps", "-aq"]:
+    print(os.getenv("TEST_PROJECT_CONTAINERS", ""))
 elif a[:1] == ["ps"]:
     print(os.getenv("TEST_STRAY_STACK", ""))
 elif a[:1] == ["pull"]:
@@ -183,7 +187,7 @@ def deployment(tmp_path: Path, stack: str, *, real_compose: bool = False) -> tup
     release.write_text(json.dumps(manifest()))
     config = {
         "COMPOSE_PROJECT": "artifact-test",
-        "AGENT_WEB_VARIANT": "agents",
+        "AGENT_WEB_VARIANT": "root",
         "AGENT_HOST_STATE_ROOT": str(host_state),
         "AGENT_HOST_SLOTS": "3",
         "AGENT_SANDBOX_BACKEND": "kata",
@@ -203,7 +207,7 @@ def deployment(tmp_path: Path, stack: str, *, real_compose: bool = False) -> tup
         for key in re.findall(r"\$\{([A-Z_]+):\?", compose.read_text()):
             if not key.endswith("_IMAGE") and key != "AGENT_DEPLOYMENT_SHA":
                 config.setdefault(key, "fixture-value")
-    for prefix in ("AGENT_TUNNEL", "AGENT_MCP_TUNNEL", "AGENT_CONTROL_PLANE_TUNNEL"):
+    for prefix in ("AGENT_MCP_TUNNEL", "AGENT_CONTROL_PLANE_TUNNEL"):
         key, known = state / f"{prefix}.key", state / f"{prefix}.known-hosts"
         key.write_text("fixture key")
         known.write_text("fixture host fingerprint")
@@ -360,7 +364,7 @@ def test_packaged_deployers_run_without_source_and_preserve_state(tmp_path: Path
         assert "--expected-deployment-sha" in calls[readiness]["args"]
         assert COMMIT in calls[readiness]["args"]
         assert "--draining-host" not in calls[readiness]["args"]
-        assert "/agents" in Path(env["TEST_CURL_LOG"]).read_text()
+        assert "http://127.0.0.1:3002/" in Path(env["TEST_CURL_LOG"]).read_text()
 
 
 @pytest.mark.parametrize("source", ["environment", "dotenv"])
@@ -482,12 +486,31 @@ def test_real_compose_precedence_reaches_the_deployer(tmp_path: Path, exported: 
     dotenv = Path(env["DEPLOY_ROOT"]) / ".env"
     with dotenv.open("a") as file:
         file.write(f"AGENT_DEPLOYMENT_SHA={'c' * 40 if exported == COMMIT else COMMIT}\n")
-        file.write("PREFIX=/agents\nAGENT_WEB_BASE_PATH=$PREFIX\n")
+        file.write("PREFIX=Cloud\nAGENT_WEB_APP_NAME=$PREFIX\n")
     env["AGENT_DEPLOYMENT_SHA"] = exported
     result, calls = run(script, env)
     assert (result.returncode == 0) == (exported == COMMIT), result.stdout + result.stderr
     if exported != COMMIT:
         assert all("up" not in c["args"] and "pull" not in c["args"] for c in calls)
+
+
+@pytest.mark.parametrize(
+    "lines,refused",
+    [
+        ("BASE=\nAGENT_WEB_BASE_PATH=${BASE:-}\n", False),
+        ("PREFIX=/agents\nAGENT_WEB_BASE_PATH=$PREFIX\n", True),
+    ],
+)
+def test_the_web_base_path_is_checked_as_compose_resolves_it(
+    tmp_path: Path, lines: str, refused: bool
+):
+    """`${BASE:-}` is empty to Compose, so a root deployment must not be refused."""
+    script, env = deployment(tmp_path, "control-plane", real_compose=True)
+    with (Path(env["DEPLOY_ROOT"]) / ".env").open("a") as file:
+        file.write(lines)
+    result, _ = run(script, env)
+    assert (result.returncode != 0) == refused, result.stdout + result.stderr
+    assert ("AGENT_WEB_BASE_PATH" in result.stderr) == refused
 
 
 @pytest.mark.parametrize("stack", ["control-plane", "host"])
@@ -537,6 +560,18 @@ def test_real_compose_keeps_persistent_mounts_outside_the_recipe(tmp_path: Path,
             == (state / ".shared-live-ready").resolve()
         )
         assert str(state / "enrollment") in mounts
+        receipt_target = "/var/lib/hybridinference/upload-receipts"
+        manager_mounts = {
+            mount["target"]: mount for mount in document["services"]["sandbox-manager"]["volumes"]
+        }
+        for service_mounts in (mounts, manager_mounts):
+            receipt = service_mounts[receipt_target]
+            assert (
+                Path(receipt["source"]).resolve()
+                == (state / "enrollment/upload-receipts").resolve()
+            )
+            assert not receipt.get("read_only", False)
+        assert str(state / "enrollment") not in manager_mounts
     else:
         edge = document["services"]["edge"]["volumes"][0]
         assert Path(edge["source"]).resolve() == (script.parent / "edge.nginx.conf").resolve()
@@ -545,10 +580,6 @@ def test_real_compose_keeps_persistent_mounts_outside_the_recipe(tmp_path: Path,
 
 def test_root_web_variant_controls_both_image_and_health_path(tmp_path: Path):
     script, env = deployment(tmp_path, "control-plane")
-    dotenv = Path(env["DEPLOY_ROOT"]) / ".env"
-    dotenv.write_text(
-        dotenv.read_text().replace("AGENT_WEB_VARIANT=agents", "AGENT_WEB_VARIANT=root")
-    )
     result, _ = run(script, env)
     assert result.returncode == 0, result.stdout + result.stderr
     generated = next((Path(env["DEPLOY_ROOT"]) / "deploy/control-plane").glob(".release-*.yml"))
@@ -557,6 +588,24 @@ def test_root_web_variant_controls_both_image_and_health_path(tmp_path: Path):
     probes = Path(env["TEST_CURL_LOG"]).read_text()
     assert "http://127.0.0.1:3002/" in probes
     assert "/agents" not in probes
+
+
+@pytest.mark.parametrize(
+    "line,named",
+    [
+        ("AGENT_WEB_VARIANT=agents", "AGENT_WEB_VARIANT=agents"),
+        ("AGENT_WEB_BASE_PATH=/agents", "AGENT_WEB_BASE_PATH=/agents"),
+    ],
+)
+def test_a_sub_path_mount_is_refused_before_anything_starts(tmp_path: Path, line: str, named: str):
+    """Sub-path mounting was removed; a leftover value is named, not ignored."""
+    script, env = deployment(tmp_path, "control-plane")
+    dotenv = Path(env["DEPLOY_ROOT"]) / ".env"
+    dotenv.write_text(dotenv.read_text().replace("AGENT_WEB_VARIANT=root\n", "") + line + "\n")
+    result, calls = run(script, env)
+    assert result.returncode != 0
+    assert named in result.stderr
+    assert all("pull" not in c["args"] and "up" not in c["args"] for c in calls)
 
 
 def test_manifest_validation_and_rendering_use_the_same_bytes(tmp_path: Path):
@@ -935,39 +984,6 @@ def test_private_override_is_last_for_every_artifact_stack_compose_call(tmp_path
             arguments[index + 1] for index, argument in enumerate(arguments) if argument == "-f"
         ]
         assert compose_files[-2:] == [compute_overlay, str(override)]
-
-
-def test_control_plane_generates_one_persistent_compute_encryption_key(tmp_path: Path):
-    script, env = deployment(tmp_path, "control-plane")
-    dotenv = Path(env["DEPLOY_ROOT"]) / ".env"
-    assert "AGENT_COMPUTE_SECRET_KEY=" not in dotenv.read_text()
-
-    first, _ = run(script, env, "--phase", "prepare", COMMIT)
-    assert first.returncode == 0, first.stdout + first.stderr
-    values = dict(line.split("=", 1) for line in dotenv.read_text().splitlines() if "=" in line)
-    generated = values["AGENT_COMPUTE_SECRET_KEY"]
-    assert re.fullmatch(r"[a-f0-9]{64}", generated)
-    assert dotenv.stat().st_mode & 0o077 == 0
-    assert generated not in first.stdout + first.stderr
-
-    second, _ = run(script, env, "--phase", "prepare", COMMIT)
-    assert second.returncode == 0, second.stdout + second.stderr
-    repeated = dict(line.split("=", 1) for line in dotenv.read_text().splitlines() if "=" in line)
-    assert repeated["AGENT_COMPUTE_SECRET_KEY"] == generated
-
-
-def test_control_plane_preserves_an_existing_compute_encryption_key(tmp_path: Path):
-    script, env = deployment(tmp_path, "control-plane")
-    dotenv = Path(env["DEPLOY_ROOT"]) / ".env"
-    existing = "existing-compute-key-material-0123456789"
-    with dotenv.open("a") as output:
-        output.write(f"AGENT_COMPUTE_SECRET_KEY={existing}\n")
-
-    result, _ = run(script, env, "--phase", "prepare", COMMIT)
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert dotenv.read_text().splitlines().count(f"AGENT_COMPUTE_SECRET_KEY={existing}") == 1
-    assert "generated and persisted" not in result.stdout
 
 
 def test_compute_overlay_gives_credentials_and_mount_only_to_main_control_plane(tmp_path: Path):

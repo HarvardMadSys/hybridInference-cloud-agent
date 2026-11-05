@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -10,11 +10,11 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from fastapi import FastAPI
+from tests.support.owners import SESSIONS, use_session_secret
 
-from cloud_agent import identity
 from cloud_agent.admin_observability import encode_cursor
 from cloud_agent.api import owner_usage
-from cloud_agent.api.deps import get_gateway_client, get_storage
+from cloud_agent.api.deps import get_owner_directory, get_storage
 from cloud_agent.owner_usage import (
     CONTAINER_CURSOR_SCOPE,
     OwnerContainerCursor,
@@ -31,10 +31,25 @@ ZERO = OwnerResourceTotals(
 )
 
 
+class _FakeUsage:
+    """The batched selection, yielding prepared batches and recording each call."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.batches: list[tuple[list, list]] = []
+        self.failure: Exception | None = None
+
+    async def batched_selection(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.failure is not None:
+            raise self.failure
+        for batch in self.batches:
+            yield batch
+
+
 @pytest.fixture()
 def app(monkeypatch):
-    monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
-    monkeypatch.setenv(identity.ENV_SESSION_SECRET, "usage-test-session-secret-long-enough")
+    use_session_secret(monkeypatch)
     application = FastAPI()
     application.include_router(owner_usage.router)
     queries = AsyncMock()
@@ -48,17 +63,17 @@ def app(monkeypatch):
     queries.resource_history.return_value = OwnerResourceHistory(
         since=NOW, until=NOW, generated_at=NOW, totals=ZERO, days=[]
     )
-    usage = AsyncMock()
-    usage.selection.return_value = ([], [])
+    queries.first_record_at.return_value = None
+    usage = _FakeUsage()
     gateway = AsyncMock()
     gateway.agent_access.side_effect = lambda owner: {
         "user_id": owner,
         "allowed": True,
         "permissions": ["agent.use"],
     }
-    application.dependency_overrides[get_gateway_client] = lambda: gateway
+    application.dependency_overrides[get_owner_directory] = lambda: gateway
     application.dependency_overrides[get_storage] = lambda: SimpleNamespace(
-        owner_usage=queries, admin_usage=usage
+        local_accounts=SESSIONS, owner_usage=queries, admin_usage=usage
     )
     application.state.queries = queries
     application.state.usage = usage
@@ -66,7 +81,7 @@ def app(monkeypatch):
 
 
 async def _get(app, path, *, owner="owner-1", **params):
-    headers = {"Authorization": f"Bearer {identity.mint_session(user_id=owner)}"} if owner else {}
+    headers = {"Authorization": f"Bearer {SESSIONS.sign_in(owner)}"} if owner else {}
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="https://agent.example"
     ) as http:
@@ -134,22 +149,119 @@ async def test_history_periods_are_bounded(app, path, days):
 async def test_tokens_select_only_the_owners_runs(app):
     response = await _get(app, "/v1/agent/usage/tokens", days=7)
     assert response.status_code == 200
-    call = app.state.usage.selection.await_args.kwargs
+    [call] = app.state.usage.calls
     assert call["user_id"] == "owner-1"
-    assert call["model"] is None and call["runtime"] is None and call["repo"] is None
+    assert call["thread_ids"] is None
     body = response.json()
     assert body["summary"]["run_count"] == 0
     assert len(body["days"]) == 7
     assert body["by_model"]["groups"] == []
     assert body["day_timezone"] == "UTC" and body["time_basis"] == "job_created_at"
+    assert body["period"]["days"] == 7 and body["period"]["bucket"] == "day"
     assert "by_user" not in body
 
 
 @pytest.mark.parametrize(
-    ("failure", "status"), [(UsageQueryTooLarge(), 422), (UsageQueryUnavailable(), 503)]
+    ("failure", "status", "error_type"),
+    [
+        (UsageQueryTooLarge(), 422, "usage_query_too_large"),
+        (UsageQueryUnavailable(), 503, "usage_temporarily_unavailable"),
+    ],
 )
-async def test_tokens_refuse_rather_than_return_a_partial_sum(app, failure, status):
-    app.state.usage.selection.side_effect = failure
+async def test_tokens_refuse_rather_than_return_a_partial_sum(app, failure, status, error_type):
+    app.state.usage.failure = failure
     response = await _get(app, "/v1/agent/usage/tokens")
     assert response.status_code == status
     assert "summary" not in response.text
+    # A typed reason the page translates, not prose it shows as sent.
+    error = response.json()["detail"]["error"]
+    assert (error["type"], error["code"]) == (error_type, status)
+
+
+@pytest.mark.parametrize(("preset", "count"), [("today", 1), ("7d", 7), ("30d", 30)])
+@pytest.mark.parametrize("path", ["resources", "tokens"])
+async def test_each_preset_reads_its_utc_days(app, path, preset, count):
+    response = await _get(app, f"/v1/agent/usage/{path}", range=preset)
+    assert response.status_code == 200
+    period = response.json()["period"]
+    assert period["preset"] == preset and period["day_timezone"] == "UTC"
+    assert period["bucket"] == "day"
+    assert len(response.json()["days"]) == count or path == "resources"
+    since = datetime.fromisoformat(period["since"])
+    assert (since.hour, since.minute, since.tzinfo is not None) == (0, 0, True)
+    app.state.queries.first_record_at.assert_not_awaited()
+
+
+async def test_all_starts_at_the_first_record_and_is_not_capped(app):
+    first = datetime(2024, 3, 9, 17, 30, tzinfo=UTC)
+    app.state.queries.first_record_at.return_value = first
+    tokens = await _get(app, "/v1/agent/usage/tokens", range="all")
+    resources = await _get(app, "/v1/agent/usage/resources", range="all")
+    assert tokens.status_code == resources.status_code == 200
+    # Both halves of the page describe the same interval.
+    assert tokens.json()["period"]["since"] == resources.json()["period"]["since"]
+    period = tokens.json()["period"]
+    assert datetime.fromisoformat(period["since"]) == datetime(2024, 3, 9, tzinfo=UTC)
+    assert datetime.fromisoformat(period["first_record_at"]) == first
+    # More than two years: drawn by week, every week present, the first one
+    # clipped to the first record's day.
+    assert period["bucket"] == "week"
+    days = tokens.json()["days"]
+    assert datetime.fromisoformat(days[0]["since"]) == datetime(2024, 3, 9, tzinfo=UTC)
+    assert days[0]["date"] == "2024-03-04"  # that week's Monday
+    assert len(days) > 100
+    [call] = app.state.usage.calls
+    assert call["since"] == datetime(2024, 3, 9, tzinfo=UTC)
+    buckets = app.state.queries.resource_history.await_args.kwargs["buckets"]
+    assert buckets[0][0] == datetime(2024, 3, 9, tzinfo=UTC)
+    assert all(earlier[1] == later[0] for earlier, later in pairwise(buckets))
+
+
+async def test_all_without_any_record_is_today(app):
+    response = await _get(app, "/v1/agent/usage/tokens", range="all")
+    period = response.json()["period"]
+    assert period["first_record_at"] is None
+    assert len(response.json()["days"]) == 1
+
+
+@pytest.mark.parametrize("path", ["resources", "tokens"])
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"range": "7d", "days": 7},
+        {"days": 7, "all": "true"},
+        {"days": 30, "all": "false"},
+        {"range": "30d", "all": "true"},
+    ],
+)
+async def test_range_days_and_all_are_one_choice(app, path, params):
+    response = await _get(app, f"/v1/agent/usage/{path}", **params)
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"]["type"] == "usage_period_conflict"
+    assert app.state.usage.calls == []
+    app.state.queries.resource_history.assert_not_awaited()
+
+
+async def test_all_true_is_the_whole_retained_history(app):
+    first = datetime(2024, 3, 9, 17, 30, tzinfo=UTC)
+    app.state.queries.first_record_at.return_value = first
+    by_flag = (await _get(app, "/v1/agent/usage/tokens", all="true")).json()["period"]
+    by_range = (await _get(app, "/v1/agent/usage/tokens", range="all")).json()["period"]
+    # Never narrowed to a year or a run budget: the first record's own day.
+    assert by_flag["preset"] == by_range["preset"] == "all"
+    assert by_flag["since"] == by_range["since"]
+    assert datetime.fromisoformat(by_flag["since"]) == datetime(2024, 3, 9, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("path", ["resources", "tokens"])
+async def test_no_period_reads_the_last_seven_utc_days(app, path):
+    period = (await _get(app, f"/v1/agent/usage/{path}")).json()["period"]
+    assert period["days"] == 7
+    span = datetime.fromisoformat(period["until"]) - datetime.fromisoformat(period["since"])
+    assert timedelta(days=6) <= span < timedelta(days=7)
+    app.state.queries.first_record_at.assert_not_awaited()
+
+
+@pytest.mark.parametrize("path", ["resources", "tokens"])
+async def test_an_unknown_range_is_refused(app, path):
+    assert (await _get(app, f"/v1/agent/usage/{path}", range="90d")).status_code == 422

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 
+import { Select } from '@/components/ui/Select';
 import type { ComputeConnection, ComputeProvider } from '@/lib/api/compute';
 
 import { ErrorNotice, Field, initialFields, inputClass, ProviderFields } from './compute-ui';
@@ -115,7 +116,7 @@ export function CredentialPicker({
   const label = credentialLabel(provider.id, provider.label);
   const selected = saved.find((item) => item.id === value.selection);
   const choosing = !selected || editingSelection === value.selection;
-  const picker = useRef<HTMLSelectElement>(null);
+  const picker = useRef<HTMLButtonElement>(null);
   const changeButton = useRef<HTMLButtonElement>(null);
   const wasChoosing = useRef(choosing);
   useEffect(() => {
@@ -147,27 +148,25 @@ export function CredentialPicker({
         </div>
       )}
       {saved.length > 0 && choosing && (
-        <select
+        <Select
           ref={picker}
           aria-label={`Use ${label}`}
           className={inputClass}
           required
           value={value.selection}
-          onChange={(event) => {
-            onChange({ ...value, selection: event.target.value, secret: '' });
+          onValueChange={(next) => {
+            onChange({ ...value, selection: next, secret: '' });
             setEditingSelection(null);
           }}
-        >
-          <option value="">Select…</option>
-          {saved.map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.name}
-            </option>
-          ))}
-          <option value={NEW_CREDENTIAL}>
-            Add a new {provider.id === 'existing_ssh' ? 'SSH key' : 'account'}…
-          </option>
-        </select>
+          options={[
+            { value: '', label: 'Select…' },
+            ...saved.map((item) => ({ value: item.id, label: item.name })),
+            {
+              value: NEW_CREDENTIAL,
+              label: `Add a new ${provider.id === 'existing_ssh' ? 'SSH key' : 'account'}…`,
+            },
+          ]}
+        />
       )}
       {selected && choosing && (
         <button

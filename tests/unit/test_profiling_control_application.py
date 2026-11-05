@@ -248,10 +248,6 @@ class _FakeControl:
         self.counted += 1
         return self.stored
 
-    async def mark_run_lifecycle(self, **kwargs: Any) -> None:
-        """Attach lifecycle to a run that exists."""
-        return None
-
     async def get_run(self, *, run_id: str) -> dict[str, Any] | None:
         """Return one run."""
         return self.runs.get(run_id)

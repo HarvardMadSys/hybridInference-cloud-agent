@@ -94,7 +94,7 @@ class PostgresHostCapacityRepository:
     ) -> int:
         """Delete one bounded batch of history older than the retention window.
 
-        Bounded because this runs beside the reaper and the publisher on the
+        Bounded because this runs beside the reaper and the maintenance loops on the
         same database: an unbounded ``DELETE`` after a control-plane outage
         would hold locks for as long as it took to remove the backlog, and the
         work it delayed is recovering jobs.

@@ -12,7 +12,7 @@
 
 **跨仓规范源：**
 
-- [Cloud Agent migration state](../../../MIGRATION.md)
+- [Cloud Agent migration state](../reviews/2026-08-09-repository-extraction-record.md)
 - [HybridInference architecture](https://github.com/HarvardMadSys/hybridInference/blob/dev/docs/developer/architecture.md)
 - [HybridInference configuration](https://github.com/HarvardMadSys/hybridInference/blob/dev/docs/developer/configuration.md)
 - [HybridInference public path table](https://github.com/HarvardMadSys/hybridInference/blob/dev/docs/developer/public-path-table.md)

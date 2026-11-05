@@ -11,8 +11,8 @@ if TYPE_CHECKING:
 class SettingsRepository(Protocol):
     """Read, initialize and atomically patch the deployment's settings."""
 
-    async def read_settings(self) -> tuple[int, dict[str, Any]]:
-        """Return the revision and encoded values, or revision minus one before initialization."""
+    async def read_settings(self, *, after_revision: int = -1) -> tuple[int, dict[str, Any]]:
+        """Read a newer snapshot, or ``(-1, {})`` when none is available."""
         ...
 
     async def seed_settings(self, values: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:

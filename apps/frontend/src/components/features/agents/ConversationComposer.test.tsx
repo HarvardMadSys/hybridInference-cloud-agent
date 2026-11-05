@@ -4,6 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 
+import { onPlatform } from '@/lib/platformTestSupport';
 import { ComposerMessageActions } from './ConversationComposer';
 
 afterEach(cleanup);
@@ -29,10 +30,28 @@ it('exposes separate queue and steer actions without submitting the form when st
   expect(submit).not.toHaveBeenCalled();
   expect(screen.getByRole('button', { name: 'Steer now' })).toHaveAttribute(
     'aria-keyshortcuts',
-    'Meta+Enter Control+Enter',
+    'Control+Enter',
   );
   fireEvent.click(screen.getByRole('button', { name: 'Queue message' }));
   expect(submit).toHaveBeenCalledOnce();
+});
+
+it('names Command+Enter as the steer chord on a Mac', () => {
+  onPlatform('MacIntel');
+  render(
+    <ComposerMessageActions
+      label="Queue message"
+      title="Send after this turn"
+      busy={false}
+      disabled={false}
+      steerLabel="Steer now"
+      onSteer={() => {}}
+    />,
+  );
+  expect(screen.getByRole('button', { name: 'Steer now' })).toHaveAttribute(
+    'aria-keyshortcuts',
+    'Meta+Enter',
+  );
 });
 
 it.each([

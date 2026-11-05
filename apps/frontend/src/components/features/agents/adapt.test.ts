@@ -160,10 +160,6 @@ const JOB: AgentJobApi = {
   metadata: null,
   created_at: null,
   updated_at: null,
-  spent_usd: null,
-  tokens_in: null,
-  tokens_out: null,
-  model_calls: null,
 };
 
 function event(
@@ -248,6 +244,15 @@ describe('toDisplayEvent', () => {
       text: 'Could not reach example.com',
       sourceEventId: 1,
     });
+  });
+
+  it('keeps the MCP server a Codex call went to, and names none for other calls', () => {
+    const mcp = toDisplayEvent(
+      event(1, 'tool_use', { id: 'm', name: 'review__task', input: {}, mcp_server: 'session' }),
+    );
+    expect(mcp).toMatchObject({ kind: 'tool_use', tool: 'review__task', mcpServer: 'session' });
+    const command = toDisplayEvent(event(2, 'tool_use', { id: 'c', name: 'Bash', input: 'ls' }));
+    expect(command).not.toHaveProperty('mcpServer');
   });
 
   it('keeps a plain error as a lifecycle row', () => {
@@ -974,7 +979,6 @@ describe('toDisplayJob', () => {
     // than a blank one.
     const job = toDisplayJob(JOB);
     expect(job.gates).toEqual([]);
-    expect(job.spentUsd).toBe(0);
   });
 
   it('folds a tool result into its matching activity and preserves its attempt', () => {
@@ -1446,6 +1450,155 @@ describe('patch parsing', () => {
     expect(toDisplayJob(JOB, { patch: PATCH }).diffStat).toEqual({ add: 1, del: 1 });
   });
 
+  // What the host's `git diff` writes for `文档.md`: core.quotePath is on, so
+  // the name is quoted and each byte of its UTF-8 spelling is an octal escape.
+  const QUOTED = [
+    'diff --git "a/\\346\\226\\207\\346\\241\\243.md" "b/\\346\\226\\207\\346\\241\\243.md"',
+    'index ce01362..3b18e51 100644',
+    '--- "a/\\346\\226\\207\\346\\241\\243.md"',
+    '+++ "b/\\346\\226\\207\\346\\241\\243.md"',
+    '@@ -1 +1 @@',
+    '-hello',
+    '+hello world',
+  ].join('\n');
+
+  it('decodes a quoted non-ASCII path', () => {
+    expect(toDiffFiles(QUOTED)).toEqual(['文档.md']);
+    expect(toDiffFileDetails(QUOTED)).toEqual([
+      expect.objectContaining({ path: '文档.md', add: 1, del: 1 }),
+    ]);
+  });
+
+  it('keeps a quoted file out of the file listed before it', () => {
+    const patch = `${PATCH}\n${QUOTED}`;
+    expect(toDiffFiles(patch)).toEqual(['src/x.py', '文档.md']);
+    expect(toDiffFileDetails(patch)).toEqual([
+      expect.objectContaining({ path: 'src/x.py', add: 1, del: 1 }),
+      expect.objectContaining({ path: '文档.md', add: 1, del: 1 }),
+    ]);
+  });
+
+  it.each([
+    ['tab\\tname.md', 'tab\tname.md'],
+    ['say \\"hi\\".md', 'say "hi".md'],
+    ['back\\\\slash.md', 'back\\slash.md'],
+  ])('decodes the escape in "b/%s"', (quoted, path) => {
+    expect(toDiffFiles(`diff --git "a/${quoted}" "b/${quoted}"`)).toEqual([path]);
+  });
+
+  it('leaves out a file whose name is not UTF-8, with its lines', () => {
+    // A Latin-1 `café.md`: Git writes its é as the one byte \351, which spells
+    // no UTF-8 name, and the workspace lists no such file to open.
+    const latin1 = [
+      'diff --git "a/caf\\351.md" "b/caf\\351.md"',
+      'index ce01362..3b18e51 100644',
+      '--- "a/caf\\351.md"',
+      '+++ "b/caf\\351.md"',
+      '@@ -1 +1 @@',
+      '-hello',
+      '+hello world',
+    ].join('\n');
+    const patch = `${PATCH}\n${latin1}`;
+    expect(toDiffFiles(patch)).toEqual(['src/x.py']);
+    expect(toDiffFileDetails(patch)).toEqual([
+      expect.objectContaining({ path: 'src/x.py', add: 1, del: 1 }),
+    ]);
+    // Its lines still count, as a header without prefixes does.
+    expect(toDisplayJob(JOB, { patch }).diffStat).toEqual({ add: 2, del: 2 });
+  });
+
+  it('reads a header that quotes only one of its names', () => {
+    const rename = [
+      'diff --git a/plain.md "b/\\345\\220\\215\\345\\255\\227.md"',
+      'similarity index 100%',
+      'rename from plain.md',
+      'rename to "\\345\\220\\215\\345\\255\\227.md"',
+    ].join('\n');
+    expect(toDiffFiles(rename)).toEqual(['名字.md']);
+  });
+
+  it('reads each line of a hunk by its first character', () => {
+    // A removed `--count;` and an added `++count;` are changes like any other,
+    // not the `---` and `+++` lines that name the file before its first hunk.
+    const patch = [
+      'diff --git a/tick.c b/tick.c',
+      'index 15c5242..04c18dc 100644',
+      '--- a/tick.c',
+      '+++ b/tick.c',
+      '@@ -1,3 +1,3 @@',
+      ' void tick(void) {',
+      '---count;',
+      '+++count;',
+      ' }',
+    ].join('\n');
+    const [file] = toDiffFileDetails(patch);
+    expect(file).toMatchObject({ add: 1, del: 1 });
+    expect(file.lines.slice(0, 2)).toEqual([
+      { marker: 'ctx', text: '--- a/tick.c' },
+      { marker: 'ctx', text: '+++ b/tick.c' },
+    ]);
+    expect(file.lines.slice(4, 6)).toEqual([
+      { marker: 'del', text: '---count;' },
+      { marker: 'add', text: '+++count;' },
+    ]);
+    expect(toDisplayJob(JOB, { patch }).diffStat).toEqual({ add: 1, del: 1 });
+  });
+
+  it('counts a patch whose headers a repository writes without the a/ and b/ prefixes', () => {
+    // diff.noPrefix drops them and diff.mnemonicPrefix swaps them for i/ and w/.
+    // The file list cannot name such a file, but the count must still see it.
+    for (const [from, to] of [
+      ['tick.c', 'tick.c'],
+      ['i/tick.c', 'w/tick.c'],
+    ]) {
+      const patch = [
+        `diff --git ${from} ${to}`,
+        'index 15c5242..04c18dc 100644',
+        `--- ${from}`,
+        `+++ ${to}`,
+        '@@ -1,3 +1,3 @@',
+        ' void tick(void) {',
+        '---count;',
+        '+++count;',
+        '+  ready();',
+        ' }',
+      ].join('\n');
+      expect(toDisplayJob(JOB, { patch }).diffStat).toEqual({ add: 2, del: 1 });
+    }
+  });
+
+  it('reads a file that became a symlink as one changed file', () => {
+    // What `git diff` writes for a change of file type: a deletion and a
+    // creation, each with its own header, under the one name.
+    const patch = [
+      'diff --git a/config.yml b/config.yml',
+      'deleted file mode 100644',
+      'index a52e282..0000000',
+      '--- a/config.yml',
+      '+++ /dev/null',
+      '@@ -1 +0,0 @@',
+      '-plain text',
+      'diff --git a/config.yml b/config.yml',
+      'new file mode 120000',
+      'index 0000000..0190743',
+      '--- /dev/null',
+      '+++ b/config.yml',
+      '@@ -0,0 +1 @@',
+      '+shared/config.yml',
+      '\\ No newline at end of file',
+    ].join('\n');
+    expect(toDiffFiles(patch)).toEqual(['config.yml']);
+    const files = toDiffFileDetails(patch);
+    expect(files).toEqual([expect.objectContaining({ path: 'config.yml', add: 1, del: 1 })]);
+    expect(files[0].lines.filter((line) => line.marker !== 'ctx')).toEqual([
+      { marker: 'hunk', text: '@@ -1 +0,0 @@' },
+      { marker: 'del', text: '-plain text' },
+      { marker: 'hunk', text: '@@ -0,0 +1 @@' },
+      { marker: 'add', text: '+shared/config.yml' },
+    ]);
+    expect(toDisplayJob(JOB, { patch }).diffStat).toEqual({ add: 1, del: 1 });
+  });
+
   it('handles a job that produced no patch', () => {
     const job = toDisplayJob(JOB, { patch: null });
     expect(job.diffFiles).toEqual([]);
@@ -1453,30 +1606,12 @@ describe('patch parsing', () => {
   });
 });
 
-describe('ledger-sourced fields', () => {
-  it('reports spend and usage from the API rather than inventing them', () => {
-    const job = toDisplayJob({
-      ...JOB,
-      spent_usd: 0.0075,
-      tokens_in: 74523,
-      tokens_out: 512,
-      model_calls: 3,
-    });
-
-    expect(job.spentUsd).toBe(0.0075);
-    expect(job.hasLedger).toBe(true);
-    expect(job.usage.tokensIn).toBe('74.5k');
-    expect(job.usage.turns).toBe(3);
-  });
-
-  it('distinguishes "no ledger" from "spent nothing"', () => {
-    // A deployment with no billing ledger must not be shown as a free job.
-    const job = toDisplayJob(JOB);
-
-    expect(job.spentUsd).toBe(0);
-    expect(job.hasLedger).toBe(false);
-    expect(job.usage.tokensIn).toBe('');
-    expect(job.usage.turns).toBeNull();
+describe('job usage fields', () => {
+  it("carries no cost or billed count: the job usage read is the agent's report", () => {
+    const job = toDisplayJob(JOB) as unknown as Record<string, unknown>;
+    expect(job).not.toHaveProperty('spentUsd');
+    expect(job).not.toHaveProperty('hasLedger');
+    expect(job).not.toHaveProperty('usage');
   });
 });
 
@@ -1505,10 +1640,6 @@ describe('lifecycle noise', () => {
     metadata: null,
     created_at: null,
     updated_at: null,
-    spent_usd: null,
-    tokens_in: null,
-    tokens_out: null,
-    model_calls: null,
   };
 
   it('does not render an unknown phase as a completed milestone', () => {
@@ -1528,6 +1659,18 @@ describe('lifecycle noise', () => {
       text: 'Saving workspace changes',
       milestone: true,
     });
+  });
+
+  it("shows an error in the agent's own words as said, even one named like a built-in", () => {
+    // The agent chooses those words. `__proto__` and `constructor` are not
+    // entries of the label table, and must not find Object.prototype's.
+    for (const word of ['__proto__', 'constructor']) {
+      expect(
+        toDisplayEvent(event(1, 'error', { detail: `agent reported an error: ${word}` })),
+      ).toEqual({ kind: 'lifecycle', text: word, sourceEventId: 1 });
+    }
+    expect(lifecyclePhaseLabel('__proto__')).toEqual({ text: '  proto  ', milestone: false });
+    expect(lifecyclePhaseLabel('constructor')).toEqual({ text: 'constructor', milestone: false });
   });
 
   it('collapses consecutive reasoning rows into one status', () => {
@@ -1709,29 +1852,17 @@ describe('projecting a running turn again', () => {
   });
 });
 
-describe('workspace publication', () => {
-  it('carries what the owner has and has not published', () => {
-    const waiting = toDisplayJob(
-      { ...JOB, state: 'succeeded', workspace_unpublished_changes: true, workspace_pr_url: null },
-      {},
-    );
-    expect(waiting.workspaceUnpublishedChanges).toBe(true);
-    expect(waiting.workspacePrUrl).toBeUndefined();
+describe('workspace pull request', () => {
+  it('carries the newest pull request the conversation opened', () => {
+    const none = toDisplayJob({ ...JOB, state: 'succeeded', workspace_pr_url: null }, {});
+    expect(none.workspacePrUrl).toBeUndefined();
 
-    const unchanged = toDisplayJob(
-      {
-        ...JOB,
-        state: 'succeeded',
-        workspace_publication_state: 'published',
-        workspace_publication_unchanged: true,
-        workspace_pr_url: 'https://github.com/o/n/pull/4',
-        workspace_unpublished_changes: false,
-      },
+    const opened = toDisplayJob(
+      { ...JOB, state: 'succeeded', workspace_pr_url: 'https://github.com/o/n/pull/4' },
       {},
     );
-    expect(unchanged.workspacePublicationState).toBe('published');
-    expect(unchanged.workspacePublicationUnchanged).toBe(true);
-    expect(unchanged.workspacePrUrl).toBe('https://github.com/o/n/pull/4');
-    expect(unchanged.workspaceUnpublishedChanges).toBeUndefined();
+    expect(opened.workspacePrUrl).toBe('https://github.com/o/n/pull/4');
+    // A pull request opened in an earlier turn is not this turn's.
+    expect(opened.prUrl).toBeUndefined();
   });
 });

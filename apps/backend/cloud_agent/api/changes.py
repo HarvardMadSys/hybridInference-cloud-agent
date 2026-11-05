@@ -5,10 +5,9 @@ title and pull request link every few seconds. A tab now holds this stream, and
 it sends each changed job or thread the moment Postgres says it changed
 (migration ``0031``): its id, its ``revision`` and the values the tab shows.
 A job's usage is sent when it changes (migration ``0032``), as its usage read
-returns it. The message queue, tool approvals and publication progress are
-named as hints, and the tab reads that one thing again: the first two are
-lists, and the last is the newest snapshot of a workspace, which has no
-version a tab could order against the turn row it reads it with. Lists still
+returns it. The message queue and tool approvals are named as hints, and the
+tab reads that one thing again: both are lists. A pull request a turn opened
+arrives on the job itself (``published_pr_url``). Lists still
 read their own pages; what they no longer do is ask on a clock.
 
 The stream replays nothing. It says ``hello`` once it collects the owner's
@@ -32,7 +31,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from cloud_agent.api._job_views import _iso
-from cloud_agent.api._owner_auth import OWNER_STREAM_MAX_S, require_agent_owner
+from cloud_agent.api._owner_auth import (
+    OWNER_STREAM_MAX_S,
+    owner_stream_guard,
+    require_agent_owner,
+)
 from cloud_agent.api._stream_slots import STREAM_SLOTS
 from cloud_agent.api.deps import get_owner_change_signal, get_storage, require_store
 from cloud_agent.api.usage import job_usage_response
@@ -95,9 +98,24 @@ def _thread(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _usage(store: _ChangesStorage, user_id: str, job_id: str) -> dict[str, Any]:
-    """A job's usage as its usage read returns it; only its id if it is not theirs."""
-    usage = await job_usage_response(store, job_id=job_id, user_id=user_id)
+async def _usage(
+    store: _ChangesStorage,
+    signal: OwnerChangeSignal,
+    user_id: str,
+    job_id: str,
+    *,
+    after: int,
+) -> dict[str, Any]:
+    """A job's usage as its usage read returns it; only its id if it is not theirs.
+
+    Each of the owner's tabs is woken by the same notification, so they share
+    one read: one made since the notification that woke this stream.
+    """
+    usage = await signal.reads.read(
+        ("usage", user_id, job_id),
+        after=after,
+        read=lambda: job_usage_response(store, job_id=job_id, user_id=user_id),
+    )
     if usage is None:
         return {"id": job_id}
     return {"id": job_id, "usage": usage.model_dump(mode="json")}
@@ -116,8 +134,8 @@ async def stream_owner_changes(
     ``thread`` carry the row's current values and its ``revision``, or
     ``{"id": ..., "deleted": true}`` once it is gone; ``usage`` carries the
     job's ``{"id": ..., "usage": ...}`` as ``GET /v1/agent/jobs/{id}/usage``
-    returns it; ``mcp`` (a job) and ``queue``, ``publication`` (a
-    conversation) carry only ``{"id": ...}``: read that again. 404 where this
+    returns it; ``mcp`` (a job) and ``queue`` (a conversation) carry only
+    ``{"id": ...}``: read that again. 404 where this
     process pushes nothing, which a tab treats as "keep reading on a clock".
     The stream ends after at most ``OWNER_STREAM_MAX_S`` (15 minutes); the tab
     reconnects, is admitted again, and its ``hello`` has it read its lists.
@@ -143,11 +161,14 @@ async def stream_owner_changes(
         # Admission was checked once, for this connection, so the connection
         # does not outlive the cap.
         closes_at = clock() + OWNER_STREAM_MAX_S
+        still_admitted = owner_stream_guard(request, user_id)
         with signal.subscribe(user_id) as subscription:
             yield _frame("hello", {"live": signal.listening})
             while True:
                 remaining = closes_at - clock()
                 if remaining <= 0 or await request.is_disconnected():
+                    return
+                if not await still_admitted():
                     return
                 woken = await subscription.wait(min(_KEEPALIVE_S, remaining))
                 changes = subscription.take()
@@ -173,7 +194,12 @@ async def stream_owner_changes(
                 for kind in HINT_KINDS:
                     for row_id in sorted(changes.hints.get(kind, ())):
                         if kind == "usage":
-                            yield _frame(kind, await _usage(job_store, user_id, row_id))
+                            yield _frame(
+                                kind,
+                                await _usage(
+                                    job_store, signal, user_id, row_id, after=changes.sequence
+                                ),
+                            )
                         else:
                             yield _frame(kind, {"id": row_id})
                 if not (woken or changes.resync) and clock() < closes_at:

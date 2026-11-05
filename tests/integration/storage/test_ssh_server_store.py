@@ -4,13 +4,16 @@ from __future__ import annotations
 
 # ruff: noqa: F811 -- imported pytest fixtures remain parameters
 import uuid
+from typing import Any
 
 import asyncpg
 import pytest
 from tests.integration.storage.test_agent_job_store import pool, store  # noqa: F401
 from tests.support.ssh_keys import host_key
 
+from cloud_agent.application.ssh_servers import push_ssh_access
 from cloud_agent.domain.ssh_servers import SshServerConflict, SshServerUnavailable
+from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -310,12 +313,174 @@ async def test_a_change_reaches_the_running_groups_of_its_chats_and_servers(stor
     )
 
     assert by_server == [
-        {"sandbox_id": sandbox_id, "thread_id": origin["thread_id"], "job_id": origin["id"]}
+        {
+            "sandbox_id": sandbox_id,
+            "origin_thread_id": origin["thread_id"],
+            "host": "machine",
+            "sandbox_manager_url": None,
+            "resident_thread_id": None,
+        }
     ]
     assert by_thread == by_server
     async with pool.acquire() as conn:
         await conn.execute("UPDATE agent_sandboxes SET state = 'stopped' WHERE id = $1", sandbox_id)
     assert await store.ssh_servers.running_groups_for_ssh_change(server_id=gpu["id"]) == []
+
+
+async def test_batch_states_preserve_revocation_and_revision_order_in_three_queries(store, pool):
+    from contextlib import asynccontextmanager
+
+    from cloud_agent.storage.repositories.ssh_servers import PostgresSshServerRepository
+
+    gpu = await _server(store)
+    first = await _chat(store, ssh_server_ids=[gpu["id"]])
+    peer = await _chat(store)
+    second = await _chat(store, ssh_server_ids=[gpu["id"]])
+    first_group = await _group(pool, [(first, 0), (peer, 1)])
+    second_group = await _group(pool, [(second, 0)])
+    origins = [first["thread_id"], second["thread_id"]]
+    queries = []
+
+    class Connection:
+        def __init__(self, conn):
+            self.conn = conn
+
+        async def fetch(self, sql, *args):
+            queries.append(sql)
+            return await self.conn.fetch(sql, *args)
+
+    class Pool:
+        @asynccontextmanager
+        async def acquire(self):
+            async with pool.acquire() as conn:
+                yield Connection(conn)
+
+    repository = PostgresSshServerRepository(Pool())
+    before = await repository.ssh_group_states(thread_ids=origins)
+    assert len(queries) == 3
+    assert "nextval" in queries[0]
+    assert [before[origin]["sandbox_id"] for origin in origins] == [first_group, second_group]
+    assert len(before[origins[0]]["members"]) == 2
+    await store.ssh_servers.replace_thread_ssh_bindings(
+        user_id="alice", thread_id=origins[0], server_ids=[]
+    )
+    after = await repository.ssh_group_states(thread_ids=origins)
+    assert all(
+        after[origin]["revision"] > max(s["revision"] for s in before.values())
+        for origin in origins
+    )
+    assert all(member["servers"] == [] for member in after[origins[0]]["members"])
+    assert after[origins[1]]["members"][0]["servers"][0]["id"] == gpu["id"]
+    first_page = await repository.running_groups_for_ssh_change(server_id=gpu["id"], limit=1)
+    second_page = await repository.running_groups_for_ssh_change(
+        server_id=gpu["id"], limit=1, after_sandbox_id=first_page[0]["sandbox_id"]
+    )
+    assert {first_page[0]["sandbox_id"], second_page[0]["sandbox_id"]} == {
+        first_group,
+        second_group,
+    }
+
+
+async def _manager_host(store, host: str) -> str:
+    """Enroll a host whose sandbox manager answers at its own address."""
+    url = f"http://{host}.test:9000"
+    await store.host_pool.register_host(
+        host=host, credential_hash=f"hash-{host}", sandbox_manager_url=url
+    )
+    return url
+
+
+def _sandbox_managers(monkeypatch, known: dict[str, set[str]]) -> list[tuple[str, str, Any]]:
+    """Sandbox managers that know only these chats, as one does right after a restart.
+
+    Each answers an unknown chat with the 404 its SSH route gives. Returns the
+    states applied, with the manager and the chat each was addressed to.
+    """
+    monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "ssh-store-test-token")
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "ssh-store-test-key")
+    applied: list[tuple[str, str, Any]] = []
+
+    async def sync_ssh_access(client, workspace_id, access):
+        if workspace_id not in known.get(client._base_url, set()):
+            raise SandboxManagerError(404, "shared chat workspace is not materialized")
+        applied.append((client._base_url, workspace_id, access))
+        return {"newest": True, "revision": access.revision, "running": True}
+
+    monkeypatch.setattr(SandboxManagerClient, "sync_ssh_access", sync_ssh_access)
+    return applied
+
+
+@pytest.mark.parametrize("knows", ["origin", "fork"])
+async def test_a_push_reaches_its_group_through_a_chat_its_manager_knows(
+    store, pool, monkeypatch, knows
+):
+    gpu = await _server(store)
+    origin = await _chat(store, ssh_server_ids=[gpu["id"]])
+    fork = await _chat(store)
+    url = await _manager_host(store, "machine")
+    # The fork holds a slot and the origin none, as after the owner deleted
+    # the origin chat: the fork is the chat a push used to address.
+    await _group(pool, [(origin, None), (fork, 1)])
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_thread_sandbox_memberships SET native_session_id = 'native-fork' "
+            "WHERE thread_id = $1",
+            fork["thread_id"],
+        )
+    # A restarted manager has re-learned only the origin, from its container's
+    # labels; one that has since been sent the group's manifest knows only the
+    # chats holding slots.
+    thread = {"origin": origin["thread_id"], "fork": fork["thread_id"]}[knows]
+    applied = _sandbox_managers(monkeypatch, {url: {thread}})
+    await store.ssh_servers.replace_thread_ssh_bindings(
+        user_id="alice", thread_id=origin["thread_id"], server_ids=[]
+    )
+
+    await push_ssh_access(store, thread_ids=[origin["thread_id"]])
+
+    [(where, workspace_id, access)] = applied
+    assert (where, workspace_id) == (url, thread)
+    assert access.members == [], "gpu is off: the group keeps nothing"
+
+
+async def test_a_push_goes_to_the_groups_host_not_where_a_members_turn_runs(
+    store, pool, monkeypatch
+):
+    gpu = await _server(store)
+    chat = await _chat(store, ssh_server_ids=[gpu["id"]])
+    home = await _manager_host(store, "machine")
+    elsewhere = await _manager_host(store, "elsewhere")
+    await _group(pool, [(chat, 0)])
+    # The chat's latest job has an attempt running on another host.
+    async with pool.acquire() as conn:
+        attempt_id = await conn.fetchval(
+            """
+            INSERT INTO agent_attempts
+                (job_id, thread_id, attempt_no, lease_owner, lease_generation,
+                 lease_expires_at, host_id)
+            VALUES ($1, $2, 1, 'worker', 1, NOW() + INTERVAL '5 minutes', 'elsewhere')
+            RETURNING id
+            """,
+            chat["id"],
+            chat["thread_id"],
+        )
+        await conn.execute(
+            "UPDATE agent_jobs SET state = 'running', current_attempt_id = $2 WHERE id = $1",
+            chat["id"],
+            attempt_id,
+        )
+    applied = _sandbox_managers(
+        monkeypatch, {home: {chat["thread_id"]}, elsewhere: {chat["thread_id"]}}
+    )
+    await store.ssh_servers.replace_thread_ssh_bindings(
+        user_id="alice", thread_id=chat["thread_id"], server_ids=[]
+    )
+
+    await push_ssh_access(store, thread_ids=[chat["thread_id"]])
+
+    assert [(where, workspace_id) for where, workspace_id, _ in applied] == [
+        (home, chat["thread_id"])
+    ]
 
 
 async def test_a_fork_starts_with_its_sources_ssh_selection(store, pool):

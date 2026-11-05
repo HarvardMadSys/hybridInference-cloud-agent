@@ -15,12 +15,18 @@ from tests.integration.storage.test_agent_job_store import (
     pool as pool,
     store as store,
 )
+from tests.support.follow_ups import append_follow_up
 
+from cloud_agent.goals.models import GoalInput
 from cloud_agent.storage.repositories.host_pool import PostgresHostPoolRepository
 from cloud_agent_host.sandbox import KATA_RUNTIME
 from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILITY
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
+
+# AWS's documented example key pair, which no account accepts.
+_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"
+_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 
 
 async def _age(pool):
@@ -139,7 +145,8 @@ class _AutoscalingObservationBarrierPool:
 
 async def test_queue_health_ignores_new_jobs_and_blocked_followups(pool, store):
     parent = await _create_job(store)
-    await store.conversation_commands.create_follow_up(
+    await append_follow_up(
+        pool,
         parent_job_id=parent["id"],
         user_id=parent["user_id"],
         prompt="Later",
@@ -290,6 +297,51 @@ async def test_autoscaling_observes_only_new_groups_and_effective_free_slots(poo
     assert stale["autoscaling_template_hosts"] == []
 
 
+async def test_autoscaling_counts_a_host_that_applied_a_policy_with_an_access_key(
+    pool, store, monkeypatch
+):
+    """The stored key is sealed, and the observation opens it as the claim does (#984)."""
+    monkeypatch.setenv(
+        "AGENT_SETTINGS_ENCRYPTION_KEY", "test-settings-root-key-over-thirty-two-bytes"
+    )
+    await _create_job(store, execution_profile="trusted-v1")
+    await _host(
+        store, slots=2, capabilities=[*_SHARED_HOST_CAPABILITIES, SANDBOX_ARCHIVE_CAPABILITY]
+    )
+    saved = await store.host_pool.set_sandbox_archive_settings(
+        expected_revision=0,
+        settings={
+            "enabled": True,
+            "region": "us-east-1",
+            "aws_access_key_id": _ACCESS_KEY_ID,
+            "aws_secret_access_key": _SECRET_ACCESS_KEY,
+        },
+    )
+    assert saved is not None and saved["revision"] == 1
+    sealed = await pool.fetchval(
+        "SELECT jsonb_typeof(sandbox_archive_settings->'aws_secret_access_key') "
+        "FROM agent_runner_policy WHERE id"
+    )
+    assert sealed == "object"
+    behind = await store.host_pool.autoscaling_observation(
+        expected_deployment_sha="test-deployment"
+    )
+    assert behind["fresh_effective_free_slots"] == 0
+    assert behind["unmatched_new_group_jobs"] == 1
+
+    await store.host_pool.record_host_heartbeat(
+        host="runner-a",
+        credential_hash="test",
+        sandbox_archive_settings_applied_revision=1,
+        sandbox_archive_settings_revision_reported=True,
+    )
+    applied = await store.host_pool.autoscaling_observation(
+        expected_deployment_sha="test-deployment"
+    )
+    assert applied["fresh_effective_free_slots"] == 2
+    assert applied["unmatched_new_group_jobs"] == 0
+
+
 async def test_autoscaling_observation_keeps_queue_and_slots_in_one_snapshot(pool, store):
     job = await _create_job(store)
     await _host(store, slots=1)
@@ -345,6 +397,49 @@ async def test_retained_queue_never_creates_autoscaling_pressure(pool, store):
 
     assert snapshot["runnable_new_group_jobs"] == 0
     assert snapshot["unmatched_new_group_jobs"] == 0
+
+
+async def test_autoscaling_demand_is_only_what_a_claim_would_hand_out(pool, store):
+    """A turn waiting out its claim backoff, or a goal round in a deleted chat, is no demand.
+
+    No claim hands either one out, so a new Host would only sit idle beside it.
+    The turn in backoff still waits for a Host and is counted apart; the round
+    in the deleted chat never runs, so it is counted nowhere.
+    """
+    backoff = await _create_job(store, execution_profile="trusted-v1")
+    await pool.execute(
+        "UPDATE agent_jobs SET claim_retry_at = clock_timestamp() + INTERVAL '1 hour' "
+        "WHERE id = $1",
+        backoff["id"],
+    )
+    deleted = await _create_job(store, execution_profile="trusted-v1")
+    assert await store.goals.set_goal(
+        thread_id=deleted["thread_id"],
+        user_id=deleted["user_id"],
+        goal=GoalInput(objective="ship it", max_rounds=5),
+    )
+    await pool.execute(
+        """UPDATE agent_jobs j
+           SET turn_source = 'goal', goal_id = t.goal_id, goal_revision = t.goal_revision
+           FROM agent_threads t WHERE j.id = $1 AND t.id = j.thread_id""",
+        deleted["id"],
+    )
+    await pool.execute(
+        "UPDATE agent_threads SET deleted_at = NOW() WHERE id = $1", deleted["thread_id"]
+    )
+
+    snapshot = await store.host_pool.autoscaling_observation(
+        expected_deployment_sha="test-deployment"
+    )
+    assert snapshot["runnable_new_group_jobs"] == 0
+    assert snapshot["backoff_new_group_jobs"] == 1
+
+    await pool.execute("UPDATE agent_jobs SET claim_retry_at = NULL WHERE id = $1", backoff["id"])
+    snapshot = await store.host_pool.autoscaling_observation(
+        expected_deployment_sha="test-deployment"
+    )
+    assert snapshot["runnable_new_group_jobs"] == 1
+    assert snapshot["backoff_new_group_jobs"] == 0
 
 
 async def test_autoscaling_does_not_treat_incompatible_manual_slots_as_capacity(store):

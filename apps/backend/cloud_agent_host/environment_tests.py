@@ -6,21 +6,30 @@ import contextlib
 import logging
 import threading
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec, RetainedChatBackend
 from cloud_agent_host.chat_sandbox_models import ENVIRONMENT_TEST_LABEL
-from cloud_agent_host.environment_preparation import EnvironmentPreparation, write_setup_marker
-from cloud_agent_host.setup import run_setup
+from cloud_agent_host.environment_preparation import (
+    RUNNING_PROGRESS_INTERVAL_S,
+    EnvironmentPreparation,
+    run_step,
+    write_setup_marker,
+)
+from cloud_agent_host.host_control import keepalive_client
 from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY, BoundEnvironment
 from cloud_agent_shared.environment_snapshots import ENVIRONMENT_SNAPSHOT_CAPABILITY
 from cloud_agent_shared.secret_redaction import SecretRedactor
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 #: Snapshot ids per question to the control plane; one Sandbox Manager delete
 #: request takes as many.
 _RETIRED_IMAGES_BATCH = 100
+_HEARTBEAT_INTERVAL_S = 10.0
 
 
 def environment_run_spec(run_id: str, generation: int, image_digest: str | None) -> ChatSandboxSpec:
@@ -35,6 +44,15 @@ def environment_run_spec(run_id: str, generation: int, image_digest: str | None)
     )
 
 
+def _control_plane_client(base_url: str, credential: str) -> httpx.Client:
+    """A keep-alive client that presents ``credential`` on every request it sends."""
+    return keepalive_client(
+        base_url=base_url.rstrip("/"),
+        headers={"Authorization": f"Bearer {credential}"},
+        timeout=30,
+    )
+
+
 def claim_and_execute(
     *,
     base_url: str,
@@ -43,13 +61,20 @@ def claim_and_execute(
     stop: threading.Event | None = None,
     cleanup_orphans: bool = True,
     cleanup_snapshots: bool = False,
+    client: httpx.Client | None = None,
+    attestation: dict[str, Any] | None = None,
 ) -> bool:
-    """Claim and clean up one test or prebuild using a normal registered host slot."""
+    """Claim and clean up one test or prebuild using a normal registered host slot.
+
+    ``client`` is the worker's keep-alive client for ``credential`` and is left
+    open; without one, this opens its own. ``attestation`` is the proof the
+    claim loop just built for its own claim; without one, this builds it.
+    """
     from cloud_agent_host.runner import _claim_attestation
 
-    with httpx.Client(
-        base_url=base_url.rstrip("/"), headers={"Authorization": f"Bearer {credential}"}, timeout=30
-    ) as client:
+    with contextlib.ExitStack() as stack:
+        if client is None:
+            client = stack.enter_context(_control_plane_client(base_url, credential))
         if cleanup_orphans:
             orphan_response = client.get("/v1/agent/worker/environment-runs/orphans")
             orphan_response.raise_for_status()
@@ -78,7 +103,7 @@ def claim_and_execute(
             "/v1/agent/worker/environment-runs/claim",
             json={
                 "capabilities": [ENVIRONMENT_CAPABILITY, ENVIRONMENT_SNAPSHOT_CAPABILITY],
-                "attestation": _claim_attestation(backend),
+                "attestation": _claim_attestation(backend) if attestation is None else attestation,
             },
         )
         response.raise_for_status()
@@ -87,6 +112,128 @@ def claim_and_execute(
             return False
         execute_test(client=client, run=run, backend=backend, stop=stop)
         return True
+
+
+class _RunReporter:
+    """One environment run's reports to the control plane, and its heartbeat.
+
+    ``cancelled`` is this run's own cancellation. A refused report, a failed
+    heartbeat or the time limit ends this run only: the worker's stop is
+    copied into it, never set from it, or one cancelled run would stop every
+    later poll.
+    """
+
+    def __init__(
+        self,
+        client: Any,
+        run: dict[str, Any],
+        *,
+        redactor: SecretRedactor,
+        image_digest: str | None,
+        stop: threading.Event | None,
+    ) -> None:
+        self._client = client
+        self._path = f"/v1/agent/worker/environment-runs/{run['id']}"
+        self._generation = int(run["lease_generation"])
+        self._redactor = redactor
+        self._image_digest = image_digest
+        self._stop = stop
+        self.cancelled = threading.Event()
+        if stop is not None and stop.is_set():
+            self.cancelled.set()
+        self._steps: list[dict[str, Any]] = []
+        self._lock = threading.Lock()
+        self._report_lock = threading.Lock()
+        self._began = time.monotonic()
+        self._last_reported_at = self._began
+        self._running_progress_reported = False
+        self._ended = threading.Event()
+        self._beat = threading.Thread(target=self._heartbeat, name="environment-test-heartbeat")
+
+    def start(self) -> None:
+        """Start the heartbeat."""
+        self._beat.start()
+
+    def end(self) -> None:
+        """Stop the heartbeat. Steps are still recorded, but no longer reported."""
+        self._ended.set()
+        self._beat.join(timeout=35)
+
+    def report(
+        self,
+        state: str = "running",
+        detail: str = "",
+        *,
+        cleanup_complete: bool = False,
+        snapshot: dict[str, Any] | None = None,
+        minimum_interval_s: float | None = None,
+    ) -> bool:
+        """Send one fenced update, coalescing only non-terminal running reports."""
+        with self._report_lock:
+            now = time.monotonic()
+            if minimum_interval_s is not None and now - self._last_reported_at < minimum_interval_s:
+                return False
+            with self._lock:
+                payload = {
+                    "generation": self._generation,
+                    "state": state,
+                    "steps": [dict(s) for s in self._steps],
+                    "detail": self._redactor.text(detail)[-1000:],
+                    "image_digest": self._image_digest,
+                    "cleanup_complete": cleanup_complete,
+                    **({"snapshot": snapshot} if snapshot is not None else {}),
+                }
+            answer = self._client.post(self._path, json=payload)
+            if answer.status_code == 409:
+                self.cancelled.set()
+            answer.raise_for_status()
+            self._last_reported_at = time.monotonic()
+            return True
+
+    def step(self, step: dict[str, Any]) -> None:
+        """Record a step's latest state, and report it at most twice a second while it runs."""
+        with self._lock:
+            prior = next(
+                (i for i, s in enumerate(self._steps) if s["phase"] == step["phase"]), None
+            )
+            if prior is None:
+                self._steps.append(dict(step))
+            else:
+                self._steps[prior] = dict(step)
+        if self._ended.is_set():
+            return
+        try:
+            sent = self.report(
+                minimum_interval_s=(
+                    RUNNING_PROGRESS_INTERVAL_S
+                    if step["state"] == "running" and self._running_progress_reported
+                    else None
+                )
+            )
+            if sent and step["state"] == "running":
+                self._running_progress_reported = True
+        except httpx.HTTPStatusError as exc:
+            # A refused report has cancelled the run. Raised from a
+            # running step's output, it would leave the step running:
+            # run_setup stops the script instead, so it ends cancelled.
+            if step["state"] != "running" or exc.response.status_code != 409:
+                raise
+
+    def _heartbeat(self) -> None:
+        # A short tick, so a closing worker cancels its run without waiting
+        # out the interval between reports.
+        while not self._ended.wait(0.25):
+            if self._stop is not None and self._stop.is_set():
+                self.cancelled.set()
+            if time.monotonic() - self._began >= 1800:
+                self.cancelled.set()
+            try:
+                # Every progress report renews the same lease. Send a
+                # heartbeat only when no more recent update already did so.
+                self.report(minimum_interval_s=_HEARTBEAT_INTERVAL_S)
+            except (httpx.HTTPError, ValueError):
+                self.cancelled.set()
+                return
 
 
 def execute_test(
@@ -102,54 +249,21 @@ def execute_test(
     # runtime values, and nothing they write may reach another workspace.
     prepared = bound.model_copy(update={"start_script": ""}) if prebuild else bound
     target = run.get("snapshot") if prebuild and isinstance(run.get("snapshot"), dict) else None
-    redactor = SecretRedactor(bound.secrets())
     manager = ChatSandboxManager(backend)
     spec = environment_run_spec(
         run["id"],
         int(run["lease_generation"]),
         backend.version_stamp().get("sandbox_image_digest"),
     )
-    cancelled = stop or threading.Event()
-    heartbeat_stop = threading.Event()
-    steps: list[dict[str, Any]] = []
-    data_lock = threading.Lock()
-    path = f"/v1/agent/worker/environment-runs/{run['id']}"
-    began = time.monotonic()
-
-    def report(
-        state: str = "running",
-        detail: str = "",
-        *,
-        cleanup_complete: bool = False,
-        snapshot: dict[str, Any] | None = None,
-    ) -> None:
-        with data_lock:
-            payload = {
-                "generation": int(run["lease_generation"]),
-                "state": state,
-                "steps": [dict(s) for s in steps],
-                "detail": redactor.text(detail)[-1000:],
-                "image_digest": spec.sandbox_image_digest,
-                "cleanup_complete": cleanup_complete,
-                **({"snapshot": snapshot} if snapshot is not None else {}),
-            }
-        answer = client.post(path, json=payload)
-        if answer.status_code == 409:
-            cancelled.set()
-        answer.raise_for_status()
-
-    def heartbeat() -> None:
-        while not heartbeat_stop.wait(10):
-            if time.monotonic() - began >= 1800:
-                cancelled.set()
-            try:
-                report()
-            except (httpx.HTTPError, ValueError):
-                cancelled.set()
-                return
-
-    beat = threading.Thread(target=heartbeat, name="environment-test-heartbeat")
-    beat.start()
+    reporter = _RunReporter(
+        client,
+        run,
+        redactor=SecretRedactor(bound.secrets()),
+        image_digest=spec.sandbox_image_digest,
+        stop=stop,
+    )
+    cancelled = reporter.cancelled
+    reporter.start()
     container_id = None
     source = None
     outcome = "failed"
@@ -175,62 +289,34 @@ def execute_test(
             runtime="claude-code",
             model="",
             worker_token="",
-            sandbox_token="",
             clone_token=run.get("clone_token"),
         )
         source = _SourcePrefetch(job, uid=backend.uid, gid=backend.gid, max_bytes=None)
         source_sha = source.import_into(manager, spec)
         manager.prepare_shared_workspace(spec)
         retained = RetainedChatBackend(manager, spec)
-        last_upload = 0.0
-
-        def on_step(step: dict[str, Any]) -> None:
-            nonlocal last_upload
-            with data_lock:
-                prior = next((i for i, s in enumerate(steps) if s["phase"] == step["phase"]), None)
-                if prior is None:
-                    steps.append(dict(step))
-                else:
-                    steps[prior] = dict(step)
-            now = time.monotonic()
-            if heartbeat_stop.is_set():
-                return
-            if step["state"] != "running" or now - last_upload >= 0.5:
-                report()
-                last_upload = now
-
-        EnvironmentPreparation().prepare(retained, prepared, callback=on_step, cancel=cancelled)
+        EnvironmentPreparation().prepare(
+            retained, prepared, callback=reporter.step, cancel=cancelled
+        )
         if bound.verify_script and not prebuild:
             step: dict[str, Any] = {"phase": "verify", "state": "running", "output": ""}
-
-            def output(chunk: str) -> None:
-                step["output"] = (str(step["output"]) + chunk)[-65536:]
-                on_step(step)
-
-            started = time.monotonic()
-            result = run_setup(
+            result = run_step(
+                retained,
+                bound,
+                step,
                 script=bound.verify_script,
-                workdir="/workspace",
-                backend=retained,
-                env=bound.values("runtime"),
-                secrets=bound.secrets(),
+                values="runtime",
                 timeout_s=300,
-                on_output=output,
+                on_output=reporter.step,
                 cancel=cancelled,
-                phase="verify",
             )
-            step.update(
-                state="succeeded" if result.exit_code == 0 else "failed",
-                exit_code=result.exit_code,
-                duration_seconds=time.monotonic() - started,
-            )
-            on_step(step)
+            reporter.step(step)
             if result.exit_code:
                 raise RuntimeError(f"Verification failed ({result.exit_code})")
         if cancelled.is_set():
             raise RuntimeError("Environment test cancelled")
         if target is not None:
-            report(
+            reporter.report(
                 snapshot=_save_snapshot(
                     manager,
                     spec,
@@ -246,28 +332,38 @@ def execute_test(
     except Exception as exc:
         outcome, detail = ("cancelled" if cancelled.is_set() else "failed"), str(exc)
     finally:
-        heartbeat_stop.set()
-        beat.join(timeout=35)
+        reporter.end()
         if source is not None:
             source.discard()
-        cleanup_inspection = manager.inspect(spec.container_name)
-        if cleanup_inspection is not None:
-            container_id = cleanup_inspection.container_id
-            try:
-                manager.remove_environment_test(spec, container_id=container_id)
-            except Exception:
-                with contextlib.suppress(httpx.HTTPError):
-                    report("running", "Environment cleanup is pending")
-                return
-        if container_id:
-            key = __import__("hashlib").sha256(container_id.encode()).hexdigest()
-            root = EnvironmentPreparation().root
-            for suffix in (".json", ".lock"):
-                with contextlib.suppress(FileNotFoundError):
-                    (root / f"{key}{suffix}").unlink()
+        _remove_run(manager, spec, reporter, container_id, outcome, detail)
 
-        with contextlib.suppress(httpx.HTTPError):
-            report(outcome, detail, cleanup_complete=True)
+
+def _remove_run(
+    manager: ChatSandboxManager,
+    spec: ChatSandboxSpec,
+    reporter: _RunReporter,
+    container_id: str | None,
+    outcome: str,
+    detail: str,
+) -> None:
+    """Remove the run's container, then report its outcome with cleanup complete.
+
+    A container that cannot be removed is reported as cleanup pending instead,
+    and stays an orphan for the next poll to remove.
+    """
+    inspection = manager.inspect(spec.container_name)
+    if inspection is not None:
+        container_id = inspection.container_id
+        try:
+            manager.remove_environment_test(spec, container_id=container_id)
+        except Exception:
+            with contextlib.suppress(httpx.HTTPError):
+                reporter.report("running", "Environment cleanup is pending")
+            return
+    if container_id:
+        EnvironmentPreparation().forget(container_id)
+    with contextlib.suppress(httpx.HTTPError):
+        reporter.report(outcome, detail, cleanup_complete=True)
 
 
 def _save_snapshot(
@@ -372,22 +468,39 @@ def _delete_retired_snapshots(client: httpx.Client) -> None:
 class EnvironmentTestWorker:
     """Keep test execution and orphan RPCs off the host's coding-task claim loop."""
 
-    def __init__(self, base_url: str, backend: Any) -> None:
+    def __init__(
+        self, base_url: str, backend: Any, *, on_idle: Callable[[], None] | None = None
+    ) -> None:
         self._base_url = base_url
         self._backend = backend
+        #: Called from the poll's thread once its claim or test is over, so a
+        #: claim loop waiting at capacity takes the freed slot at once.
+        self._on_idle = on_idle
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        #: Set before a poll's thread starts and cleared when its work is done,
+        #: before ``on_idle``: the loop that call wakes must find the slot free,
+        #: and the thread may still be alive for a moment as it exits.
+        self._in_flight = False
         self._next_poll = 0.0
         self._next_cleanup = 0.0
         self._next_snapshot_cleanup = 0.0
+        #: The keep-alive client every poll and run uses, and the credential it
+        #: presents. Each poll opened its own, every five seconds, before.
+        self._client: httpx.Client | None = None
+        self._credential = ""
 
     @property
     def busy(self) -> bool:
         """Count an in-flight claim or test as one reserved local slot."""
-        return self._thread is not None and self._thread.is_alive()
+        return self._in_flight
 
-    def poll(self, credential: str) -> None:
-        """Start at most one bounded poll without waiting for its HTTP or script work."""
+    def poll(self, credential: str, attestation: dict[str, Any] | None = None) -> None:
+        """Start at most one bounded poll without waiting for its HTTP or script work.
+
+        ``attestation`` is the proof the claim loop built for the claim that
+        just found nothing; without one, the poll builds its own.
+        """
         if self._stop.is_set() or self.busy or time.monotonic() < self._next_poll:
             return
         self._next_poll = time.monotonic() + 5
@@ -397,6 +510,7 @@ class EnvironmentTestWorker:
         snapshots = time.monotonic() >= self._next_snapshot_cleanup
         if snapshots:
             self._next_snapshot_cleanup = time.monotonic() + 600
+        client = self._client_for(credential)
 
         def execute() -> None:
             try:
@@ -407,15 +521,43 @@ class EnvironmentTestWorker:
                     stop=self._stop,
                     cleanup_orphans=cleanup,
                     cleanup_snapshots=snapshots,
+                    client=client,
+                    attestation=attestation,
                 )
             except Exception:
                 logging.getLogger(__name__).warning("environment_test_poll_failed")
+            finally:
+                self._in_flight = False
+                if self._on_idle is not None:
+                    self._on_idle()
 
         self._thread = threading.Thread(target=execute, name="environment-test", daemon=True)
-        self._thread.start()
+        self._in_flight = True
+        try:
+            self._thread.start()
+        except BaseException:
+            # No thread started, so nothing holds the slot.
+            self._in_flight = False
+            raise
+
+    def _client_for(self, credential: str) -> httpx.Client:
+        """The client presenting ``credential``, replacing one made for another.
+
+        Called only between runs, so no thread is using the one it replaces.
+        """
+        if self._client is None or credential != self._credential:
+            if self._client is not None:
+                self._client.close()
+            self._client = _control_plane_client(self._base_url, credential)
+            self._credential = credential
+        return self._client
 
     def close(self) -> None:
         """Cancel in-flight preparation and allow its fenced cleanup to finish."""
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=45)
+        # A run still cleaning up keeps its client, or its last report would be
+        # lost: the process is ending, and takes both with it.
+        if self._client is not None and not self.busy:
+            self._client.close()

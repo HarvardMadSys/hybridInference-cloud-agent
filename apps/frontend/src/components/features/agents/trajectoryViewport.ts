@@ -52,11 +52,6 @@ export function valueAtFraction(window: DomainRange, fraction: number): number {
   return window.start + clampFraction(fraction) * windowDuration(window);
 }
 
-/** Where a domain value sits in the window, as a fraction of its width. */
-export function fractionOf(value: number, window: DomainRange): number {
-  return (value - window.start) / windowDuration(window);
-}
-
 /**
  * The window duration one wheel step lands on, clamped to what the projection
  * allows. A positive delta is a wheel-down: the window grows and the picture

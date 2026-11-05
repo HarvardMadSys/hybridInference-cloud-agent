@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import time
 from dataclasses import dataclass
@@ -64,9 +63,45 @@ _ABBREVIATED = "application/vnd.npm.install-v1+json; q=1.0, application/json; q=
 _STABLE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 
 
+def configured_registry_url() -> str:
+    """The saved registry (``runtime_registry_url``), ``""`` for the public one.
+
+    Before this process adopts a settings snapshot the registry reads the
+    environment, as it always did.
+    """
+    from cloud_agent.settings import text_setting
+
+    return text_setting("runtime_registry_url").strip().rstrip("/")
+
+
 def registry_url() -> str:
     """The npm registry this deployment reads, without a trailing slash."""
-    return (os.environ.get(ENV_RUNTIME_REGISTRY_URL) or DEFAULT_REGISTRY_URL).strip().rstrip("/")
+    return configured_registry_url() or DEFAULT_REGISTRY_URL
+
+
+def registry_lagging_hosts(hosts: list[dict[str, Any]]) -> list[str]:
+    """Online hosts not known to download from the saved registry, by name.
+
+    A host reports the registry its next download uses (``config_reports``).
+    One that reports another value is lagging. One that reports nothing runs a
+    release from before the report; it uses its own environment value, which
+    is unknown here. With the public registry saved that is how every
+    deployment worked before, so such a host is not counted; with any other
+    registry saved, it is, since nothing shows it has the same one.
+    """
+    configured = configured_registry_url()
+    lagging: list[str] = []
+    for host in hosts:
+        if host.get("status") != HOST_ONLINE:
+            continue
+        reported = (host.get("config_reports") or {}).get("runtime_registry_url")
+        if reported is None:
+            if configured:
+                lagging.append(str(host.get("host")))
+            continue
+        if str(reported).strip().rstrip("/") != configured:
+            lagging.append(str(host.get("host")))
+    return sorted(lagging)
 
 
 def _package_path(package: str) -> str:
@@ -146,9 +181,22 @@ class RegistryClient:
         self._version_reads: dict[str, asyncio.Lock] = {}
         self._lock = asyncio.Lock()
 
-    def _client(self) -> httpx.AsyncClient:
+    def _registry(self) -> str:
+        """The registry a read uses, fixed when it starts.
+
+        Read once per call: an answer from the registry that was saved when the
+        request began is cached under that registry, never under one saved
+        while it was in flight.
+        """
+        return self._base_url or registry_url()
+
+    def _cache_key(self, package: str, registry: str | None = None) -> str:
+        """Cache per registry: a changed registry setting reads afresh."""
+        return f"{registry or self._registry()} {package}"
+
+    def _client(self, registry: str | None = None) -> httpx.AsyncClient:
         return httpx.AsyncClient(
-            base_url=self._base_url or registry_url(),
+            base_url=registry or self._registry(),
             timeout=_REGISTRY_TIMEOUT_S,
             transport=self._transport,
             headers={"accept": "application/json"},
@@ -156,14 +204,16 @@ class RegistryClient:
 
     async def latest(self, package: str) -> tuple[str | None, str | None]:
         """``(version, None)``, or ``(None, why it is unknown)``."""
+        registry = self._registry()
+        key = self._cache_key(package, registry)
         async with self._lock:
-            cached = self._latest.get(package)
+            cached = self._latest.get(key)
             if cached is not None and self._clock() - cached[0] < REGISTRY_CACHE_S:
                 return cached[1], cached[2]
         version: str | None = None
         error: str | None = None
         try:
-            async with self._client() as client:
+            async with self._client(registry) as client:
                 response = await client.get(f"/{_package_path(package)}/latest")
             if response.status_code != 200:
                 error = f"npm answered {response.status_code} for {package}"
@@ -183,31 +233,33 @@ class RegistryClient:
                 if version
                 else self._clock() - REGISTRY_CACHE_S + REGISTRY_FAILURE_CACHE_S
             )
-            self._latest[package] = (stamp, version, error)
+            self._latest[key] = (stamp, version, error)
         return version, error
 
     async def versions(self, package: str) -> NpmVersions:
         """Every stable release of ``package`` worth offering, cached for an hour."""
+        registry = self._registry()
+        key = self._cache_key(package, registry)
         async with self._lock:
-            read = self._version_reads.setdefault(package, asyncio.Lock())
+            read = self._version_reads.setdefault(key, asyncio.Lock())
         async with read:
             async with self._lock:
-                cached = self._versions.get(package)
+                cached = self._versions.get(key)
                 if cached is not None and self._clock() - cached[0] < REGISTRY_CACHE_S:
                     return cached[1]
-            result = await self._read_versions(package)
+            result = await self._read_versions(package, registry)
             async with self._lock:
                 stamp = (
                     self._clock()
                     if result.error is None
                     else self._clock() - REGISTRY_CACHE_S + REGISTRY_FAILURE_CACHE_S
                 )
-                self._versions[package] = (stamp, result)
+                self._versions[key] = (stamp, result)
             return result
 
-    async def _read_versions(self, package: str) -> NpmVersions:
+    async def _read_versions(self, package: str, registry: str) -> NpmVersions:
         try:
-            async with self._client() as client:
+            async with self._client(registry) as client:
                 response = await client.get(
                     f"/{_package_path(package)}",
                     headers={"accept": _ABBREVIATED},
@@ -269,7 +321,7 @@ def default_version(runtime: str, hosts: list[dict[str, Any]]) -> str | None:
     return versions.pop() if len(versions) == 1 else None
 
 
-def upgrade_state(
+def upgrade_state(  # noqa: PLR0912 complexity baseline, #771
     runtime: str, target: dict[str, Any] | None, hosts: list[dict[str, Any]]
 ) -> UpgradeState | None:
     """Reduce every host's report on ``target`` to one state and one number.

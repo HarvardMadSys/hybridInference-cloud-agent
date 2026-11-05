@@ -16,7 +16,7 @@ platform has to pick the earliest of whichever ones are present.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -298,7 +298,7 @@ class TestTheTimeoutContract:
 
     def test_the_decision_window_is_the_answer_when_nothing_else_waits(self) -> None:
         """There is always a deadline, even with no other clock configured."""
-        created = datetime.now(timezone.utc)
+        created = datetime.now(UTC)
         deadline = invocations.deadline_for(created_at=created)
         assert deadline.source == "decision_window"
         assert deadline.expires_at == created + invocations.DEFAULT_DECISION_WINDOW
@@ -306,7 +306,7 @@ class TestTheTimeoutContract:
     def test_the_relay_timeout_wins_when_it_is_tighter_than_the_cli(self) -> None:
         """Both are configured, and the shorter one is what the caller lives
         with."""
-        created = datetime.now(timezone.utc)
+        created = datetime.now(UTC)
         deadline = invocations.deadline_for(
             created_at=created,
             cli_timeout=timedelta(minutes=5),
@@ -316,7 +316,7 @@ class TestTheTimeoutContract:
 
     def test_a_runner_deadline_is_an_instant_not_a_duration(self) -> None:
         """The whole job's wall clock, not a per-call slice of it."""
-        created = datetime.now(timezone.utc)
+        created = datetime.now(UTC)
         deadline = invocations.deadline_for(
             created_at=created, runner_deadline=created + timedelta(seconds=10)
         )
@@ -325,16 +325,14 @@ class TestTheTimeoutContract:
     def test_a_naive_timestamp_is_read_as_utc(self) -> None:
         """The store writes tz-aware values; a fixture may not, and reading one
         as local time would move a deadline by hours."""
-        created = datetime.now(timezone.utc)
+        created = datetime.now(UTC)
         naive = created.replace(tzinfo=None) + timedelta(seconds=5)
         deadline = invocations.deadline_for(created_at=created, lease_expires_at=naive)
         assert deadline.source == "lease"
 
     def test_a_passed_deadline_reports_no_time_left_rather_than_a_negative(self) -> None:
         """A caller subtracting it should not have to clamp."""
-        deadline = invocations.deadline_for(
-            created_at=datetime.now(timezone.utc) - timedelta(hours=1)
-        )
+        deadline = invocations.deadline_for(created_at=datetime.now(UTC) - timedelta(hours=1))
         assert deadline.passed
         assert deadline.remaining() == timedelta(0)
 

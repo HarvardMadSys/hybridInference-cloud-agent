@@ -4,14 +4,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta, timezone
 
-
-def timezone_offset(hours: int) -> timezone:
-    """An explicit offset, so equivalent local boundaries select the same jobs."""
-    return timezone(timedelta(hours=hours))
-
-
-from tests.unit.test_ledger_snapshots import END, ledger_row, report_payload
-
 from cloud_agent.admin_usage import (
     BREAKDOWN_TOP_GROUPS,
     MAX_USAGE_WINDOW_DAYS,
@@ -22,10 +14,36 @@ from cloud_agent.admin_usage import (
     days_breakdown,
     resolve_usage_window,
 )
-from cloud_agent.ledger import summarize_job_ledger
+from cloud_agent.runtime_usage import NO_RUNTIME_REPORT, summarize_runtime_job
 
 TERMINAL = ("succeeded", "failed", "cancelled")
 DAY = datetime(2026, 9, 9, tzinfo=UTC)
+
+
+def timezone_offset(hours: int) -> timezone:
+    """An explicit offset, so equivalent local boundaries select the same jobs."""
+    return timezone(timedelta(hours=hours))
+
+
+def attempt(
+    *,
+    attempt_no: int = 1,
+    saw_usage: bool = True,
+    input_tokens: int | None = 20,
+    output_tokens: int | None = 10,
+    cache_read_tokens: int | None = 80,
+    cache_write_tokens: int | None = 0,
+) -> dict:
+    """One attempt's rollup as the bounded usage read returns it."""
+    return {
+        "attempt_id": 100 + attempt_no,
+        "attempt_no": attempt_no,
+        "saw_usage": saw_usage,
+        "input_tokens": input_tokens if saw_usage else None,
+        "output_tokens": output_tokens if saw_usage else None,
+        "cache_read_tokens": cache_read_tokens if saw_usage else None,
+        "cache_write_tokens": cache_write_tokens if saw_usage else None,
+    }
 
 
 def job(
@@ -35,12 +53,12 @@ def job(
     model: str = "model-a",
     created_at: datetime = DAY,
     state: str = "succeeded",
-    ledger: list[dict] | None = None,
+    usage: list[dict] | None = None,
     runtime: str = "claude-code",
     repo: str = "example/repository",
 ) -> dict:
-    """One selected job row as the bounded admin usage read returns it."""
-    rows = [ledger_row()] if ledger is None else ledger
+    """One selected job row with its attempts' usage."""
+    rows = [attempt()] if usage is None else usage
     for row in rows:
         row["job_id"] = job_id
     return {
@@ -51,20 +69,18 @@ def job(
         "repo": repo,
         "state": state,
         "created_at": created_at,
-        "ledger": rows,
+        "usage": rows,
     }
 
 
-def spend(amount: str, *, calls: int = 1) -> dict:
-    """A report with a known amount, so ranking and totals are explicit."""
-    payload = report_payload()
-    payload["totals"] = {**payload["totals"], "spent_usd": amount, "calls": calls}
-    return payload
+def tokens(output: int) -> list[dict]:
+    """A report with a known output, so ranking and totals are explicit."""
+    return [attempt(output_tokens=output, input_tokens=0, cache_read_tokens=0)]
 
 
-def test_the_same_job_is_summarized_once_with_the_owner_accounting_rules():
+def test_the_same_job_is_summarized_once_with_the_per_turn_rules():
     summary = aggregate_jobs([job()], terminal_states=TERMINAL)
-    reference = summarize_job_ledger(job()["ledger"], terminal=True)
+    reference = summarize_runtime_job(job(), terminal=True)
     assert summary.run_count == 1
     assert summary.attempt_count == len(reference.attempts)
     assert summary.runs_with_snapshot == 1
@@ -76,100 +92,74 @@ def test_the_same_job_is_summarized_once_with_the_owner_accounting_rules():
     assert sum(summary.status_counts.values()) == summary.run_count
 
 
-def test_a_job_without_a_snapshot_contributes_coverage_and_no_zero_usage():
-    pending = job(job_id="ajob_pending", state="running", ledger=[])
-    empty = job(
-        job_id="ajob_empty",
-        ledger=[
-            ledger_row(
-                job_id="ajob_empty",
-                snapshot=report_payload(
-                    totals={
-                        "calls": 0,
-                        "tokens_in": None,
-                        "tokens_out": None,
-                        "cache_read": None,
-                        "cache_write": None,
-                        "reasoning": None,
-                        "spent_usd": None,
-                    },
-                    unknown_rows=dict.fromkeys(report_payload()["unknown_rows"], 0),
-                ),
-            )
-        ],
+def test_input_is_cache_inclusive_only_where_the_agent_establishes_it():
+    claude = summarize_runtime_job(job(runtime="claude-code"), terminal=True)
+    codex = summarize_runtime_job(
+        job(runtime="codex", usage=[attempt(input_tokens=100, cache_read_tokens=80)]),
+        terminal=True,
     )
-    summary = aggregate_jobs([pending, empty], terminal_states=TERMINAL)
-    assert summary.run_count == 2
-    assert summary.runs_with_snapshot == 1
-    assert summary.totals is not None
-    # A zero-call snapshot is a real zero, and it does not invent a cost.
-    assert summary.totals.calls == 0
-    assert summary.totals.spent_usd is None
-    assert summary.totals.tokens_in is None
-    assert summary.status_counts["pending"] == 1
-    assert summary.status_counts["available"] == 1
-    assert summary.active_runs == 1
+    unverified = summarize_runtime_job(job(runtime="opencode"), terminal=True)
+    partial = summarize_runtime_job(
+        job(runtime="claude-code", usage=[attempt(cache_write_tokens=None)]), terminal=True
+    )
+    # Claude Code reports uncached input, cache reads and cache writes apart.
+    assert claude.totals is not None and claude.totals.tokens_in == 100
+    # Codex input already includes its cache hits.
+    assert codex.totals is not None and codex.totals.tokens_in == 100
+    # An agent whose convention is not verified, or a missing cache counter,
+    # leaves input unknown rather than guessed; what it did report stays.
+    for summary in (unverified, partial):
+        assert summary.totals is not None and summary.totals.tokens_in is None
+        assert summary.totals.tokens_out == 10
+        assert summary.unknown_rows is not None and summary.unknown_rows.tokens_in == 1
 
 
-def test_partly_known_metrics_sum_what_is_known_and_count_the_rest():
-    known = job(job_id="ajob_known")
-    unknown = job(
-        job_id="ajob_unknown",
-        ledger=[
-            ledger_row(
-                job_id="ajob_unknown",
-                snapshot=report_payload(
-                    totals={
-                        "calls": 1,
-                        "tokens_in": 120,
-                        "tokens_out": 20,
-                        "cache_read": 100,
-                        "cache_write": 0,
-                        "reasoning": None,
-                        "spent_usd": None,
-                    },
-                    unknown_rows={**report_payload()["unknown_rows"], "spent_usd": 1},
-                ),
-            )
-        ],
-    )
-    summary = aggregate_jobs([known, unknown], terminal_states=TERMINAL)
+def test_cost_reasoning_and_calls_are_never_invented():
+    summary = aggregate_jobs([job(), job(job_id="ajob_2")], terminal_states=TERMINAL)
     assert summary.totals is not None and summary.unknown_rows is not None
-    assert summary.totals.tokens_in == 240
-    assert summary.totals.spent_usd == "0.00012345"
-    assert summary.unknown_rows.spent_usd == 1
-    assert summary.runs_with_snapshot == 2
+    assert summary.totals.spent_usd is None
+    assert summary.totals.reasoning is None
+    assert summary.totals.calls is None
+    # Each reporting attempt is a row that lacked them.
+    assert summary.unknown_rows.spent_usd == 2
+    assert summary.unknown_rows.reasoning == 2
+    assert summary.estimated_calls == 0
 
 
-def test_estimated_calls_and_missing_attempts_are_carried_through():
-    job_with_gap = job(
-        ledger=[
-            ledger_row(
-                job_id="ajob_1", id=None, attempt_id=9, attempt_no=1, snapshot=None, queried_at=None
-            ),
-            ledger_row(job_id="ajob_1", attempt_no=2, snapshot=report_payload(estimated_calls=1)),
-        ]
-    )
-    summary = aggregate_jobs([job_with_gap], terminal_states=TERMINAL)
-    assert summary.estimated_calls == 1
+def test_a_job_without_a_report_contributes_coverage_and_no_zero_usage():
+    pending = job(job_id="ajob_pending", state="running", usage=[attempt(saw_usage=False)])
+    silent = job(job_id="ajob_silent", usage=[attempt(saw_usage=False)])
+    summary = aggregate_jobs([pending, silent], terminal_states=TERMINAL)
+    assert summary.run_count == 2
+    assert summary.runs_with_snapshot == 0
+    assert summary.totals is None
+    assert summary.status_counts["pending"] == 1
+    assert summary.status_counts["unavailable"] == 1
     assert summary.missing_attempts == 1
-    assert summary.runs_with_snapshot == 1
-    assert summary.oldest_queried_at == END
+    assert summary.active_runs == 1
+    assert summarize_runtime_job(silent, terminal=True).attempts[0].reason == NO_RUNTIME_REPORT
 
 
-def test_oldest_queried_snapshot_is_the_minimum_known_read_time():
-    earlier = END - timedelta(minutes=5)
+def test_a_reported_zero_is_a_real_zero():
     summary = aggregate_jobs(
-        [
-            job(job_id="ajob_1", ledger=[ledger_row(job_id="ajob_1", queried_at=END)]),
-            job(
-                job_id="ajob_2",
-                ledger=[ledger_row(job_id="ajob_2", queried_at=earlier)],
-            ),
-        ],
+        [job(usage=[attempt(input_tokens=0, output_tokens=0, cache_read_tokens=0)])],
         terminal_states=TERMINAL,
     )
-    assert summary.oldest_queried_at == earlier
+    assert summary.totals is not None
+    assert (summary.totals.tokens_in, summary.totals.tokens_out) == (0, 0)
+
+
+def test_retries_add_each_attempts_own_report_and_count_the_silent_one():
+    retried = job(usage=[attempt(attempt_no=1, saw_usage=False), attempt(attempt_no=2)])
+    summary = aggregate_jobs([retried], terminal_states=TERMINAL)
+    assert summary.attempt_count == 2
+    assert summary.missing_attempts == 1
+    assert summary.status_counts["partial"] == 1
+    assert summary.totals is not None and summary.totals.tokens_out == 10
+    twice = aggregate_jobs(
+        [job(usage=[attempt(attempt_no=1), attempt(attempt_no=2)])], terminal_states=TERMINAL
+    )
+    assert twice.totals is not None and twice.totals.tokens_out == 20
 
 
 def test_day_buckets_cover_every_intersecting_utc_day_without_overlap():
@@ -205,7 +195,7 @@ def test_a_run_keeps_its_whole_usage_on_its_creation_day():
     assert [day.date for day in days] == ["2026-09-10", "2026-09-11"]
     assert [day.usage.run_count for day in days] == [1, 1]
     assert days[0].usage.totals is not None
-    assert days[0].usage.totals.calls == 1
+    assert days[0].usage.totals.tokens_out == 10
 
 
 def test_an_equivalent_offset_selects_the_same_jobs_and_days():
@@ -245,7 +235,7 @@ def test_days_and_breakdowns_add_up_to_the_summary():
             model="",
             created_at=datetime(2026, 9, 10, 2, tzinfo=UTC),
             state="running",
-            ledger=[],
+            usage=[],
         ),
     ]
     summary = aggregate_jobs(rows, terminal_states=TERMINAL)
@@ -273,32 +263,32 @@ def test_days_and_breakdowns_add_up_to_the_summary():
     # The two breakdowns partition the summary; adding them together would
     # double count every run, so only each of them is compared to it.
     assert (
-        sum(group.usage.totals.calls for group in users.groups if group.usage.totals)
-        + (users.other.usage.totals.calls if users.other and users.other.usage.totals else 0)
-        == summary.totals.calls
+        sum(group.usage.totals.tokens_out for group in users.groups if group.usage.totals)
+        + (users.other.usage.totals.tokens_out if users.other and users.other.usage.totals else 0)
+        == summary.totals.tokens_out
     )
     assert [group.key for group in users.groups] == ["owner-one", "owner-two"]
     # An empty configured model is one explicit unknown group, never a guess.
     assert [group.key for group in models.groups] == ["model-a", "model-b", None]
 
 
-def test_groups_rank_by_recorded_cost_and_unknown_cost_ranks_last():
+def test_groups_rank_by_reported_tokens_and_unreported_ranks_last():
     rows = [
-        job(job_id="ajob_1", user_id="cheap", ledger=[ledger_row(snapshot=spend("0.01"))]),
-        job(job_id="ajob_2", user_id="dear", ledger=[ledger_row(snapshot=spend("2.00"))]),
-        job(job_id="ajob_3", user_id="unknown-cost", state="running", ledger=[]),
+        job(job_id="ajob_1", user_id="light", usage=tokens(1)),
+        job(job_id="ajob_2", user_id="heavy", usage=tokens(200)),
+        job(job_id="ajob_3", user_id="unreported", state="running", usage=[]),
     ]
     groups = breakdown(rows, dimension="user_id", terminal_states=TERMINAL)
-    assert [group.key for group in groups.groups] == ["dear", "cheap", "unknown-cost"]
+    assert [group.key for group in groups.groups] == ["heavy", "light", "unreported"]
     assert groups.groups[-1].usage.totals is None
     assert groups.other is None
 
 
-def test_equal_costs_tie_break_on_the_whole_key_in_utf8_order():
+def test_equal_volumes_tie_break_on_the_whole_key_in_utf8_order():
     rows = [
-        job(job_id="ajob_1", user_id="zeta", ledger=[ledger_row(snapshot=spend("0.50"))]),
-        job(job_id="ajob_2", user_id="alpha", ledger=[ledger_row(snapshot=spend("0.50"))]),
-        job(job_id="ajob_3", user_id="Ünicode", ledger=[ledger_row(snapshot=spend("0.50"))]),
+        job(job_id="ajob_1", user_id="zeta", usage=tokens(50)),
+        job(job_id="ajob_2", user_id="alpha", usage=tokens(50)),
+        job(job_id="ajob_3", user_id="Ünicode", usage=tokens(50)),
     ]
     groups = breakdown(rows, dimension="user_id", terminal_states=TERMINAL)
     # UTF-8 byte order puts ASCII before multi-byte keys, whatever the database
@@ -311,7 +301,7 @@ def test_more_than_twenty_groups_are_ranked_and_the_remainder_is_aggregated():
         job(
             job_id=f"ajob_{index:03d}",
             user_id=f"owner-{index:03d}",
-            ledger=[ledger_row(snapshot=spend(f"{index}.00"))],
+            usage=tokens(index),
         )
         for index in range(1, BREAKDOWN_TOP_GROUPS + 6)
     ]
@@ -323,7 +313,7 @@ def test_more_than_twenty_groups_are_ranked_and_the_remainder_is_aggregated():
     assert groups.other.key is None
     assert groups.other.usage.run_count == 5
     assert groups.other.usage.totals is not None
-    assert groups.other.usage.totals.spent_usd == "15.00"
+    assert groups.other.usage.totals.tokens_out == 15
     # The remainder is a real aggregation, so its coverage is complete too.
     assert groups.other.usage.runs_with_snapshot == 5
 
@@ -332,8 +322,8 @@ def test_a_full_key_is_never_truncated_into_another_group():
     long_key = "owner-" + "x" * 300
     shared_prefix = long_key[:260]
     rows = [
-        job(job_id="ajob_1", user_id=long_key, ledger=[ledger_row(snapshot=spend("1.00"))]),
-        job(job_id="ajob_2", user_id=shared_prefix, ledger=[ledger_row(snapshot=spend("1.00"))]),
+        job(job_id="ajob_1", user_id=long_key, usage=tokens(1)),
+        job(job_id="ajob_2", user_id=shared_prefix, usage=tokens(1)),
     ]
     groups = breakdown(rows, dimension="user_id", terminal_states=TERMINAL)
     assert groups.group_count == 2

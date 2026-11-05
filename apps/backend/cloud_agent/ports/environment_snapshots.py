@@ -53,9 +53,19 @@ class EnvironmentSnapshotRepository(Protocol):
         ...
 
     async def record_use(
-        self, *, job_id: str, snapshot_id: str | None, outcome: str, base_sha: str | None
+        self,
+        *,
+        job_id: str,
+        attempt_id: int,
+        lease_generation: int,
+        snapshot_id: str | None,
+        outcome: str,
+        base_sha: str | None,
     ) -> bool:
-        """Account for a new workspace's snapshot and queue a build when it had none."""
+        """Account for a new workspace's snapshot and queue a build when it had none.
+
+        ``False`` when the attempt no longer holds the job's live lease.
+        """
         ...
 
     async def summaries(

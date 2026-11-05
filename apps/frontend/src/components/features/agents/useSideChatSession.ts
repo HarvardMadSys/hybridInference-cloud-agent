@@ -12,6 +12,12 @@ import { sideChatKeys } from './sideChatStorage';
 import { sideChatAnchor, type SideChatTab } from './useWorkspaceTabs';
 import type { AgentJob } from './types';
 
+/** What a side chat reads from the conversation it was opened beside. */
+export type SideChatSource = Pick<
+  AgentJob,
+  'id' | 'threadId' | 'sandboxId' | 'workspaceShared' | 'archivedAt'
+>;
+
 export interface SideChatSession {
   anchorJobId: string;
   sandboxId: string;
@@ -21,8 +27,6 @@ export interface SideChatSession {
   reviewSent?: boolean;
 }
 type Status = 'preparing' | 'waiting' | 'ready' | 'error';
-export const sideChatStorageKey = (userId: string, threadId: string) =>
-  sideChatKeys(userId, threadId).session;
 
 function read(key: string): SideChatSession | null {
   const raw = localStorage.getItem(key);
@@ -56,7 +60,7 @@ function save(key: string, session: SideChatSession) {
   localStorage.setItem(key, JSON.stringify(session));
 }
 export function childSession(
-  source: AgentJob,
+  source: Pick<AgentJob, 'threadId' | 'sandboxId'>,
   session: SideChatSession,
   child: AgentJobApi,
 ): SideChatSession | null {
@@ -74,7 +78,7 @@ export function childSession(
 }
 
 export function useSideChatSession(
-  source: AgentJob,
+  source: SideChatSource,
   userId: string | undefined,
   active: boolean,
   sourceJobs: AgentJobApi[] = [],

@@ -24,7 +24,10 @@ interface TabsState {
   nextNumber: number;
 }
 
-export function sideChatAnchor(source: AgentJob, jobs: AgentJobApi[]) {
+export function sideChatAnchor(
+  source: Pick<AgentJob, 'id' | 'threadId' | 'sandboxId'>,
+  jobs: AgentJobApi[],
+) {
   const rows = jobs.filter((row) => row.thread_id === source.threadId);
   const anchor =
     latestJob(rows.filter((row) => ['running', 'publishing'].includes(row.state))) ??
@@ -58,6 +61,8 @@ function read(key: string): TabsState {
       new Set(value.chats.map((chat) => chat.id)).size !== value.chats.length
     )
       return initial;
+    // An unknown tab, or Context from when it was a workspace tab (it is a
+    // main view now), falls back to Git.
     if (
       !['git', 'terminal', 'files', 'environment'].includes(value.selected) &&
       !value.chats.some((chat) => chat.id === value.selected)

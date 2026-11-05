@@ -2,7 +2,7 @@
 // Domain modules own their wire types and operations; internal modules import
 // those directly rather than depending on this facade.
 
-export type { AgentConfigApi, AgentMcpServerApi } from './agents/config';
+export type { AgentConfigApi, ModelConnectionOptionApi } from './agents/config';
 
 export { getAgentConfig } from './agents/config';
 
@@ -34,17 +34,18 @@ export type {
   AgentJobApi,
   McpBindingInputApi,
   AgentPluginInputApi,
-  AgentThreadPublicationApi,
   CreateAgentJobRequest,
 } from './agents/jobs';
 
-export {
-  getAgentJob,
-  createAgentJob,
-  cancelAgentJob,
-  forkAgentJob,
-  publishAgentThread,
-} from './agents/jobs';
+export { getAgentJob, createAgentJob, cancelAgentJob, forkAgentJob } from './agents/jobs';
+
+export type {
+  AgentNotificationJobApi,
+  AgentNotificationStateApi,
+  AgentNotificationThreadApi,
+} from './agents/notifications';
+
+export { getAgentNotificationState } from './agents/notifications';
 
 export type {
   AgentThreadMessageApi,
@@ -58,8 +59,87 @@ export {
   listAgentConversations,
   listAgentProjects,
   getAgentJobThread,
+  getAgentThreadMessage,
   getAgentThreadStats,
 } from './agents/threads';
+
+export type {
+  FileActivityApi,
+  FileActivityCoverageApi,
+  FileActivityFilter,
+  FileActivityQuery,
+  FileActivityRowApi,
+  FileActivitySemanticsApi,
+  FileActivitySort,
+  FileActivityTotalsApi,
+  FileKind as FileActivityFileKind,
+  FileOperationApi,
+  FileOperationKind,
+  FileOperationStatus,
+  FileOperationsPageApi,
+  FilePathBasis,
+} from './agents/fileActivity';
+
+export {
+  FILE_ACTIVITY_FILTERS,
+  FILE_ACTIVITY_SORTS,
+  getAgentFileActivity,
+  getAgentFileOperations,
+} from './agents/fileActivity';
+
+export type {
+  CompositionCategoryApi,
+  CompositionEntryApi,
+  ContextChangeApi,
+  ContextCompactionApi,
+  ContextEventApi,
+  ContextEventKind,
+  ContextPointApi,
+  LatestContextApi,
+  EventCapabilityApi,
+  DnaBandsApi,
+  SessionTokensApi,
+  ThreadTimingApi,
+  TimingKind,
+  EventContentApi,
+  NativeSnapshotApi,
+  NativeSnapshotCategoryApi,
+  NativeSnapshotEntryApi,
+  ReconstructedCompositionApi,
+  RequestCompositionApi,
+  ContextSupport,
+  ContextTurnApi,
+  RuntimeContextCapabilityApi,
+  ThreadContextApi,
+} from './agents/context';
+
+export {
+  CONTEXT_EVENT_KINDS,
+  getAgentThreadContext,
+  getEventContent,
+  getRequestComposition,
+  getThreadContextDna,
+  getThreadContextTiming,
+} from './agents/context';
+
+export type {
+  CommandAttentionApi,
+  CommandCountsApi,
+  CommandCoverageApi,
+  CommandDurationBasis,
+  CommandExecutionApi,
+  CommandFilter,
+  CommandPageApi,
+  CommandParseBasis,
+  CommandProgramApi,
+  CommandQuery,
+  CommandSort,
+  CommandStatus,
+  CommandSummaryApi,
+  ThreadCommandsApi,
+} from './agents/commandExecutions';
+
+export { getThreadContextCommands } from './agents/commandExecutions';
 
 export type {
   AgentThreadArchiveApi,
@@ -119,20 +199,25 @@ export type {
   RunResourceSummaryApi,
   AgentAttemptSummaryApi,
   AgentAttemptTelemetryApi,
+  AgentTrajectoryAttemptTimingApi,
+  AgentTrajectoryJobTimingApi,
+  AgentTrajectoryTimingResponseApi,
 } from './agents/resources';
 
-export { getAgentAttemptTelemetry } from './agents/resources';
+export {
+  AGENT_TRAJECTORY_TIMING_BATCH_SIZE,
+  getAgentAttemptTelemetry,
+  getAgentTrajectoryTimings,
+} from './agents/resources';
 
 export type {
-  AgentLedgerStatus,
-  AgentLedgerTotalsApi,
-  AgentLedgerUnknownRowsApi,
-  AgentAttemptUsageApi,
+  AgentUsageStatus,
+  AgentUsageTotalsApi,
+  AgentUsageUnknownRowsApi,
   AgentJobUsageApi,
-  AgentMessageRequestApi,
 } from './agents/usage';
 
-export { getAgentMessageRequest, getAgentJobUsage, refreshAgentJobUsage } from './agents/usage';
+export { getAgentJobUsage } from './agents/usage';
 
 export type {
   AgentJobFileStatus,
@@ -142,11 +227,12 @@ export type {
   AgentJobSymlinkApi,
   AgentJobFilesApi,
   AgentGitWorkspaceApi,
+  AgentGitWorkspaceMetadataApi,
 } from './agents/workspace';
 
 export {
   getAgentJobFiles,
-  writeAgentJobFile,
+  getAgentJobGitMetadata,
   getAgentJobGit,
   downloadAgentWorkspace,
 } from './agents/workspace';

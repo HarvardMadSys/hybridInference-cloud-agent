@@ -279,6 +279,17 @@ def test_a_report_on_the_version_in_use_is_not_the_updates():
     assert (state.state, state.error) == (STATE_DOWNLOADING, None)
 
 
+def test_a_report_on_the_version_roll_back_returns_to_is_not_the_updates():
+    """After the switch, hosts also hold the version the update replaced."""
+    done = {**TARGET, "activated_at": "2026-10-15T00:05:00+00:00"}
+    held = _report("failed", version="2.1.235", nonce="a" * 32, error="held copy")
+    state = upgrade_state(
+        "claude-code", done, [_host("a", available=["2.1.220", "2.1.300"], report=held)]
+    )
+    assert state is not None
+    assert (state.state, state.progress, state.error) == (STATE_UPDATED, 100, None)
+
+
 def test_a_chosen_version_is_shown_only_when_a_host_cannot_download_it():
     """Roll back and a hand-picked version keep it on every host; no update to follow."""
     chosen = {

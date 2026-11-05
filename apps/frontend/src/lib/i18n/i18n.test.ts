@@ -59,12 +59,12 @@ describe('stored locale', () => {
 
 describe('translate', () => {
   it('substitutes placeholders', () => {
-    expect(translate('en', 'sidebar.showMore', { count: 7 })).toBe('Show 7 more');
-    expect(translate('zh-CN', 'sidebar.showMore', { count: 7 })).toBe('显示另外 7 条');
+    expect(translate('en', 'settings.usage.showMore', { count: 7 })).toBe('Show 7 more');
+    expect(translate('zh-CN', 'settings.usage.showMore', { count: 7 })).toBe('再显示 7 个');
   });
 
   it('leaves an unsupplied placeholder visible rather than blanking it', () => {
-    expect(translate('en', 'sidebar.showMore')).toBe('Show {count} more');
+    expect(translate('en', 'settings.usage.showMore')).toBe('Show {count} more');
   });
 
   it('answers in the requested language', () => {

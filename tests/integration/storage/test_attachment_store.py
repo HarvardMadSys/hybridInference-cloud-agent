@@ -13,6 +13,8 @@ from tests.integration.storage.test_agent_job_store import (
     pool,  # noqa: F401 - pytest fixture
     store,  # noqa: F401 - pytest fixture
 )
+from tests.support.follow_ups import append_follow_up
+from tests.support.uploads import thread_uploads
 
 from cloud_agent.attachments import models
 from cloud_agent.attachments.models import (
@@ -83,7 +85,7 @@ async def test_attached_uploads_still_count_toward_what_an_owner_may_keep(store,
     await stage(store, "theirs.bin", user_id="user-2", content=b"z" * 10)
 
 
-async def test_creating_a_job_binds_its_uploads_and_frees_the_staging_quota(store):
+async def test_creating_a_job_binds_its_uploads_and_frees_the_staging_quota(pool, store):
     staged = await stage(store)
     manifest = await resolve_attachments(
         store.attachments, user_id="user-1", attachment_ids=[staged["id"]]
@@ -95,7 +97,7 @@ async def test_creating_a_job_binds_its_uploads_and_frees_the_staging_quota(stor
         await store.attachments.select_attachments(user_id="user-1", attachment_ids=[staged["id"]])
         == []
     )
-    rows = await store.attachments.list_thread_attachments(thread_id=job["thread_id"])
+    rows = await thread_uploads(pool, thread_id=job["thread_id"])
     assert [row["path"] for row in rows] == ["notes.md"]
     assert await store.attachments.count_thread_attachments(thread_id=job["thread_id"]) == 1
     assert job["attachments"] == [
@@ -114,27 +116,7 @@ async def test_a_second_submission_cannot_take_uploads_a_job_already_holds(store
         await _create_job(store, attachments=manifest)
 
 
-async def test_the_host_reads_a_claimed_upload_by_its_thread(store):
-    staged = await stage(store, content=b"payload")
-    manifest = await resolve_attachments(
-        store.attachments, user_id="user-1", attachment_ids=[staged["id"]]
-    )
-    job = await _create_job(store, attachments=manifest)
-
-    found = await store.attachments.read_attachment_content(
-        thread_id=job["thread_id"], attachment_id=staged["id"]
-    )
-    assert found == (b"payload", "text/plain")
-    # A token for another conversation reads nothing.
-    assert (
-        await store.attachments.read_attachment_content(
-            thread_id="other-thread", attachment_id=staged["id"]
-        )
-        is None
-    )
-
-
-async def test_a_follow_ups_uploads_join_the_same_conversation(store):
+async def test_a_follow_ups_uploads_join_the_same_conversation(pool, store):
     first = await stage(store, "one.md")
     job = await _create_job(
         store,
@@ -143,7 +125,8 @@ async def test_a_follow_ups_uploads_join_the_same_conversation(store):
         ),
     )
     second = await stage(store, "two.md")
-    await store.conversation_commands.create_follow_up(
+    await append_follow_up(
+        pool,
         parent_job_id=job["id"],
         user_id="user-1",
         prompt="and now this",
@@ -151,7 +134,7 @@ async def test_a_follow_ups_uploads_join_the_same_conversation(store):
             store.attachments, user_id="user-1", attachment_ids=[second["id"]]
         ),
     )
-    rows = await store.attachments.list_thread_attachments(thread_id=job["thread_id"])
+    rows = await thread_uploads(pool, thread_id=job["thread_id"])
     assert [row["path"] for row in rows] == ["one.md", "two.md"]
 
 
@@ -162,9 +145,10 @@ async def manifest(store, *uploads):
     )
 
 
-async def attach(store, job, *uploads):
+async def attach(pool, store, job, *uploads):
     """A follow-up in ``job``'s conversation that attaches ``uploads``."""
-    return await store.conversation_commands.create_follow_up(
+    return await append_follow_up(
+        pool,
         parent_job_id=job["id"],
         user_id="user-1",
         prompt="and now these",
@@ -172,7 +156,7 @@ async def attach(store, job, *uploads):
     )
 
 
-async def test_a_file_attached_again_replaces_the_earlier_one_in_the_sandbox(store):
+async def test_a_file_attached_again_replaces_the_earlier_one_in_the_sandbox(pool, store):
     """An edited ``report.csv`` sent again: the host gets one file, the newer one.
 
     The host rebuilds ``/uploads`` from exactly the worker listing and refuses
@@ -182,9 +166,9 @@ async def test_a_file_attached_again_replaces_the_earlier_one_in_the_sandbox(sto
     first = await stage(store, "report.csv", content=b"v1")
     job = await _create_job(store, attachments=await manifest(store, first))
     second = await stage(store, "report.csv", content=b"v2")
-    assert await attach(store, job, second) is not None
+    assert await attach(pool, store, job, second) is not None
 
-    rows = await store.attachments.list_thread_attachments(thread_id=job["thread_id"])
+    rows = await thread_uploads(pool, thread_id=job["thread_id"])
     assert [(row["id"], row["path"]) for row in rows] == [(second["id"], "report.csv")]
     claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
     assert claim is not None
@@ -202,14 +186,14 @@ async def test_a_file_attached_again_replaces_the_earlier_one_in_the_sandbox(sto
     build_upload_archive(files)
 
 
-async def test_the_turn_that_attached_a_file_last_wins_not_the_newest_upload(store):
+async def test_the_turn_that_attached_a_file_last_wins_not_the_newest_upload(pool, store):
     """A file staged early can still be the one the newest turn attaches."""
     attached_last = await stage(store, "report.csv", content=b"attached by turn two")
     attached_first = await stage(store, "report.csv", content=b"attached by turn one")
     job = await _create_job(store, attachments=await manifest(store, attached_first))
-    await attach(store, job, attached_last)
+    await attach(pool, store, job, attached_last)
 
-    rows = await store.attachments.list_thread_attachments(thread_id=job["thread_id"])
+    rows = await thread_uploads(pool, thread_id=job["thread_id"])
     assert [row["id"] for row in rows] == [attached_last["id"]]
 
 
@@ -224,7 +208,7 @@ async def test_a_later_turn_cannot_turn_a_file_into_a_folder_or_back(store, pool
     job = await _create_job(store, attachments=await manifest(store, first))
     second = await stage(store, later)
     with pytest.raises(AttachmentError, match="docs cannot be both a file and a folder"):
-        await attach(store, job, second)
+        await attach(pool, store, job, second)
 
     async with pool.acquire() as conn:
         turns = await conn.fetchval(
@@ -250,11 +234,11 @@ async def test_a_conversation_cannot_attach_more_than_the_host_will_import(
     first = await stage(store, "a.bin", content=b"x" * 6)
     job = await _create_job(store, attachments=await manifest(store, first))
     # The same path, replaced: still six bytes in the sandbox.
-    assert await attach(store, job, await stage(store, "a.bin", content=b"y" * 6)) is not None
+    assert await attach(pool, store, job, await stage(store, "a.bin", content=b"y" * 6)) is not None
 
     over = await stage(store, "b.bin", content=b"z" * 5)
     with pytest.raises(AttachmentError, match="must total no more than 10 bytes"):
-        await attach(store, job, over)
+        await attach(pool, store, job, over)
 
     async with pool.acquire() as conn:
         turns = await conn.fetchval(
@@ -267,14 +251,14 @@ async def test_a_conversation_cannot_attach_more_than_the_host_will_import(
     assert [row["id"] for row in staged] == [over["id"]]
 
 
-async def test_a_conversation_holds_a_bounded_number_of_files(store, monkeypatch):
+async def test_a_conversation_holds_a_bounded_number_of_files(pool, store, monkeypatch):
     monkeypatch.setattr(models, "MAX_THREAD_ATTACHMENT_FILES", 2)
     job = await _create_job(
         store,
         attachments=await manifest(store, await stage(store, "a.md"), await stage(store, "b.md")),
     )
     with pytest.raises(AttachmentError, match="at most 2 uploaded files"):
-        await attach(store, job, await stage(store, "c.md"))
+        await attach(pool, store, job, await stage(store, "c.md"))
 
 
 async def test_deleting_the_conversation_takes_its_uploads_with_it(store, pool):
@@ -434,7 +418,8 @@ async def test_a_finished_runner_cannot_read_later_conversation_uploads(store, p
         **fence, from_states=("running",), to_state="succeeded"
     )
     later = await stage(store, path="later.txt", content=b"later private upload")
-    await store.conversation_commands.create_follow_up(
+    await append_follow_up(
+        pool,
         parent_job_id=job["id"],
         user_id="user-1",
         prompt="now read this",

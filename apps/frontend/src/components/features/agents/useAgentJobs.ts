@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   getAgentJob,
   getAgentJobFiles,
-  getAgentJobGit,
+  getAgentJobGitMetadata,
   listAllAgentThreadEvents,
   listAgentProjects,
   streamAgentJob,
@@ -14,15 +14,19 @@ import type {
   AgentJobEventApi,
   AgentJobFileApi,
   AgentJobFileEntryApi,
+  AgentGitWorkspaceMetadataApi,
   AgentJobSymlinkApi,
   AgentProjectApi,
   AgentThreadApi,
   AgentThreadEventApi,
 } from '@/lib/api/agents';
 import { createDisplayJobAdapter } from './adapt';
+import { resumeAfter } from './threadHistory';
+import { useThreadHistory, type ThreadHistoryControl } from './useThreadHistory';
 import { useAgentReads } from './AgentReadProvider';
 import { announceAgentSessionsChanged, onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { projectKey } from '@/lib/temporaryWorkspace';
+import { APIError } from '@/lib/utils/errors';
 import type { AgentJob } from './types';
 import { isActiveJobState, isActiveConversationState } from './conversationJob';
 import { hasActiveGoal } from './goal/liveWork';
@@ -47,26 +51,6 @@ const ACTIVE_ATTEMPT_PHASES = new Set([
   'workspace_ready',
   'workspace_finalizing',
 ]);
-
-const ACTIVE_WORKSPACE_PUBLICATION_STATES = new Set([
-  'pending',
-  'capturing',
-  'captured',
-  'publishing',
-]);
-
-/** Whether one shared-workspace publication still changes owner-visible data. */
-export function isActiveWorkspacePublicationState(state: unknown): boolean {
-  return typeof state === 'string' && ACTIVE_WORKSPACE_PUBLICATION_STATES.has(state);
-}
-
-/** Whether a finished shared turn still has owner-visible state to publish. */
-export function hasActiveWorkspacePublication(job: AgentJobApi | null): boolean {
-  return (
-    job?.workspace_shared === true &&
-    isActiveWorkspacePublicationState(job.workspace_publication_state)
-  );
-}
 
 /** Apply one live attempt-state event to the cached owner-facing job row. */
 export function applyAgentLifecycleEvent(
@@ -185,28 +169,6 @@ function endsStreamingTurn(current: AgentJobApi | null, latest: AgentJobApi): bo
   );
 }
 
-/**
- * Where to read a conversation again when its earlier log is held.
- *
- * Stored events are never changed or removed, so a later read only has to
- * reach what was added. It does not start after the newest held event: ids
- * are taken before their writes commit, so a write still in flight during
- * the earlier read could land below an id that read already returned. The
- * running turn writes, and so do the snapshot and publication that follow
- * the turn before it, which can still be committing when the next turn
- * starts. The last two held turns are therefore read again in full. A write
- * to an older turn takes an id from after they began, and is read either way.
- */
-function resumeAfter(held: readonly AgentThreadEventApi[]): number {
-  const turns = [...new Set(held.map((event) => event.turn_no))].sort((a, b) => b - a);
-  const from = turns[1] ?? turns[0];
-  let first = Infinity;
-  for (const event of held) {
-    if (event.turn_no >= from && event.id < first) first = event.id;
-  }
-  return Number.isFinite(first) ? first - 1 : 0;
-}
-
 export function useAgentJob(
   jobId: string,
   {
@@ -225,6 +187,7 @@ export function useAgentJob(
    * model. Returning them here avoids a second read of the same thread.
    */
   threadJobs: AgentJobApi[];
+  history?: ThreadHistoryControl;
   loading: boolean;
   error: string | null;
   reload: () => void;
@@ -232,12 +195,15 @@ export function useAgentJob(
   const [api, setApi] = useState<AgentJobApi | null>(null);
   const [events, setEvents] = useState<AgentJobEventApi[]>([]);
   const [threadEvents, setThreadEvents] = useState<AgentThreadEventApi[]>([]);
-  const [patch, setPatch] = useState<string | null>(null);
+  const [gitMetadata, setGitMetadata] = useState<AgentGitWorkspaceMetadataApi | null | undefined>(
+    undefined,
+  );
   const [thread, setThread] = useState<AgentThreadApi | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
   const reads = useAgentReads();
+  const { readThread, history } = useThreadHistory(jobId, reads, thread, setThread, loading);
   const seen = useRef<Map<number, AgentThreadEventApi>>(new Map());
   const seenScope = useRef({ jobId, reads });
   const historyRead = useRef<{
@@ -303,6 +269,7 @@ export function useAgentJob(
       }
       seen.current = new Map();
       seenScope.current = { jobId, reads };
+      setGitMetadata(undefined);
     }
     const read = {
       jobId,
@@ -310,7 +277,6 @@ export function useAgentJob(
       lifecycleEvents: new Map<number, AgentThreadEventApi>(),
     };
     historyRead.current = read;
-    setPatch(null);
     setLoading(true);
     const progressive =
       loadedStreamCursor.current?.jobId !== jobId || loadedStreamCursor.current.reads !== reads;
@@ -331,7 +297,7 @@ export function useAgentJob(
     // before it ends, so events read after a row that says it ended are all
     // of them; read alongside, they could predate an end the row then reports,
     // and the turn would end on screen without its last events.
-    Promise.all([reads.getAgentJob(jobId), reads.getAgentJobThread(jobId)])
+    Promise.all([reads.getAgentJob(jobId), readThread(jobId)])
       .then(async ([job, foundThread]) => {
         if (cancelled || requestGeneration !== generation.current) return null;
         // Durable messages and the prompt do not depend on downloading the
@@ -419,24 +385,20 @@ export function useAgentJob(
       controller.abort();
       if (historyRead.current === read) historyRead.current = null;
     };
-  }, [active, jobId, reads, tick]);
+  }, [active, jobId, reads, readThread, tick]);
 
-  // Diff state belongs to the retained group workspace, not to a per-turn
-  // artifact uploaded by the runner. Fork siblings therefore see the same
-  // current workspace diff, matching the Git panel below. Metadata reloads
-  // clear the cached patch, so refetch even when the job state stays settled.
-  // During an in-place turn change, api still belongs to the previous turn.
-  // Do not open the new stream with that turn's attempt or event identity.
+  // The detail path reads only a cheap status fingerprint. The full patch and
+  // log belong to the Git panel. Avoid inspecting the prior turn under a new URL.
   const state = api?.id === jobId ? api.state : undefined;
   useEffect(() => {
     if (!active || !jobId || !state) return undefined;
     let cancelled = false;
-    getAgentJobGit(jobId)
+    getAgentJobGitMetadata(jobId)
       .then((workspace) => {
-        if (!cancelled) setPatch(workspace.available ? workspace.patch : null);
+        if (!cancelled) setGitMetadata(workspace);
       })
       .catch(() => {
-        if (!cancelled) setPatch(null);
+        if (!cancelled) setGitMetadata(null);
       });
     return () => {
       cancelled = true;
@@ -553,8 +515,7 @@ export function useAgentJob(
           (job) =>
             job.id === jobId || (pushThreadId !== undefined && job.thread_id === pushThreadId),
         ) ||
-        change.threads.some((thread) => thread.id === pushThreadId) ||
-        (pushThreadId != null && change.publications.includes(pushThreadId));
+        change.threads.some((thread) => thread.id === pushThreadId);
       if (!touched) return;
       setApi((current) => (current?.id === jobId ? overlayPushed(current) : current));
       const read = ++latestRead;
@@ -645,8 +606,7 @@ export function useAgentJob(
 
   // A queued or terminal turn's stream cannot report another turn finishing.
   // Refresh shared activity until this turn takes over or the conversation
-  // and its publication have both settled.
-  const publicationActive = hasActiveWorkspacePublication(api);
+  // has settled.
   const conversationActive = isActiveConversationState(api?.conversation_state);
   // An active goal outlives the turn on screen: the previous round has settled
   // and the next one may not be queued yet, so `conversation_state` alone
@@ -655,9 +615,7 @@ export function useAgentJob(
   const goalActive = hasActiveGoal(api?.goal);
   const metadataActive =
     api?.id === jobId &&
-    (publicationActive ||
-      goalActive ||
-      (state !== 'running' && state !== 'publishing' && conversationActive));
+    (goalActive || (state !== 'running' && state !== 'publishing' && conversationActive));
   const metadataInterval = pushLive ? PUSH_FALLBACK_POLL_MS : 5_000;
   useEffect(() => {
     if (!active || !jobId || !metadataActive) return undefined;
@@ -720,12 +678,13 @@ export function useAgentJob(
     if (!api) return null;
     return adapter.project(api, {
       events,
-      patch,
+      gitMetadata,
+      gitMetadataPending: gitMetadata === undefined,
       thread: visibleThread,
       threadEvents,
       historyLoading,
     });
-  }, [adapter, api, events, patch, visibleThread, threadEvents, historyLoading]);
+  }, [adapter, api, events, gitMetadata, visibleThread, threadEvents, historyLoading]);
   // The turn rows come from the thread read, which is a snapshot: a live
   // attempt replacement updates `api` and would otherwise leave the inspector
   // reading the attempt that is already gone. The current turn is therefore
@@ -742,15 +701,30 @@ export function useAgentJob(
   // Both shapes, deliberately: `job.events` is the chat view's *reading* of
   // the stream — folded, deduplicated, unknown kinds dropped — while the
   // trajectory needs the rows the platform actually stored.
-  return { job, events: threadEvents, threadJobs, loading, error, reload };
+  return { job, events: threadEvents, threadJobs, history, loading, error, reload };
 }
 
 /** One directory of the workspace tree, as far as it has been loaded. */
 export interface WorkspaceDirectory {
   entries: AgentJobFileEntryApi[] | null;
+  /** Set when the listing leaves entries out, so `entries` is not the whole folder. */
+  truncated?: true;
   loading: boolean;
   error: string | null;
 }
+
+/** A listing's incompleteness, carried only when it is set. */
+const partialListing = (truncated: boolean | undefined) =>
+  truncated ? { truncated: true as const } : {};
+
+/**
+ * A path-keyed record with no prototype, holding the entries of `sources`.
+ * Workspace paths are the agent's to choose. On a plain object, a folder named
+ * `constructor` or `__proto__` reads back an Object.prototype member: shown
+ * open before anyone opened it, with that member standing in for its listing.
+ */
+const byPath = <T>(...sources: Array<Record<string, T>>): Record<string, T> =>
+  Object.assign(Object.create(null) as Record<string, T>, ...sources);
 
 export interface WorkspaceFilesState {
   /** Loaded directories keyed by path; the workspace root is the empty string. */
@@ -762,6 +736,8 @@ export interface WorkspaceFilesState {
   file: AgentJobFileApi | AgentJobSymlinkApi | null;
   fileLoading: boolean;
   fileError: string | null;
+  /** The failed read found nothing at the selected path (404), rather than failing. */
+  fileMissing: boolean;
   source: 'workspace' | null;
   toggleDirectory: (path: string) => void;
   retryDirectory: (path: string) => void;
@@ -788,13 +764,14 @@ export function useWorkspaceFiles(
   enabled: boolean,
   refreshKey = '',
 ): WorkspaceFilesState {
-  const [directories, setDirectories] = useState<Record<string, WorkspaceDirectory>>({});
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [directories, setDirectories] = useState(() => byPath<WorkspaceDirectory>());
+  const [expanded, setExpanded] = useState(() => byPath<boolean>());
   const [selected, setSelected] = useState<string | null>(null);
   const [directoryPath, setDirectoryPath] = useState<string | null>(null);
   const [file, setFile] = useState<AgentJobFileApi | AgentJobSymlinkApi | null>(null);
   const [fileLoading, setFileLoading] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
+  const [fileMissing, setFileMissing] = useState(false);
   const [source, setSource] = useState<'workspace' | null>(null);
   const [tick, setTick] = useState(0);
   const reload = useCallback(() => setTick((value) => value + 1), []);
@@ -832,29 +809,38 @@ export function useWorkspaceFiles(
         alive.current &&
         mine === generation.current &&
         directoryRequests.current.get(path)?.request === request;
-      setDirectories((current) => ({
-        ...current,
-        [path]: { entries: current[path]?.entries ?? null, loading: true, error: null },
-      }));
+      setDirectories((current) =>
+        byPath(current, {
+          [path]: {
+            entries: current[path]?.entries ?? null,
+            ...partialListing(current[path]?.truncated),
+            loading: true,
+            error: null,
+          },
+        }),
+      );
       try {
         const node = await getAgentJobFiles(jobId, path);
         if (!isCurrent()) return;
         directoryGenerations.current.set(path, mine);
-        setDirectories((current) => ({
-          ...current,
-          [path]: {
-            entries: node.kind === 'directory' ? (node.entries ?? []) : [],
-            loading: false,
-            error: null,
-          },
-        }));
+        setDirectories((current) =>
+          byPath(current, {
+            [path]: {
+              entries: node.kind === 'directory' ? (node.entries ?? []) : [],
+              ...partialListing(node.kind === 'directory' && node.truncated),
+              loading: false,
+              error: null,
+            },
+          }),
+        );
         if (path === '') setSource(node.source ?? null);
       } catch (cause) {
         if (!isCurrent()) return;
-        setDirectories((current) => ({
-          ...current,
-          [path]: { entries: null, loading: false, error: filesError(cause) },
-        }));
+        setDirectories((current) =>
+          byPath(current, {
+            [path]: { entries: null, loading: false, error: filesError(cause) },
+          }),
+        );
       } finally {
         if (directoryRequests.current.get(path)?.request === request)
           directoryRequests.current.delete(path);
@@ -871,6 +857,7 @@ export function useWorkspaceFiles(
         alive.current && mine === generation.current && request === fileRequest.current;
       setFileLoading(true);
       setFileError(null);
+      setFileMissing(false);
       try {
         const node = await getAgentJobFiles(jobId, path);
         if (!isCurrent()) return;
@@ -881,14 +868,19 @@ export function useWorkspaceFiles(
           const ancestors = parts.map((_, index) => parts.slice(0, index + 1).join('/'));
           directoryRequests.current.delete(node.path);
           directoryGenerations.current.set(node.path, mine);
-          setDirectories((current) => ({
-            ...current,
-            [node.path]: { entries: node.entries ?? [], loading: false, error: null },
-          }));
-          setExpanded((current) => ({
-            ...current,
-            ...Object.fromEntries(ancestors.map((ancestor) => [ancestor, true])),
-          }));
+          setDirectories((current) =>
+            byPath(current, {
+              [node.path]: {
+                entries: node.entries ?? [],
+                ...partialListing(node.truncated),
+                loading: false,
+                error: null,
+              },
+            }),
+          );
+          setExpanded((current) =>
+            byPath(current, Object.fromEntries(ancestors.map((ancestor) => [ancestor, true]))),
+          );
           for (const ancestor of ancestors.slice(0, -1)) {
             if (directoryGenerations.current.get(ancestor) !== mine) void loadDirectory(ancestor);
           }
@@ -904,6 +896,7 @@ export function useWorkspaceFiles(
         if (!isCurrent()) return;
         setFile(null);
         setFileError(filesError(cause));
+        setFileMissing(cause instanceof APIError && cause.statusCode === 404);
       } finally {
         if (isCurrent()) setFileLoading(false);
       }
@@ -929,7 +922,7 @@ export function useWorkspaceFiles(
   const toggleDirectory = useCallback(
     (path: string) => {
       const open = Boolean(expanded[path]);
-      setExpanded((current) => ({ ...current, [path]: !open }));
+      setExpanded((current) => byPath(current, { [path]: !open }));
       if (
         !open &&
         (!directories[path]?.entries ||
@@ -959,6 +952,7 @@ export function useWorkspaceFiles(
     setFile(null);
     setFileLoading(false);
     setFileError(null);
+    setFileMissing(false);
   }, []);
 
   const retryDirectory = useCallback((path: string) => void loadDirectory(path), [loadDirectory]);
@@ -976,6 +970,7 @@ export function useWorkspaceFiles(
       selectedRef.current = null;
       setSelected(null);
       setFileError(null);
+      setFileMissing(false);
     }
   }, [file]);
 
@@ -987,6 +982,7 @@ export function useWorkspaceFiles(
     file,
     fileLoading,
     fileError,
+    fileMissing,
     source,
     toggleDirectory,
     retryDirectory,

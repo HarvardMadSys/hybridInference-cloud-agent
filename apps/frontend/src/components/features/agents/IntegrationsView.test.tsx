@@ -18,6 +18,7 @@ import { NEUTRAL_SITE_CONFIG } from '@/config/site';
 import { IntegrationsView } from './IntegrationsView';
 import { KeyboardShortcutsSettingsView } from '../settings/KeyboardShortcutsSettingsView';
 import { MemorySettingsView } from '../settings/MemorySettingsView';
+import { ModelsSettingsView } from '../settings/ModelsSettingsView';
 import { MySettingsView } from '../settings/MySettingsView';
 import { PluginsSettingsView } from '../settings/PluginsSettingsView';
 import { EnvironmentsSettingsView } from '../settings/EnvironmentsSettingsView';
@@ -36,6 +37,12 @@ import { listSkills } from '@/lib/api/skills';
 import { listSshServers } from '@/lib/api/sshServers';
 vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
 vi.mock('@/lib/api/userProfile', () => ({ getUserProfile: vi.fn(), saveUserProfile: vi.fn() }));
+// The Models page lists personal model connections; this deployment offers none.
+vi.mock('@/lib/api/modelConnections', () => ({
+  MAX_MODELS: 8,
+  listModelConnections: () =>
+    Promise.resolve({ configured: true, enabled: false, connections: [] }),
+}));
 
 vi.mock('@/lib/api/agents', () => ({
   getAgentConfig: vi.fn(),
@@ -181,7 +188,6 @@ beforeEach(() => {
   localStorage.clear();
   document.documentElement.lang = 'en';
   vi.mocked(getAgentConfig).mockResolvedValue({
-    models: ['model-a', 'model-b'],
     repos: [],
     runtimes: ['codex'],
     github_connected: true,
@@ -377,7 +383,7 @@ describe('IntegrationsView', () => {
     expect(within(section).queryByRole('img')).not.toBeInTheDocument();
     expect(within(section).queryByText(insights.suggestions[0].title)).not.toBeInTheDocument();
     const toggle = within(section).getByRole('switch', { name: 'Use memory' });
-    vi.mocked(getMemories).mockResolvedValueOnce({ ...memory, enabled: false });
+    vi.mocked(setMemoryEnabled).mockResolvedValueOnce({ ...memory, enabled: false });
     fireEvent.click(toggle);
     await waitFor(() => expect(toggle).not.toBeChecked());
     expect(setMemoryEnabled).toHaveBeenCalledWith(null, false, expect.any(AbortSignal));
@@ -456,7 +462,8 @@ describe('IntegrationsView', () => {
     expect(await screen.findByText('HarvardMadSys · Temporarily unavailable')).toBeInTheDocument();
     expect(screen.queryByText(/Connected as/)).not.toBeInTheDocument();
     expect(screen.queryByText('Reauthorize GitHub')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Disconnect GitHub' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Manage' }));
+    expect(screen.getByRole('menuitem', { name: 'Disconnect GitHub' })).toBeInTheDocument();
   });
 
   it('looks again while GitHub is unavailable, and stops once it is back', async () => {
@@ -518,8 +525,10 @@ describe('IntegrationsView', () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(30_000); // the re-check goes out, unanswered
       });
+      fireEvent.click(screen.getByRole('button', { name: 'Manage' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Disconnect GitHub' }));
       await act(async () => {
-        fireEvent.click(screen.getByRole('button', { name: 'Disconnect GitHub' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
         await vi.advanceTimersByTimeAsync(0);
       });
       expect(screen.queryByText('HarvardMadSys · Temporarily unavailable')).not.toBeInTheDocument();
@@ -590,7 +599,7 @@ describe('IntegrationsView', () => {
     render(<IntegrationsView />);
 
     await screen.findByText('Connected as HarvardMadSys · 2 repositories');
-    expect(screen.getByText('Manage')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Manage' })).toBeInTheDocument();
     // Was 1, from the GitLab row this response omits — that row now reads
     // "Coming soon" instead, and GitHub's is the connected one.
     expect(screen.queryAllByText('Admin setup required')).toHaveLength(0);
@@ -625,7 +634,7 @@ describe('IntegrationsView', () => {
     render(<IntegrationsView />);
 
     await screen.findByText('Connected as HarvardMadSys · 2 repositories');
-    fireEvent.click(screen.getByText('Manage'));
+    fireEvent.click(screen.getByRole('button', { name: 'Manage' }));
 
     expect(screen.queryByRole('link', { name: 'Configure repositories' })).not.toBeInTheDocument();
   });
@@ -633,6 +642,23 @@ describe('IntegrationsView', () => {
   // One way out for GitHub. Removing an installation lasted only until the
   // next connection, and reauthorizing only mattered for an installation made
   // outside this page — both covered by disconnecting and connecting again.
+  it('opens the Manage menu with arrows, closes it on Escape, and returns focus', async () => {
+    mockedGetIntegrations.mockResolvedValue(integrations);
+    render(<IntegrationsView />);
+    await screen.findByText('Connected as HarvardMadSys · 2 repositories');
+    const trigger = screen.getByRole('button', { name: 'Manage' });
+    fireEvent.keyDown(trigger, { key: 'ArrowDown' });
+    const menu = screen.getByRole('menu', { name: 'Manage GitHub' });
+    expect(within(menu).getByRole('menuitem', { name: 'Disconnect GitHub' })).toHaveFocus();
+    fireEvent.keyDown(menu, { key: 'Escape' });
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+
+    fireEvent.click(trigger);
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+
   it('offers GitHub only its one way out', async () => {
     mockedGetIntegrations.mockResolvedValue({
       providers: [
@@ -649,14 +675,14 @@ describe('IntegrationsView', () => {
 
     render(<IntegrationsView />);
     await screen.findByText('Connected as HarvardMadSys, realtmxi · 2 repositories');
-    fireEvent.click(screen.getByText('Manage'));
+    fireEvent.click(screen.getByRole('button', { name: 'Manage' }));
 
-    expect(screen.getByRole('button', { name: 'Disconnect GitHub' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Disconnect GitHub' })).toBeInTheDocument();
     expect(screen.queryByText('Reauthorize GitHub')).not.toBeInTheDocument();
     expect(
-      screen.queryByRole('button', { name: /Disconnect HarvardMadSys/ }),
+      screen.queryByRole('menuitem', { name: /Disconnect HarvardMadSys/ }),
     ).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Disconnect realtmxi/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: /Disconnect realtmxi/ })).not.toBeInTheDocument();
   });
 
   // The user's token is kept for GitHub to be asked as them; removing
@@ -672,14 +698,46 @@ describe('IntegrationsView', () => {
 
     render(<IntegrationsView />);
     await screen.findByText('Connected as HarvardMadSys · 2 repositories');
-    fireEvent.click(screen.getByText('Manage'));
-    fireEvent.click(screen.getByRole('button', { name: 'Disconnect GitHub' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Manage' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Disconnect GitHub' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
 
     expect(await screen.findByRole('status')).toHaveTextContent('GitHub disconnected.');
     expect(screen.queryByText(/Connected as/)).not.toBeInTheDocument();
     expect(mockedDisconnect).not.toHaveBeenCalled();
     // One request: the answer is the page's state, not a reason to reload it.
     expect(mockedGetIntegrations).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks before disconnecting GitHub or a GitLab account', async () => {
+    const gitlab = {
+      ...integrations.providers[1],
+      connected: true,
+      accounts: [{ id: 'gl-7', label: 'murphy' }],
+    };
+    mockedGetIntegrations.mockResolvedValue({ providers: [integrations.providers[0], gitlab] });
+    mockedDisconnect.mockResolvedValue(undefined);
+
+    render(<IntegrationsView />);
+    await screen.findByText('Connected as HarvardMadSys · 2 repositories');
+    const [githubMenu, gitlabMenu] = screen.getAllByRole('button', { name: 'Manage' });
+    fireEvent.click(githubMenu);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Disconnect GitHub' }));
+    expect(screen.getByText(/^Disconnect GitHub\?/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByText(/^Disconnect GitHub\?/)).not.toBeInTheDocument();
+    expect(disconnectGitHubAccount).not.toHaveBeenCalled();
+
+    fireEvent.click(gitlabMenu);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Disconnect murphy' }));
+    expect(screen.getByText(/^Disconnect murphy\?/)).toBeInTheDocument();
+    expect(mockedDisconnect).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }));
+
+    expect(await screen.findByRole('status')).toHaveTextContent('murphy disconnected.');
+    expect(mockedDisconnect).toHaveBeenCalledExactlyOnceWith('gitlab', 'gl-7');
+    expect(disconnectGitHubAccount).not.toHaveBeenCalled();
+    expect(screen.queryByText(/^Disconnect murphy\?/)).not.toBeInTheDocument();
   });
 
   it('keeps a connected GitLab account manageable', async () => {
@@ -703,4 +761,19 @@ describe('IntegrationsView', () => {
     // no longer carries a placeholder pill.
     expect(screen.queryAllByText('Coming soon')).toHaveLength(0);
   });
+});
+
+it('the Models page offers model connections, and neither page has a default-model pin', async () => {
+  const { unmount } = render(<ModelsSettingsView />);
+  expect(screen.getByRole('heading', { level: 1, name: 'Models' })).toBeInTheDocument();
+  await screen.findByRole('region', { name: 'Personal model connections' });
+  expect(screen.queryByRole('region', { name: 'Default model' })).not.toBeInTheDocument();
+  unmount();
+  render(<MySettingsView />);
+  expect(screen.getByRole('region', { name: 'Profile' })).toBeInTheDocument();
+  expect(screen.getByRole('region', { name: 'Notifications' })).toBeInTheDocument();
+  expect(
+    screen.queryByRole('region', { name: 'Personal model connections' }),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByRole('region', { name: 'Default model' })).not.toBeInTheDocument();
 });

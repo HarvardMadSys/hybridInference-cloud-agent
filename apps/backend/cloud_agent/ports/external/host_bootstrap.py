@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Protocol
+from typing import Any, Protocol
 
 from pydantic import Field, SecretStr, field_validator
 
@@ -190,6 +190,24 @@ class HostInventory(ComputeValue):
     blocked_reasons: tuple[str, ...] = ()
 
 
+class RecordedHostState(ComputeValue):
+    """What the control plane recorded of the receipts a Host keeps on disk.
+
+    A release's machine inventory excuses a receipt only when it matches one
+    of these field for field. ``checkpoints`` maps each sandbox id to the
+    latest checkpoint this Host captured of it, as the receipt names it
+    (``checkpoint_id``, ``generation``, ``container_id``, the object and its
+    digest, ...). ``removals`` maps the request id of each removal of a
+    container left behind there that the Host confirmed to the exact
+    ``thread_id``, ``sandbox_id``, ``generation`` and ``container_id`` it
+    removed. Either can grow with the Host's history, so it travels on the
+    inventory's standard input, never in its command line.
+    """
+
+    checkpoints: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    removals: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
 class SshTransport(Protocol):
     """Execute trusted scripts using the connection's explicit host-key policy."""
 
@@ -237,9 +255,28 @@ class HostBootstrap(Protocol):
         ...
 
     async def inventory(
-        self, node: NodeObservation, profile: DeploymentProfile, intent: BootstrapIntent
+        self,
+        node: NodeObservation,
+        profile: DeploymentProfile,
+        intent: BootstrapIntent,
+        recorded: RecordedHostState | None = None,
     ) -> HostInventory:
-        """Observe stopped containers and orphan state for resource release guards."""
+        """Observe stopped containers and orphan state for resource release guards.
+
+        Host state on disk counts as orphaned unless ``recorded`` accounts for it.
+        """
+        ...
+
+    async def quiesce(
+        self, node: NodeObservation, profile: DeploymentProfile, intent: BootstrapIntent
+    ) -> int:
+        """Stop a releasing node's runner and remove the self-test sandboxes it left.
+
+        Only for a node being released: the runner stays stopped, so nothing
+        creates a container while the inventory reads Docker. The sandbox
+        manager and every other container keep running. Returns how many
+        self-test sandboxes were removed.
+        """
         ...
 
     async def stage(

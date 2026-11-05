@@ -23,40 +23,53 @@ semantics really match are shared, and these do not.
 
 from __future__ import annotations
 
-import contextlib
 import secrets
 from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import HTTPException
 
-from cloud_agent.application.residency import _mint_residency_grant, residency_ttl_s
+from cloud_agent.application.model_connections import (
+    access_for_job,
+    connection_residency_credential,
+    model_connection_cipher,
+    unusable_error,
+)
+from cloud_agent.application.residency import residency_ttl_s
+from cloud_agent.credential_cipher import CredentialCipherError
+from cloud_agent.domain.model_connections import ModelConnectionUnusable
 from cloud_agent.sandbox_manager_client import (
     SHARED_PLUGIN_SESSION_FORK_TIMEOUT_S,
     SHARED_SESSION_FORK_TIMEOUT_S,
     SandboxManagerError,
+    identity_from_row,
 )
 from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
 from cloud_agent.workspace_errors import _sandbox_manager_http_error
 from cloud_agent_shared.environment import environment_payload
+from cloud_agent_shared.sandbox_manager_wire import member_manifest
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
-        GrantRepository,
         HostPoolRepository,
+        ModelConnectionRepository,
         ResidencyRepository,
         SessionForkRepository,
     )
-    from cloud_agent.ports.environments import EnvironmentRepository
+    from cloud_agent.ports.environments import EnvironmentBindingRepository
 
 
 class _ForkMaterializationStorage(Protocol):
     """What materializing a fork reaches the store for."""
 
-    grants: GrantRepository
     host_pool: HostPoolRepository
+    model_connections: ModelConnectionRepository
     residency: ResidencyRepository
     session_fork: SessionForkRepository
-    environments: EnvironmentRepository
+
+    @property
+    def environments(self) -> EnvironmentBindingRepository:
+        """Environment persistence needed by this flow."""
+        ...
 
 
 # Keep a short recovery margin past the host request's deadline so a second API
@@ -66,34 +79,101 @@ class _ForkMaterializationStorage(Protocol):
 SESSION_FORK_COORDINATOR_LEASE_S = SHARED_SESSION_FORK_TIMEOUT_S + 30.0
 
 
+def _recorded_group(operation: dict[str, Any]) -> dict[str, Any]:
+    """The group as this Fork recorded it, not whatever the group holds now.
+
+    The operation's own ``generation`` counts the Fork's row; the group's is
+    ``sandbox_generation``. Its container is required: the host reads a null
+    expected container as no expectation, and would skip its check or create
+    a container.
+    """
+    if not operation.get("container_id"):
+        raise KeyError("container_id")
+    return {**operation, "generation": operation["sandbox_generation"]}
+
+
+def _credential_refused(exc: Exception) -> HTTPException:
+    if isinstance(exc, ModelConnectionUnusable):
+        return unusable_error(exc, status=409)
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error": {
+                "type": "model_connections_unconfigured",
+                "message": "Model connection keys cannot be read.",
+            }
+        },
+    )
+
+
+async def _fork_source_job(
+    job_store: _ForkMaterializationStorage, operation: dict[str, Any]
+) -> dict[str, Any]:
+    """The anchor turn, refused if it runs on a connection that can no longer serve it.
+
+    Asked before any lease, residency or host call: the side chat would start
+    two processes on that connection, and a Fork never moves a chat elsewhere.
+    """
+    source_job: dict[str, Any] = operation.get("source_job") or {}
+    try:
+        if not source_job.get("model_connection_id"):
+            raise ModelConnectionUnusable("no_connection")
+        await access_for_job(job_store.model_connections, source_job, model_connection_cipher())
+    except (ModelConnectionUnusable, CredentialCipherError) as exc:
+        raise _credential_refused(exc) from None
+    return source_job
+
+
+async def _fork_credentials(
+    job_store: _ForkMaterializationStorage,
+    source_job: dict[str, Any],
+    residencies: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Each member's own launch fields: its credential and where it runs.
+
+    Each residency is bound to the connection's current revision and handed
+    its key, and each launch names the connection's exact endpoint, protocol
+    and revision; on a translated plan each member also gets its own loopback
+    token.
+    """
+    source_access = await connection_residency_credential(
+        job_store, source_job, row=residencies["source"]
+    )
+    target_access = await connection_residency_credential(
+        job_store, source_job, row=residencies["target"]
+    )
+    if source_access.revision != target_access.revision:
+        raise ModelConnectionUnusable("changed")
+    return (
+        {"credential": source_access.api_key, **source_access.launch_fields()},
+        {"credential": target_access.api_key, **target_access.launch_fields()},
+    )
+
+
 async def materialize_session_fork(
     operation: dict[str, Any],
     *,
     job_id: str,
     job_store: _ForkMaterializationStorage,
-    grants: Any,
 ) -> None:
     """Drive a PREPARING fork operation to MATERIALIZED, or refuse it.
 
     Raises:
         HTTPException: the same refusals the handler used to raise from here —
             an unreachable host, an incomplete manifest, a fork already being
-            materialized, a changed fence, credentials that could not be
-            minted, and a receipt that does not match.
+            materialized, a changed fence, a connection that cannot serve it,
+            and a receipt that does not match.
     """
     operation_id = str(operation["id"])
 
     async def release_failed_fork_residencies(rows: dict[str, Any]) -> None:
         for role in ("source", "target"):
             residency = rows[role]
-            grant_id = await job_store.residency.release_residency(
+            await job_store.residency.release_residency(
                 thread_id=str(residency["thread_id"]),
                 generation=int(residency["generation"]),
                 host=str(operation["host"]),
             )
-            if grant_id and grants is not None:
-                with contextlib.suppress(Exception):
-                    await grants.revoke(grant_id)
 
     sandbox_manager = await sandbox_manager_for_job(job_store.host_pool, job_id)
     if sandbox_manager is None:
@@ -106,28 +186,12 @@ async def materialize_session_fork(
                 }
             },
         )
-    # Validate every immutable host input before minting or rotating either
-    # residency. A malformed manifest is a control-plane defect, not a
-    # reason to leak two renewable grants into an uncallable saga.
-    source_job = operation.get("source_job") or {}
+    # Validate every immutable host input before rotating either residency. A
+    # malformed manifest is a control-plane defect, not a reason to start two
+    # members in an uncallable saga.
+    source_job = await _fork_source_job(job_store, operation)
     source_thread_id = str(operation["source_thread_id"])
-    members: list[dict[str, Any]] = []
-    for member in operation.get("group_members") or []:
-        manifest = {
-            key: member.get(key)
-            for key in (
-                "thread_id",
-                "native_session_id",
-                "context_status",
-                "activation_generation",
-                "process_generation",
-                "residency_generation",
-                "resident_state",
-                "resident_slot_id",
-                "last_settled_job_id",
-            )
-        }
-        members.append(manifest)
+    members = member_manifest(operation.get("group_members") or [])
     source_member = next(
         (member for member in members if member["thread_id"] == source_thread_id),
         None,
@@ -148,8 +212,6 @@ async def materialize_session_fork(
         "model": str(source_job.get("model") or ""),
         "reasoning_effort": source_job.get("reasoning_effort"),
         "plugins": source_job.get("plugins") or [],
-        # Replaced by the sandbox manager's host-local, sandbox-reachable relay.
-        "gateway_base_url": "",
         # Fork-only does not need a tool credential. A later turn whose
         # MCP set is non-empty performs a member-only native restart.
         "mcp_server_ids": [],
@@ -205,55 +267,22 @@ async def materialize_session_fork(
                 }
             },
         )
-    for role in ("source", "target"):
-        previous_grant = residencies[role].get("previous_grant_id")
-        if previous_grant and grants is not None:
-            with contextlib.suppress(Exception):
-                await grants.revoke(previous_grant)
-    source_credential = await _mint_residency_grant(
-        job_store.grants,
-        grants,
-        row=residencies["source"],
-    )
-    target_credential = await _mint_residency_grant(
-        job_store.grants,
-        grants,
-        row=residencies["target"],
-    )
-    if not source_credential or not target_credential:
+    try:
+        source_fields, target_fields = await _fork_credentials(job_store, source_job, residencies)
+    except (ModelConnectionUnusable, CredentialCipherError) as exc:
         await release_failed_fork_residencies(residencies)
         await job_store.session_fork.release_session_fork_materialization(
             operation_id=operation_id,
             coordinator_token=coordinator_token,
         )
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": {
-                    "type": "residency_grant_unavailable",
-                    "message": "Fork could not obtain two independent resident credentials.",
-                }
-            },
-        )
+        raise _credential_refused(exc) from None
 
     source_member["residency_generation"] = int(residencies["source"]["generation"])
     source_member["resident_state"] = "restarting"
     try:
         receipt = await sandbox_manager.fork_shared_session(
             source_thread_id,
-            sandbox_id=str(operation["sandbox_id"]),
-            generation=int(operation["sandbox_generation"]),
-            origin_thread_id=str(operation["origin_thread_id"]),
-            runtime_id=str(operation["runtime_id"]),
-            runtime_version=operation.get("runtime_version"),
-            sandbox_image_digest=operation.get("sandbox_image_digest"),
-            expected_container_id=str(operation["container_id"]),
-            resident_slot_capacity=int(operation["resident_slot_capacity"]),
-            memory_limit=str(operation["memory_limit"]),
-            cpu_limit=str(operation["cpu_limit"]),
-            disk_limit_mib=int(operation.get("disk_limit_mib", 0)),
-            stop_timeout_s=int(operation["stop_timeout_seconds"]),
-            members=members,
+            identity=identity_from_row(_recorded_group(operation), members=members),
             operation_id=operation_id,
             source_native_session_id=str(operation["source_native_session_id"]),
             source_native_turn_no=int(operation["source_native_turn_no"]),
@@ -262,14 +291,14 @@ async def materialize_session_fork(
             source_launch={
                 **launch_common,
                 "native_session_id": str(operation["source_native_session_id"]),
-                "credential": source_credential,
+                **source_fields,
                 "slot_id": int(operation["resident_slot_id"]),
                 "residency_generation": int(residencies["source"]["generation"]),
             },
             target_launch={
                 **launch_common,
                 "native_session_id": None,
-                "credential": target_credential,
+                **target_fields,
                 "slot_id": int(operation["target_resident_slot_id"]),
                 "residency_generation": int(residencies["target"]["generation"]),
             },

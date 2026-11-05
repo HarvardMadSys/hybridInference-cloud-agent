@@ -5,10 +5,16 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent_shared.storable_text import storable_json
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
 MAX_EVENT_PAYLOAD_BYTES = 256 * 1024
+#: The most events one batch upload carries: as many as a runner coalesces, and
+#: as many as the control plane accepts. A control plane must accept a larger
+#: number before any runner sends one, or it refuses those runners' batches.
+MAX_EVENT_BATCH_EVENTS = 100
 #: Name the delegated agent an event came from: Claude Code's delegating call,
 #: or the Codex thread a subagent runs in. The conversation's own events carry
 #: neither.
@@ -71,7 +77,12 @@ def bound_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
     bulk content; large structured values become labelled text previews. A
     field is omitted only when the other fields leave no room for its preview.
     This bounds multi-field payloads and huge keys as well as single strings.
+
+    Text Postgres cannot store is replaced first, by :func:`storable_json`:
+    tool output holding NUL or half a surrogate pair is an event like any
+    other, and the bound is counted in UTF-8, which has no surrogates.
     """
+    payload = storable_json(payload)
     original_bytes = _size(payload)
     if original_bytes <= MAX_EVENT_PAYLOAD_BYTES:
         return payload

@@ -16,6 +16,9 @@ NATIVE_FORK_AT_ANCHOR_CAPABILITY = "native-fork-at-anchor-v1"
 #: out of it. An automatic conversation-goal round may be routed only to a
 #: host that declares this; a host without it keeps running ordinary turns.
 GOAL_REPORT_CAPABILITY = "goal_report_v1"
+#: Advertised by a host whose sandbox image carries the browser service
+#: (``cloud-agent-browser``): a chat's first prompt then says the browser is there.
+SANDBOX_BROWSER_CAPABILITY = "sandbox-browser-v1"
 #: Advertised by a runner that takes its concurrency limit from the control
 #: plane's ``slots_desired`` rather than from the count it was deployed with.
 #: The admin page reads it to tell "this host will apply your number" from
@@ -54,6 +57,18 @@ def is_residency_mcp_credential(credential: str) -> bool:
     return credential.startswith(RESIDENCY_MCP_CREDENTIAL_PREFIX)
 
 
+#: The prefix of the GitHub relay credential a chat's resident process holds
+#: (``cloud_agent.tokens.mint_residency_github_token``). It is a placeholder:
+#: GitHub refuses it, and only the GitHub relay exchanges it, on every request,
+#: for the owner's own GitHub token while one of the chat's turns is running.
+RESIDENCY_GITHUB_CREDENTIAL_PREFIX = "agh."
+
+
+def is_residency_github_credential(credential: str) -> bool:
+    """Whether ``credential`` is a residency's GitHub relay placeholder."""
+    return credential.startswith(RESIDENCY_GITHUB_CREDENTIAL_PREFIX)
+
+
 def mid_turn_input_capability(runtime_id: str) -> str:
     """The capability a host advertises when it can steer ``runtime_id``."""
     return f"{MID_TURN_INPUT_CAPABILITY_PREFIX}{runtime_id}"
@@ -88,13 +103,7 @@ INPUT_REFUSALS = frozenset(
         INPUT_UNREACHABLE,
     }
 )
-#: A shared-workspace snapshot capture's refusal when the workspace no longer
-#: holds the commit its diff is cut from. A published base reaches the
-#: workspace as objects no ref names, so Git's own housekeeping prunes it once
-#: its pack is old enough. The sandbox manager answers 409 with exactly this
-#: detail, and the control plane imports that base again and retries the
-#: capture instead of failing the snapshot.
-SNAPSHOT_BASE_MISSING = "the workspace no longer holds the snapshot's base commit"
+
 #: Header the runner uses when it hands its sandbox manager the profiling policy
 #: a control plane sent it. The sandbox manager has no host credential and never will --
 #: the design forbids widening that -- so the policy travels over the existing
@@ -112,6 +121,15 @@ HOST_CONCURRENCY_MAX_SLOTS = 128
 #: refuses a longer one together with the whole beat, so the host trims to it:
 #: a long explanation must never be what takes a host offline.
 HOST_LAUNCH_ERROR_MAX_CHARS = 500
+#: The longest reason a released activation may carry. The control plane
+#: refuses a longer one together with the release, so the host trims to it: a
+#: long explanation must never be what keeps an activation held.
+ABANDON_DETAIL_MAX_CHARS = 1000
+#: The most versions one runtime's menu may list, in a heartbeat or a claim's
+#: attestation. The control plane refuses a longer one with the whole beat or
+#: claim, so the host leaves the least needed off: a long menu must never be
+#: what takes a host out of the pool.
+HOST_VERSION_MENU_MAX_ITEMS = 64
 SHARED_DEPLOYMENT_CAPABILITY_PREFIX = "shared-sandbox-deployment:"
 ENV_DEPLOYMENT_SHA = "AGENT_DEPLOYMENT_SHA"
 #: Stored in the legacy-named ``sampler_version`` field for a current retained
@@ -139,10 +157,11 @@ SHARED_SANDBOX_HELPER_PINS = {
     # pin is the whole statement that an image's fork helper may be handed an
     # anchor; there is no separate shared-sandbox protocol number.
     FORK_HELPER: "2",
-    # 4 gates turns on live SSE, follows OpenCode/Kilo root Task children when
-    # auto-answering permissions, and fails closed on a stream or permission
-    # reply loss; 3 added questions, and 2 message metadata.
-    "http-agent-live-bridge": "4",
+    # 5 answers a between-turns ``context`` command with what the next request
+    # carries; 4 gates turns on live SSE, follows OpenCode/Kilo root Task
+    # children when auto-answering permissions, and fails closed on a stream or
+    # permission reply loss; 3 added questions, and 2 message metadata.
+    "http-agent-live-bridge": "5",
     # Bumped with the observer's own protocol: the image that carries a v2
     # observer publishes v2 here, and a host whose pin still said v1 refused to
     # attest at all rather than reporting a mismatch.

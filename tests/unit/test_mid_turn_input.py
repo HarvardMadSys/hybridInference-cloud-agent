@@ -22,15 +22,11 @@ from cloud_agent_host import drivers
 from cloud_agent_host.drivers import (
     LINE,
     TURN_COMPLETED,
-    ClaudeCodeDriver,
-    CodexDriver,
     InputOutcome,
-    KiloDriver,
     LaunchContext,
-    OpenCodeDriver,
     PendingInput,
-    PiDriver,
     TurnInput,
+    driver_for,
 )
 from cloud_agent_host.runtimes import (
     EMPTY_RUNTIME_MCP_CONFIG,
@@ -107,7 +103,7 @@ class _StreamingProcess(_LiveProcess):
 def _context(process: _LiveProcess, tmp_path) -> LaunchContext:
     return LaunchContext(
         workdir="/w",
-        gateway_base_url="http://gw",
+        model_base_url="http://gw",
         credential="agr",
         provides_isolation=True,
         mcp_config=EMPTY_RUNTIME_MCP_CONFIG,
@@ -154,7 +150,7 @@ _RESULT = {"type": "result", "subtype": "success", "result": "done"}
 
 def _claude_turn(tmp_path, process: _LiveProcess | None = None):
     process = process or _LiveProcess()
-    session = ClaudeCodeDriver(ClaudeCodeRuntime()).launch_live(_context(process, tmp_path))
+    session = driver_for(ClaudeCodeRuntime()).launch_live(_context(process, tmp_path))
     turn = session.start_turn(TurnInput(prompt="fix it", model="m"))
     events = turn.iter_events()
     next(events)  # turn started
@@ -179,7 +175,7 @@ def _written(process: _LiveProcess) -> list[str]:
 
 def test_claude_the_launch_echoes_what_it_reads():
     argv, _ = ClaudeCodeRuntime().prepare_live(
-        workdir="/w", model="m", gateway_base_url="http://gw", credential="agr"
+        workdir="/w", model="m", model_base_url="http://gw", credential="agr"
     )
 
     assert "--replay-user-messages" in argv
@@ -369,7 +365,7 @@ def _codex_turn(tmp_path):
         {"id": "initialize-1", "result": {"userAgent": "codex"}},
         {"id": "thread-2", "result": {"thread": {"id": "thread-a"}}},
     )
-    session = CodexDriver(CodexRuntime()).launch_live(_context(process, tmp_path))
+    session = driver_for(CodexRuntime()).launch_live(_context(process, tmp_path))
     session.ensure_started(model="gpt", reasoning_effort=None)
     process.feed = _lines({"id": "turn-3", "result": {"turn": {"id": "turn-a"}}})
     turn = session.start_turn(TurnInput(prompt="run it", model="gpt"))
@@ -567,7 +563,7 @@ def test_a_driver_without_the_seam_declines(tmp_path):
             "data": {"sessionId": "pi-a", "sessionFile": "/agent-state/pi-a.jsonl"},
         }
     )
-    session = PiDriver(PiRuntime()).launch_live(_context(process, tmp_path))
+    session = driver_for(PiRuntime()).launch_live(_context(process, tmp_path))
     session.ensure_started(model="m", reasoning_effort=None)
     turn = session.start_turn(TurnInput(prompt="hello", model="m"))
     sent = len(process.sent)
@@ -578,13 +574,13 @@ def test_a_driver_without_the_seam_declines(tmp_path):
 
 def test_only_the_drivers_that_wire_it_declare_mid_turn_steering():
     declared = {
-        runtime.name: driver(runtime).capabilities().steering
-        for driver, runtime in (
-            (ClaudeCodeDriver, ClaudeCodeRuntime()),
-            (CodexDriver, CodexRuntime()),
-            (PiDriver, PiRuntime()),
-            (OpenCodeDriver, OpencodeRuntime()),
-            (KiloDriver, KiloRuntime()),
+        runtime.name: driver_for(runtime).capabilities().steering
+        for runtime in (
+            ClaudeCodeRuntime(),
+            CodexRuntime(),
+            PiRuntime(),
+            OpencodeRuntime(),
+            KiloRuntime(),
         )
     }
 

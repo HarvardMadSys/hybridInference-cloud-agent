@@ -48,6 +48,11 @@ async def host_compute_admission(conn: Any, host: str) -> tuple[bool, bool]:
     """,
         host,
     )
+    return compute_admission(row)
+
+
+def compute_admission(row: Any) -> tuple[bool, bool]:
+    """Apply the same deadline/hold rules to a single or bulk DB observation."""
     if row is None:
         return False, False
     if row["id"] is None:

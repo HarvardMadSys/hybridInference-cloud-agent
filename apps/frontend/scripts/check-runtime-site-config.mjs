@@ -9,24 +9,21 @@
 // see it is to boot the built server. A suite that imported the layout would
 // pass against a build-time read exactly as happily as a runtime one.
 //
-// Two variants are built, because they are two images and the paths differ:
-//
-//   web-root    basePath ""        browser API /api         (own hostname)
-//   web-agents  basePath "/agents" browser API /agents/api  (gateway hostname)
+// The web images come from the release catalog; there is one, `web-root`,
+// served at the root of its hostname with the browser API at /api.
 //
 // For each variant, and each of two configured deployments, this checks:
 //
-//   1. the document is served at the variant's own path, and not at a bare
-//      path when the variant is mounted under a prefix;
+//   1. the document is served at the variant's own path;
 //   2. `<title>` and the rendered `<h1>` are the *configured* name — the body,
 //      not only the head, so a document that merely echoes its own <title>
 //      cannot pass;
-//   3. the sign-in link and the asset URLs carry the variant's prefix. These
-//      are the two things a wrongly-built variant gets wrong, and the sign-in
-//      URL is the one string this app hands to another service;
+//   3. the asset URLs are the build's own `/_next/static/` paths (the sign-in
+//      form itself renders in the browser, so the document carries no link of
+//      its own to check);
 //   4. every configured identity value — name, organisation, organisation
-//      URL, status URL, gateway origin — reaches the document, and the
-//      feature switch has the configured value;
+//      URL, status URL — reaches the document, and the retired Gateway link
+//      and docs-assistant switch reach nothing;
 //   5. no value from the *other* deployment appears anywhere, which is what a
 //      fallback to a build-time constant looks like;
 //   6. a secret-looking variable in the environment reaches neither the HTML
@@ -39,27 +36,24 @@
 //      markup does, exactly. The document proves the *server* rendered the
 //      runtime values; the payload is the half a client component reads, so a
 //      tree that would hydrate from the neutral default is only visible here;
-//   8. `return_to` survives the mount prefix — asked to return to a path that
-//      carries the prefix, the link hands the control plane a path that
-//      carries it once. Applied twice it returned to `/agents/agents`;
-//   9. a deployment that configures nothing renders the neutral identity, with
+//   8. a deployment that configures nothing renders the neutral identity, with
 //      no `AGENT_WEB_*` in the environment at all. "The image carries no
 //      deployment's brand" is shown rather than inferred, and a fallback that
 //      named a real site is what this fails on;
-//  10. an illegal value fails the request instead of being read as "unset";
-//  11. the artifact itself is unchanged by any of it — a digest over the
+//   9. an illegal value fails the request instead of being read as "unset";
+//  10. the artifact itself is unchanged by any of it — a digest over the
 //      standalone server and the static chunks is taken before the first
 //      render and after the last, so "one image, many deployments" is checked
 //      rather than inferred from the shape of the loop.
-//  12. metadata and layout share one saved-settings fetch per request, while
+//  11. metadata and layout share one saved-settings fetch per request, while
 //      the next request sees saved edits without restarting the server.
-//  13. stalled settings headers or bodies cannot delay pages for seconds:
+//  12. stalled settings headers or bodies cannot delay pages for seconds:
 //      cold processes render neutral branding and warmed processes retain the
 //      last valid appearance, with successful edits still visible on recovery.
-//  14. every document carries the security headers, its mount point included,
+//  13. every document carries the security headers, its mount point included,
 //      and every script in it is one its Content-Security-Policy allows: the
-//      policy comes from middleware whose matcher is relative to `basePath`,
-//      so a page the matcher misses is only visible in a served build. A
+//      policy comes from middleware, so a page its matcher misses is only
+//      visible in a served build. A
 //      static script is served with the `next.config.js` headers too, and no
 //      response sends `X-Powered-By`.
 //
@@ -67,43 +61,47 @@
 // Use --saved-config-only to check request-scoped caching against an existing
 // production build without rebuilding either variant.
 
-import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { join, resolve } from 'node:path';
-
-const WEB_ROOT = resolve(import.meta.dirname, '..');
-const NEXT_BIN = join(WEB_ROOT, 'node_modules', 'next', 'dist', 'bin', 'next');
-const NEXT_DIR = join(WEB_ROOT, '.next');
-const STANDALONE = join(NEXT_DIR, 'standalone');
-const SERVER = join(STANDALONE, 'server.js');
-const STATIC_DIR = join(NEXT_DIR, 'static');
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import {
+  buildStandalone,
+  NEXT_DIR,
+  sanitizeRuntimeSiteEnvironment,
+  STANDALONE_DIR,
+  STATIC_DIR,
+  startStandalone,
+  waitForResponse,
+} from './standalone-harness.mjs';
+import { fail, runRuntimeGuard, withRuntimeResources } from './runtime-site-config-lifecycle.mjs';
 
 const SENTINEL = 'sentinel-runtime-config-must-not-leak';
+// Set as the retired Gateway link in every deployment's environment.
+const RETIRED_GATEWAY_URL = 'https://retired-gateway.example';
 const STARTUP_TIMEOUT_MS = 60_000;
 const POLL_INTERVAL_MS = 400;
 
-let nextPort = 3411;
-
-const VARIANTS = [
-  { name: 'web-root', basePath: '', apiUrl: '/api', foreignPaths: [] },
-  {
-    name: 'web-agents',
-    basePath: '/agents',
-    apiUrl: '/agents/api',
-    // Mounted under a prefix, the app must not answer at the bare path: that
-    // would be a second, unprefixed copy of the same routes.
-    foreignPaths: ['/login'],
-  },
-];
+const CATALOG = JSON.parse(
+  readFileSync(new URL('../../../deploy/release/artifact_catalog.json', import.meta.url), 'utf8'),
+);
+const VARIANTS = CATALOG.artifacts
+  .filter((artifact) => artifact.role === 'web')
+  .map((artifact) => ({
+    name: artifact.name,
+    basePath: artifact.base_path,
+    apiUrl: artifact.api_url,
+    // A mounted app must not answer at the bare path as a second copy.
+    foreignPaths: artifact.base_path ? ['/login'] : [],
+  }))
+  // Leave the root artifact in .next so the browser suite can reuse it.
+  .sort((left, right) => Number(left.basePath === '') - Number(right.basePath === ''));
+if (VARIANTS.length === 0) throw new Error('Artifact catalog declares no web variants');
 
 function deployment(spec) {
-  const gateway = new URL(spec.gatewayUrl);
   return {
     ...spec,
-    gatewayOrigin: gateway.origin,
-    gatewayHost: gateway.host,
     env: {
       AGENT_WEB_APP_NAME: spec.appName,
       AGENT_WEB_ORG_NAME: spec.orgName,
@@ -111,8 +109,10 @@ function deployment(spec) {
       AGENT_WEB_STATUS_URL: spec.statusUrl,
       AGENT_WEB_DOCS_URL: spec.docsUrl,
       AGENT_WEB_CONTACT_URL: spec.contactUrl,
-      AGENT_WEB_GATEWAY_URL: spec.gatewayUrl,
-      AGENT_WEB_FEATURE_RAG: String(spec.rag),
+      // Retired with the Gateway: the web server reads neither, so neither
+      // may reach the document. The control plane refuses both at startup.
+      AGENT_WEB_GATEWAY_URL: RETIRED_GATEWAY_URL,
+      AGENT_WEB_FEATURE_RAG: 'true',
       AGENT_DEPLOYMENT_SHA: spec.version,
       AGENT_WEB_DEPLOYED_AT: spec.deployedAt,
       // Not configuration. It is here to prove that an unrelated environment
@@ -133,8 +133,6 @@ const DEPLOYMENTS = [
     statusUrl: 'https://status.alpha.example/',
     docsUrl: 'https://docs.alpha.example/agents/',
     contactUrl: 'mailto:help@alpha.example',
-    gatewayUrl: 'https://gateway-alpha.example/authorize',
-    rag: true,
   }),
   deployment({
     name: 'beta',
@@ -146,8 +144,6 @@ const DEPLOYMENTS = [
     statusUrl: 'https://status.beta.example/',
     docsUrl: 'https://docs.beta.example/',
     contactUrl: 'https://support.beta.example/',
-    gatewayUrl: 'https://gateway-beta.example',
-    rag: false,
   }),
 ];
 
@@ -165,16 +161,7 @@ const NEUTRAL = {
   statusUrl: '',
   docsUrl: '',
   contactUrl: '',
-  gatewayUrl: '',
-  rag: false,
 };
-
-function fail(message) {
-  console.error(`::error title=Runtime site config::${message}`);
-  process.exit(1);
-}
-
-const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
 function titleOf(html) {
   return firstMatch(html, /<title[^>]*>([^<]*)<\/title>/i);
@@ -206,7 +193,6 @@ function identityValues(target) {
     ['status URL', target.statusUrl],
     ['documentation URL', target.docsUrl],
     ['contact URL', target.contactUrl],
-    ['gateway origin', target.gatewayOrigin],
   ];
 }
 
@@ -268,23 +254,7 @@ function expectedIdentity(target) {
     statusUrl: new URL(target.statusUrl).toString(),
     docsUrl: new URL(target.docsUrl).toString(),
     contactUrl: new URL(target.contactUrl).toString(),
-    gatewayUrl: target.gatewayOrigin,
   };
-}
-
-/** The sign-in link the document offers, as an absolute path or URL. */
-function signInHref(html) {
-  return firstMatch(html, /href="([^"]*\/v1\/session\/login[^"]*)"/);
-}
-
-/**
- * The same-site path the sign-in link asks the control plane to return to.
- *
- * Read back through `URL`, not matched as text: `return_to` is escaped in the
- * link, and the property under test is the value the control plane receives.
- */
-function returnToOf(href) {
-  return new URL(href, 'http://127.0.0.1').searchParams.get('return_to');
 }
 
 /** Every JavaScript chunk the browser would download for this build. */
@@ -333,112 +303,42 @@ function hashTree(root) {
  * artifact.
  */
 function artifactDigest() {
-  return `${hashTree(STANDALONE)}:${hashTree(STATIC_DIR)}`;
+  return `${hashTree(STANDALONE_DIR)}:${hashTree(STATIC_DIR)}`;
 }
 
 function buildVariant(variant) {
-  // A stale `.next` could serve the previous variant's inlined values, which
-  // is exactly the class of mistake this script exists to catch.
-  rmSync(NEXT_DIR, { recursive: true, force: true });
-
   const env = {
-    ...process.env,
+    ...sanitizeRuntimeSiteEnvironment(process.env),
     NODE_ENV: 'production',
-    NEXT_PUBLIC_BASE_PATH: variant.basePath,
-    NEXT_PUBLIC_AGENT_API_URL: variant.apiUrl,
   };
-  // The build must never see a deployment identity. If it did, a build-time
-  // read would look like a runtime one and this whole check would be void.
-  for (const key of Object.keys(env)) {
-    if (key.startsWith('AGENT_WEB_')) delete env[key];
+  try {
+    buildStandalone(variant, { env, stdio: 'pipe' });
+  } catch (error) {
+    fail(error.message);
   }
-
-  const result = spawnSync(process.execPath, [NEXT_BIN, 'build'], {
-    cwd: WEB_ROOT,
-    env,
-    encoding: 'utf8',
-  });
-  if (result.error) {
-    fail(`could not run \`next build\` for ${variant.name}: ${result.error.message}`);
-  }
-  if (result.status !== 0) {
-    fail(
-      `\`next build\` failed for ${variant.name}:\n` +
-        `${(result.stdout ?? '') + (result.stderr ?? '')}`,
-    );
-  }
-
-  if (!existsSync(SERVER)) fail(`no standalone server at ${SERVER} after the build`);
-  // Mirror what the runtime image does: the static assets are emitted outside
-  // `.next/standalone` and have to be copied in.
-  rmSync(join(STANDALONE, '.next', 'static'), { recursive: true, force: true });
-  cpSync(STATIC_DIR, join(STANDALONE, '.next', 'static'), { recursive: true });
 }
 
-function startServer(env, port) {
+async function startServer(env) {
   // The deployment's identity is given, never inherited: a shell or CI job that
   // happens to export one of these must not decide what any render below shows.
-  const inherited = Object.fromEntries(
-    Object.entries(process.env).filter(([key]) => !key.startsWith('AGENT_WEB_')),
-  );
-  const child = spawn(process.execPath, [SERVER], {
-    cwd: STANDALONE,
+  return startStandalone({
     env: {
-      ...inherited,
-      NODE_ENV: 'production',
-      HOSTNAME: '127.0.0.1',
-      PORT: String(port),
+      ...sanitizeRuntimeSiteEnvironment(process.env),
       ...env,
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    captureOutput: true,
   });
-
-  const logs = [];
-  child.stdout.on('data', (chunk) => logs.push(String(chunk)));
-  child.stderr.on('data', (chunk) => logs.push(String(chunk)));
-  child.on('error', (error) => logs.push(`spawn error: ${error.message}`));
-
-  return {
-    logs,
-    stop() {
-      return new Promise((done) => {
-        if (child.exitCode !== null || child.signalCode !== null) return done();
-        child.once('exit', () => done());
-        child.kill('SIGTERM');
-        setTimeout(() => child.kill('SIGKILL'), 5_000).unref();
-      });
-    },
-  };
-}
-
-/**
- * The first response the server gives, whatever its status.
- *
- * Any status means the process is up; the assertions decide whether the
- * status and body are right. Waiting only for 200 would turn a wrongly-built
- * variant into a timeout, which reads as a broken check rather than a broken
- * build.
- */
-async function waitForResponse(url) {
-  const deadline = Date.now() + STARTUP_TIMEOUT_MS;
-  let lastError = 'no attempt made';
-  while (Date.now() < deadline) {
-    try {
-      return await fetch(url);
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
-      await sleep(POLL_INTERVAL_MS);
-    }
-  }
-  throw new Error(`${url} did not answer within ${STARTUP_TIMEOUT_MS}ms: ${lastError}`);
 }
 
 async function render(variant, env, suffix = '/login') {
-  const port = nextPort++;
-  const server = startServer(env, port);
+  const server = await startServer(env);
   try {
-    const url = `http://127.0.0.1:${port}${variant.basePath}${suffix}`;
-    const response = await waitForResponse(url);
+    const url = `http://127.0.0.1:${server.port}${variant.basePath}${suffix}`;
+    const response = await waitForResponse(url, {
+      server,
+      timeoutMs: STARTUP_TIMEOUT_MS,
+      pollIntervalMs: POLL_INTERVAL_MS,
+    });
     return { status: response.status, html: await response.text(), logs: server.logs.join('') };
   } finally {
     await server.stop();
@@ -446,10 +346,9 @@ async function render(variant, env, suffix = '/login') {
 }
 
 async function probePath(variant, path) {
-  const port = nextPort++;
-  const server = startServer(DEPLOYMENTS[0].env, port);
+  const server = await startServer(DEPLOYMENTS[0].env);
   try {
-    const response = await waitForResponse(`http://127.0.0.1:${port}${path}`);
+    const response = await waitForResponse(`http://127.0.0.1:${server.port}${path}`, { server });
     return response.status;
   } finally {
     await server.stop();
@@ -494,18 +393,6 @@ function assertRendered(variant, target, rendered) {
     fail(`${where}: an unconfigured footer must not invent deployment metadata`);
   }
 
-  // The one URL this app hands to another service, and the string the gateway
-  // matches as an exact redirect target.
-  const signIn = signInHref(html);
-  const expectedSignIn = `${variant.apiUrl}/v1/session/login`;
-  if (!signIn) fail(`${where}: no sign-in link in the document`);
-  if (!signIn.startsWith(expectedSignIn)) {
-    fail(
-      `${where}: the sign-in link is ${JSON.stringify(signIn)}, expected it to ` +
-        `start with ${JSON.stringify(expectedSignIn)}`,
-    );
-  }
-
   // Assets carry the mount prefix; a /agents deployment that loads the root
   // app's chunks renders unstyled and inert, or 404s outright.
   const asset = firstMatch(html, /(?:src|href)="([^"]*\/_next\/static\/[^"]*)"/);
@@ -525,13 +412,6 @@ function assertRendered(variant, target, rendered) {
     }
   }
 
-  // The feature switch is a boolean, so it is asserted structurally rather
-  // than as a substring of the escaped flight payload.
-  const unescaped = html.replaceAll('\\"', '"');
-  if (!unescaped.includes(`"rag":${target.rag}`)) {
-    fail(`${where}: the feature switch is not ${target.rag} in the serialized config`);
-  }
-
   // The half the client hydrates from. Compared as an object rather than
   // searched for as substrings: a payload carrying one field of this
   // deployment and the rest of another's is also a document that renders
@@ -545,13 +425,7 @@ function assertRendered(variant, target, rendered) {
     );
   }
 
-  const rag = payload.match(/"features":\{"rag":(true|false)\}/);
-  if (!rag) {
-    fail(`${where}: the RSC payload carries no serialized feature switch`);
-  }
-  if (rag[1] !== String(target.rag)) {
-    fail(`${where}: the RSC payload's feature switch is ${rag[1]}, expected ${target.rag}`);
-  }
+  assertNoRetired(where, html, payload);
 
   // Anything belonging to the other deployment means a fallback to a
   // build-time constant, which is the whole failure this work removed.
@@ -563,6 +437,21 @@ function assertRendered(variant, target, rendered) {
   }
   if (payload.includes(SENTINEL)) {
     fail(`${where}: a variable that is not on the allowlist reached the RSC payload`);
+  }
+}
+
+/** The retired Gateway link and docs-assistant switch reach neither half of the page. */
+function assertNoRetired(where, html, payload) {
+  for (const [subject, text] of [
+    ['the document', html],
+    ['the RSC payload', payload],
+  ]) {
+    if (
+      text.includes('retired-gateway.example') ||
+      /"features":/.test(text.replaceAll('\\"', '"'))
+    ) {
+      fail(`${where}: ${subject} carries a retired Gateway setting`);
+    }
   }
 }
 
@@ -579,7 +468,6 @@ function assertBundleIsClean(variant) {
       ['status URL', target.statusUrl],
       ['documentation URL', target.docsUrl],
       ['contact URL', target.contactUrl],
-      ['gateway host', target.gatewayHost],
     ]) {
       if (bundle.includes(value)) {
         fail(
@@ -588,41 +476,6 @@ function assertBundleIsClean(variant) {
         );
       }
     }
-  }
-}
-
-/**
- * The mount prefix reaches the control plane once.
- *
- * `return_to` is captured from `window.location.pathname`, which already
- * carries the prefix, and the control plane appends it back when it builds the
- * landing URL. Handed over unchanged it is applied twice: signing in at
- * `/agents` returned to `/agents/agents`, which this app resolved as a job
- * whose id was `agents` and rendered as "No such agent job". The unit tests pin
- * `safeReturnTo`; this pins what the built page actually links to.
- */
-async function assertReturnTo(variant) {
-  const landing = '/jobs/abc';
-  const asked = `${variant.basePath}${landing}`;
-  const where = `${variant.name} / return_to`;
-  const rendered = await render(
-    variant,
-    DEPLOYMENTS[0].env,
-    `/login?return_to=${encodeURIComponent(asked)}`,
-  );
-  if (rendered.status !== 200) {
-    fail(`${where}: the page answered ${rendered.status}\n${rendered.logs}`);
-  }
-
-  const href = signInHref(rendered.html);
-  if (!href) fail(`${where}: no sign-in link in the document`);
-
-  const returnTo = returnToOf(href);
-  if (returnTo !== landing) {
-    fail(
-      `${where}: asked to return to ${JSON.stringify(asked)}, the sign-in link asks the control ` +
-        `plane for ${JSON.stringify(returnTo)}, expected ${JSON.stringify(landing)}`,
-    );
   }
 }
 
@@ -667,7 +520,6 @@ async function assertNeutralDeployment(variant) {
     statusUrl: NEUTRAL.statusUrl,
     docsUrl: NEUTRAL.docsUrl,
     contactUrl: NEUTRAL.contactUrl,
-    gatewayUrl: NEUTRAL.gatewayUrl,
   };
   if (JSON.stringify(identity) !== JSON.stringify(expected)) {
     fail(
@@ -676,10 +528,7 @@ async function assertNeutralDeployment(variant) {
     );
   }
 
-  const rag = payload.match(/"features":\{"rag":(true|false)\}/);
-  if (!rag || rag[1] !== String(NEUTRAL.rag)) {
-    fail(`${where}: the feature switch is ${rag ? rag[1] : 'absent'}, expected ${NEUTRAL.rag}`);
-  }
+  assertNoRetired(where, rendered.html, payload);
 
   assertNoForeignIdentity(where, 'the document', rendered.html, NEUTRAL);
   assertNoForeignIdentity(where, 'the RSC payload', payload, NEUTRAL);
@@ -703,7 +552,6 @@ async function assertSavedConfigRequestScope(variant) {
     reads += 1;
     const saved = {
       branding: expectedIdentity(target),
-      features: { rag: target.rag },
     };
     if (mode === 'http') {
       response.writeHead(503).end();
@@ -711,7 +559,7 @@ async function assertSavedConfigRequestScope(variant) {
     }
     if (mode === 'invalid') {
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ ...saved, features: { rag: 'invalid' } }));
+      response.end(JSON.stringify({ branding: { ...saved.branding, docsUrl: 'javascript:1' } }));
       return;
     }
     if (mode === 'slow body') {
@@ -735,15 +583,8 @@ async function assertSavedConfigRequestScope(variant) {
   });
   await new Promise((done) => controlPlane.listen(0, '127.0.0.1', done));
 
-  const port = nextPort++;
-  const server = startServer(
-    {
-      ...DEPLOYMENTS[0].env,
-      AGENT_CONTROL_PLANE_URL: `http://127.0.0.1:${controlPlane.address().port}`,
-    },
-    port,
-  );
-  const url = `http://127.0.0.1:${port}${variant.basePath}/login`;
+  let server;
+  let url;
 
   async function assertSnapshot(expected, label, bounded = false) {
     const before = reads;
@@ -776,68 +617,77 @@ async function assertSavedConfigRequestScope(variant) {
     }
   }
 
-  try {
-    // Start the production process through an asset request, so its startup
-    // time cannot hide the appearance budget or prime the public fallback.
-    const chunk = readdirSync(join(STATIC_DIR, 'chunks')).find((file) =>
-      /^main-app-.*\.js$/.test(file),
-    );
-    if (!chunk) throw new Error('No main-app chunk to check production server readiness');
-    const asset = await waitForResponse(
-      `http://127.0.0.1:${port}${variant.basePath}/_next/static/chunks/${chunk}`,
-    );
-    await asset.arrayBuffer();
-    if (asset.status !== 200 || reads !== 0) {
-      throw new Error(`${variant.name}: static readiness request unexpectedly read settings`);
-    }
+  await withRuntimeResources(
+    {
+      controlPlane,
+      startServer: () =>
+        startServer({
+          ...DEPLOYMENTS[0].env,
+          AGENT_CONTROL_PLANE_URL: `http://127.0.0.1:${controlPlane.address().port}`,
+        }),
+    },
+    async (startedServer) => {
+      server = startedServer;
+      url = `http://127.0.0.1:${server.port}${variant.basePath}/login`;
+      // Start the production process through an asset request, so its startup
+      // time cannot hide the appearance budget or prime the public fallback.
+      const chunk = readdirSync(join(STATIC_DIR, 'chunks')).find((file) =>
+        /^main-app-.*\.js$/.test(file),
+      );
+      if (!chunk) throw new Error('No main-app chunk to check production server readiness');
+      const asset = await waitForResponse(
+        `http://127.0.0.1:${server.port}${variant.basePath}/_next/static/chunks/${chunk}`,
+        { server },
+      );
+      await asset.arrayBuffer();
+      if (asset.status !== 200 || reads !== 0) {
+        throw new Error(`${variant.name}: static readiness request unexpectedly read settings`);
+      }
 
-    const neutral = {
-      appName: NEUTRAL.appName,
-      orgName: '',
-      orgUrl: '',
-      statusUrl: '',
-      docsUrl: '',
-      contactUrl: '',
-      gatewayUrl: '',
-    };
-    for (const stalled of ['slow headers', 'slow body']) {
-      mode = stalled;
-      await assertSnapshot(neutral, `cold ${mode}`, true);
-    }
+      const neutral = {
+        appName: NEUTRAL.appName,
+        orgName: '',
+        orgUrl: '',
+        statusUrl: '',
+        docsUrl: '',
+        contactUrl: '',
+      };
+      for (const stalled of ['slow headers', 'slow body']) {
+        mode = stalled;
+        await assertSnapshot(neutral, `cold ${mode}`, true);
+      }
 
-    mode = 'success';
-    for (const deployment of DEPLOYMENTS) {
-      target = deployment;
-      await assertSnapshot(expectedIdentity(target), `saved ${target.name}`);
-    }
+      mode = 'success';
+      for (const deployment of DEPLOYMENTS) {
+        target = deployment;
+        await assertSnapshot(expectedIdentity(target), `saved ${target.name}`);
+      }
 
-    for (const failure of ['slow headers', 'slow body', 'http', 'invalid']) {
-      mode = failure;
-      await assertSnapshot(expectedIdentity(target), `retained appearance after ${mode}`, true);
-    }
+      for (const failure of ['slow headers', 'slow body', 'http', 'invalid']) {
+        mode = failure;
+        await assertSnapshot(expectedIdentity(target), `retained appearance after ${mode}`, true);
+      }
 
-    mode = 'success';
-    target = DEPLOYMENTS[0];
-    await assertSnapshot(expectedIdentity(target), 'saved edits after backend recovery');
+      mode = 'success';
+      target = DEPLOYMENTS[0];
+      await assertSnapshot(expectedIdentity(target), 'saved edits after backend recovery');
 
-    // Separate concurrent page requests must each read their own settings,
-    // rather than sharing a process-wide in-flight promise.
-    const before = reads;
-    const responses = await Promise.all([fetch(url), fetch(url)]);
-    await Promise.all(responses.map((response) => response.text()));
-    if (responses.some((response) => response.status !== 200) || reads - before !== 2) {
-      throw new Error(`${variant.name}: concurrent pages did not each read one settings snapshot`);
-    }
-    console.log(
-      `${variant.name}: cold and retained appearance fallbacks rendered within ` +
-        `${Math.max(...fallbackTimings).toFixed(0)}ms.`,
-    );
-  } finally {
-    await server.stop();
-    await new Promise((done, reject) =>
-      controlPlane.close((error) => (error ? reject(error) : done())),
-    );
-  }
+      // Separate concurrent page requests must each read their own settings,
+      // rather than sharing a process-wide in-flight promise.
+      const before = reads;
+      const responses = await Promise.all([fetch(url), fetch(url)]);
+      await Promise.all(responses.map((response) => response.text()));
+      if (responses.some((response) => response.status !== 200) || reads - before !== 2) {
+        throw new Error(
+          `${variant.name}: concurrent pages did not each read one settings snapshot`,
+        );
+      }
+      console.log(
+        `${variant.name}: cold and retained appearance fallbacks rendered within ` +
+          `${Math.max(...fallbackTimings).toFixed(0)}ms.`,
+      );
+    },
+  );
 }
 
 /** The headers every response carries, documents and build assets alike. */
@@ -868,15 +718,14 @@ function assertStaticSecurityHeaders(where, headers) {
  * miss while every other one matches.
  */
 async function assertSecurityHeaders(variant) {
-  const port = nextPort++;
-  const server = startServer(DEPLOYMENTS[0].env, port);
-  const origin = `http://127.0.0.1:${port}`;
+  const server = await startServer(DEPLOYMENTS[0].env);
+  const origin = `http://127.0.0.1:${server.port}`;
   try {
     const nonces = new Set();
     let asset = null;
     for (const path of [variant.basePath || '/', `${variant.basePath}/login`]) {
       const where = `${variant.name} / security headers of ${path}`;
-      const response = await waitForResponse(`${origin}${path}`);
+      const response = await waitForResponse(`${origin}${path}`, { server });
       const html = await response.text();
       if (response.status !== 200) {
         fail(`${where}: answered ${response.status}\n${server.logs.join('')}`);
@@ -941,7 +790,6 @@ async function main() {
       assertRendered(variant, target, await render(variant, target.env));
     }
 
-    await assertReturnTo(variant);
     await assertNeutralDeployment(variant);
     await assertSavedConfigRequestScope(variant);
     await assertSecurityHeaders(variant);
@@ -984,7 +832,7 @@ async function main() {
 
   // An illegal value must be refused. Reading it as "unset" is the silent
   // fallback this work removed, so a normal page is the failure.
-  const broken = await render(VARIANTS[0], {
+  const broken = await render(VARIANTS.at(-1), {
     ...DEPLOYMENTS[0].env,
     AGENT_WEB_STATUS_URL: 'not-a-url',
   });
@@ -997,19 +845,24 @@ async function main() {
 
   console.log(
     `Runtime site config: ${VARIANTS.length} variants, ${DEPLOYMENTS.length} configured ` +
-      `deployments, 1 unconfigured deployment, all correct.`,
+      'deployments, 1 unconfigured deployment, all correct.',
   );
 }
 
-if (process.argv.includes('--saved-config-only')) {
-  const { basePath } = JSON.parse(readFileSync(join(NEXT_DIR, 'routes-manifest.json'), 'utf8'));
-  const variant = VARIANTS.find((item) => item.basePath === basePath);
-  if (!variant)
-    throw new Error(`No runtime config fixture for basePath ${JSON.stringify(basePath)}`);
-  await assertSavedConfigRequestScope(variant);
-  console.log(
-    'Runtime site config: one fetch per request, fresh edits, and concurrent pages correct.',
-  );
-} else {
-  await main();
+async function run() {
+  if (process.argv.includes('--saved-config-only')) {
+    const { basePath } = JSON.parse(readFileSync(join(NEXT_DIR, 'routes-manifest.json'), 'utf8'));
+    const variant = VARIANTS.find((item) => item.basePath === basePath);
+    if (!variant)
+      throw new Error(`No runtime config fixture for basePath ${JSON.stringify(basePath)}`);
+    await assertSavedConfigRequestScope(variant);
+    console.log(
+      'Runtime site config: one fetch per request, fresh edits, and concurrent pages correct.',
+    );
+  } else {
+    await main();
+  }
 }
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
+  await runRuntimeGuard(run);

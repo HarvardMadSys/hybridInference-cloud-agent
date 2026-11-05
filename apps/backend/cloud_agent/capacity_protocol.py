@@ -1011,9 +1011,11 @@ def history_window(*, now: datetime, seconds: int) -> tuple[datetime, datetime]:
 
     Returns:
         ``(since, until)``, both floored to the minute and anchored to the
-        server's time. The current partial minute is excluded: its observation
-        may not have been recorded yet, and a trailing empty point would read
-        as a gap that is really just the present.
+        server's time, ``until`` being the last complete minute. The current
+        partial minute is excluded: its observation may not have been recorded
+        yet, and a trailing empty point would read as a gap that is really just
+        the present.
     """
-    until = _as_utc(now).replace(second=0, microsecond=0)
+    current = _as_utc(now).replace(second=0, microsecond=0)
+    until = current - timedelta(seconds=HISTORY_RESOLUTION_SECONDS)
     return until - timedelta(seconds=seconds), until

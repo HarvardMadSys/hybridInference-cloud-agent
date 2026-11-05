@@ -1,10 +1,11 @@
 """Real-git tests: the broker's Git runs none of the commands a workspace names.
 
-The Git view, the shared-workspace snapshot and the base-bundle import run Git
-as the group UID against a repository whose ``.git/config`` any member can
-write. These tests plant each config-driven command Git would otherwise run
-and prove the broker still reads the workspace correctly without running any
-of them.
+The Git view and the base-bundle import run Git as the group UID against a
+repository whose ``.git/config`` any member can write. These tests plant each
+config-driven command Git would otherwise run and prove the broker still reads
+the workspace correctly without running any of them. The same file cannot
+change the patch's form either: the browser reads its file names from the
+``a/`` and ``b/`` headers.
 """
 
 from __future__ import annotations
@@ -19,12 +20,8 @@ from fastapi import HTTPException
 from cloud_agent_host import chat_sandbox
 from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
 from cloud_agent_host.sandbox import ContainerBackend, ProcessBackend, SandboxError
-from cloud_agent_host.sandbox_manager import (
-    _GIT_VIEW_ENV,
-    _NEUTRALIZE_GIT_FILTERS,
-    _run_git,
-    _run_sandbox,
-)
+from cloud_agent_host.sandbox_manager import _run_git, _run_git_metadata, _run_sandbox
+from cloud_agent_host.workspace_git import GIT_VIEW_ENV, NEUTRALIZE_GIT_FILTERS
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -120,15 +117,92 @@ def test_git_view_runs_no_command_the_workspace_config_names(backend, tmp_path):
     (repo / "a.txt").write_text("two\n")
     (repo / "new.txt").write_text("new\n")
 
+    metadata = _run_git_metadata(backend, repo)
     view = _run_git(backend, repo)
 
     ran = [m.name for m in (fsmonitor_ran, hook_ran, clean_ran, gpg_ran) if m.exists()]
     assert ran == []
-    assert view["branch"] == "main"
+    assert metadata["branch"] == view["branch"] == "main"
+    assert metadata["revision"] == view["revision"]
+    assert metadata["change_count"] == len(view["changes"]) == 3
+    assert "patch" not in metadata and "commits" not in metadata
     assert {"code": " M", "path": "a.txt"} in view["changes"]
     assert "-one\n+two\n" in view["patch"]
     assert "+new\n" in view["patch"]
     assert [commit["subject"] for commit in view["commits"]] == ["first"]
+
+
+def test_git_metadata_reports_a_rename_destination_as_a_readable_path(backend, tmp_path):
+    repo = _repo(tmp_path / "ws")
+    _git("mv", "a.txt", "renamed file.txt", cwd=repo)
+
+    metadata = _run_git_metadata(backend, repo)
+
+    assert metadata["changes"] == [{"code": "R ", "path": "renamed file.txt"}]
+
+
+def test_git_metadata_revision_changes_without_constructing_a_patch(backend, tmp_path):
+    repo = _repo(tmp_path / "ws")
+    clean = _run_git_metadata(backend, repo)
+    (repo / "a.txt").write_text("two\n")
+    (repo / "new.txt").write_text("new\n")
+    first = _run_git_metadata(backend, repo)
+    # Keep the same status rows and byte sizes. The revision still follows the
+    # workspace content-sensitive filesystem fingerprint.
+    (repo / "a.txt").write_text("six\n")
+    (repo / "new.txt").write_text("old\n")
+    second = _run_git_metadata(backend, repo)
+    full = _run_git(backend, repo)
+
+    assert len({clean["revision"], first["revision"], second["revision"]}) == 3
+    assert first["changes"] == second["changes"] == full["changes"]
+    assert second["revision"] == full["revision"]
+    assert second["change_count"] == len(second["changes"]) == 2
+    assert "patch" not in second and "commits" not in second
+
+
+def test_git_metadata_reports_clean_committed_changes_from_the_pinned_base(backend, tmp_path):
+    repo = _repo(tmp_path / "ws")
+    base = _git("rev-parse", "HEAD", cwd=repo).strip()
+    (repo / "a.txt").write_text("two\n")
+    (repo / "new.txt").write_text("new\n")
+    _git("add", ".", cwd=repo)
+    _git("commit", "-q", "-m", "second", cwd=repo)
+    assert _git("status", "--porcelain", cwd=repo) == ""
+
+    metadata = _run_git_metadata(backend, repo, base)
+    full = _run_git(backend, repo, base)
+
+    assert metadata["changes"] == [
+        {"code": "M ", "path": "a.txt"},
+        {"code": "A ", "path": "new.txt"},
+    ]
+    assert metadata["change_count"] == 2
+    assert metadata["revision"] == full["revision"]
+    assert "patch" not in metadata and "commits" not in metadata
+    assert "-one\n+two\n" in full["patch"]
+    assert "+new\n" in full["patch"]
+
+
+def test_git_metadata_revision_changes_when_same_tree_history_is_rewritten(backend, tmp_path):
+    repo = _repo(tmp_path / "ws")
+    before_head = _git("rev-parse", "HEAD", cwd=repo).strip()
+    before_tree = _git("rev-parse", "HEAD^{tree}", cwd=repo).strip()
+    before = _run_git_metadata(backend, repo)
+
+    _git("commit", "--amend", "-q", "-m", "rewritten first", cwd=repo)
+
+    after_head = _git("rev-parse", "HEAD", cwd=repo).strip()
+    after_tree = _git("rev-parse", "HEAD^{tree}", cwd=repo).strip()
+    after = _run_git_metadata(backend, repo)
+    full = _run_git(backend, repo)
+
+    assert before_head != after_head
+    assert before_tree == after_tree
+    assert before["changes"] == after["changes"] == []
+    assert before["revision"] != after["revision"]
+    assert after["revision"] == full["revision"]
+    assert [commit["subject"] for commit in full["commits"]] == ["rewritten first"]
 
 
 def test_git_view_never_lazily_fetches_through_a_planted_promisor(backend, tmp_path):
@@ -196,8 +270,8 @@ def test_only_git_lfs_own_filter_survives_the_neutralized_config(backend, tmp_pa
     status, stdout, _stderr = _run_sandbox(
         backend,
         workdir=repo,
-        script=_NEUTRALIZE_GIT_FILTERS + report,
-        env=dict(_GIT_VIEW_ENV),
+        script=NEUTRALIZE_GIT_FILTERS + report,
+        env=dict(GIT_VIEW_ENV),
         timeout_s=30,
     )
 
@@ -243,6 +317,80 @@ def test_git_view_patch_still_carries_every_kind_of_change(backend, tmp_path):
     ]
     assert f"-Subproject commit {recorded}\n+Subproject commit {moved}\n" in view["patch"]
     assert {"code": " M", "path": "sub"} in view["changes"]
+    assert {"code": "??", "path": "line\nbreak"} in view["changes"]
+
+
+@pytest.mark.parametrize("scope", ["repository", "global"])
+@pytest.mark.parametrize("key", ["noPrefix", "mnemonicPrefix"])
+@pytest.mark.parametrize("capture", ["view", "snapshot"])
+def test_git_patch_names_files_a_and_b_whatever_the_prefix_config(
+    backend, tmp_path, scope, key, capture
+):
+    # The browser's Git panel and Changes list read the a/ and b/ names.
+    repo = _repo(tmp_path / "ws")
+    base = _git("rev-parse", "HEAD", cwd=repo).strip()
+    if scope == "repository":
+        _git("config", f"diff.{key}", "true", cwd=repo)
+    else:
+        (tmp_path / "home" / ".gitconfig").write_text(f"[diff]\n\t{key} = true\n")
+    (repo / "a.txt").write_text("two\n")
+    (repo / "src").mkdir()
+    (repo / "src" / "new.txt").write_text("new\n")
+
+    view = (
+        _run_git(backend, repo, base, exact_patch=True)
+        if capture == "snapshot"
+        else _run_git(backend, repo)
+    )
+
+    names = [
+        line
+        for line in view["patch"].splitlines()
+        if line.startswith(("diff --git ", "--- ", "+++ "))
+    ]
+    assert names == [
+        "diff --git a/a.txt b/a.txt",
+        "--- a/a.txt",
+        "+++ b/a.txt",
+        "diff --git a/src/new.txt b/src/new.txt",
+        "--- /dev/null",
+        "+++ b/src/new.txt",
+    ]
+
+
+@pytest.mark.parametrize("key", ["color.ui", "color.diff"])
+@pytest.mark.parametrize("capture", ["view", "snapshot"])
+def test_git_patch_carries_no_colour_whatever_the_colour_config(backend, tmp_path, key, capture):
+    repo = _repo(tmp_path / "ws")
+    base = _git("rev-parse", "HEAD", cwd=repo).strip()
+    _git("config", key, "always", cwd=repo)
+    (repo / "a.txt").write_text("two\n")
+
+    view = (
+        _run_git(backend, repo, base, exact_patch=True)
+        if capture == "snapshot"
+        else _run_git(backend, repo)
+    )
+
+    assert view["patch"].startswith("diff --git a/a.txt b/a.txt\nindex ")
+    assert view["patch"].endswith("\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-one\n+two\n")
+
+
+def test_the_git_view_keeps_its_context_under_diff_context_zero(backend, tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _git("init", "-q", "-b", "main", cwd=workspace)
+    (workspace / "a.txt").write_text("one\ntwo\nthree\nfour\nfive\n")
+    _git("add", "a.txt", cwd=workspace)
+    _git("commit", "-q", "-m", "first", cwd=workspace)
+    base = _git("rev-parse", "HEAD", cwd=workspace).strip()
+    # A hunk with no context around it is one git apply refuses.
+    _git("config", "diff.context", "0", cwd=workspace)
+    (workspace / "a.txt").write_text("one\ntwo\nTHREE\nfour\nfive\n")
+
+    hunk = "@@ -1,5 +1,5 @@\n one\n two\n-three\n+THREE\n four\n five\n"
+    assert _run_git(backend, workspace, base, exact_patch=True)["patch"].endswith(hunk)
+    assert _run_git(backend, workspace)["patch"].endswith(hunk)
 
 
 def test_base_bundle_import_never_lazily_fetches_a_missing_prerequisite(tmp_path, monkeypatch):
@@ -271,13 +419,14 @@ def test_base_bundle_import_never_lazily_fetches_a_missing_prerequisite(tmp_path
     monkeypatch.setattr(chat_sandbox, "ACTIVATION_TMPFS", str(tmpfs))
     manager = ChatSandboxManager(ContainerBackend(image="img"))
 
-    def exec_here(_spec, argv, *, env, workdir, timeout_s, input_bytes):
+    def exec_here(_spec, argv, *, env, workdir, timeout_s, input_bytes=None, stdin=None):
         # The container's exec without Docker: the same argv, env and stdin.
+        assert input_bytes is None
         return subprocess.run(
             argv,
             cwd=workspace,
             env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), **env},
-            input=input_bytes,
+            stdin=stdin,
             capture_output=True,
             timeout=timeout_s,
             check=False,
@@ -289,7 +438,7 @@ def test_base_bundle_import_never_lazily_fetches_a_missing_prerequisite(tmp_path
     )
 
     # The prerequisite is missing, so the import fails, and fetches nothing.
-    with pytest.raises(SandboxError):
-        manager.import_base_bundle(spec, bundle.read_bytes(), commit=tip, env={})
+    with pytest.raises(SandboxError), bundle.open("rb") as bundle_file:
+        manager.import_base_bundle(spec, bundle_file, commit=tip, env={})
 
     assert not upload_pack_ran.exists()

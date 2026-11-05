@@ -133,7 +133,9 @@ class PostgresCredentialQueries:
                        c.deleted_at, c.label, c.transport, c.location
                 FROM agent_mcp_thread_bindings b
                 JOIN agent_mcp_connections c ON c.id = b.connection_id
-                WHERE b.thread_id = $1 AND b.enabled
+                -- A sandbox server runs behind the sandbox's own MCP gateway;
+                -- the relay never dials it, so never lists it either.
+                WHERE b.thread_id = $1 AND b.enabled AND c.location <> 'sandbox'
                 ORDER BY b.alias, b.connection_id
                 """,
                 row["thread_id"],

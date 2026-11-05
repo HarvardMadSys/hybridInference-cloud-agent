@@ -11,7 +11,7 @@ from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.api import source_control
 from cloud_agent.api._owner_auth import authenticate_agent_owner
-from cloud_agent.api.deps import get_agent_app_credentials, get_gateway_client, get_storage
+from cloud_agent.api.deps import get_agent_app_credentials, get_owner_directory, get_storage
 from cloud_agent.github_app import (
     AppNotInstalled,
     RepositoryCreationError,
@@ -142,7 +142,7 @@ def setup(monkeypatch):
     app = FastAPI()
     app.include_router(source_control.router)
     app.dependency_overrides[authenticate_agent_owner] = lambda: {"user_id": _OWNER}
-    app.dependency_overrides[get_gateway_client] = _Gateway
+    app.dependency_overrides[get_owner_directory] = _Gateway
     app.dependency_overrides[get_storage] = lambda: store
     app.dependency_overrides[get_agent_app_credentials] = lambda: credentials
     return app, store, credentials
@@ -262,7 +262,7 @@ async def test_session_authentication_required_and_worker_tokens_refused(setup, 
 
 async def test_gateway_admission_cannot_be_bypassed(setup):
     app, store, credentials = setup
-    app.dependency_overrides[get_gateway_client] = lambda: _Gateway(allowed=False)
+    app.dependency_overrides[get_owner_directory] = lambda: _Gateway(allowed=False)
     response = await _post(app)
     assert response.status_code == 403
     assert credentials.created == [] and store.reads == []

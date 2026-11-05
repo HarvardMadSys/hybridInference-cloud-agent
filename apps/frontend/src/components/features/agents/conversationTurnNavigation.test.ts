@@ -31,14 +31,12 @@ function makeJob(overrides: Partial<AgentJob> = {}): AgentJob {
     branch: 'agent/ajob_1',
     runtime: 'claude-code',
     model: 'qwen-test',
-    spentUsd: 0,
     timeoutLabel: '',
     sandbox: '',
     attempts: [{ no: 1, status: 'live' }],
     events: [],
     diffFiles: [],
     gates: [],
-    usage: { tokensIn: '', tokensOut: '', cachePct: 0, turns: null },
     ...overrides,
   };
 }

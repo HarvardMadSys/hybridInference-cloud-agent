@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useAuth, useLocale } from '@/components/providers';
+import { Select } from '@/components/ui/Select';
 import { getMemoryProjects } from '@/lib/api/agentMemory';
 import { MemoryScopePanel } from './MemoryScopePanel';
 import { RefreshIcon } from './icons';
@@ -68,22 +69,19 @@ function ProjectMemorySelector() {
           <label htmlFor={selectId} className="text-xs font-medium text-foreground">
             {t('settings.projectMemory.project')}
           </label>
-          <select
+          <Select
             id={selectId}
             value={repo}
-            onChange={(event) => setRepo(event.target.value)}
+            onValueChange={setRepo}
             disabled={loading || projects.length === 0}
             className="ui-input mt-1 block min-h-11 w-full rounded-lg"
-          >
-            {!projects.length ? (
-              <option value="">{t('settings.projectMemory.select')}</option>
-            ) : null}
-            {projects.map((project) => (
-              <option key={project} value={project}>
-                {project}
-              </option>
-            ))}
-          </select>
+            options={[
+              ...(projects.length
+                ? []
+                : [{ value: '', label: t('settings.projectMemory.select') }]),
+              ...projects.map((project) => ({ value: project, label: project })),
+            ]}
+          />
         </div>
         <button
           type="button"

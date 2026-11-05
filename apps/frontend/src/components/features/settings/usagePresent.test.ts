@@ -4,6 +4,7 @@ import type { AdminUsageAggregate, AdminUsageDay } from '@/lib/api/adminUsage';
 import type { OwnerResourceDay } from '@/lib/api/ownerUsage';
 
 import {
+  cachedShare,
   chartDays,
   compactCount,
   coreHours,
@@ -13,13 +14,17 @@ import {
   formatCost,
   formatDayValue,
   formatMemory,
+  formatShare,
   gibHours,
   partlyMeasured,
+  reasoningPartly,
   relativeTime,
   tickIndexes,
   tokenTotal,
-  unrecordedTurns,
   utcMidnightLocal,
+  bucketLabel,
+  crossesYear,
+  rangeSpan,
 } from './usagePresent';
 
 const GIB = 1024 ** 3;
@@ -42,7 +47,7 @@ function aggregate(overrides: Partial<AdminUsageAggregate> = {}): AdminUsageAggr
     oldest_queried_at: null,
     runs_with_snapshot: 2,
     missing_attempts: 0,
-    status_counts: { available: 2, partial: 0, stale: 0, pending: 0, unavailable: 0 },
+    status_counts: { available: 2, partial: 0, pending: 0, unavailable: 0 },
     active_runs: 0,
     refreshing_runs: 0,
     ...overrides,
@@ -116,16 +121,100 @@ describe('coverage', () => {
     expect(partlyMeasured({ ...base, running_seconds: 30, measured_seconds: 0 })).toBe(false);
   });
 
-  it('counts turns the Gateway has not reported', () => {
-    expect(unrecordedTurns(aggregate({ run_count: 5, runs_with_snapshot: 3 }))).toBe(2);
-    expect(unrecordedTurns(aggregate())).toBe(0);
-  });
-
   it('adds input and output tokens only when both are known', () => {
     expect(tokenTotal(aggregate())).toBe(1250);
     const unknown = aggregate();
     unknown.totals = { ...unknown.totals!, tokens_out: null };
     expect(tokenTotal(unknown)).toBeNull();
+  });
+
+  it('never adds reasoning or cached input again: output and input hold them', () => {
+    const usage = aggregate();
+    usage.totals = { ...usage.totals!, cache_read: 400, cache_write: 100, reasoning: 90 };
+    expect(tokenTotal(usage)).toBe(1250);
+  });
+});
+
+describe('cache hit rate', () => {
+  function withCache(
+    cacheRead: number | null,
+    tokensIn: number | null = 1000,
+    unknown: Partial<NonNullable<AdminUsageAggregate['unknown_rows']>> | null = null,
+  ): AdminUsageAggregate {
+    const usage = aggregate();
+    usage.totals = { ...usage.totals!, cache_read: cacheRead, tokens_in: tokensIn };
+    if (unknown) {
+      usage.unknown_rows = {
+        tokens_in: 0,
+        tokens_out: 0,
+        cache_read: 0,
+        cache_write: 0,
+        reasoning: 0,
+        spent_usd: 0,
+        ...unknown,
+      };
+    }
+    return usage;
+  }
+
+  it('reads the share of input taken from the cache', () => {
+    expect(cachedShare(withCache(250))).toBe(0.25);
+    expect(cachedShare(withCache(250, 1000, { tokens_out: 3, reasoning: 2 }))).toBe(0.25);
+  });
+
+  it('keeps a reported zero as zero', () => {
+    expect(cachedShare(withCache(0))).toBe(0);
+    expect(formatShare(cachedShare(withCache(0)))).toBe('0%');
+  });
+
+  it('shows no ratio for anything not fully reported', () => {
+    expect(cachedShare(aggregate({ totals: null }))).toBeNull();
+    expect(cachedShare(withCache(null))).toBeNull();
+    expect(cachedShare(withCache(250, null))).toBeNull();
+    expect(cachedShare(withCache(250, 1000, { cache_read: 1 }))).toBeNull();
+    expect(cachedShare(withCache(250, 1000, { tokens_in: 1 }))).toBeNull();
+  });
+
+  it('shows no ratio for no input, or a cache read larger than the input', () => {
+    expect(cachedShare(withCache(0, 0))).toBeNull();
+    expect(cachedShare(withCache(1200, 1000))).toBeNull();
+  });
+
+  it('reads an unknown share as a dash, never 0%', () => {
+    expect(formatShare(null)).toBe('—');
+    expect(formatShare(cachedShare(withCache(null)))).toBe('—');
+    expect(formatShare(0.4248)).toBe('42%');
+    expect(formatShare(0.004)).toBe('<1%');
+    expect(formatShare(1)).toBe('100%');
+  });
+});
+
+describe('reasoning', () => {
+  function withReasoning(reasoning: number | null, unreported: number | null): AdminUsageAggregate {
+    const usage = aggregate();
+    usage.totals = { ...usage.totals!, reasoning };
+    if (unreported !== null) {
+      usage.unknown_rows = {
+        tokens_in: 0,
+        tokens_out: 0,
+        cache_read: 0,
+        cache_write: 0,
+        reasoning: unreported,
+        spent_usd: 0,
+      };
+    }
+    return usage;
+  }
+
+  it('notes a known total that leaves out calls not reporting it', () => {
+    expect(reasoningPartly(withReasoning(90, 2))).toBe(true);
+  });
+
+  it('notes nothing for a fully reported or an unknown total', () => {
+    expect(reasoningPartly(withReasoning(90, null))).toBe(false);
+    expect(reasoningPartly(withReasoning(90, 0))).toBe(false);
+    expect(reasoningPartly(withReasoning(null, 2))).toBe(false);
+    expect(reasoningPartly(aggregate({ totals: null }))).toBe(false);
   });
 });
 
@@ -200,5 +289,51 @@ describe('the start of a UTC day on the reader’s clock', () => {
     expect(utcMidnightLocal(at, 'en-US', 'Asia/Kolkata')).toBe('5:30 AM');
     expect(utcMidnightLocal(at, 'en-US', 'UTC')).toBeNull();
     expect(utcMidnightLocal(Number.NaN, 'en-US', 'Asia/Shanghai')).toBeNull();
+  });
+});
+
+describe('ranges and buckets', () => {
+  it('names a bucket by its day, week start or month, with the year once bars cross one', () => {
+    expect(bucketLabel('2026-10-12', 'day', 'en-US', false)).toBe('Oct 12');
+    expect(bucketLabel('2026-10-12', 'week', 'en-US', true)).toBe('Oct 12, 2026');
+    expect(bucketLabel('2025-12-01', 'month', 'en-US', true)).toBe('Dec 2025');
+    expect(bucketLabel('2025-12-01', 'month', 'en-US', false)).toBe('Dec');
+    expect(crossesYear(['2025-12-01', '2026-01-01'])).toBe(true);
+    expect(crossesYear(['2026-01-01', '2026-10-01'])).toBe(false);
+  });
+
+  it('writes a range’s first and last UTC days', () => {
+    const week = {
+      preset: '7d' as const,
+      days: null,
+      since: '2026-10-09T00:00:00Z',
+      until: '2026-10-15T12:00:00Z',
+      day_timezone: 'UTC' as const,
+      bucket: 'day' as const,
+      first_record_at: null,
+    };
+    expect(rangeSpan(week, 'en-US')).toEqual({ since: 'Oct 9', until: 'Oct 15' });
+    expect(rangeSpan({ ...week, preset: 'all', since: '2024-03-09T00:00:00Z' }, 'en-US')).toEqual({
+      since: 'Mar 9, 2024',
+      until: 'Oct 15, 2026',
+    });
+  });
+
+  it('treats only the bucket that ends now as still going', () => {
+    const day = (since: string, until: string) => ({
+      date: since.slice(0, 10),
+      since,
+      until,
+      running_seconds: 0,
+      measured_seconds: 0,
+      cpu_core_seconds: 0,
+      memory_byte_seconds: 0,
+    });
+    const days = chartDays(undefined, [
+      // A week clipped by the range's first day is whole.
+      day('2024-03-09T00:00:00Z', '2024-03-11T00:00:00Z'),
+      day('2026-10-12T00:00:00Z', '2026-10-15T12:00:00Z'),
+    ]);
+    expect(days.map((entry) => entry.whole)).toEqual([true, false]);
   });
 });

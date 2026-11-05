@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -693,7 +693,7 @@ class TestInvocations:
 
     def test_the_earliest_deadline_wins(self) -> None:
         """Four layers wait; the platform waits for the shortest of them."""
-        created = datetime.now(timezone.utc)
+        created = datetime.now(UTC)
         deadline = invocations.deadline_for(
             created_at=created,
             cli_timeout=timedelta(seconds=30),
@@ -703,7 +703,7 @@ class TestInvocations:
 
     def test_a_lease_can_be_the_binding_constraint(self) -> None:
         """A job whose lease ends sooner is not held open for its owner."""
-        created = datetime.now(timezone.utc)
+        created = datetime.now(UTC)
         deadline = invocations.deadline_for(
             created_at=created, lease_expires_at=created + timedelta(seconds=5)
         )

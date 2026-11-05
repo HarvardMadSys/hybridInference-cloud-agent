@@ -8,8 +8,8 @@ own concurrency semantics are pinned separately by the ``dbtest`` suite.
 Ported from the gateway with assertions untouched. Two things the router no
 longer holds are supplied by the test app instead of by an import:
 
-- **The model catalog and the MCP registry** arrive over HTTP now, so the
-  route registry the source stubbed is a fake ``GatewayClient`` here.
+- **The owner's models and the MCP registry** come from the owner's own
+  connections now, so the test app stands in an owner directory and a store.
 - **The auth dependencies** are real now, so nothing stands in for them
   any more: ``get_current_user`` verifies this service's own session token and
   ``verify_admin_access`` compares ``ADMIN_TOKEN``. There is no API-key branch
@@ -27,31 +27,39 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
 import json
-from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
-from typing import Any, ClassVar
-from unittest.mock import AsyncMock, call
+from datetime import UTC, datetime
+from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from tests.support.storage import AllCapabilities, EmptyAttachments, EmptySkillLibrary
+from tests.support.owners import (
+    CONNECTION_ID,
+    CONNECTION_MODELS,
+    SessionAccounts,
+    connection_claim,
+    connection_row,
+    on_connection,
+    use_session_secret,
+)
+from tests.support.storage import AllCapabilities, EmptyAttachments, EmptySkillLibrary, NoAccounts
 
 from cloud_agent import sandbox_manager_routing
 from cloud_agent.api import routes as agent_jobs_router, worker, workspace as agent_workspace
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import get_storage
-from cloud_agent.application.follow_ups import PreparedFollowUp
 from cloud_agent.attachments.models import AttachmentError
 from cloud_agent.domain.execution import JobStreamState
 from cloud_agent.domain.pending_messages import SettleOutcome
 from cloud_agent.goals.models import GoalConflict
 from cloud_agent.mcp.registry import mcp_cipher
+from cloud_agent.model_preference import ModelPreferenceView
+from cloud_agent.storage.repositories.conversation_commands import _goal_round_metadata
 from cloud_agent.storage.repositories.goals import _pause_detail
+from cloud_agent.thread_stats import summarize_thread
 from cloud_agent.tokens import mint_worker_token, parse_residency_mcp_token
 
 pytestmark = pytest.mark.asyncio
@@ -145,12 +153,6 @@ class FakeGoalWakeups:
         """Nothing is consumed here; the decision's own tests own that path."""
         return []
 
-    async def pending_wakeup(self, *, thread_id: str) -> dict[str, Any] | None:
-        for row in self.rows:
-            if row["thread_id"] == thread_id and row["state"] == "pending":
-                return dict(row)
-        return None
-
     def invalidate(self, thread_id: str, detail: str) -> None:
         """Pause, clear and resume void every obligation waiting on that goal."""
         for row in self.rows:
@@ -188,10 +190,6 @@ class FakeGoals:
     async def get_goal(self, *, thread_id: str) -> dict[str, Any] | None:
         goal = self._goal(thread_id)
         return None if goal is None else dict(goal)
-
-    async def get_goal_for_job(self, *, job_id: str) -> dict[str, Any] | None:
-        job = self._store.jobs.get(job_id)
-        return None if job is None else await self.get_goal(thread_id=str(job["thread_id"]))
 
     async def get_thread_goal_state(self, *, user_id: str, thread_id: str) -> dict[str, Any] | None:
         """The goal and its control version, or ``None`` for a foreign thread.
@@ -340,8 +338,15 @@ class FakeGoals:
         )
         return dict(written)
 
-    async def clear_goal(self, *, thread_id: str, user_id: str) -> bool:
-        if not self._owned(thread_id, user_id) or self._goal(thread_id) is None:
+    async def clear_goal(
+        self, *, thread_id: str, user_id: str, expected_revision: int | None = None
+    ) -> bool:
+        if not self._owned(thread_id, user_id):
+            return False
+        revision = self._store.goal_revisions.get(thread_id, 0)
+        if expected_revision is not None and expected_revision != revision:
+            raise GoalConflict("This goal changed since you read it. Reload and try again.")
+        if self._goal(thread_id) is None:
             return False
         del self._store.thread_goals[thread_id]
         # The version keeps moving: the next write compares against the revision
@@ -363,7 +368,7 @@ class FakeGoals:
                 job["cancel_requested"] = True
 
 
-class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
+class FakeStorage(EmptySkillLibrary, EmptyAttachments, NoAccounts, AllCapabilities):
     """In-memory stand-in exposing the storage surface the router uses."""
 
     def __init__(self) -> None:
@@ -379,6 +384,10 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         #: Which owner each conversation belongs to, the way
         #: ``agent_threads.user_id`` scopes every goal read and write.
         self.thread_owners: dict[str, str] = {}
+        #: How many messages a person has sent each conversation, as
+        #: ``agent_threads.user_input_seq`` counts them. Every turn is stamped
+        #: with it as it is written; only a person's turn moves it.
+        self.thread_input_seqs: dict[str, int] = {}
         self.goal_wakeups = FakeGoalWakeups(self)
         self.goals = FakeGoals(self)
         self.turn_telemetry: dict[str, dict[str, Any]] = {}
@@ -386,7 +395,6 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         self.attempt_telemetry: dict[str, list[dict[str, Any]]] = {}
         self.attempt_jobs: dict[int, str] = {}
         self.live_fence: tuple[int, int] | None = None
-        self.attempt_grants: dict[int, str] = {}
         self.terminal_readiness: dict[int, bool] = {}
         self.thread_workspace_readiness: dict[str, bool] = {}
         self.workspace_start_fences: list[str] = []
@@ -399,6 +407,9 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         self.mcp_connections: dict[int, dict[str, Any]] = {}
         self.mcp_capabilities: dict[int, dict[str, Any]] = {}
         self.mcp_bindings: dict[str, list[dict[str, Any]]] = {}
+        #: The owner's pinned default model, keyed by owner. There is no
+        #: last-used half here: it is derived from ``self.jobs``, exactly as the
+        #: repository derives it from the newest turn.
         self.session_forks: dict[str, dict[str, Any]] = {}
         #: The owner's waiting messages, and each thread's two queue facts, the
         #: way ``agent_pending_messages`` and ``agent_threads`` hold them.
@@ -406,9 +417,22 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         self.queue_paused: dict[str, str] = {}
         self.queue_settled: dict[str, str] = {}
         self._next_pending = 1
+        #: The owner's account, approved: terminal fences read it.
+        self.local_accounts = SessionAccounts()
+        self.local_accounts.add(_OWNER)
         self._next_connection = 1
         self._next_event_id = 1
         self._next_job = 1
+
+    async def get_model_preference(self, user_id: str) -> ModelPreferenceView:
+        """The newest owned turn's model and connection, as the repository derives them."""
+        jobs = [job for job in self.jobs.values() if job.get("user_id") == user_id]
+        if not jobs:
+            return ModelPreferenceView()
+        newest = max(jobs, key=lambda job: job["id"])
+        return ModelPreferenceView(
+            last_model=newest["model"], last_model_connection_id=newest.get("model_connection_id")
+        )
 
     # -- MCP connections --
     #
@@ -449,7 +473,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         if row is None or row["deleted_at"] is not None:
             return False
         row.update(
-            deleted_at=datetime.now(timezone.utc),
+            deleted_at=datetime.now(UTC),
             status="disabled",
             access_token_ciphertext=None,
             refresh_token_ciphertext=None,
@@ -582,11 +606,6 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "label": row["label"],
         }
 
-    async def get_gitlab_connection(self, *, user_id: str) -> dict[str, Any] | None:
-        """No GitLab account connected, for the same reason as the grants above."""
-        del user_id
-        return None
-
     async def list_repo_grants(self, *, user_id: str) -> list[dict[str, Any]]:
         """No GitHub App installations in these tests, which is the usual state.
 
@@ -598,14 +617,12 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         del user_id
         return []
 
-    async def get_github_account(self, *, user_id: str) -> dict[str, Any] | None:
-        """No GitHub account connected either, for the same reason."""
-        del user_id
-        return None
-
     # -- owner surface --
     async def create_job(self, **kwargs: Any) -> dict[str, Any]:
         kwargs.pop("attachments", None)
+        # Admission writes every turn with its connection; a fixture written
+        # straight to the store is the same kind of turn.
+        kwargs.setdefault("model_connection_id", CONNECTION_ID)
         job_id = f"ajob_{self._next_job:04d}"
         self._next_job += 1
         thread_id = f"athr_{job_id}"
@@ -649,6 +666,10 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         if goal is not None:
             self.goals.create_with_job(thread_id, goal)
         job["goal"] = self.thread_goals.get(thread_id)
+        # As the store counts: the task of a conversation created with a goal is
+        # its first message, and the first turn is stamped with the count.
+        self.thread_input_seqs[thread_id] = 1 if goal is not None else 0
+        job["input_seq_at_create"] = self.thread_input_seqs[thread_id]
         self.jobs[job_id] = job
         self.messages.append(
             {
@@ -681,34 +702,33 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             return job
         return None
 
-    async def create_follow_up(
+    async def insert_follow_up(
         self,
         *,
         parent_job_id: str,
         user_id: str,
         prompt: str,
-        runtime: str | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
         reset_reasoning_effort: bool = False,
         skills: list[dict[str, Any]] | None = None,
-        goal: Any | None = None,
         attachments: list[dict[str, Any]] | None = None,
-        turn_source: str = "human",
-        goal_round: int | None = None,
-        goal_round_kind: str | None = None,
-        goal_revision: int | None = None,
         yield_to_queued: bool = False,
         client_request_id: str | None = None,
         client_request_fingerprint: str | None = None,
+        model_connection_id: str | None = None,
     ) -> dict[str, Any] | None:
+        """A person's next turn, as the store's ``insert_follow_up`` appends it.
+
+        Not a storage method. The store calls that function inside the
+        transaction that decided to append the turn, the queue's settlement or
+        an idle-only message, and this fake's ``settle_queue`` and
+        ``submit_message`` call this the same way. The turn is a person's and
+        keeps the conversation's runtime; an automatic round is
+        :meth:`create_goal_round`'s.
+        """
         del attachments  # staged uploads have their own suite; this fake stages none
-        self.last_follow_up_request = (client_request_id, client_request_fingerprint)
         requested = self.jobs.get(parent_job_id)
-        if goal is not None and requested is not None:
-            await self.goals.set_goal(
-                thread_id=str(requested["thread_id"]), user_id=user_id, goal=goal
-            )
         if requested is None or requested["user_id"] != user_id:
             return None
         if requested["state"] == "cancelled":
@@ -738,6 +758,12 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             )
             + 1
         )
+        thread_id = str(parent["thread_id"])
+        self.thread_input_seqs[thread_id] = self.thread_input_seqs.get(thread_id, 0) + 1
+        # Mirrors the store: a model is named with its source (null being the
+        # Gateway), and an omitted model keeps the parent's model and source
+        # together, so a follow-up never changes source without being told.
+        source = model_connection_id if model else parent.get("model_connection_id")
         job = {
             **parent,
             "id": job_id,
@@ -746,8 +772,8 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "base_sha": parent.get("published_commit_sha") or parent.get("base_sha"),
             "task_prompt": prompt,
             "skills": skills if skills is not None else parent.get("skills"),
-            "runtime": runtime or parent["runtime"],
             "model": model or parent["model"],
+            "model_connection_id": source,
             # Mirrors the store: inherit when omitted, and only the explicit
             # reset clears an effort the thread already carries.
             "reasoning_effort": (
@@ -762,15 +788,20 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "published_pr_url": None,
             "published_commit_sha": None,
             "detail": None,
-            "turn_source": turn_source,
-            "goal_round": goal_round,
-            "goal_round_kind": goal_round_kind,
-            "round_goal_revision": goal_revision,
+            # A person's turn, whatever its parent was: it carries the
+            # conversation's goal identity and no round of its own.
+            "turn_source": "human",
+            "goal_id": (self.thread_goals.get(thread_id) or {}).get("goal_id"),
+            "goal_round": None,
+            "goal_round_kind": None,
+            "round_goal_revision": None,
             # A fresh turn has its own report columns, whatever its parent
             # ended on.
             "goal_report_parse": None,
             "goal_report_outcome": None,
             "goal_report_detail": None,
+            # Stamped with the count this message moved the conversation to.
+            "input_seq_at_create": self.thread_input_seqs[thread_id],
             "created_at": None,
             "updated_at": None,
             "pinned_at": self.pinned_threads.get(parent["thread_id"]),
@@ -795,12 +826,85 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         )
         return job
 
+    async def create_goal_round(
+        self,
+        *,
+        thread_id: str,
+        goal_id: str,
+        revision: int,
+        kind: str,
+        round_number: int,
+        prompt: str,
+        client_request_id: str,
+        client_request_fingerprint: str,
+    ) -> dict[str, Any] | None:
+        """One automatic round, as the store's ``create_goal_round`` appends it.
+
+        The only write of a ``goal`` turn. Like the store's, it continues the
+        newest turn with that turn's runtime, model, effort and skills, adds the
+        goal report to what its metadata requires of a host, and is stamped with
+        the conversation's input count without moving it. A key the
+        conversation already used appends nothing, which is how a replayed
+        decision finds the round it made. The controller's ``conn`` and
+        ``wakeup_id`` are not modelled: nothing consumes this fake's wakeups.
+        """
+        turns = self._thread_turns(thread_id)
+        if not turns:
+            return None
+        if any(job.get("client_request_id") == client_request_id for job in turns):
+            return None
+        parent = turns[-1]
+        job_id = f"ajob_{self._next_job:04d}"
+        self._next_job += 1
+        job = {
+            **parent,
+            "id": job_id,
+            "parent_job_id": parent["id"],
+            "turn_no": parent["turn_no"] + 1,
+            "base_sha": parent.get("published_commit_sha") or parent.get("base_sha"),
+            "task_prompt": prompt,
+            "metadata": _goal_round_metadata(parent.get("metadata")),
+            "state": "queued",
+            "cancel_requested": False,
+            "terminal_resume_pending": False,
+            "current_attempt_id": None,
+            "published_pr_url": None,
+            "published_commit_sha": None,
+            "detail": None,
+            "turn_source": "goal",
+            "goal_id": goal_id,
+            "goal_round": round_number,
+            "goal_round_kind": kind,
+            "round_goal_revision": revision,
+            "goal_report_parse": None,
+            "goal_report_outcome": None,
+            "goal_report_detail": None,
+            "input_seq_at_create": self.thread_input_seqs.get(thread_id, 0),
+            "created_at": None,
+            "updated_at": None,
+            "pinned_at": self.pinned_threads.get(thread_id),
+            "goal": self.thread_goals.get(thread_id),
+            "client_request_id": client_request_id,
+            "client_request_fingerprint": client_request_fingerprint,
+        }
+        self.jobs[job_id] = job
+        self.messages.append(
+            {
+                "id": len(self.messages) + 1,
+                "thread_id": thread_id,
+                "job_id": job_id,
+                "role": "user",
+                "content": prompt,
+                "created_at": None,
+            }
+        )
+        return job
+
     # -- Pending messages --
     #
     # The queue the message route writes. A message that is sent becomes a turn
-    # through ``create_follow_up`` above, so it becomes exactly the turn a
-    # follow-up always made here, and the cases about a turn's fields keep
-    # asserting on the same fake.
+    # through ``insert_follow_up`` above, as the store's settlement sends one,
+    # so the cases about a turn's fields keep asserting on the same fake.
 
     def _thread_turns(self, thread_id: str) -> list[dict[str, Any]]:
         return sorted(
@@ -859,6 +963,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         reset_reasoning_effort: bool = False,
         skills: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        model_connection_id: str | None = None,
     ) -> dict[str, Any]:
         turns = self._thread_turns(thread_id)
         if not turns or turns[-1]["user_id"] != user_id:
@@ -889,11 +994,12 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
                 or sandbox.get("workspace_publication_state") != "published"
             ):
                 return {"error": "conversation_changed"}
-            made = await self.create_follow_up(
+            made = await self.insert_follow_up(
                 parent_job_id=expected_latest_job_id,
                 user_id=user_id,
                 prompt=prompt,
                 model=model,
+                model_connection_id=model_connection_id,
                 reasoning_effort=reasoning_effort,
                 reset_reasoning_effort=reset_reasoning_effort,
                 skills=skills,
@@ -924,6 +1030,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "attachment_ids": attachment_ids or None,
             "attachments": [],
             "model": model,
+            "model_connection_id": model_connection_id if model else None,
             "reasoning_effort": reasoning_effort,
             "client_request_id": client_request_id,
             "client_request_fingerprint": client_request_fingerprint,
@@ -994,7 +1101,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         return {"queue_paused_reason": None}
 
     async def settle_queue(self, *, thread_id: str, prepared: Any = None) -> SettleOutcome:
-        """Mirrors the store's settlement, sending through ``create_follow_up``."""
+        """Mirrors the store's settlement, sending through ``insert_follow_up``."""
         turns = self._thread_turns(thread_id)
         if not turns or self._thread_live(thread_id):
             return SettleOutcome()
@@ -1020,11 +1127,12 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         if prepared.error is not None:
             head.update(state="held", last_error=prepared.error, revision=head["revision"] + 1)
             return SettleOutcome()
-        job = await self.create_follow_up(
+        job = await self.insert_follow_up(
             parent_job_id=latest["id"],
             user_id=head["user_id"],
             prompt=head["prompt"],
             model=prepared.model,
+            model_connection_id=prepared.model_connection_id,
             reasoning_effort=prepared.reasoning_effort,
             reset_reasoning_effort=prepared.reset_reasoning_effort,
             skills=prepared.skills,
@@ -1045,8 +1153,9 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         del self.pending[head["id"]]
         return SettleOutcome(job=job, message_id=head["id"])
 
-    async def threads_to_settle(self, *, limit: int = 50) -> list[str]:
-        return sorted({row["thread_id"] for row in self.pending.values()})[:limit]
+    async def threads_to_settle(self, *, limit: int = 50, after: str | None = None) -> list[str]:
+        threads = sorted({row["thread_id"] for row in self.pending.values()})
+        return [thread_id for thread_id in threads if after is None or thread_id > after][:limit]
 
     async def _copy_fork_history(
         self, *, source_job_id: str, user_id: str
@@ -1313,9 +1422,19 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         operation.update(state="ready", target_anchor_job_id=copied["id"])
         return copied
 
-    async def get_thread_for_job(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
+    async def get_thread_for_job(
+        self,
+        *,
+        job_id: str,
+        user_id: str,
+        cursor: str | None = None,
+        after: str | None = None,
+        limit: int = 50,
+        anchor: bool = False,
+    ) -> dict[str, Any] | None:
         job = self.jobs.get(job_id)
-        if job is None or job["user_id"] != user_id:
+        # The real read joins the thread and refuses a deleted conversation.
+        if job is None or job["user_id"] != user_id or job.get("deleted_at") is not None:
             return None
         thread_id = job["thread_id"]
         jobs = sorted(
@@ -1346,9 +1465,10 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "queue_paused_reason": self.queue_paused.get(thread_id),
         }
 
-    async def thread_stats_inputs(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
+    async def thread_stats(self, *, job_id: str, user_id: str) -> dict[str, Any] | None:
         job = self.jobs.get(job_id)
-        if job is None or job["user_id"] != user_id:
+        # The real read joins the thread and refuses a deleted conversation.
+        if job is None or job["user_id"] != user_id or job.get("deleted_at") is not None:
             return None
         thread_id = job["thread_id"]
         thread_jobs = sorted(
@@ -1356,16 +1476,14 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             key=lambda item: item["turn_no"],
         )
         job_ids = [item["id"] for item in thread_jobs]
+        attempts = [{"job_id": item["id"], "started_at": None} for item in thread_jobs]
+        events = [event for event in self.events if event["job_id"] in set(job_ids)]
+        # This stand-in stamps no clocks (``append_event`` stores
+        # ``created_at: None``), so timings are zero; the reducer's arithmetic
+        # is pinned by ``tests/unit/test_thread_stats.py``.
         return {
             "thread_id": thread_id,
-            "job_ids": job_ids,
-            # This stand-in stamps no clocks (``append_event`` stores
-            # ``created_at: None``), so the timings come back zero here and
-            # the arithmetic is pinned by ``tests/unit/test_thread_stats.py``
-            # instead. What this fake is for is the HTTP contract: ownership,
-            # shape, and the counts that need no clock.
-            "attempts": [{"job_id": item["id"], "started_at": None} for item in thread_jobs],
-            "events": [event for event in self.events if event["job_id"] in set(job_ids)],
+            "stats": summarize_thread(job_ids=job_ids, attempts=attempts, events=events),
         }
 
     async def get_job(self, job_id: str) -> dict[str, Any] | None:
@@ -1382,11 +1500,14 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             "goal": self.thread_goals.get(str(job["thread_id"])),
         }
 
-    async def get_job_stream_state(self, *, job_id: str, user_id: str) -> JobStreamState | None:
+    async def job_stream_page(
+        self, *, job_id: str, user_id: str, after_id: int, limit: int
+    ) -> tuple[list[dict[str, Any]], JobStreamState] | None:
         job = self.jobs.get(job_id)
         if job is None or job["user_id"] != user_id:
             return None
-        return JobStreamState(job["state"], job.get("published_pr_url"))
+        events = await self.list_events_after(job_id=job_id, after_id=after_id, limit=limit)
+        return events, JobStreamState(job["state"], job.get("published_pr_url"))
 
     async def latest_assistant_message_state(self, *, job_id: str) -> dict[str, Any] | None:
         said = [
@@ -1409,7 +1530,8 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
     ) -> list[dict[str, Any]] | None:
         """Every event of the containing thread, labelled by turn."""
         job = self.jobs.get(job_id)
-        if job is None or job.get("user_id") != user_id:
+        # The real read joins the thread and refuses a deleted conversation.
+        if job is None or job.get("user_id") != user_id or job.get("deleted_at") is not None:
             return None
         thread_id = job.get("thread_id")
         turns = {
@@ -1443,6 +1565,41 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             return []
         attempt_id = self.jobs[job_id].get("current_attempt_id") or 100
         return [{"attempt_id": attempt_id, "attempt_no": 1, **newest}]
+
+    async def trajectory_timings(
+        self, *, job_ids: list[str], user_id: str, max_attempts: int
+    ) -> dict[str, Any]:
+        """Return the compact, owner-fenced projection used by the timeline."""
+        owned = [
+            job_id
+            for job_id in job_ids
+            if (job := self.jobs.get(job_id)) is not None
+            and job.get("user_id") == user_id
+            and job.get("deleted_at") is None
+        ]
+        attempts = [
+            {"job_id": job_id, **row}
+            for job_id in owned
+            for row in await self.job_attempts_telemetry(job_id=job_id)
+        ]
+        compact = []
+        if len(attempts) <= max_attempts:
+            for row in attempts:
+                tool_calls = row.get("tool_calls") or []
+                compact.append(
+                    {
+                        **row,
+                        "tool_time_ms": row.get("tool_time_ms"),
+                        "tool_calls_truncated": bool(row.get("tool_calls_truncated")),
+                        "tool_timing_exact": bool(tool_calls)
+                        and all(call.get("timing_source") == "exact" for call in tool_calls),
+                    }
+                )
+        return {
+            "owned_count": len(owned),
+            "attempt_count": len(attempts),
+            "attempts": compact,
+        }
 
     async def record_attempt_resources(
         self, *, attempt_id: int, lease_generation: int, rollup: dict[str, Any]
@@ -1562,7 +1719,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             and (repo is None or job["repo"] == repo)
             and (not temporary or job["repo"] is None)
         ]
-        minimum = datetime.min.replace(tzinfo=timezone.utc)
+        minimum = datetime.min.replace(tzinfo=UTC)
         jobs.sort(
             key=lambda job: (
                 job["pinned_at"] is not None,
@@ -1611,7 +1768,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         for project in projects.values():
             project.pop("_threads")
             project.pop("_pinned_threads")
-        minimum = datetime.min.replace(tzinfo=timezone.utc)
+        minimum = datetime.min.replace(tzinfo=UTC)
         return sorted(
             projects.values(),
             key=lambda project: (
@@ -1630,7 +1787,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             return None
         thread_id = job["thread_id"]
         if archived:
-            archived_at = self.archived_threads.setdefault(thread_id, datetime.now(timezone.utc))
+            archived_at = self.archived_threads.setdefault(thread_id, datetime.now(UTC))
             self._pause(thread_id, "archived")
         else:
             self.archived_threads.pop(thread_id, None)
@@ -1656,7 +1813,7 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
             return None
         thread_id = job["thread_id"]
         if pinned:
-            pinned_at = self.pinned_threads.setdefault(thread_id, datetime.now(timezone.utc))
+            pinned_at = self.pinned_threads.setdefault(thread_id, datetime.now(UTC))
         else:
             self.pinned_threads.pop(thread_id, None)
             pinned_at = None
@@ -1684,12 +1841,17 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
     async def thread_workspace_ready(self, *, thread_id: str) -> bool:
         return self.thread_workspace_readiness.get(thread_id, True)
 
-    async def fence_workspace_start(self, *, thread_id: str) -> str | None:
+    async def fence_workspace_start(self, *, thread_id: str) -> tuple[str, int | None] | None:
         self.workspace_start_fences.append(thread_id)
         for job in self.jobs.values():
             sandbox = job.get("thread_sandbox")
             if job.get("thread_id") == thread_id and isinstance(sandbox, dict):
-                return sandbox.get("state")
+                state = sandbox.get("state")
+                if state is None:
+                    return None
+                if state == "host_revoked":
+                    return state, None
+                return state, int(sandbox.get("start_seq") or 0) + 1
         return None
 
     async def fence_terminal_workspace(self, *, attempt_id: int, lease_generation: int) -> bool:
@@ -1794,14 +1956,6 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
         self.attempt_jobs[100] = job["id"]
         return {**job, "attempt_id": 100, "attempt_no": 1, "lease_generation": 1}
 
-    async def record_attempt_grant(
-        self, *, attempt_id: int, lease_generation: int, grant_id: str
-    ) -> bool:
-        if self.live_fence != (attempt_id, lease_generation):
-            return False
-        self.attempt_grants[attempt_id] = grant_id
-        return True
-
     async def heartbeat(
         self, *, attempt_id: int, lease_generation: int, lease_ttl_seconds: float
     ) -> dict[str, Any]:
@@ -1869,6 +2023,29 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, AllCapabilities):
                 }
             )
         return event["id"]
+
+    async def append_events(
+        self,
+        *,
+        attempt_id: int,
+        lease_generation: int,
+        events: list[tuple[str, dict[str, Any] | None, int | None]],
+    ) -> list[int] | None:
+        # Mirror the store: one fence for the batch, each event as a single append stores it.
+        if not self._fenced(attempt_id, lease_generation):
+            return None
+        stored = []
+        for event_type, payload, event_seq in events:
+            event_id = await self.append_event(
+                attempt_id=attempt_id,
+                lease_generation=lease_generation,
+                event_type=event_type,
+                payload=payload,
+                event_seq=event_seq,
+            )
+            assert event_id is not None
+            stored.append(event_id)
+        return stored
 
     async def transition(
         self,
@@ -1951,7 +2128,7 @@ def _api_key_secret(monkeypatch):
     """
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "api-test-secret")
     monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "api-test-sandbox-manager-secret")
-    monkeypatch.setenv("AGENT_SESSION_SECRET", "session-test-secret-32-bytes-minimum!")
+    use_session_secret(monkeypatch)
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name,o/n,private/repo")
     # The key stored MCP credentials are wrapped under. Without it a deployment
     # can hold nobody's credential, and the composer legitimately offers
@@ -1987,84 +2164,14 @@ _TEST_MODELS = ("glm-5.1", "qwen-next", "m")
 _TEST_MODEL_EFFORTS = {"glm-5.1": ["low", "high", "max"]}
 
 
-class _FakeGateway:
-    """The gateway's internal contracts, answered in-process.
-
-    Replaces the source's ``_fake_route_exec``: the model catalog and the MCP
-    registry are HTTP calls now, not registry objects the router holds.
-
-    No MCP here: the registry moved to this service with its credentials and
-    its relay, so a fake gateway that still offered one would suggest the
-    gateway is still asked — which is the call this change removed.
-    """
-
-    async def model_catalog(self, user_id: str) -> list[str]:
-        return list(_TEST_MODELS)
-
-    #: Profile metadata remains separate from the explicit admission decision.
-    status: ClassVar[dict[str, Any]] = {"exists": True, "active": True, "role": "admin"}
+class _FakeOwners:
+    """The account directory, answered in-process: every owner holds ``agent.use``."""
 
     async def agent_access(self, user_id: str) -> dict[str, Any]:
         return {"user_id": user_id, "allowed": True, "permissions": ["agent.use"]}
 
-    async def user_status(self, user_id: str) -> dict[str, Any]:
-        return dict(self.status)
-
-    aliases: ClassVar[dict[str, str]] = {}
-
-    async def model_catalog_with_aliases(self, user_id: str) -> tuple[list[str], dict[str, str]]:
-        """The catalog plus the gateway's alias translation table.
-
-        No aliases here: these tests name canonical ids, and resolution has its
-        own file. What matters is that the shape is the real one — a fake that
-        answered only the older method sent every job-creation path down a
-        `AttributeError` the moment the caller started asking for the table.
-        """
-        return list(_TEST_MODELS), dict(self.aliases)
-
-    async def model_reasoning_efforts(self, user_id: str) -> dict[str, list[str]]:
-        """Which models take a reasoning effort, and which values.
-
-        Same reason the alias method exists here: the real client asks, so a
-        fake that does not answer sends every composer and create path into an
-        ``AttributeError`` rather than the behaviour under test.
-        """
-        return {model: list(values) for model, values in _TEST_MODEL_EFFORTS.items()}
-
-    async def model_catalog_with_reasoning_efforts(
-        self, user_id: str
-    ) -> tuple[list[str], dict[str, list[str]]]:
-        """The composer's model options, returned by one current catalog read."""
-        return await self.model_catalog(user_id), await self.model_reasoning_efforts(user_id)
-
-
-class _FakeGrants:
-    """The gateway's grant contract, answered in-process.
-
-    The claim asks for the sandbox's credential now instead of minting one, so
-    an app with no grant client cannot claim at all — the same shape as the
-    fake gateway above, and for the same reason.
-    """
-
-    def __init__(self) -> None:
-        self.minted: list[dict[str, Any]] = []
-
-    async def mint(self, **kwargs: Any) -> dict[str, Any]:
-        self.minted.append(kwargs)
-        return {
-            "grant_id": f"agr_{len(self.minted)}",
-            "token": f"agr.{kwargs['job_id']}.{kwargs['attempt_id']}",
-            # The gateway returns the *effective* scope, and the claim refuses
-            # a grant that does not cover the job's model. A fake omitting it
-            # models a gateway that does not exist.
-            "allowed_models": list(kwargs.get("models") or []),
-        }
-
-    async def renew(self, grant_id: str) -> dict[str, Any]:
-        return {"grant_id": grant_id}
-
-    async def revoke(self, grant_id: str) -> bool:
-        return True
+    async def user_email(self, user_id: str) -> str:
+        return f"{user_id}@example.org"
 
 
 def _build_app(store, *, role: str = "admin", claim_auth: bool = True):
@@ -2075,28 +2182,19 @@ def _build_app(store, *, role: str = "admin", claim_auth: bool = True):
     """
     from cloud_agent.api.deps import (
         get_agent_app_credentials,
-        get_gateway_client,
-        get_grant_client,
-        get_log_store,
+        get_owner_directory,
     )
 
     app = FastAPI()
     app.include_router(agent_jobs_router.router)
     app.dependency_overrides[get_storage] = lambda: store
-    # The create endpoints fail fast on models the deployment cannot serve, so
-    # the gateway the test answers with must contain what the tests submit.
-    app.dependency_overrides[get_gateway_client] = _FakeGateway
-    # The sandbox credential comes from the gateway; without this the
-    # claim would correctly refuse, having no configured grant client.
-    app.dependency_overrides[get_grant_client] = _FakeGrants
+    # Every owner request and claim is admitted on the account's permissions.
+    app.dependency_overrides[get_owner_directory] = _FakeOwners
     # No GitHub App by default — the configuration most deployments start in,
     # and the one where a public repository still clones fine.
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
-    # No log store: spend and usage are then absent from the response rather
-    # than reported as a fabricated zero.
-    app.dependency_overrides[get_log_store] = lambda: None
     identity = {"user_id": _OWNER, "role": role, "authenticated": True}
-    # Override identity only; every request still exercises Gateway admission.
+    # Override identity only; every request still exercises account admission.
     app.dependency_overrides[authenticate_agent_owner] = lambda: identity
     if claim_auth:
         app.dependency_overrides[worker.verify_claiming_host] = lambda: {
@@ -2106,26 +2204,11 @@ def _build_app(store, *, role: str = "admin", claim_auth: bool = True):
     return app
 
 
-def _browser_session(*, expires_delta=None) -> str:
-    """Mint the browser credential this service issues.
-
-    The gateway's ``create_access_token`` is ``identity.mint_session`` here —
-    the same compact three-segment JWT with ``sub``/``email``/``exp``, signed
-    with this service's own secret instead of the gateway's. ``mint_session``
-    has no expiry parameter, so an expired one is the same claims re-signed.
-    """
-    import jwt
-
-    from cloud_agent.identity import mint_session
-
-    token = mint_session(user_id=_OWNER)
-    if expires_delta is None:
-        return token
-    import os
-
-    claims = jwt.decode(token, options={"verify_signature": False})
-    claims["exp"] = int((datetime.now(timezone.utc) + expires_delta).timestamp())
-    return jwt.encode(claims, os.environ["AGENT_SESSION_SECRET"], algorithm="HS256")
+def _browser_session(store: FakeStorage) -> str:
+    """A live account session for the owner, as sign-in issues one."""
+    if not isinstance(getattr(store, "local_accounts", None), SessionAccounts):
+        store.local_accounts = SessionAccounts()
+    return store.local_accounts.sign_in(_OWNER)
 
 
 @pytest_asyncio.fixture()
@@ -2141,7 +2224,7 @@ async def _create_job_raw(client: AsyncClient, *, model: str = "glm-5.1"):
     """Post a job and hand back the raw response, refusals included."""
     return await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "task_prompt": "fix it", "model": model},
+        json=on_connection({"repo": "owner/name", "task_prompt": "fix it", "model": model}),
     )
 
 
@@ -2230,17 +2313,19 @@ async def test_execution_profile_is_server_owned_and_reserved_metadata_is_droppe
     monkeypatch.setenv("AGENT_DEFAULT_EXECUTION_PROFILE", "untrusted-kata-v1")
     created = await client.post(
         "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "fix it",
-            "model": "glm-5.1",
-            "metadata": {
-                "origin": "api-test",
-                "execution_profile": "trusted-v1",
-                "sandbox_runtime": "runc",
-                "guest_kernel": "forged",
-            },
-        },
+        json=on_connection(
+            {
+                "repo": "owner/name",
+                "task_prompt": "fix it",
+                "model": "glm-5.1",
+                "metadata": {
+                    "origin": "api-test",
+                    "execution_profile": "trusted-v1",
+                    "sandbox_runtime": "runc",
+                    "guest_kernel": "forged",
+                },
+            }
+        ),
     )
 
     assert created.status_code == 201
@@ -2250,12 +2335,14 @@ async def test_execution_profile_is_server_owned_and_reserved_metadata_is_droppe
 
     rejected = await client.post(
         "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "try to downgrade",
-            "model": "glm-5.1",
-            "execution_profile": "trusted-v1",
-        },
+        json=on_connection(
+            {
+                "repo": "owner/name",
+                "task_prompt": "try to downgrade",
+                "model": "glm-5.1",
+                "execution_profile": "trusted-v1",
+            }
+        ),
     )
     assert rejected.status_code == 422
     assert "server-owned" in rejected.text
@@ -2280,7 +2367,7 @@ async def test_jobs_page_by_repo_and_projects_summarize_the_task_tree(client: As
     first = await _create_job(client)
     second = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "o/n", "task_prompt": "a second project", "model": "glm-5.1"},
+        json=on_connection({"repo": "o/n", "task_prompt": "a second project", "model": "glm-5.1"}),
     )
     assert second.status_code == 201
 
@@ -2306,7 +2393,7 @@ async def test_conversation_search_forwards_owner_filters_and_shapes_latest_job(
     """Search returns the canonical title separately from the latest prompt."""
     job_id = await _create_job(client)
     job = store.jobs[job_id]
-    job["updated_at"] = datetime(2026, 9, 10, tzinfo=timezone.utc)
+    job["updated_at"] = datetime(2026, 9, 10, tzinfo=UTC)
     search = AsyncMock(
         return_value={
             "conversations": [
@@ -2394,7 +2481,8 @@ async def test_conversation_search_requires_owner_and_accepts_browser_session(
         assert anonymous.status_code == 401
         search.assert_not_awaited()
         response = await client.get(
-            "/v1/agent/conversations", headers={"Authorization": f"Bearer {_browser_session()}"}
+            "/v1/agent/conversations",
+            headers={"Authorization": f"Bearer {_browser_session(store)}"},
         )
     assert response.status_code == 200
     assert response.json() == {"conversations": [], "next_cursor": None}
@@ -2512,6 +2600,39 @@ async def test_thread_stats_are_owner_scoped(client: AsyncClient, store: FakeSto
     assert response.status_code == 404
 
 
+async def test_thread_reads_answer_from_the_owner_scoped_query_alone(
+    client: AsyncClient, store: FakeStorage
+):
+    """Thread, stats, and event pages fence and serve in one owner-scoped read.
+
+    The query that serves each read is already scoped to the caller's own,
+    undeleted job, so a whole-job fetch before it — sandbox subqueries,
+    skill summaries, conversation state — buys the handler nothing: it
+    discards the row. Someone else's job and a missing one must stay one
+    indistinguishable 404.
+    """
+    job_id = await _create_job(client)
+    foreign_id = await _create_job(client)
+    store.jobs[foreign_id]["user_id"] = _OTHER
+    whole_job = store.conversation_queries.get_job
+    calls = {"whole_job": 0}
+
+    async def counting_get_job(job_id: str):
+        calls["whole_job"] += 1
+        return await whole_job(job_id)
+
+    store.conversation_queries.get_job = counting_get_job
+
+    for suffix in ("/thread", "/thread/stats", "/thread/events"):
+        owned = await client.get(f"/v1/agent/jobs/{job_id}{suffix}")
+        assert owned.status_code == 200, (suffix, owned.text)
+        foreign = await client.get(f"/v1/agent/jobs/{foreign_id}{suffix}")
+        assert foreign.status_code == 404, suffix
+        missing = await client.get(f"/v1/agent/jobs/ajob_missing{suffix}")
+        assert missing.status_code == 404, suffix
+    assert calls["whole_job"] == 0
+
+
 async def test_thread_stats_answer_a_thread_that_never_ran(client: AsyncClient):
     """A queued thread has no events yet and still renders a bar."""
     job_id = await _create_job(client)
@@ -2521,7 +2642,7 @@ async def test_thread_stats_answer_a_thread_that_never_ran(client: AsyncClient):
     assert body["turns"] == 1
     assert body["tool_calls"] == 0
     assert body["wall_seconds"] == 0.0
-    assert body["ttft_seconds"] is None
+    assert body["first_output_seconds"] is None
 
 
 async def test_archived_threads_leave_the_active_project_tree(client: AsyncClient):
@@ -2628,7 +2749,7 @@ async def test_rename_hides_foreign_missing_and_deleted_jobs(
     foreign_id = await _create_job(client)
     store.jobs[foreign_id]["user_id"] = _OTHER
     deleted_id = await _create_job(client)
-    store.jobs[deleted_id]["deleted_at"] = datetime.now(timezone.utc)
+    store.jobs[deleted_id]["deleted_at"] = datetime.now(UTC)
     for job_id in (foreign_id, deleted_id, "ajob_missing"):
         response = await client.patch(f"/v1/agent/jobs/{job_id}/title", json={"title": "New title"})
         assert response.status_code == 404
@@ -2651,9 +2772,9 @@ async def test_pin_and_unpin_are_thread_scoped_idempotent_and_reorder_lists(
         model="glm-5.1",
     )
     newer_id = newer["id"]
-    store.jobs[parent_id]["created_at"] = datetime(2026, 7, 1, tzinfo=timezone.utc)
-    store.jobs[child_id]["created_at"] = datetime(2026, 7, 2, tzinfo=timezone.utc)
-    store.jobs[newer_id]["created_at"] = datetime(2026, 7, 3, tzinfo=timezone.utc)
+    store.jobs[parent_id]["created_at"] = datetime(2026, 7, 1, tzinfo=UTC)
+    store.jobs[child_id]["created_at"] = datetime(2026, 7, 2, tzinfo=UTC)
+    store.jobs[newer_id]["created_at"] = datetime(2026, 7, 3, tzinfo=UTC)
     store.jobs[parent_id]["state"] = "running"
 
     pinned = await client.post(f"/v1/agent/jobs/{child_id}/pin")
@@ -2711,7 +2832,14 @@ async def test_a_message_sent_during_a_turn_waits_then_follows_it_in_native_cont
     """
     parent_id = await _create_job(client)
     sent = await _send(
-        client, store, parent_id, {"prompt": "now add a regression test", "model": "qwen-next"}
+        client,
+        store,
+        parent_id,
+        {
+            "prompt": "now add a regression test",
+            "model": "qwen-next",
+            "model_connection_id": CONNECTION_ID,
+        },
     )
     assert sent.status_code == 201
     assert sent.json()["job"] is None
@@ -2725,9 +2853,13 @@ async def test_a_message_sent_during_a_turn_waits_then_follows_it_in_native_cont
     assert [message["content"] for message in thread.json()["messages"]] == ["fix it"]
     assert [row["id"] for row in thread.json()["pending_messages"]] == [waiting["id"]]
 
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    claim = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
     assert claim["job_id"] == parent_id
-    blocked = await client.post("/v1/agent/worker/claim", json={"worker_id": "w2"})
+    blocked = await client.post(
+        "/v1/agent/worker/claim", json=connection_claim({"worker_id": "w2"})
+    )
     assert blocked.status_code == 200
     assert blocked.json() is None
     auth = {"Authorization": f"Bearer {claim['worker_token']}"}
@@ -2757,7 +2889,9 @@ async def test_a_message_sent_during_a_turn_waits_then_follows_it_in_native_cont
         "now add a regression test",
     ]
 
-    child_claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w2"})).json()
+    child_claim = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w2"}))
+    ).json()
     assert child_claim["job_id"] == child["id"]
     assert "context_patch" not in child_claim
     assert "context_messages" not in child_claim
@@ -2778,13 +2912,15 @@ async def test_a_waiting_message_is_held_when_its_owners_agent_access_was_withdr
     sent = await _send(client, store, parent_id, {"prompt": "now add a regression test"})
     assert sent.status_code == 201
     waiting = sent.json()["pending"]
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    claim = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
     assert claim["job_id"] == parent_id
 
     async def withdrawn(self: Any, user_id: str) -> dict[str, Any]:
         return {"user_id": user_id, "allowed": False, "permissions": []}
 
-    monkeypatch.setattr(_FakeGateway, "agent_access", withdrawn)
+    monkeypatch.setattr(_FakeOwners, "agent_access", withdrawn)
     finished = await client.post(
         f"/v1/agent/worker/jobs/{parent_id}/finish",
         json={"state": "succeeded"},
@@ -2804,16 +2940,16 @@ async def test_cancelled_middle_turn_does_not_release_a_later_queued_turn(
     """Every unfinished earlier turn blocks a claim, even across a cancellation.
 
     Two turns queued behind a live one cannot come from the message route any
-    more — it holds later messages in the queue — so they are appended through
-    the store, which automatic rounds still do.
+    more — it holds later messages in the queue — so they are appended directly,
+    the way ``insert_follow_up`` appends when it is not asked to yield.
     """
     parent_id = await _create_job(client)
-    middle = await store.create_follow_up(
+    middle = await store.insert_follow_up(
         parent_job_id=parent_id, user_id=_OWNER, prompt="skip this follow-up"
     )
     assert middle is not None
     middle_id = middle["id"]
-    latest = await store.create_follow_up(
+    latest = await store.insert_follow_up(
         parent_job_id=parent_id, user_id=_OWNER, prompt="run this after the first turn"
     )
     assert latest is not None
@@ -2824,9 +2960,13 @@ async def test_cancelled_middle_turn_does_not_release_a_later_queued_turn(
     cancelled = await client.post(f"/v1/agent/jobs/{middle_id}/cancel")
     assert cancelled.status_code == 200
     assert cancelled.json()["state"] == "cancelled"
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    claim = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
     assert claim["job_id"] == parent_id
-    blocked = await client.post("/v1/agent/worker/claim", json={"worker_id": "w2"})
+    blocked = await client.post(
+        "/v1/agent/worker/claim", json=connection_claim({"worker_id": "w2"})
+    )
     assert blocked.status_code == 200
     assert blocked.json() is None
     assert store.jobs[latest_id]["state"] == "queued"
@@ -2837,21 +2977,46 @@ async def test_cancelled_middle_turn_does_not_release_a_later_queued_turn(
         headers={"Authorization": f"Bearer {claim['worker_token']}"},
     )
     assert finished.status_code == 200
-    next_claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w2"})).json()
+    next_claim = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w2"}))
+    ).json()
     assert next_claim["job_id"] == latest_id
 
 
-async def test_create_fails_fast_on_a_model_this_deployment_cannot_serve(client: AsyncClient):
-    """An unknown model is a 400 at create, not a dead job after claim+clone."""
+async def test_create_fails_fast_on_a_model_the_connection_does_not_list(client: AsyncClient):
+    """An unlisted model is a 400 at create, not a dead job after claim+clone."""
     response = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "task_prompt": "fix it", "model": "gpt-nonexistent"},
+        json={
+            "repo": "owner/name",
+            "task_prompt": "fix it",
+            "model": "gpt-nonexistent",
+            "model_connection_id": CONNECTION_ID,
+        },
     )
     assert response.status_code == 400
     detail = response.json()["detail"]["error"]
-    assert detail["type"] == "model_not_available"
-    # The rejection names what would work, so the caller can fix the request.
-    assert "glm-5.1" in detail["message"]
+    assert (detail["type"], detail["reason"]) == ("model_connection_unusable", "model_not_listed")
+
+
+async def test_create_without_a_connection_is_a_verdict_not_an_outage(client: AsyncClient):
+    """There is no other source: the owner is asked to choose a connection's model."""
+    response = await client.post(
+        "/v1/agent/jobs", json={"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1"}
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["error"]["type"] == "model_connection_required"
+
+
+async def test_create_refuses_an_effort_on_a_connection(client: AsyncClient):
+    response = await client.post(
+        "/v1/agent/jobs",
+        json=on_connection(
+            {"repo": "owner/name", "task_prompt": "fix it", "reasoning_effort": "high"}
+        ),
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"]["reason"] == "effort_unsupported"
 
 
 async def test_follow_up_model_switch_gets_the_same_fail_fast(
@@ -2860,10 +3025,27 @@ async def test_follow_up_model_switch_gets_the_same_fail_fast(
     """Switching models in a message is validated like a fresh job, before it waits."""
     parent_id = await _create_job(client)
     response = await _send(
-        client, store, parent_id, {"prompt": "try another model", "model": "gpt-nonexistent"}
+        client,
+        store,
+        parent_id,
+        {
+            "prompt": "try another model",
+            "model": "gpt-nonexistent",
+            "model_connection_id": CONNECTION_ID,
+        },
     )
     assert response.status_code == 400
-    assert response.json()["detail"]["error"]["type"] == "model_not_available"
+    assert response.json()["detail"]["error"]["reason"] == "model_not_listed"
+    assert store.pending == {}
+
+
+async def test_follow_up_model_switch_without_its_connection_is_refused(
+    client: AsyncClient, store: FakeStorage
+):
+    parent_id = await _create_job(client)
+    response = await _send(client, store, parent_id, {"prompt": "again", "model": "glm-5.1"})
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"]["type"] == "model_connection_required"
     assert store.pending == {}
 
 
@@ -2871,12 +3053,14 @@ async def test_an_unregistered_runtime_is_refused_at_create(client: AsyncClient)
     """An arbitrary runtime string dies here, not as a claimed-then-dead job."""
     response = await client.post(
         "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "fix it",
-            "model": "glm-5.1",
-            "runtime": "no-such-harness",
-        },
+        json=on_connection(
+            {
+                "repo": "owner/name",
+                "task_prompt": "fix it",
+                "model": "glm-5.1",
+                "runtime": "no-such-harness",
+            }
+        ),
     )
     assert response.status_code == 400
     assert "no-such-harness" in response.json()["detail"]["error"]["message"]
@@ -2904,7 +3088,9 @@ async def test_a_first_turn_is_bounded_like_every_later_message(
     """
     response = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1", **change},
+        json=on_connection(
+            {"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1", **change}
+        ),
     )
     assert response.status_code == 422, response.text
     assert store.jobs == {}
@@ -2929,12 +3115,14 @@ async def test_an_upload_lost_between_resolving_and_claiming_is_a_400(
 
     response = await client.post(
         "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "read the notes",
-            "model": "glm-5.1",
-            "attachment_ids": [7],
-        },
+        json=on_connection(
+            {
+                "repo": "owner/name",
+                "task_prompt": "read the notes",
+                "model": "glm-5.1",
+                "attachment_ids": [7],
+            }
+        ),
     )
 
     assert response.status_code == 400, response.text
@@ -2948,7 +3136,9 @@ async def test_a_first_turn_keeps_the_trimmed_task(client: AsyncClient, store: F
     """The same trimming a message gets, so a first turn reads like the rest."""
     response = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "task_prompt": "  fix it \n", "model": "glm-5.1"},
+        json=on_connection(
+            {"repo": "owner/name", "task_prompt": "  fix it \n", "model": "glm-5.1"}
+        ),
     )
     assert response.status_code == 201, response.text
     assert store.jobs[response.json()["id"]]["task_prompt"] == "fix it"
@@ -2969,100 +3159,60 @@ async def test_a_message_cannot_name_a_harness(client: AsyncClient, store: FakeS
     assert len(store.jobs) == 1
 
 
-async def test_config_offers_the_models_the_create_endpoint_accepts(client: AsyncClient):
+async def test_config_offers_the_connections_the_create_endpoint_accepts(client: AsyncClient):
     """The picker and the validator must be the same list, or one is lying."""
     config = await client.get("/v1/agent/config")
     assert config.status_code == 200
-    assert config.json()["models"] == list(_TEST_MODELS)
+    body = config.json()
+    assert "models" not in body
+    assert "gateway_inference" not in body
+    (option,) = body["model_connections"]
+    assert option["id"] == CONNECTION_ID
+    assert set(option["models"]) == set(CONNECTION_MODELS)
+    assert body["model_connection_required"] is False
     # This fixture has no GitHub App, but its operator allowlists public repos.
     # The API accepts those jobs and anonymous clone works, so the composer
     # must not disable itself behind a narrower historical field name.
-    assert "owner/name" in config.json()["repos"]
-    assert config.json()["github_connected"] is True
+    assert "owner/name" in body["repos"]
+    assert body["github_connected"] is True
 
 
-async def test_config_reads_one_current_catalog_for_each_admitted_owner_read(
-    store: FakeStorage,
+async def test_config_without_a_usable_connection_asks_for_one(
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
-    """One catalog response supplies both fields, for each admitted owner read.
+    """An owner whose connections serve no Agent is told to set one up."""
 
-    The catalog is read on every request. Admission asks the Gateway once per
-    account here: the second read for the same owner is admitted on the grant
-    kept from the first (``AGENT_ACCESS_ALLOW_TTL_S``).
-    """
-    from httpx import MockTransport, Response
+    async def none(*, user_id):
+        return []
 
-    from cloud_agent.api.deps import get_gateway_client
-    from cloud_agent.gateway import GatewayClient
-
-    catalog_owners: list[str] = []
-    admitted_owners: list[str] = []
-
-    def handler(request):
-        assert request.headers["Authorization"] == "Bearer config-dispatch-token"
-        if request.url.path.endswith("/agent-access"):
-            owner = request.url.path.split("/")[-2]
-            admitted_owners.append(owner)
-            return Response(
-                200, json={"user_id": owner, "allowed": True, "permissions": ["agent.use"]}
-            )
-        assert request.url.path == "/internal/model-catalog"
-        owner = request.url.params["user_id"]
-        catalog_owners.append(owner)
-        model = f"{owner}-model-{len(catalog_owners)}"
-        return Response(200, json={"models": [model], "reasoning_efforts": {model: ["high"]}})
-
-    app = _build_app(store)
-    identity = {"user_id": _OWNER}
-    app.dependency_overrides[authenticate_agent_owner] = lambda: identity
-    async with AsyncClient(transport=MockTransport(handler)) as upstream:
-        gateway = GatewayClient("https://gateway.example", "config-dispatch-token", client=upstream)
-        app.dependency_overrides[get_gateway_client] = lambda: gateway
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            admitted_after = ([_OWNER], [_OWNER], [_OWNER, _OTHER])
-            for index, owner in enumerate((_OWNER, _OWNER, _OTHER), start=1):
-                identity["user_id"] = owner
-                response = await client.get("/v1/agent/config")
-                assert response.status_code == 200, response.text
-                model = f"{owner}-model-{index}"
-                assert response.json()["models"] == [model]
-                assert response.json()["model_reasoning_efforts"] == {model: ["high"]}
-                assert len(catalog_owners) == index
-                assert admitted_owners == admitted_after[index - 1]
-    assert catalog_owners == [_OWNER, _OWNER, _OTHER]
+    monkeypatch.setattr(store, "list_model_connections", none)
+    body = (await client.get("/v1/agent/config")).json()
+    assert body["model_connections"] == []
+    assert body["model_connection_required"] is True
+    assert body["default_model"] is None
 
 
-@pytest.mark.parametrize(
-    "payload,status",
-    [({}, 200), ({"models": "all"}, 200), ({"models": ["unavailable"]}, 503)],
-)
-async def test_config_catalog_failure_offers_no_models_or_efforts(
-    store: FakeStorage, payload, status
+async def test_config_reports_where_a_new_task_should_start(
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
-    """Catalog failure cannot widen options or discard the remaining config."""
-    from httpx import MockTransport, Response
+    """A new task starts where the newest one ran, while that connection still offers it."""
+    first = (await client.get("/v1/agent/config")).json()
+    assert (first["default_model"], first["default_model_connection_id"]) == (None, None)
 
-    from cloud_agent.api.deps import get_gateway_client
-    from cloud_agent.gateway import GatewayClient
+    await _create_job(client, model="qwen-next")
+    remembered = (await client.get("/v1/agent/config")).json()
+    assert (remembered["default_model"], remembered["default_model_connection_id"]) == (
+        "qwen-next",
+        CONNECTION_ID,
+    )
 
-    def handler(request):
-        if request.url.path.endswith("/agent-access"):
-            return Response(
-                200, json={"user_id": _OWNER, "allowed": True, "permissions": ["agent.use"]}
-            )
-        return Response(status, json=payload)
+    # The connection no longer lists the model: nothing is pre-selected.
+    async def narrowed(*, user_id):
+        return [connection_row(user_id, models=("glm-5.1",))]
 
-    app = _build_app(store)
-    async with AsyncClient(transport=MockTransport(handler)) as upstream:
-        gateway = GatewayClient("https://gateway.example", "config-dispatch-token", client=upstream)
-        app.dependency_overrides[get_gateway_client] = lambda: gateway
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            response = await client.get("/v1/agent/config")
-    assert response.status_code == 200, response.text
-    assert response.json()["models"] == []
-    assert response.json()["model_reasoning_efforts"] == {}
-    assert response.json()["repos"]
-    assert response.json()["runtimes"]
+    monkeypatch.setattr(store, "list_model_connections", narrowed)
+    gone = (await client.get("/v1/agent/config")).json()
+    assert (gone["default_model"], gone["default_model_connection_id"]) == (None, None)
 
 
 async def test_config_reads_independent_sources_concurrently(
@@ -3079,7 +3229,9 @@ async def test_config_reads_independent_sources_concurrently(
 
     async def wait_for_sources(name):
         started.add(name)
-        if len(started) == 3:
+        # Repository entitlement, model connections, MCP connections, and the
+        # owner's model preference: every independent source this read fans out.
+        if len(started) == 4:
             all_started.set()
         await release.wait()
 
@@ -3090,10 +3242,10 @@ async def test_config_reads_independent_sources_concurrently(
         repositories_read = True
         return ["owner/name"]
 
-    async def model_options(self, user_id):
+    async def model_connections(*, user_id):
         assert user_id == _OWNER
         await wait_for_sources("models")
-        return ["glm-5.1"], {"glm-5.1": ["high"]}
+        return [connection_row(user_id)]
 
     async def connections(*, user_id):
         assert user_id == _OWNER
@@ -3107,9 +3259,15 @@ async def test_config_reads_independent_sources_concurrently(
         account_reads += 1
         return None
 
+    async def preference(user_id):
+        assert user_id == _OWNER
+        await wait_for_sources("preference")
+        return ModelPreferenceView(last_model="glm-5.1", last_model_connection_id=CONNECTION_ID)
+
     monkeypatch.setattr(config_api, "repos_for_user", repositories)
-    monkeypatch.setattr(_FakeGateway, "model_catalog_with_reasoning_efforts", model_options)
+    monkeypatch.setattr(store, "list_model_connections", model_connections)
     monkeypatch.setattr(store, "list_mcp_connections", connections)
+    monkeypatch.setattr(store, "get_model_preference", preference)
     monkeypatch.setattr(store, "get_github_account", account)
     request = asyncio.create_task(client.get("/v1/agent/config"))
     try:
@@ -3124,8 +3282,7 @@ async def test_config_reads_independent_sources_concurrently(
     assert response.status_code == 200, response.text
     assert account_reads == 1
     assert response.json()["repos"] == ["owner/name"]
-    assert response.json()["models"] == ["glm-5.1"]
-    assert response.json()["model_reasoning_efforts"] == {"glm-5.1": ["high"]}
+    assert [option["id"] for option in response.json()["model_connections"]] == [CONNECTION_ID]
     assert response.json()["mcp_connections"] == []
 
 
@@ -3142,7 +3299,9 @@ async def test_messages_append_to_latest_turn_and_reject_blank_prompts(
     second = await _send(client, store, parent_id, {"prompt": "second follow-up"})
     assert second.status_code == 201
     assert second.json()["job"] is None
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    claim = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
     assert claim["job_id"] == first["id"]
     finished = await client.post(
         f"/v1/agent/worker/jobs/{first['id']}/finish",
@@ -3196,10 +3355,10 @@ async def test_follow_up_handles_context_loss_during_admission_checks(
     job_id = await _create_job(client)
     store.jobs[job_id]["state"] = "succeeded"
 
-    async def _lost_during_create(**_kwargs):
+    async def _lost_during_insert(**_kwargs):
         return {"error": "sandbox_context_lost"}
 
-    monkeypatch.setattr(store, "create_follow_up", _lost_during_create)
+    monkeypatch.setattr(store, "insert_follow_up", _lost_during_insert)
     response = await _send(client, store, job_id, {"prompt": "race with a lost activation"})
 
     assert response.status_code == 201
@@ -3222,6 +3381,27 @@ async def test_chat_without_shared_native_state_cannot_be_forked(
     assert response.status_code == 409
     assert response.json()["detail"]["error"]["type"] == "native_context_unavailable"
     assert len(store.jobs) == 1
+
+
+async def test_a_fork_from_a_removed_hosts_sandbox_says_its_server_is_gone(
+    client: AsyncClient, store: FakeStorage, monkeypatch: pytest.MonkeyPatch
+):
+    source_id = await _create_job(client)
+    store.jobs[source_id].update(
+        state="succeeded",
+        thread_sandbox={"sandbox_id": "asbx_shared", "shared_live": True},
+    )
+
+    async def _on_a_removed_host(**_kwargs):
+        return {"error": "host_removed"}
+
+    monkeypatch.setattr(store, "prepare_session_fork", _on_a_removed_host)
+    response = await client.post(f"/v1/agent/jobs/{source_id}/fork")
+
+    assert response.status_code == 409
+    error = response.json()["detail"]["error"]
+    assert error["type"] == "native_context_unavailable"
+    assert "server that has been removed" in error["message"]
 
 
 async def test_fork_of_an_active_turn_is_refused(client: AsyncClient, store: FakeStorage):
@@ -3339,9 +3519,9 @@ async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
 
         async def fork_shared_session(self, source_thread_id: str, **kwargs: Any):
             self.calls.append((source_thread_id, kwargs))
-            assert kwargs["expected_container_id"] == "container-shared"
-            assert kwargs["disk_limit_mib"] == 16384
-            assert kwargs["origin_thread_id"] == source_thread_id
+            assert kwargs["identity"]["expected_container_id"] == "container-shared"
+            assert kwargs["identity"]["disk_limit_mib"] == 16384
+            assert kwargs["identity"]["origin_thread_id"] == source_thread_id
             assert kwargs["source_native_session_id"] == "native-session-source"
             assert kwargs["source_native_turn_no"] == 1
             assert kwargs["target_thread_id"] != source_thread_id
@@ -3349,11 +3529,11 @@ async def test_shared_chat_fork_creates_two_native_sessions_in_one_container(
             assert kwargs["target_launch"]["plugins"] == plugins
             return {
                 "operation_id": kwargs["operation_id"],
-                "sandbox_id": kwargs["sandbox_id"],
-                "sandbox_generation": kwargs["generation"],
-                "container_id": kwargs["expected_container_id"],
-                "runtime_id": kwargs["runtime_id"],
-                "runtime_version": kwargs["runtime_version"],
+                "sandbox_id": kwargs["identity"]["sandbox_id"],
+                "sandbox_generation": kwargs["identity"]["generation"],
+                "container_id": kwargs["identity"]["expected_container_id"],
+                "runtime_id": kwargs["identity"]["runtime_id"],
+                "runtime_version": kwargs["identity"]["runtime_version"],
                 "source_thread_id": source_thread_id,
                 "source_native_session_id": kwargs["source_native_session_id"],
                 "target_thread_id": kwargs["target_thread_id"],
@@ -3425,11 +3605,11 @@ async def test_shared_chat_can_fork_from_a_specific_historical_turn(
             self.native_turns.append(kwargs["source_native_turn_no"])
             return {
                 "operation_id": kwargs["operation_id"],
-                "sandbox_id": kwargs["sandbox_id"],
-                "sandbox_generation": kwargs["generation"],
-                "container_id": kwargs["expected_container_id"],
-                "runtime_id": kwargs["runtime_id"],
-                "runtime_version": kwargs["runtime_version"],
+                "sandbox_id": kwargs["identity"]["sandbox_id"],
+                "sandbox_generation": kwargs["identity"]["generation"],
+                "container_id": kwargs["identity"]["expected_container_id"],
+                "runtime_id": kwargs["identity"]["runtime_id"],
+                "runtime_version": kwargs["identity"]["runtime_version"],
                 "source_thread_id": source_thread_id,
                 "source_native_session_id": kwargs["source_native_session_id"],
                 "target_thread_id": kwargs["target_thread_id"],
@@ -3503,11 +3683,11 @@ async def test_same_native_fork_request_has_one_external_coordinator(
             await finish.wait()
             return {
                 "operation_id": kwargs["operation_id"],
-                "sandbox_id": kwargs["sandbox_id"],
-                "sandbox_generation": kwargs["generation"],
-                "container_id": kwargs["expected_container_id"],
-                "runtime_id": kwargs["runtime_id"],
-                "runtime_version": kwargs["runtime_version"],
+                "sandbox_id": kwargs["identity"]["sandbox_id"],
+                "sandbox_generation": kwargs["identity"]["generation"],
+                "container_id": kwargs["identity"]["expected_container_id"],
+                "runtime_id": kwargs["identity"]["runtime_id"],
+                "runtime_version": kwargs["identity"]["runtime_version"],
                 "source_thread_id": source_thread_id,
                 "source_native_session_id": kwargs["source_native_session_id"],
                 "target_thread_id": kwargs["target_thread_id"],
@@ -3564,11 +3744,11 @@ async def test_ready_native_fork_retry_does_not_need_the_host(store: FakeStorage
             self.calls += 1
             return {
                 "operation_id": kwargs["operation_id"],
-                "sandbox_id": kwargs["sandbox_id"],
-                "sandbox_generation": kwargs["generation"],
-                "container_id": kwargs["expected_container_id"],
-                "runtime_id": kwargs["runtime_id"],
-                "runtime_version": kwargs["runtime_version"],
+                "sandbox_id": kwargs["identity"]["sandbox_id"],
+                "sandbox_generation": kwargs["identity"]["generation"],
+                "container_id": kwargs["identity"]["expected_container_id"],
+                "runtime_id": kwargs["identity"]["runtime_id"],
+                "runtime_version": kwargs["identity"]["runtime_version"],
                 "source_thread_id": source_thread_id,
                 "source_native_session_id": kwargs["source_native_session_id"],
                 "target_thread_id": kwargs["target_thread_id"],
@@ -3627,7 +3807,7 @@ async def test_browser_jwt_can_list_agent_jobs(store: FakeStorage):
     """Regression: the web login JWT was interpreted as an invalid API key."""
     app = _build_app(store)
     app.dependency_overrides.pop(authenticate_agent_owner)
-    token = _browser_session()
+    token = _browser_session(store)
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as jwt_client:
@@ -3640,23 +3820,23 @@ async def test_browser_jwt_can_list_agent_jobs(store: FakeStorage):
     assert response.json() == {"jobs": []}
 
 
-async def test_expired_browser_jwt_is_not_reinterpreted_as_api_key(store: FakeStorage):
-    """Credential dispatch must preserve a JWT's own expiry failure."""
-    from datetime import timedelta
+async def test_an_ended_session_is_refused(store: FakeStorage):
+    """A session ended server-side (sign-out, password change) authenticates nothing."""
 
     app = _build_app(store)
     app.dependency_overrides.pop(authenticate_agent_owner)
-    token = _browser_session(expires_delta=timedelta(seconds=-1))
+    token = _browser_session(store)
+    store.local_accounts.revoke_all()
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as jwt_client:
-        response = await jwt_client.get(
+    async with AsyncClient(transport=transport, base_url="http://test") as session_client:
+        response = await session_client.get(
             "/v1/agent/jobs",
             headers={"Authorization": f"Bearer {token}"},
         )
 
     assert response.status_code == 401
-    assert response.json()["detail"].startswith("Token has expired")
+    assert response.json()["detail"] == "Invalid authentication token."
 
 
 # ``test_normal_api_key_still_authenticates_agent_owner`` stood here. It minted
@@ -3664,14 +3844,14 @@ async def test_expired_browser_jwt_is_not_reinterpreted_as_api_key(store: FakeSt
 # ``update_key_last_used``. The API-key branch was deleted on 2026-08-04 — it
 # had no producer here and never will — so the case has no subject left and
 # passed only because it injected the store production never has. Recorded in
-# MIGRATION.md's "Discarded tests" register, which also says where the property
+# the extraction record's "Discarded tests" register, which also says where the property
 # lives now: the gateway, which still authenticates API keys for its own
 # surfaces.
 
 
 async def test_sandbox_token_stays_out_of_owner_routes(store: FakeStorage):
     """A structured Agent token must not be mistaken for a browser JWT."""
-    from cloud_agent.tokens import SCOPE_MODEL
+    from cloud_agent.tokens import SCOPE_MCP
 
     app = _build_app(store)
     app.dependency_overrides.pop(authenticate_agent_owner)
@@ -3679,7 +3859,7 @@ async def test_sandbox_token_stays_out_of_owner_routes(store: FakeStorage):
         job_id="ajob_0001",
         attempt_id=1,
         lease_generation=1,
-        scope=SCOPE_MODEL,
+        scope=SCOPE_MCP,
     )
 
     transport = ASGITransport(app=app)
@@ -3717,6 +3897,7 @@ async def test_other_users_jobs_are_404_not_403(client: AsyncClient, store: Fake
         f"/v1/agent/jobs/{foreign['id']}/events",
         f"/v1/agent/jobs/{foreign['id']}/files",
         f"/v1/agent/jobs/{foreign['id']}/git",
+        f"/v1/agent/jobs/{foreign['id']}/git/metadata",
     ):
         response = await client.get(path)
         assert response.status_code == 404, path
@@ -3725,10 +3906,6 @@ async def test_other_users_jobs_are_404_not_403(client: AsyncClient, store: Fake
         f"/v1/agent/jobs/{foreign['id']}/files",
         params={"path": "README.md"},
         json={"content": "forbidden"},
-    )
-    terminal = await client.post(
-        f"/v1/agent/jobs/{foreign['id']}/terminal",
-        json={"command": "pwd", "cwd": "/workspace"},
     )
     terminal_session_requests = [
         await client.post(
@@ -3748,7 +3925,6 @@ async def test_other_users_jobs_are_404_not_403(client: AsyncClient, store: Fake
         await client.delete(f"/v1/agent/jobs/{foreign['id']}/terminals/term_1"),
     ]
     assert write.status_code == 404
-    assert terminal.status_code == 404
     assert all(response.status_code == 404 for response in terminal_session_requests)
     cancel = await client.post(f"/v1/agent/jobs/{foreign['id']}/cancel")
     assert cancel.status_code == 404
@@ -3764,11 +3940,14 @@ async def test_other_users_jobs_are_404_not_403(client: AsyncClient, store: Fake
 
 
 async def test_live_workspace_routes_use_the_job_sandbox_manager(store: FakeStorage, monkeypatch):
-    """Files, terminal and Git address the same retained chat workspace."""
+    """Files and Git address the same retained chat workspace."""
 
     class SandboxManager:
         def __init__(self) -> None:
             self.calls: list[tuple] = []
+
+        def with_start_seq(self, _start_seq: int | None):
+            return self
 
         async def register_shared_sandbox(self, _sandbox: dict[str, Any]):
             return None
@@ -3794,14 +3973,21 @@ async def test_live_workspace_routes_use_the_job_sandbox_manager(store: FakeStor
                 "source": "workspace",
             }
 
-        async def terminal(self, workspace_id: str, **kwargs):
-            self.calls.append(("terminal", workspace_id, kwargs["command"], kwargs["cwd"]))
-            return {"output": "ok\n", "stderr": "", "exit_code": 0, "cwd": "/workspace"}
+        async def git_metadata(self, workspace_id: str, base_sha: str | None = None):
+            self.calls.append(("git_metadata", workspace_id, base_sha))
+            return {
+                "available": True,
+                "revision": "a" * 64,
+                "branch": "agent/thread",
+                "changes": [{"code": " M", "path": "README.md"}],
+                "change_count": 1,
+            }
 
         async def git(self, workspace_id: str, base_sha: str | None = None):
             self.calls.append(("git", workspace_id, base_sha))
             return {
                 "available": True,
+                "revision": "a" * 64,
                 "branch": "agent/thread",
                 "changes": [{"code": " M", "path": "README.md"}],
                 "patch": "diff --git a/README.md b/README.md\n",
@@ -3821,22 +4007,26 @@ async def test_live_workspace_routes_use_the_job_sandbox_manager(store: FakeStor
             params={"path": "README.md"},
             json={"content": "updated"},
         )
-        terminal = await local_client.post(
-            f"/v1/agent/jobs/{job_id}/terminal",
-            json={"command": "pwd", "cwd": "/workspace"},
-        )
+        metadata = await local_client.get(f"/v1/agent/jobs/{job_id}/git/metadata")
         git = await local_client.get(f"/v1/agent/jobs/{job_id}/git")
 
     assert listing.status_code == 200
     assert listing.json()["writable"] is True
     assert listing.json()["source"] == "workspace"
     assert saved.status_code == 200
-    assert terminal.json()["output"] == "ok\n"
+    assert metadata.json() == {
+        "available": True,
+        "revision": "a" * 64,
+        "branch": "agent/thread",
+        "changes": [{"code": " M", "path": "README.md"}],
+        "change_count": 1,
+    }
+    assert "patch" not in metadata.json()
     assert git.json()["branch"] == "agent/thread"
     assert sandbox_manager.calls == [
         ("files", workspace_id, ""),
         ("write", workspace_id, "README.md", "updated"),
-        ("terminal", workspace_id, "pwd", "/workspace"),
+        ("git_metadata", workspace_id, store.jobs[job_id].get("base_sha")),
         ("git", workspace_id, store.jobs[job_id].get("base_sha")),
     ]
     # Each request may start the stopped container, so each fences it first.
@@ -3851,6 +4041,9 @@ async def test_binary_workspace_payload_preserves_owner_and_path_checks(
     class SandboxManager:
         def __init__(self) -> None:
             self.calls: list[tuple[str, str]] = []
+
+        def with_start_seq(self, _start_seq: int | None):
+            return self
 
         async def register_shared_sandbox(self, _sandbox: dict[str, Any]):
             return None
@@ -3909,6 +4102,9 @@ async def test_missing_shared_workspace_is_a_conflict_not_a_missing_file(
     from cloud_agent.sandbox_manager_client import SandboxManagerError
 
     class SandboxManager:
+        def with_start_seq(self, _start_seq: int | None):
+            return self
+
         async def register_shared_sandbox(self, _sandbox: dict[str, Any]):
             return None
 
@@ -3938,16 +4134,15 @@ async def test_retained_mutations_honor_thread_fence_even_through_a_settled_turn
         def __init__(self) -> None:
             self.calls: list[tuple[Any, ...]] = []
 
+        def with_start_seq(self, _start_seq: int | None):
+            return self
+
         async def register_shared_sandbox(self, _sandbox: dict[str, Any]):
             return None
 
         async def write_file(self, workspace_id: str, path: str, content: str):
             self.calls.append(("write", workspace_id, path, content))
             raise AssertionError("durably fenced write reached the sandbox manager")
-
-        async def terminal(self, workspace_id: str, **kwargs):
-            self.calls.append(("terminal", workspace_id, kwargs["command"]))
-            raise AssertionError("durably fenced command reached the sandbox manager")
 
         async def terminal_input(self, workspace_id: str, terminal_id: str, *, data: str):
             self.calls.append(("input", workspace_id, terminal_id, data))
@@ -3977,10 +4172,6 @@ async def test_retained_mutations_honor_thread_fence_even_through_a_settled_turn
             f"/v1/agent/jobs/{job_id}/files?path=README.md",
             json={"content": "blocked"},
         )
-        command = await client.post(
-            f"/v1/agent/jobs/{job_id}/terminal",
-            json={"command": "touch blocked", "cwd": "/workspace"},
-        )
         wrote = await client.post(
             f"/v1/agent/jobs/{job_id}/terminals/term_1/input",
             json={"data": "eA=="},
@@ -3991,8 +4182,8 @@ async def test_retained_mutations_honor_thread_fence_even_through_a_settled_turn
         )
         killed = await client.delete(f"/v1/agent/jobs/{job_id}/terminals/term_1")
 
-    assert {saved.status_code, command.status_code, wrote.status_code, resized.status_code} == {409}
-    for response in (saved, command, wrote, resized):
+    assert {saved.status_code, wrote.status_code, resized.status_code} == {409}
+    for response in (saved, wrote, resized):
         assert response.json()["detail"]["error"]["type"] == "workspace_not_ready"
     assert killed.status_code == 200
     assert sandbox_manager.calls == [("delete", job["thread_id"], "term_1")]
@@ -4031,6 +4222,9 @@ class _TerminalSessionSandboxManager:
             b'event: output\ndata: {"seq":1,"data":"aGk="}\n\n',
             b'event: exit\ndata: {"seq":2,"exit_code":0}\n\n',
         )
+
+    def with_start_seq(self, _start_seq: int | None):
+        return self
 
     async def register_shared_sandbox(self, _sandbox: dict[str, Any]):
         return None
@@ -4169,64 +4363,6 @@ async def test_terminal_list_passes_the_sandbox_managers_advertised_limits_throu
 
     assert listed.status_code == 200
     assert listed.json() == advertised
-
-
-async def test_terminal_controls_use_the_attached_session_capability(
-    store: FakeStorage, monkeypatch
-):
-    """Attached PTY controls skip entitlement and never replay the event log."""
-    sandbox_manager = _TerminalSessionSandboxManager()
-    monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
-
-    async def unexpected_entitlement_recheck(**_kwargs):
-        raise AssertionError("attached terminal controls must not call external entitlement")
-
-    monkeypatch.setattr(
-        agent_workspace,
-        "_require_workspace_entitlement",
-        unexpected_entitlement_recheck,
-    )
-
-    async def unexpected_event_query(**_kwargs):
-        raise AssertionError("terminal input must use the attempt readiness field")
-
-    monkeypatch.setattr(store, "list_events_after", unexpected_event_query)
-    app = _build_app(store)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as local_client:
-        job_id = await _create_job(local_client)
-        workspace_id = _attach_shared_workspace(store, job_id)
-        claimed = await store.attempt_commands.claim_job(
-            worker_id="worker-1",
-            lease_ttl_seconds=60,
-            host="runner-test",
-            host_credential_hash="test-credential-hash",
-        )
-        assert claimed is not None
-        await store.attempt_commands.append_event(
-            attempt_id=claimed["attempt_id"],
-            lease_generation=claimed["lease_generation"],
-            event_type="lifecycle",
-            payload={"phase": "workspace_ready"},
-        )
-        wrote = await local_client.post(
-            f"/v1/agent/jobs/{job_id}/terminals/term_1/input",
-            json={"data": "eA=="},
-        )
-        resized = await local_client.post(
-            f"/v1/agent/jobs/{job_id}/terminals/term_1/resize",
-            json={"rows": 30, "cols": 100},
-        )
-        killed = await local_client.delete(f"/v1/agent/jobs/{job_id}/terminals/term_1")
-
-    assert wrote.status_code == 200
-    assert resized.status_code == 200
-    assert killed.status_code == 200
-    assert sandbox_manager.calls == [
-        ("input", workspace_id, "term_1", "eA=="),
-        ("resize", workspace_id, "term_1", 30, 100),
-        ("delete", workspace_id, "term_1"),
-    ]
 
 
 async def test_interactive_terminal_stream_is_relayed_byte_for_byte(
@@ -4437,7 +4573,7 @@ async def test_worker_suspends_terminals_around_protected_workspace_phases(
         job_id = await _create_job(local_client)
         claim = await local_client.post(
             "/v1/agent/worker/claim",
-            json={"worker_id": "worker-1"},
+            json=connection_claim({"worker_id": "worker-1"}),
         )
         auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
         workspace_id = _attach_shared_workspace(store, job_id)
@@ -4529,7 +4665,7 @@ async def test_worker_re_suspends_terminals_if_ready_event_loses_lease(
         job_id = await _create_job(local_client)
         claim = await local_client.post(
             "/v1/agent/worker/claim",
-            json={"worker_id": "worker-1"},
+            json=connection_claim({"worker_id": "worker-1"}),
         )
         auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
         workspace_id = _attach_shared_workspace(store, job_id)
@@ -4571,7 +4707,7 @@ async def test_worker_re_suspends_terminals_if_finish_loses_lease(
         job_id = await _create_job(local_client)
         claim = await local_client.post(
             "/v1/agent/worker/claim",
-            json={"worker_id": "worker-1"},
+            json=connection_claim({"worker_id": "worker-1"}),
         )
         auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
         workspace_id = _attach_shared_workspace(store, job_id)
@@ -4848,7 +4984,7 @@ async def test_worker_flow_claim_event_finish(client: AsyncClient, store: FakeSt
     """The worker path is claim → token → event → fenced finish."""
     job_id = await _create_job(client)
 
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    claim = await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
     assert claim.status_code == 200
     body = claim.json()
     assert body["job_id"] == job_id
@@ -4887,7 +5023,7 @@ async def test_worker_residency_establish_uses_the_token_attempt_fence(
 ):
     """The API must not substitute a same-host current attempt for its caller."""
     job_id = await _create_job(client)
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    claim = await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
     auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
     calls: list[dict[str, Any]] = []
     records: list[dict[str, Any]] = []
@@ -4902,6 +5038,8 @@ async def test_worker_residency_establish_uses_the_token_attempt_fence(
             "establishing_attempt_id": kwargs["attempt_id"],
             "user_id": _OWNER,
             "model": store.jobs[job_id]["model"],
+            "runtime": store.jobs[job_id]["runtime"],
+            "model_connection_id": CONNECTION_ID,
         }
 
     async def record_shared_thread_residency(**kwargs: Any) -> bool:
@@ -4948,7 +5086,7 @@ async def test_retained_lifecycle_writes_echo_every_generation_fence(
     client: AsyncClient, store: FakeStorage
 ):
     job_id = await _create_job(client)
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    claim = await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
     auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
 
     process = await client.post(
@@ -5024,29 +5162,80 @@ async def test_retained_lifecycle_writes_echo_every_generation_fence(
     ]
 
 
-async def test_shared_abandon_releases_the_exact_residency_and_grant(
-    store: FakeStorage, monkeypatch
+async def test_marking_a_group_running_pushes_its_ssh_state_as_it_is_now(
+    client: AsyncClient, store: FakeStorage, monkeypatch
 ):
-    """A pre-admission process failure must not leave a renewable grant live."""
+    """A change made while the group started reached no push; this one reaches it.
 
-    class RecordingGrants(_FakeGrants):
-        def __init__(self) -> None:
-            super().__init__()
-            self.revoked: list[str] = []
+    The claim's SSH state was read before the group was reserved, and an
+    owner's change only looks for running groups. Once the group is running,
+    every later change finds it, and this push covers the ones before.
+    """
+    job_id = await _create_job(client)
+    claim = await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
+    thread_id = _thread_of(store, job_id)
+    pushes: list[tuple[Any, dict[str, Any]]] = []
 
-        async def revoke(self, grant_id: str) -> bool:
-            self.revoked.append(grant_id)
-            return True
+    async def push(storage: Any, **kwargs: Any) -> None:
+        pushes.append((storage, kwargs))
 
-    grants = RecordingGrants()
+    async def mark_thread_sandbox_running(**kwargs: Any) -> dict[str, Any] | None:
+        if not store._fenced(kwargs["attempt_id"], kwargs["lease_generation"]):
+            return None
+        return {
+            "thread_id": kwargs["thread_id"],
+            "sandbox_id": "asbx_test",
+            "generation": kwargs["sandbox_generation"],
+            "host": "runner-test",
+            "container_id": kwargs["container_id"],
+            "container_name": "freeinference-test",
+            "runtime_id": "claude-code",
+            "execution_profile": "trusted-v1",
+            "state": "running",
+            "context_status": kwargs["context_status"],
+            "activation_generation": kwargs["activation_generation"],
+            "process_generation": 0,
+        }
+
+    monkeypatch.setattr(worker, "push_ssh_access", push, raising=False)
+    monkeypatch.setattr(
+        store, "mark_thread_sandbox_running", mark_thread_sandbox_running, raising=False
+    )
+    body = {
+        "sandbox_generation": 3,
+        "activation_generation": 7,
+        "container_id": "container-test",
+        "context_status": "new",
+    }
+
+    running = await client.post(
+        f"/v1/agent/worker/jobs/{job_id}/sandbox/running", json=body, headers=auth
+    )
+
+    assert running.status_code == 200, running.text
+    assert pushes == [(store, {"thread_ids": [thread_id]})]
+
+    # A superseded attempt confirms nothing, and so pushes nothing.
+    store.live_fence = (101, 2)
+    lost = await client.post(
+        f"/v1/agent/worker/jobs/{job_id}/sandbox/running", json=body, headers=auth
+    )
+
+    assert lost.status_code == 409, lost.text
+    assert len(pushes) == 1
+
+
+async def test_shared_abandon_releases_the_exact_residency(store: FakeStorage, monkeypatch):
+    """A pre-admission process failure must not leave its residency open."""
+
     app = _build_app(store)
-    from cloud_agent.api.deps import get_grant_client
-
-    app.dependency_overrides[get_grant_client] = lambda: grants
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         job_id = await _create_job(client)
-        claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+        claim = await client.post(
+            "/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"})
+        )
         auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
 
         job = store.jobs[job_id]
@@ -5104,7 +5293,6 @@ async def test_shared_abandon_releases_the_exact_residency_and_grant(
 
     assert response.status_code == 200, response.text
     assert releases == [(job["thread_id"], 11, "runner-a")]
-    assert grants.revoked == ["agr_resident_shared"]
 
 
 async def test_worker_api_bounds_oversized_events_without_failing_or_duplicating_the_turn(
@@ -5112,7 +5300,7 @@ async def test_worker_api_bounds_oversized_events_without_failing_or_duplicating
 ):
     """Older runners can upload large events; the API stores a labelled preview."""
     job_id = await _create_job(client)
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    claim = await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
     auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
     body = {
         "event_type": "tool_result",
@@ -5133,7 +5321,9 @@ async def test_worker_api_bounds_oversized_events_without_failing_or_duplicating
 
 async def test_empty_queue_claim_returns_null(client: AsyncClient):
     """Claiming with nothing queued is a 200 with a null body, not an error."""
-    response = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    response = await client.post(
+        "/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"})
+    )
     assert response.status_code == 200
     assert response.json() is None
 
@@ -5141,7 +5331,7 @@ async def test_empty_queue_claim_returns_null(client: AsyncClient):
 async def test_lost_lease_maps_to_409_on_every_write_path(client: AsyncClient, store: FakeStorage):
     """Once the fence moves on, every remaining worker write returns 409."""
     job_id = await _create_job(client)
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    claim = await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
     auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
 
     # The reaper hands ownership to a new attempt/generation.
@@ -5188,7 +5378,7 @@ async def test_worker_token_is_required_and_scoped(client: AsyncClient):
 async def test_finish_rejects_non_terminal_state(client: AsyncClient):
     """A worker cannot 'finish' into a non-terminal state."""
     job_id = await _create_job(client)
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    claim = await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
     auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
     response = await client.post(
         f"/v1/agent/worker/jobs/{job_id}/finish", json={"state": "running"}, headers=auth
@@ -5201,7 +5391,7 @@ async def test_sse_stream_replays_and_closes_on_terminal_state(
 ):
     """The SSE stream emits id-tagged frames and ends with job_finished."""
     job_id = await _create_job(client)
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    claim = await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
     auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
     await client.post(
         f"/v1/agent/worker/jobs/{job_id}/events",
@@ -5227,7 +5417,7 @@ async def test_sse_stream_replays_and_closes_on_terminal_state(
 async def test_sse_resumes_from_last_event_id(client: AsyncClient, store: FakeStorage):
     """Last-Event-ID skips already-delivered events."""
     job_id = await _create_job(client)
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    claim = await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
     auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
     for text in ("one", "two"):
         await client.post(
@@ -5275,14 +5465,18 @@ async def test_claim_requires_an_enrolled_host_identity(store: FakeStorage):
     app = _build_app(store, role="pro", claim_auth=False)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        denied = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+        denied = await client.post(
+            "/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"})
+        )
     assert denied.status_code in (401, 403)
     assert store.jobs[next(iter(store.jobs))]["state"] == "queued"
 
     app = _build_app(store, claim_auth=True)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        allowed = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+        allowed = await client.post(
+            "/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"})
+        )
     assert allowed.status_code == 200
     assert allowed.json()["repo"] == "private/repo"
 
@@ -5302,7 +5496,7 @@ async def test_pool_wide_bearer_token_does_not_open_claim(store: FakeStorage):
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/v1/agent/worker/claim",
-            json={"worker_id": "w1"},
+            json=connection_claim({"worker_id": "w1"}),
             headers={"Authorization": "Bearer pool-wide-secret"},
         )
     assert response.status_code == 401
@@ -5319,7 +5513,7 @@ async def test_worker_cannot_inject_sse_frames_via_event_type(
     a fake job_finished — into the owner's live stream.
     """
     job_id = await _create_job(client)
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    claim = await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
     auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
 
     rejected = await client.post(
@@ -5365,7 +5559,7 @@ async def test_lease_ttl_is_capped_server_side(client: AsyncClient):
     await _create_job(client)
     response = await client.post(
         "/v1/agent/worker/claim",
-        json={"worker_id": "w1", "lease_ttl_seconds": 99_999_999},
+        json=connection_claim({"worker_id": "w1", "lease_ttl_seconds": 99_999_999}),
     )
     assert response.status_code == 422
 
@@ -5378,7 +5572,7 @@ async def test_terminal_stream_drains_beyond_one_page(client: AsyncClient, store
     large backlog silently lost everything past the second page.
     """
     job_id = await _create_job(client)
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    claim = await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
     auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
 
     # More than two pages (page size is 500).
@@ -5414,35 +5608,37 @@ async def test_terminal_stream_drains_beyond_one_page(client: AsyncClient, store
 # The case below is its in-place replacement. The full record — the original's
 # four assertions, which three of them the replacement keeps verbatim, and why
 # "does not parse at all" is stronger than "parses with a narrow scope" — is
-# MIGRATION.md § Discarded tests → "`test_agent_jobs_api.py` — two cases E9
+# the extraction record § Discarded tests → "`test_agent_jobs_api.py` — two cases E9
 # replaced in place (E7/E8/E9)", case 1. Ratified 2026-08-04.
 
 
-async def test_the_claim_hands_over_a_gateway_grant_not_a_minted_token(
+async def test_the_claim_hands_over_the_owners_connection_and_no_sandbox_grant(
     client: AsyncClient, store: FakeStorage
 ):
-    """The sandbox credential is distinct from the runner's — and is not ours.
+    """The runner gets its control token and the turn's connection; there is no grant.
 
-    Two separate claims, and the second is the point: this service can
-    mint the runner's control token because it verifies it, and it must *not*
-    be able to mint the sandbox's, because the thing that credential buys is
-    inference the gateway meters. So the sandbox token deliberately does not
-    parse in this service's own namespace at all.
+    The runner's control token parses in this service's own namespace; the
+    sandbox's CLI runs on the owner's provider key from the connection.
     """
     await _create_job(client)
-    body = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
-    assert body["sandbox_token"]
-    assert body["sandbox_token"] != body["worker_token"]
+    body = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
+    assert "sandbox_token" not in body
+    assert body["model_connection"]["connection_id"] == CONNECTION_ID
 
-    from cloud_agent.tokens import SCOPE_FULL, InvalidAgentToken, parse_worker_token
+    from cloud_agent.tokens import SCOPE_FULL, parse_worker_token
 
     assert parse_worker_token(body["worker_token"])["scope"] == SCOPE_FULL
-    with pytest.raises(InvalidAgentToken):
-        parse_worker_token(body["sandbox_token"])
 
-    # And the grant is linked to the attempt under its own fence, because
-    # renewal and revocation are both lookups through that link.
-    assert store.attempt_grants == {100: "agr_1"}
+
+async def test_a_claim_from_a_host_that_cannot_run_connections_is_handed_back(
+    client: AsyncClient, store: FakeStorage
+):
+    job_id = await _create_job(client)
+    refused = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    assert refused.status_code == 503
+    assert store.jobs[job_id]["state"] == "queued"
 
 
 # ``test_sandbox_token_cannot_write_job_state`` was here, asserting 403
@@ -5454,20 +5650,22 @@ async def test_the_claim_hands_over_a_gateway_grant_not_a_minted_token(
 # The case below is its in-place replacement: same four endpoints, same
 # positive control, line-for-line identical otherwise. The full record — and
 # the note that ``_worker_claims``' 403 scope branch lost its only test with
-# the original — is MIGRATION.md § Discarded tests → "`test_agent_jobs_api.py`
+# the original — is the extraction record § Discarded tests → "`test_agent_jobs_api.py`
 # — two cases E9 replaced in place (E7/E8/E9)", case 2. Ratified 2026-08-04.
 
 
-async def test_the_sandbox_grant_cannot_write_job_state(client: AsyncClient):
+async def test_the_sandbox_credential_cannot_write_job_state(client: AsyncClient):
     """A credential leaked from inside the sandbox cannot poison the job.
 
     This is the payoff of running the runner outside the sandbox: the only
-    credential the agent can reach buys model calls, not event-log writes,
-    terminal transitions, or lease renewal.
+    worker-namespace credential the agent can reach (``mcp`` scope) opens the
+    MCP relay, not event-log writes, terminal transitions, or lease renewal.
     """
     job_id = await _create_job(client)
-    body = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
-    sandbox_auth = {"Authorization": f"Bearer {body['sandbox_token']}"}
+    body = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
+    sandbox_auth = {"Authorization": f"Bearer {body['mcp_token']}"}
 
     for path, payload in (
         (f"/v1/agent/worker/jobs/{job_id}/events", {"event_type": "message"}),
@@ -5475,8 +5673,8 @@ async def test_the_sandbox_grant_cannot_write_job_state(client: AsyncClient):
         (f"/v1/agent/worker/jobs/{job_id}/heartbeat", {}),
     ):
         response = await client.post(path, json=payload, headers=sandbox_auth)
-        assert response.status_code == 401, path
-        assert response.json()["detail"]["error"]["type"] == "unauthorized"
+        assert response.status_code == 403, path
+        assert response.json()["detail"]["error"]["type"] == "insufficient_scope"
 
     # The runner's own token still works.
     runner_auth = {"Authorization": f"Bearer {body['worker_token']}"}
@@ -5498,7 +5696,7 @@ async def test_the_sandbox_grant_cannot_write_job_state(client: AsyncClient):
 # ``insufficient_scope`` on ``/v1/agent/jobs``) and, for the worker surface,
 # ``test_the_sandbox_grant_cannot_write_job_state`` (the in-place replacement
 # for ``test_sandbox_token_cannot_write_job_state``; 401 against the gateway
-# grant the sandbox now carries). Recorded in MIGRATION.md's discarded-test
+# grant the sandbox now carries). Recorded in the extraction record's discarded-test
 # register.
 
 
@@ -5511,7 +5709,7 @@ async def test_event_type_guard_rejects_a_trailing_newline(client: AsyncClient):
 
 
 async def test_the_claim_carries_a_read_only_clone_credential(store: FakeStorage):
-    """Checkout stays read-only; sandbox publication uses a separate scoped token."""
+    """Checkout stays read-only, and no GitHub token for the sandbox is minted at all."""
     from cloud_agent.api.deps import get_agent_app_credentials
 
     asked: list[dict[str, Any]] = []
@@ -5519,39 +5717,37 @@ async def test_the_claim_carries_a_read_only_clone_credential(store: FakeStorage
     class FakeApp:
         async def token_for(self, repo: str, **kwargs: Any) -> str:
             asked.append({"repo": repo, **kwargs})
-            return (
-                "ghs_clone_only"
-                if kwargs["permissions"] == {"contents": "read"}
-                else "sandbox-write-token"
-            )
+            return "ghs_clone_only"
 
     app = _build_app(store)
     app.dependency_overrides[get_agent_app_credentials] = lambda: FakeApp()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         await _create_job(client)
-        claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+        claim = await client.post(
+            "/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"})
+        )
 
     assert claim.json()["clone_token"] == "ghs_clone_only"
-    assert asked[0]["permissions"] == {"contents": "read"}
-    assert asked[0]["repository_scoped"] is True
-    assert claim.json()["github_token"] == "sandbox-write-token"
-    assert asked[1] == {
-        "repo": claim.json()["repo"],
-        "permissions": {"contents": "write", "pull_requests": "write"},
-        "repository_scoped": True,
-    }
-    assert len(asked) == 2
+    assert asked == [
+        {
+            "repo": claim.json()["repo"],
+            "permissions": {"contents": "read"},
+            "repository_scoped": True,
+        }
+    ]
+    # git and gh in the sandbox hold the residency's relay placeholder instead.
+    assert "github_token" not in claim.json()
 
 
 async def test_a_deployment_without_a_github_app_still_claims_jobs(client: AsyncClient):
     """No App configured is a working setup: a public repository needs no token."""
     await _create_job(client)
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    claim = await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
 
     assert claim.status_code == 200
     assert claim.json()["clone_token"] is None
-    assert claim.json()["github_token"] is None
+    assert "github_token" not in claim.json()
 
 
 async def test_an_uninstalled_app_hands_the_job_over_without_a_credential(
@@ -5574,21 +5770,17 @@ async def test_an_uninstalled_app_hands_the_job_over_without_a_credential(
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         job_id = await _create_job(client)
-        claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+        claim = await client.post(
+            "/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"})
+        )
 
     assert claim.status_code == 200
     assert claim.json()["job_id"] == job_id
     assert claim.json()["clone_token"] is None
-    assert claim.json()["github_token"] is None
+    assert "github_token" not in claim.json()
 
 
-@pytest.mark.parametrize(
-    "failure_scope", [{"contents": "read"}, {"contents": "write", "pull_requests": "write"}]
-)
-async def test_a_transient_credential_error_is_retryable_not_terminal(
-    store: FakeStorage,
-    failure_scope: dict[str, str],
-):
+async def test_a_transient_credential_error_is_retryable_not_terminal(store: FakeStorage):
     """GitHub having a bad minute must not permanently fail someone's job.
 
     Handing the runner a null token here sends it off to clone anonymously,
@@ -5600,16 +5792,16 @@ async def test_a_transient_credential_error_is_retryable_not_terminal(
 
     class FlakyApp:
         async def token_for(self, repo: str, **kwargs: Any) -> str:
-            if kwargs["permissions"] == failure_scope:
-                raise TimeoutError("api.github.com timed out")
-            return "host-clone-token"
+            raise TimeoutError("api.github.com timed out")
 
     app = _build_app(store)
     app.dependency_overrides[get_agent_app_credentials] = lambda: FlakyApp()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         await _create_job(client)
-        claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+        claim = await client.post(
+            "/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"})
+        )
 
     assert claim.status_code == 503, "a null token here would terminally fail the job"
     # And the claim is handed back, not merely left to lapse. A lapsed lease
@@ -5631,7 +5823,7 @@ async def test_the_worker_reports_the_commit_it_actually_worked_from(
     job_id = await _create_job(client)
     assert store.jobs[job_id].get("base_sha") in (None, "")
 
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    claim = await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
     auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
     resolved = "a" * 40
 
@@ -5652,16 +5844,18 @@ async def test_a_worker_cannot_overwrite_a_base_the_owner_pinned(
     pinned = "b" * 40
     created = await client.post(
         "/v1/agent/jobs",
-        json={
-            "repo": "o/n",
-            "task_prompt": "do the thing",
-            "model": "m",
-            "base_sha": pinned,
-        },
+        json=on_connection(
+            {
+                "repo": "o/n",
+                "task_prompt": "do the thing",
+                "model": "m",
+                "base_sha": pinned,
+            }
+        ),
     )
     job_id = created.json()["id"]
 
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    claim = await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
     auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
     await client.post(
         f"/v1/agent/worker/jobs/{job_id}/finish",
@@ -5681,7 +5875,9 @@ async def test_an_unentitled_repo_is_refused_at_creation(client: AsyncClient):
     """
     response = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "someone-else/private", "task_prompt": "exfiltrate", "model": "m"},
+        json=on_connection(
+            {"repo": "someone-else/private", "task_prompt": "exfiltrate", "model": "m"}
+        ),
     )
 
     assert response.status_code == 403
@@ -5712,7 +5908,9 @@ async def test_a_legacy_row_gets_no_credential_at_claim(store: FakeStorage):
     app.dependency_overrides[get_agent_app_credentials] = lambda: FakeApp()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+        claim = await client.post(
+            "/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"})
+        )
 
     assert claim.status_code == 403
     assert minted == [], "no credential may be minted for an unentitled repo"
@@ -5739,51 +5937,31 @@ async def test_a_definitively_unentitled_oldest_job_does_not_block_the_next_job(
     async with AsyncClient(
         transport=ASGITransport(app=_build_app(store)), base_url="http://test"
     ) as client:
-        refused = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
-        accepted = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+        refused = await client.post(
+            "/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"})
+        )
+        accepted = await client.post(
+            "/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"})
+        )
     assert refused.status_code == 403
     assert store.jobs[denied["id"]]["state"] == "failed"
     assert accepted.status_code == 200
     assert accepted.json()["job_id"] == ready["id"]
 
 
-async def test_spend_and_usage_come_from_the_ledger_not_the_agent(store: FakeStorage):
-    """A job's numbers must not depend on what the agent says about itself.
+async def test_a_job_carries_no_cost_or_billed_usage_of_its_own(store: FakeStorage):
+    """The owner's provider bills a turn; the job never claims a cost or a billed count.
 
-    Models do misreport their own usage — this session watched one claim it had
-    edited a file it never touched — so the owner-facing totals read the same
-    billing ledger the budget check already trusts.
+    What the agent reported is the job's usage read (``/jobs/{id}/usage``), named
+    as the agent's report, never folded into the job as if it were billing.
     """
-    from cloud_agent.api.deps import get_log_store
-
-    class Ledger:
-        async def get_agent_job_cost(self, job_id: str) -> float:
-            return 0.0075
-
-        async def get_agent_job_usage(self, job_id: str) -> dict[str, float]:
-            return {"tokens_in": 74000, "tokens_out": 523, "calls": 3}
-
     app = _build_app(store)
-    app.dependency_overrides[get_log_store] = lambda: Ledger()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         job_id = await _create_job(client)
-        got = await client.get(f"/v1/agent/jobs/{job_id}")
+        body = (await client.get(f"/v1/agent/jobs/{job_id}")).json()
 
-    body = got.json()
-    assert body["spent_usd"] == 0.0075
-    assert body["tokens_in"] == 74000
-    assert body["model_calls"] == 3
-
-
-async def test_a_deployment_without_a_ledger_reports_absent_not_zero(client: AsyncClient):
-    """A missing source must not look like a job that spent nothing."""
-    job_id = await _create_job(client)
-
-    body = (await client.get(f"/v1/agent/jobs/{job_id}")).json()
-
-    assert body["spent_usd"] is None
-    assert body["tokens_in"] is None
+    assert not {"spent_usd", "tokens_in", "tokens_out", "model_calls"} & body.keys()
 
 
 async def test_a_job_reports_no_network_mode(client: AsyncClient):
@@ -5813,7 +5991,7 @@ async def test_a_worker_cannot_write_the_publish_record(client: AsyncClient):
     patch was never gated or pushed.
     """
     job_id = await _create_job(client)
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
+    claim = await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
     auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
 
     for path, body in (
@@ -5822,3876 +6000,3 @@ async def test_a_worker_cannot_write_the_publish_record(client: AsyncClient):
     ):
         response = await client.post(path, json=body, headers=auth)
         assert response.status_code == 404, f"{path} must not exist"
-
-
-class _FakeGitHubApp:
-    """Stands in for the App: a user token maps to installations, which cover repos.
-
-    ``repos_by_installation`` is what each installation covers; ``pushable``,
-    where given, is the part of it this user may push to — what GitHub answers
-    when asked as the user. Absent, the user may push to all of it.
-    """
-
-    def __init__(
-        self,
-        installations,
-        repos_by_installation,
-        *,
-        exchange_fails=False,
-        login="octocat",
-        pushable=None,
-    ):
-        from cloud_agent.source_control import SourceControlCipher
-
-        self.installations = installations
-        self.repos = repos_by_installation
-        self.pushable = pushable
-        self.exchange_fails = exchange_fails
-        self.login = login
-        self.exchanged: list[str] = []
-        self.listed_with: list[str] = []
-        self.revoked: list[str] = []
-        self.refused_tokens: set[str] = set()
-        self.forgotten: list[str] = []
-        self.cipher = SourceControlCipher("test-source-control-key")
-
-    async def exchange_user_code(self, code: str) -> Any:
-        from cloud_agent.github_app import UserTokens
-
-        if self.exchange_fails:
-            raise RuntimeError("GitHub refused the code exchange")
-        self.exchanged.append(code)
-        return UserTokens(
-            access_token=f"user-token-for-{code}",
-            access_expires_at=datetime.now(timezone.utc) + timedelta(hours=8),
-            refresh_token=f"refresh-for-{code}",
-            refresh_expires_at=datetime.now(timezone.utc) + timedelta(days=180),
-        )
-
-    async def user_profile(self, user_token: str) -> dict[str, Any]:
-        assert user_token.startswith("user-token-for-"), "the profile is the token's own"
-        return {"id": 583231, "login": self.login}
-
-    async def writable_repositories_for_user(self, user_token: str, installation_id: int):
-        from cloud_agent.github_app import UserAuthorizationRevoked
-
-        if user_token in self.refused_tokens:
-            raise UserAuthorizationRevoked("GitHub refused the user's token")
-        self.listed_with.append(user_token)
-        if self.pushable is not None:
-            return list(self.pushable.get(installation_id, []))
-        return list(self.repos.get(installation_id, []))
-
-    # The fake answers fresh every time; the minute-long memory is the real
-    # class's, and tested there.
-    def cached_user_repositories(self, user_id, installation_ids):
-        return None
-
-    def remember_user_repositories(self, user_id, installation_ids, repositories):
-        pass
-
-    def forget_user(self, user_id):
-        self.forgotten.append(user_id)
-
-    async def revoke_user_authorization(self, access_token: str) -> None:
-        self.revoked.append(access_token)
-
-    user_authorization_configured = True
-
-    def user_authorization_url(self, state: str) -> str:
-        return f"https://github.test/login/oauth/authorize?state={state}"
-
-    async def installations_for_user(self, user_token: str) -> list[dict[str, Any]]:
-        return self.installations
-
-    async def repositories_for_installation(self, installation_id: int) -> list[str]:
-        return self.repos.get(installation_id, [])
-
-    async def token_for(self, repo: str, **kwargs: Any) -> str:
-        return "ghs_x"
-
-    async def require_commit_on_branch(
-        self, repo: str, sha: str, *, branch: str | None = None
-    ) -> str:
-        """Every base is on its branch unless a test says otherwise."""
-        return branch or "main"
-
-
-def _store_with_grants(store: FakeStorage) -> FakeStorage:
-    """Give the fake store the grant surface the router uses."""
-    store.grants = {}
-    store.consumed_oauth_states = set()
-
-    async def record_repo_grant(*, user_id, installation_id, account_login=None):
-        store.grants.setdefault(user_id, {})[installation_id] = account_login
-
-    async def list_repo_grants(*, user_id):
-        return [
-            {"installation_id": iid, "account_login": login}
-            for iid, login in store.grants.get(user_id, {}).items()
-        ]
-
-    async def revoke_repo_grant(*, user_id, installation_id):
-        return store.grants.get(user_id, {}).pop(installation_id, "missing") != "missing"
-
-    async def consume_oauth_state(*, state_hash, user_id, provider):
-        assert user_id == "user-owner"
-        assert provider == "github"
-        if state_hash in store.consumed_oauth_states:
-            return None
-        store.consumed_oauth_states.add(state_hash)
-        return {"code_verifier_ciphertext": None}
-
-    store.issued_oauth_states = []
-
-    async def create_oauth_state(**kwargs):
-        store.issued_oauth_states.append(kwargs)
-
-    store.github_accounts = {}
-    store.github_account_locks = {}
-    store.github_account_lock_attempts = []
-
-    @asynccontextmanager
-    async def serialize_github_account(*, user_id):
-        lock = store.github_account_locks.setdefault(user_id, asyncio.Lock())
-        task = asyncio.current_task()
-        store.github_account_lock_attempts.append(
-            task.get_name() if task is not None else "unknown"
-        )
-        async with lock:
-            yield store
-
-    store.serialize_github_account = serialize_github_account
-
-    async def connect_github_account(
-        *,
-        user_id,
-        github_user_id,
-        login,
-        installations,
-        access_token_ciphertext=None,
-        access_expires_at=None,
-        refresh_token_ciphertext=None,
-        refresh_expires_at=None,
-    ):
-        previous = store.github_accounts.get(user_id)
-        refresh_generation = 0 if previous is None else previous["refresh_generation"] + 1
-        store.github_accounts[user_id] = {
-            "github_user_id": github_user_id,
-            "login": login,
-            "access_token_ciphertext": access_token_ciphertext,
-            "access_expires_at": access_expires_at,
-            "refresh_token_ciphertext": refresh_token_ciphertext,
-            "refresh_expires_at": refresh_expires_at,
-            "refresh_generation": refresh_generation,
-        }
-        store.grants[user_id] = {
-            item["installation_id"]: item.get("account_login") for item in installations
-        }
-
-    async def get_github_account(*, user_id):
-        account = store.github_accounts.get(user_id)
-        return dict(account) if account else None
-
-    async def claim_github_token_refresh(*, user_id, lease_seconds, margin_seconds):
-        return None
-
-    async def store_github_tokens(**kwargs):
-        return False
-
-    async def clear_github_tokens(*, user_id, access_token_ciphertext):
-        account = store.github_accounts.get(user_id)
-        if not account or account.get("access_token_ciphertext") != access_token_ciphertext:
-            return False
-        account.update(access_token_ciphertext=None, refresh_token_ciphertext=None)
-        return True
-
-    async def disconnect_github_account(*, user_id):
-        account = store.github_accounts.pop(user_id, None)
-        if account is None:
-            return None
-        store.grants.pop(user_id, None)
-        return dict(account)
-
-    store.record_repo_grant = record_repo_grant
-    store.list_repo_grants = list_repo_grants
-    store.revoke_repo_grant = revoke_repo_grant
-    store.consume_oauth_state = consume_oauth_state
-    store.create_oauth_state = create_oauth_state
-    store.connect_github_account = connect_github_account
-    store.get_github_account = get_github_account
-    store.claim_github_token_refresh = claim_github_token_refresh
-    store.store_github_tokens = store_github_tokens
-    store.clear_github_tokens = clear_github_tokens
-    store.disconnect_github_account = disconnect_github_account
-    return store
-
-
-async def test_connecting_records_only_what_github_attests(store: FakeStorage, monkeypatch):
-    """The entitlement must come from GitHub's answer, not the browser's claim.
-
-    The browser sends a code; the platform exchanges it for a token that speaks
-    as that user and asks GitHub which installations they can reach. An
-    installation id posted directly would be exactly the confused deputy this
-    path exists to prevent.
-    """
-    monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
-    from cloud_agent.api.deps import get_agent_app_credentials, get_github_app_state
-    from cloud_agent.source_control_runtime import GitHubAppState
-
-    app_creds = _FakeGitHubApp(
-        installations=[{"installation_id": 77, "account_login": "acme"}],
-        repos_by_installation={77: ["acme/service", "acme/web"]},
-    )
-    app = _build_app(_store_with_grants(store))
-    app.dependency_overrides[get_agent_app_credentials] = lambda: app_creds
-    # The config and disconnect routes answer while the App is unavailable,
-    # so they read it through the lenient dependency.
-    app.dependency_overrides[get_github_app_state] = lambda: GitHubAppState(
-        credentials=app_creds, load_status="ready"
-    )
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        connected = await client.post(
-            "/v1/agent/github/connect",
-            json={"code": "abc123", "state": "test-state-value-123456"},
-        )
-        config = await client.get("/v1/agent/config")
-
-    assert connected.status_code == 200
-    assert app_creds.exchanged == ["abc123"], "the code must be exchanged, not trusted"
-    assert connected.json()["connections"][0]["installation_id"] == 77
-    # The picker now offers what this user actually connected.
-    assert config.json()["repos"] == ["acme/service", "acme/web"]
-    assert config.json()["github_connected"] is True
-
-
-async def test_a_connected_user_may_run_only_their_own_repos(store: FakeStorage, monkeypatch):
-    """Connecting one owner must not entitle someone else's repository."""
-    monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
-    from cloud_agent.api.deps import get_agent_app_credentials
-
-    app_creds = _FakeGitHubApp(
-        installations=[{"installation_id": 77, "account_login": "acme"}],
-        repos_by_installation={77: ["acme/service"]},
-    )
-    app = _build_app(_store_with_grants(store))
-    app.dependency_overrides[get_agent_app_credentials] = lambda: app_creds
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        await client.post(
-            "/v1/agent/github/connect",
-            json={"code": "abc123", "state": "test-state-value-123456"},
-        )
-        mine = await client.post(
-            "/v1/agent/jobs",
-            json={"repo": "acme/service", "task_prompt": "fix it", "model": "m"},
-        )
-        theirs = await client.post(
-            "/v1/agent/jobs",
-            json={"repo": "someone-else/private", "task_prompt": "exfiltrate", "model": "m"},
-        )
-
-    assert mine.status_code == 201
-    assert theirs.status_code == 403
-    assert "connected" in theirs.text
-
-
-async def test_a_failed_exchange_grants_nothing(store: FakeStorage, monkeypatch):
-    """A code that does not verify must leave the user with no entitlement."""
-    monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
-    from cloud_agent.api.deps import get_agent_app_credentials, get_github_app_state
-    from cloud_agent.source_control_runtime import GitHubAppState
-
-    app_creds = _FakeGitHubApp(
-        installations=[{"installation_id": 77, "account_login": "acme"}],
-        repos_by_installation={77: ["acme/service"]},
-        exchange_fails=True,
-    )
-    app = _build_app(_store_with_grants(store))
-    app.dependency_overrides[get_agent_app_credentials] = lambda: app_creds
-    # The config and disconnect routes answer while the App is unavailable,
-    # so they read it through the lenient dependency.
-    app.dependency_overrides[get_github_app_state] = lambda: GitHubAppState(
-        credentials=app_creds, load_status="ready"
-    )
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        connected = await client.post(
-            "/v1/agent/github/connect",
-            json={"code": "stolen", "state": "test-state-value-123456"},
-        )
-        config = await client.get("/v1/agent/config")
-
-    assert connected.status_code == 400
-    assert config.json()["repos"] == []
-
-
-async def test_disconnecting_removes_the_entitlement(store: FakeStorage, monkeypatch):
-    """Revoking here is half of it; uninstalling on GitHub is the other half."""
-    monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
-    from cloud_agent.api.deps import get_agent_app_credentials, get_github_app_state
-    from cloud_agent.source_control_runtime import GitHubAppState
-
-    app_creds = _FakeGitHubApp(
-        installations=[{"installation_id": 77, "account_login": "acme"}],
-        repos_by_installation={77: ["acme/service"]},
-    )
-    app = _build_app(_store_with_grants(store))
-    app.dependency_overrides[get_agent_app_credentials] = lambda: app_creds
-    # The config and disconnect routes answer while the App is unavailable,
-    # so they read it through the lenient dependency.
-    app.dependency_overrides[get_github_app_state] = lambda: GitHubAppState(
-        credentials=app_creds, load_status="ready"
-    )
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        await client.post(
-            "/v1/agent/github/connect",
-            json={"code": "abc123", "state": "test-state-value-123456"},
-        )
-        await client.delete("/v1/agent/github/connect/77")
-        after = await client.post(
-            "/v1/agent/jobs",
-            json={"repo": "acme/service", "task_prompt": "fix it", "model": "m"},
-        )
-
-    assert after.status_code == 403
-
-
-_INSTALL_URL = "https://github.com/apps/agent-test/installations/new"
-
-
-def _connectable_app(store: FakeStorage, app_creds: _FakeGitHubApp) -> FastAPI:
-    """An app where users can connect their own GitHub: App, OAuth and install URL."""
-    from cloud_agent.api.deps import get_agent_app_credentials, get_github_app_state
-    from cloud_agent.source_control_runtime import GitHubAppState
-
-    app = _build_app(store)
-    app.dependency_overrides[get_agent_app_credentials] = lambda: app_creds
-    app.dependency_overrides[get_github_app_state] = lambda: GitHubAppState(
-        credentials=app_creds, load_status="ready"
-    )
-    return app
-
-
-async def test_connecting_records_the_account_even_before_any_installation(
-    store: FakeStorage, monkeypatch
-):
-    """Having connected and having repository access are two different states.
-
-    A user with no installation yet used to leave no row at all, and the
-    composer — which read "connected" as "has a repository" — sent them back to
-    a Connect button they had just pressed.
-    """
-    monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
-    monkeypatch.setenv("AGENT_GITHUB_APP_INSTALL_URL", _INSTALL_URL)
-    app_creds = _FakeGitHubApp(installations=[], repos_by_installation={})
-    grants_store = _store_with_grants(store)
-    app = _connectable_app(grants_store, app_creds)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        connected = await client.post(
-            "/v1/agent/integrations/github/connect",
-            json={"code": "abc123", "state": "test-state-value-123456"},
-        )
-        config = await client.get("/v1/agent/config")
-        integrations = await client.get("/v1/agent/integrations")
-
-    assert connected.status_code == 200
-    assert connected.json()["connections"] == []
-    assert connected.json()["install_url"].startswith(_INSTALL_URL)
-    # Who connected is GitHub's answer for the exchanged token, and the token
-    # itself is kept only encrypted.
-    account = grants_store.github_accounts[_OWNER]
-    assert (account["github_user_id"], account["login"]) == (583231, "octocat")
-    assert "user-token-for-abc123" not in str(account)
-    assert app_creds.cipher.decrypt(account["access_token_ciphertext"]) == "user-token-for-abc123"
-    assert app_creds.cipher.decrypt(account["refresh_token_ciphertext"]) == "refresh-for-abc123"
-
-    assert config.json()["github_connected"] is True
-    assert config.json()["repos"] == []
-
-    github_row = integrations.json()["providers"][0]
-    assert github_row["connected"] is True
-    assert github_row["accounts"] == []
-    # Where repository access is added — including a personal account the App
-    # is not installed on yet — is offered without an installation to manage.
-    assert github_row["manage_url"].startswith(_INSTALL_URL)
-
-
-async def test_connecting_offers_the_install_page_until_the_app_is_on_the_users_own_account(
-    store: FakeStorage, monkeypatch
-):
-    """An organization's installation is not the user's own.
-
-    The install page used to be offered only when connecting found no
-    installation at all. A member of an organization that already had the App
-    found that one, skipped the page, and could not tell that their own
-    repositories needed an installation of their own.
-    """
-    monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
-    monkeypatch.setenv("AGENT_GITHUB_APP_INSTALL_URL", _INSTALL_URL)
-    app_creds = _FakeGitHubApp(
-        installations=[{"installation_id": 77, "account_login": "acme", "account_id": 1001}],
-        repos_by_installation={77: ["acme/service"], 88: ["octocat/dotfiles"]},
-    )
-    app = _connectable_app(_store_with_grants(store), app_creds)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        org_only = await client.post(
-            "/v1/agent/integrations/github/connect",
-            json={"code": "first", "state": "test-state-value-first-1"},
-        )
-        # The user installs the App on their own account and comes back through
-        # the same callback.
-        app_creds.installations = [
-            {"installation_id": 77, "account_login": "acme", "account_id": 1001},
-            {"installation_id": 88, "account_login": "octocat", "account_id": 583231},
-        ]
-        with_own = await client.post(
-            "/v1/agent/integrations/github/connect",
-            json={"code": "second", "state": "test-state-value-second-2"},
-        )
-
-    assert [row["installation_id"] for row in org_only.json()["connections"]] == [77]
-    assert org_only.json()["repos"] == ["acme/service"]
-    assert org_only.json()["install_url"].startswith(_INSTALL_URL)
-    assert with_own.json()["install_url"] is None
-    assert with_own.json()["repos"] == ["acme/service", "octocat/dotfiles"]
-
-
-async def test_a_user_is_offered_only_the_repositories_they_can_push_to(
-    store: FakeStorage, monkeypatch
-):
-    """The installation covers more than this user was given; only theirs are offered.
-
-    Asked with the installation's token, GitHub lists every repository the
-    installation covers — for an organization, repositories an outside
-    collaborator on one of them was never given, which the platform would then
-    clone into their sandbox. Asked as the user, it lists theirs, with their
-    permission on each: the agent pushes a branch, so push is the bar.
-    """
-    monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
-    monkeypatch.setenv("AGENT_GITHUB_APP_INSTALL_URL", _INSTALL_URL)
-    app_creds = _FakeGitHubApp(
-        installations=[{"installation_id": 77, "account_login": "acme", "account_id": 1001}],
-        repos_by_installation={77: ["acme/secret", "acme/service", "acme/readonly"]},
-        pushable={77: ["acme/service"]},
-    )
-    app = _connectable_app(_store_with_grants(store), app_creds)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        await client.post(
-            "/v1/agent/integrations/github/connect",
-            json={"code": "abc123", "state": "test-state-value-123456"},
-        )
-        config = await client.get("/v1/agent/config")
-        mine = await client.post(
-            "/v1/agent/jobs",
-            json={"repo": "acme/service", "task_prompt": "fix it", "model": "m"},
-        )
-        secret = await client.post(
-            "/v1/agent/jobs",
-            json={"repo": "acme/secret", "task_prompt": "read it", "model": "m"},
-        )
-        branches = await client.get("/v1/agent/branches", params={"repo": "acme/secret"})
-
-    assert config.json()["repos"] == ["acme/service"]
-    assert mine.status_code == 201
-    assert secret.status_code == 403
-    assert branches.status_code == 403
-    # Asked as the user, with the token the connection exchanged.
-    assert set(app_creds.listed_with) == {"user-token-for-abc123"}
-
-
-async def test_a_token_github_refuses_is_forgotten_and_the_user_connects_again(
-    store: FakeStorage, monkeypatch
-):
-    """A revoked authorization closes everything, and the composer asks to reconnect."""
-    monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
-    monkeypatch.setenv("AGENT_GITHUB_APP_INSTALL_URL", _INSTALL_URL)
-    app_creds = _FakeGitHubApp(
-        installations=[{"installation_id": 77, "account_login": "acme", "account_id": 1001}],
-        repos_by_installation={77: ["acme/service"]},
-    )
-    grants_store = _store_with_grants(store)
-    app = _connectable_app(grants_store, app_creds)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        await client.post(
-            "/v1/agent/integrations/github/connect",
-            json={"code": "abc123", "state": "test-state-value-123456"},
-        )
-        app_creds.refused_tokens.add("user-token-for-abc123")
-        refused = await client.post(
-            "/v1/agent/jobs",
-            json={"repo": "acme/service", "task_prompt": "fix it", "model": "m"},
-        )
-        config = await client.get("/v1/agent/config")
-
-    assert refused.status_code == 403
-    assert "Reconnect GitHub" in refused.text
-    assert grants_store.github_accounts[_OWNER]["access_token_ciphertext"] is None
-    assert config.json()["github_connected"] is False
-    assert config.json()["repos"] == []
-
-
-async def test_disconnecting_github_forgets_the_token_and_withdraws_the_authorization(
-    store: FakeStorage, monkeypatch
-):
-    """The stored token is why this exists: removing installations one by one left it."""
-    monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
-    monkeypatch.setenv("AGENT_GITHUB_APP_INSTALL_URL", _INSTALL_URL)
-    app_creds = _FakeGitHubApp(
-        installations=[{"installation_id": 77, "account_login": "acme", "account_id": 1001}],
-        repos_by_installation={77: ["acme/service"]},
-    )
-    grants_store = _store_with_grants(store)
-    app = _connectable_app(grants_store, app_creds)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        await client.post(
-            "/v1/agent/integrations/github/connect",
-            json={"code": "abc123", "state": "test-state-value-123456"},
-        )
-        removed = await client.delete("/v1/agent/integrations/github")
-        config = await client.get("/v1/agent/config")
-        after = await client.post(
-            "/v1/agent/jobs",
-            json={"repo": "acme/service", "task_prompt": "fix it", "model": "m"},
-        )
-
-    assert removed.status_code == 200
-    github_row = removed.json()["providers"][0]
-    assert (github_row["connected"], github_row["accounts"]) == (False, [])
-    assert removed.json()["providers"][1]["provider"] == "gitlab", "the page's whole state"
-    assert app_creds.revoked == ["user-token-for-abc123"]
-    assert grants_store.github_accounts == {}
-    assert config.json()["github_connected"] is False
-    assert after.status_code == 403
-
-
-async def test_github_connect_first_is_revoked_by_later_disconnect(store: FakeStorage, monkeypatch):
-    """The whole-grant lock makes a later disconnect win after OAuth completes."""
-    monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
-    monkeypatch.setenv("AGENT_GITHUB_APP_INSTALL_URL", _INSTALL_URL)
-    app_creds = _FakeGitHubApp(
-        installations=[{"installation_id": 77, "account_login": "acme", "account_id": 1001}],
-        repos_by_installation={77: ["acme/service"]},
-    )
-    grants_store = _store_with_grants(store)
-    original_exchange = app_creds.exchange_user_code
-    exchange_started = asyncio.Event()
-    release_exchange = asyncio.Event()
-
-    async def blocked_exchange(code: str):
-        exchange_started.set()
-        await release_exchange.wait()
-        return await original_exchange(code)
-
-    app_creds.exchange_user_code = blocked_exchange
-    app = _connectable_app(grants_store, app_creds)
-    connect: asyncio.Task | None = None
-    disconnect: asyncio.Task | None = None
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        try:
-            connect = asyncio.create_task(
-                client.post(
-                    "/v1/agent/integrations/github/connect",
-                    json={"code": "connect-first", "state": "connect-first-state-value"},
-                ),
-                name="github-connect-first",
-            )
-            await asyncio.wait_for(exchange_started.wait(), timeout=1)
-            disconnect = asyncio.create_task(
-                client.delete("/v1/agent/integrations/github"),
-                name="github-disconnect-second",
-            )
-            for _ in range(100):
-                if "github-disconnect-second" in grants_store.github_account_lock_attempts:
-                    break
-                await asyncio.sleep(0.01)
-            assert "github-disconnect-second" in grants_store.github_account_lock_attempts
-            assert not disconnect.done(), "disconnect bypassed the in-flight OAuth exchange"
-
-            release_exchange.set()
-            connected, removed = await asyncio.gather(connect, disconnect)
-        finally:
-            release_exchange.set()
-            pending = [
-                task for task in (connect, disconnect) if task is not None and not task.done()
-            ]
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-
-    assert connected.status_code == 200
-    assert removed.status_code == 200
-    assert app_creds.revoked == ["user-token-for-connect-first"]
-    assert grants_store.github_accounts == {}
-    assert grants_store.grants.get(_OWNER, {}) == {}
-
-
-async def test_github_disconnect_first_blocks_exchange_then_reconnect_wins(
-    store: FakeStorage, monkeypatch
-):
-    """A reconnect mints its grant only after an earlier full revoke completes."""
-    monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
-    monkeypatch.setenv("AGENT_GITHUB_APP_INSTALL_URL", _INSTALL_URL)
-    app_creds = _FakeGitHubApp(
-        installations=[{"installation_id": 77, "account_login": "acme", "account_id": 1001}],
-        repos_by_installation={77: ["acme/service"]},
-    )
-    grants_store = _store_with_grants(store)
-    app = _connectable_app(grants_store, app_creds)
-    revoke_started = asyncio.Event()
-    release_revoke = asyncio.Event()
-    exchange_started = asyncio.Event()
-    original_revoke = app_creds.revoke_user_authorization
-    original_exchange = app_creds.exchange_user_code
-
-    async def blocked_revoke(access_token: str) -> None:
-        revoke_started.set()
-        await release_revoke.wait()
-        await original_revoke(access_token)
-
-    async def observed_exchange(code: str):
-        exchange_started.set()
-        return await original_exchange(code)
-
-    disconnect: asyncio.Task | None = None
-    reconnect: asyncio.Task | None = None
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        old = await client.post(
-            "/v1/agent/integrations/github/connect",
-            json={"code": "old", "state": "old-state-value-123456"},
-        )
-        assert old.status_code == 200
-        app_creds.revoke_user_authorization = blocked_revoke
-        app_creds.exchange_user_code = observed_exchange
-        try:
-            disconnect = asyncio.create_task(
-                client.delete("/v1/agent/integrations/github"),
-                name="github-disconnect-first",
-            )
-            await asyncio.wait_for(revoke_started.wait(), timeout=1)
-            reconnect = asyncio.create_task(
-                client.post(
-                    "/v1/agent/integrations/github/connect",
-                    json={"code": "new", "state": "new-state-value-123456"},
-                ),
-                name="github-connect-second",
-            )
-            for _ in range(100):
-                if "github-connect-second" in grants_store.github_account_lock_attempts:
-                    break
-                await asyncio.sleep(0.01)
-            assert "github-connect-second" in grants_store.github_account_lock_attempts
-            assert not exchange_started.is_set(), "reconnect exchanged before revoke completed"
-
-            release_revoke.set()
-            removed, connected = await asyncio.gather(disconnect, reconnect)
-        finally:
-            release_revoke.set()
-            pending = [
-                task for task in (disconnect, reconnect) if task is not None and not task.done()
-            ]
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-
-    assert removed.status_code == 200
-    assert connected.status_code == 200
-    assert app_creds.revoked == ["user-token-for-old"]
-    account = grants_store.github_accounts[_OWNER]
-    assert app_creds.cipher.decrypt(account["access_token_ciphertext"]) == "user-token-for-new"
-    assert grants_store.grants[_OWNER] == {77: "acme"}
-
-
-async def test_refresh_asks_github_again_rather_than_reusing_the_last_answer(
-    store: FakeStorage, monkeypatch
-):
-    """The composer's Refresh is for a repository just given to the App on GitHub."""
-    monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
-    app_creds = _FakeGitHubApp(installations=[], repos_by_installation={})
-    app = _connectable_app(_store_with_grants(store), app_creds)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        await client.get("/v1/agent/config")
-        assert app_creds.forgotten == []
-        fresh = await client.get("/v1/agent/config", params={"fresh": "true"})
-
-    assert fresh.status_code == 200
-    assert app_creds.forgotten == [_OWNER]
-
-
-async def test_reconnecting_keeps_only_the_installations_github_still_reports(
-    store: FakeStorage, monkeypatch
-):
-    """An installation the user lost stays granted only until they reconnect.
-
-    Grants were only ever added, so leaving an organization kept its
-    repositories until someone removed the connection by hand.
-    """
-    monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
-    monkeypatch.setenv("AGENT_GITHUB_APP_INSTALL_URL", _INSTALL_URL)
-    app_creds = _FakeGitHubApp(
-        installations=[
-            {"installation_id": 77, "account_login": "acme"},
-            {"installation_id": 88, "account_login": "octocat"},
-        ],
-        repos_by_installation={77: ["acme/service"], 88: ["octocat/dotfiles"]},
-    )
-    grants_store = _store_with_grants(store)
-    app = _connectable_app(grants_store, app_creds)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        await client.post(
-            "/v1/agent/integrations/github/connect",
-            json={"code": "first", "state": "test-state-value-first-1"},
-        )
-        before = await client.get("/v1/agent/config")
-        app_creds.installations = [{"installation_id": 88, "account_login": "octocat"}]
-        await client.post(
-            "/v1/agent/integrations/github/connect",
-            json={"code": "second", "state": "test-state-value-second-2"},
-        )
-        after = await client.get("/v1/agent/config")
-        lost = await client.post(
-            "/v1/agent/jobs",
-            json={"repo": "acme/service", "task_prompt": "fix it", "model": "m"},
-        )
-
-    assert before.json()["repos"] == ["acme/service", "octocat/dotfiles"]
-    assert after.json()["repos"] == ["octocat/dotfiles"]
-    assert grants_store.grants[_OWNER] == {88: "octocat"}
-    assert lost.status_code == 403
-
-
-async def test_an_allowlisted_repository_does_not_stand_in_for_connecting(
-    store: FakeStorage, monkeypatch
-):
-    """Where users can connect GitHub, they connect before choosing anything.
-
-    The allowlist is still an entitlement — the create endpoint honours it — but
-    it no longer makes the composer skip the connection: that is how a user ran
-    their first task without knowing it would change a GitHub repository.
-    """
-    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "acme/public")
-    monkeypatch.setenv("AGENT_GITHUB_APP_INSTALL_URL", _INSTALL_URL)
-    app_creds = _FakeGitHubApp(installations=[], repos_by_installation={})
-    app = _connectable_app(_store_with_grants(store), app_creds)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        config = await client.get("/v1/agent/config")
-
-    assert config.json()["repos"] == ["acme/public"]
-    assert config.json()["github_connected"] is False
-
-
-async def test_with_nothing_to_connect_to_the_allowlist_is_the_whole_entitlement(
-    store: FakeStorage, monkeypatch
-):
-    """The dogfood shape: no connectable App, so an allowlisted repository runs."""
-    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "acme/public")
-    monkeypatch.delenv("AGENT_GITHUB_APP_INSTALL_URL", raising=False)
-    app = _build_app(_store_with_grants(store))
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        config = await client.get("/v1/agent/config")
-
-    assert config.json()["repos"] == ["acme/public"]
-    assert config.json()["github_connected"] is True
-
-
-async def test_a_connection_with_no_token_is_made_again_before_anything_runs(
-    store: FakeStorage, monkeypatch
-):
-    """Grants from before users' tokens were kept: GitHub cannot be asked as them.
-
-    Such a connection used to be the whole entitlement, read with the
-    installation's token — every repository the installation covered. It now
-    grants nothing until the user connects again, and says so.
-    """
-    monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
-    monkeypatch.setenv("AGENT_GITHUB_APP_INSTALL_URL", _INSTALL_URL)
-    grants_store = _store_with_grants(store)
-    await grants_store.record_repo_grant(user_id=_OWNER, installation_id=77, account_login="acme")
-    app_creds = _FakeGitHubApp(installations=[], repos_by_installation={77: ["acme/service"]})
-    app = _connectable_app(grants_store, app_creds)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        config = await client.get("/v1/agent/config")
-        integrations = await client.get("/v1/agent/integrations")
-        refused = await client.post(
-            "/v1/agent/jobs",
-            json={"repo": "acme/service", "task_prompt": "fix it", "model": "m"},
-        )
-
-    assert config.json()["github_connected"] is False
-    assert config.json()["repos"] == []
-    assert integrations.json()["providers"][0]["connected"] is False
-    assert refused.status_code == 403
-    assert "Reconnect GitHub" in refused.text
-
-
-# ── Issue #47: a GitHub App this process could not load ────────────────────
-
-
-@pytest.fixture(scope="module")
-def app_private_pem() -> str:
-    """A real key: recovery signs with it, as the running service would."""
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa
-
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    return key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.PKCS8,
-        encryption_algorithm=serialization.NoEncryption(),
-    ).decode()
-
-
-class _StepClock:
-    """The runtime's monotonic clock, moved by the test instead of waited for."""
-
-    def __init__(self) -> None:
-        self.now = 1_000.0
-
-    def __call__(self) -> float:
-        return self.now
-
-
-def _app_with_unloaded_github(
-    store: FakeStorage, key_path: Any, clock: _StepClock, minter: Any
-) -> FastAPI:
-    """An app whose GitHub App is configured but whose key is not there yet.
-
-    The real dependencies over a real runtime. ``_build_app`` answers ``None``
-    for the credentials, which is exactly the misreading issue #47 was about,
-    so that override is removed rather than kept beside the runtime. Once the
-    key can be read the runtime signs with it for real and then hands back
-    ``minter``, so recovery needs no network.
-    """
-    from cloud_agent.api.deps import get_agent_app_credentials
-    from cloud_agent.source_control_runtime import (
-        GitHubAppProvider,
-        GitLabOAuthLoad,
-        SourceControlRuntime,
-    )
-
-    app = _build_app(store)
-    del app.dependency_overrides[get_agent_app_credentials]
-    provider = GitHubAppProvider(
-        {"AGENT_GITHUB_APP_ID": "12345", "AGENT_GITHUB_APP_PRIVATE_KEY_PATH": str(key_path)},
-        clock=clock,
-        credentials_factory=lambda config: minter,
-    )
-    app.state.source_control = SourceControlRuntime(github=provider, gitlab=GitLabOAuthLoad({}))
-    return app
-
-
-async def test_an_unloaded_github_app_is_temporarily_unavailable_until_its_key_loads(
-    store: FakeStorage, tmp_path, app_private_pem: str
-):
-    """What a user meets during the outage, and after it, in one process.
-
-    Not "admin setup required" and not "no access": the App is configured and
-    this process has not read its key yet. The pages that describe state keep
-    answering, with the user's connection intact; the ones that act on GitHub
-    answer 503 with a retry hint. Once the key can be read, the same process
-    serves all of it again — no restart.
-    """
-    grants_store = _store_with_grants(store)
-    key = tmp_path / "github-app.pem"
-    clock = _StepClock()
-    minter = _FakeGitHubApp(installations=[], repos_by_installation={77: ["acme/service"]})
-    await grants_store.connect_github_account(
-        user_id=_OWNER,
-        github_user_id=583231,
-        login="octocat",
-        installations=[{"installation_id": 77, "account_login": "acme"}],
-        access_token_ciphertext=minter.cipher.encrypt("user-token-for-earlier"),
-    )
-    app = _app_with_unloaded_github(grants_store, key, clock, minter)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        created = await _create_job_raw(client)
-        branches = await client.get("/v1/agent/branches", params={"repo": "owner/name"})
-        integrations = await client.get("/v1/agent/integrations")
-        config = await client.get("/v1/agent/config")
-
-        key.write_text(app_private_pem)
-        clock.now += 30
-        recreated = await _create_job_raw(client)
-        integrations_after = await client.get("/v1/agent/integrations")
-        config_after = await client.get("/v1/agent/config")
-
-    for refused in (created, branches):
-        assert refused.status_code == 503
-        assert refused.headers["retry-after"] == "30"
-        assert refused.json()["detail"]["error"]["type"] == "source_control_unavailable"
-        assert refused.json()["detail"]["error"]["provider"] == "github"
-
-    assert integrations.status_code == 200
-    github_row, gitlab_row = integrations.json()["providers"]
-    assert github_row["load_status"] == "unavailable"
-    assert (github_row["configured"], github_row["connect_url"]) == (False, None)
-    assert github_row["connected"] is True, "an outage is not a lost connection"
-    assert [account["label"] for account in github_row["accounts"]] == ["acme"]
-    assert github_row["repositories"] == []
-    assert gitlab_row["load_status"] == "unconfigured"
-
-    assert config.status_code == 200
-    assert config.json()["github_load_status"] == "unavailable"
-    assert config.json()["github_connected"] is False
-    assert config.json()["runtimes"], "the rest of the composer's answers still hold"
-
-    assert recreated.status_code == 201
-    github_after = integrations_after.json()["providers"][0]
-    assert github_after["load_status"] == "ready"
-    assert [repo["name"] for repo in github_after["repositories"]] == ["acme/service"]
-    assert config_after.json()["github_load_status"] == "ready"
-    assert config_after.json()["github_connected"] is True
-
-
-async def test_a_connection_can_be_removed_while_the_app_is_unloaded(store: FakeStorage, tmp_path):
-    """The grant is this service's own row; removing it never needed GitHub."""
-    grants_store = _store_with_grants(store)
-    await grants_store.record_repo_grant(user_id=_OWNER, installation_id=77, account_login="acme")
-    minter = _FakeGitHubApp(installations=[], repos_by_installation={})
-    app = _app_with_unloaded_github(grants_store, tmp_path / "github-app.pem", _StepClock(), minter)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        removed = await client.delete("/v1/agent/integrations/github/connections/77")
-
-    assert removed.status_code == 200
-    assert removed.json()["connections"] == []
-    assert grants_store.grants[_OWNER] == {}
-
-
-async def test_a_claim_while_the_app_is_unloaded_leaves_the_job_queued(
-    store: FakeStorage, tmp_path, app_private_pem: str
-):
-    """The runner is told to come back: no attempt spent, nothing minted.
-
-    With ``None`` for credentials the claim checked only the allowlist and
-    handed the job over without a clone token, so a private repository failed
-    for good at checkout. The refusal comes before the claim itself.
-    """
-    async with AsyncClient(
-        transport=ASGITransport(app=_build_app(store)), base_url="http://test"
-    ) as client:
-        job_id = await _create_job(client)
-    key = tmp_path / "github-app.pem"
-    clock = _StepClock()
-    minter = _FakeGitHubApp(installations=[], repos_by_installation={})
-    app = _app_with_unloaded_github(store, key, clock, minter)
-    grants = _FakeGrants()
-    from cloud_agent.api.deps import get_grant_client
-
-    app.dependency_overrides[get_grant_client] = lambda: grants
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        refused = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
-        while_down = dict(store.jobs[job_id])
-        minted_while_down = list(grants.minted)
-
-        key.write_text(app_private_pem)
-        clock.now += 30
-        claimed = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
-
-    assert refused.status_code == 503
-    assert refused.json()["detail"]["error"]["type"] == "source_control_unavailable"
-    assert (while_down["state"], while_down["current_attempt_id"]) == ("queued", None)
-    assert minted_while_down == []
-    assert claimed.status_code == 200
-    assert claimed.json()["job_id"] == job_id
-    assert claimed.json()["clone_token"] == "ghs_x"
-
-
-async def test_a_turn_finishes_while_the_app_is_unloaded_and_its_wakeup_waits(
-    store: FakeStorage, tmp_path
-):
-    """The finish is recorded and acknowledged; only the next goal round waits.
-
-    A finish the runner could not get acknowledged would be retried and then
-    lost with the lease, so it must not depend on the App. The goal consumer it
-    drains stops before claiming anything, which is what leaves a wakeup's
-    attempts unspent (see ``test_goal_controller``).
-    """
-    async with AsyncClient(
-        transport=ASGITransport(app=_build_app(store)), base_url="http://test"
-    ) as client:
-        job_id = await _create_job(client)
-        claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
-    auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
-    claimed_wakeups: list[int] = []
-    original_claim = store.goal_wakeups.claim_wakeups
-
-    async def counting_claim(
-        *, limit: int = 1, thread_id: str | None = None
-    ) -> list[dict[str, Any]]:
-        claimed_wakeups.append(limit)
-        return await original_claim(limit=limit, thread_id=thread_id)
-
-    store.goal_wakeups.claim_wakeups = counting_claim
-    minter = _FakeGitHubApp(installations=[], repos_by_installation={})
-    app = _app_with_unloaded_github(store, tmp_path / "github-app.pem", _StepClock(), minter)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        finish = await client.post(
-            f"/v1/agent/worker/jobs/{job_id}/finish",
-            json={"state": "succeeded"},
-            headers=auth,
-        )
-
-    assert finish.status_code == 200
-    assert store.jobs[job_id]["state"] == "succeeded"
-    assert claimed_wakeups == [], "no wakeup may be claimed while the App is unloaded"
-
-
-async def test_a_finish_drains_only_its_own_conversations_goal_wakeups(
-    client: AsyncClient, store: FakeStorage
-):
-    """The goal drain a finish runs names the finished turn's conversation.
-
-    Unnamed, the claim took the deployment's oldest due wakeups, and this
-    runner's request decided other owners' goals before it was acknowledged.
-    """
-    job_id = await _create_job(client)
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
-    auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
-    claims: list[tuple[int, str | None]] = []
-    original_claim = store.goal_wakeups.claim_wakeups
-
-    async def recording_claim(
-        *, limit: int = 1, thread_id: str | None = None
-    ) -> list[dict[str, Any]]:
-        claims.append((limit, thread_id))
-        return await original_claim(limit=limit, thread_id=thread_id)
-
-    store.goal_wakeups.claim_wakeups = recording_claim
-    finish = await client.post(
-        f"/v1/agent/worker/jobs/{job_id}/finish", json={"state": "succeeded"}, headers=auth
-    )
-
-    assert finish.status_code == 200
-    assert claims == [(8, store.jobs[job_id]["thread_id"])]
-
-
-async def test_a_branch_is_pinned_to_a_commit_at_creation(store: FakeStorage, monkeypatch):
-    """A job records the sha, never the branch name.
-
-    A branch moves. A job that stored "dev" would silently mean a different
-    tree by the time it ran, and the publisher applies its patch onto a pinned
-    commit — so resolving late would mean generating a diff against one tree
-    and pushing it onto another.
-    """
-    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name")
-    from cloud_agent.api.deps import get_agent_app_credentials
-
-    class BranchApp(_FakeGitHubApp):
-        async def resolve_ref(self, repo: str, ref: str) -> str:
-            assert ref == "dev"
-            return "f" * 40
-
-    app_creds = BranchApp(installations=[], repos_by_installation={})
-    app = _build_app(_store_with_grants(store))
-    app.dependency_overrides[get_agent_app_credentials] = lambda: app_creds
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        created = await client.post(
-            "/v1/agent/jobs",
-            json={
-                "repo": "owner/name",
-                "task_prompt": "fix it",
-                "model": "m",
-                "base_ref": "dev",
-                "metadata": {"_agent_base_ref": "spoofed", "ticket": "ABC-1"},
-            },
-        )
-
-    assert created.status_code == 201
-    assert created.json()["base_sha"] == "f" * 40
-    assert created.json()["base_ref"] == "dev"
-    assert created.json()["output_branch"].startswith("agent/")
-    assert created.json()["metadata"] == {"ticket": "ABC-1"}
-
-
-async def test_reserved_base_ref_metadata_cannot_invent_a_branch(client: AsyncClient):
-    """Without base_ref, caller metadata must not forge the Git panel's base branch."""
-    created = await client.post(
-        "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "fix it",
-            "model": "m",
-            "metadata": {"_agent_base_ref": "forged"},
-        },
-    )
-
-    assert created.status_code == 201
-    assert created.json()["base_ref"] is None
-    assert created.json()["metadata"] is None
-
-
-async def test_reserved_oncall_mark_cannot_be_claimed_by_an_owner(
-    client: AsyncClient, store: FakeStorage
-):
-    """Only the on-call door stamps the mark; an owner's copy is dropped."""
-    created = await client.post(
-        "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "fix it",
-            "model": "m",
-            "metadata": {"oncall": True, "ticket": "ABC-1"},
-        },
-    )
-
-    assert created.status_code == 201
-    assert created.json()["metadata"] == {"ticket": "ABC-1"}
-    assert store.jobs[created.json()["id"]]["metadata"] == {"ticket": "ABC-1"}
-
-
-async def test_an_unresolvable_branch_is_refused_at_creation(store: FakeStorage, monkeypatch):
-    """Better a clear 400 than a job queued against a ref that does not exist."""
-    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name")
-    from cloud_agent.api.deps import get_agent_app_credentials
-
-    class BrokenBranchApp(_FakeGitHubApp):
-        async def resolve_ref(self, repo: str, ref: str) -> str:
-            raise RuntimeError("no such branch")
-
-    app = _build_app(_store_with_grants(store))
-    app.dependency_overrides[get_agent_app_credentials] = lambda: BrokenBranchApp(
-        installations=[], repos_by_installation={}
-    )
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        created = await client.post(
-            "/v1/agent/jobs",
-            json={
-                "repo": "owner/name",
-                "task_prompt": "fix it",
-                "model": "m",
-                "base_ref": "nope",
-            },
-        )
-
-    assert created.status_code == 400
-    assert "nope" in created.text
-
-
-@pytest.mark.parametrize(
-    "base_ref", ["../../../../installation/repositories", "main?x=1", "-main", "a..b"]
-)
-async def test_a_base_ref_git_would_refuse_never_reaches_github(
-    store: FakeStorage, monkeypatch, base_ref
-):
-    """The ref is sent inside a GitHub API path, so only a real ref name is accepted."""
-    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name")
-    from cloud_agent.api.deps import get_agent_app_credentials
-
-    resolved: list[str] = []
-
-    class RecordingApp(_FakeGitHubApp):
-        async def resolve_ref(self, repo: str, ref: str) -> str:
-            resolved.append(ref)
-            return "f" * 40
-
-    app = _build_app(_store_with_grants(store))
-    app.dependency_overrides[get_agent_app_credentials] = lambda: RecordingApp(
-        installations=[], repos_by_installation={}
-    )
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        created = await client.post(
-            "/v1/agent/jobs",
-            json={
-                "repo": "owner/name",
-                "task_prompt": "fix it",
-                "model": "m",
-                "base_ref": base_ref,
-            },
-        )
-
-    assert created.status_code == 422
-    assert "base_ref" in created.text
-    assert resolved == []
-
-
-class _HistoryApp(_FakeGitHubApp):
-    """Resolves every ref to ``resolved``; only ``on_branch`` is in branch history."""
-
-    def __init__(self, *, resolved: str, on_branch: set[str]) -> None:
-        super().__init__(installations=[], repos_by_installation={})
-        self.resolved = resolved
-        self.on_branch = on_branch
-        self.checked: list[tuple[str, str, str | None]] = []
-
-    async def resolve_ref(self, repo: str, ref: str) -> str:
-        return self.resolved
-
-    async def require_commit_on_branch(
-        self, repo: str, sha: str, *, branch: str | None = None
-    ) -> str:
-        from cloud_agent.github_app import CommitNotOnBranch
-
-        self.checked.append((repo, sha, branch))
-        if sha not in self.on_branch:
-            raise CommitNotOnBranch(f"commit {sha[:12]} is not in the history of branch 'main'")
-        return branch or "main"
-
-
-async def _create_with_history_app(
-    store: FakeStorage, monkeypatch, app_creds: _HistoryApp, **fields: str
-) -> Any:
-    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name")
-    from cloud_agent.api.deps import get_agent_app_credentials
-
-    app = _build_app(_store_with_grants(store))
-    app.dependency_overrides[get_agent_app_credentials] = lambda: app_creds
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        return await client.post(
-            "/v1/agent/jobs",
-            json={"repo": "owner/name", "task_prompt": "fix it", "model": "m", **fields},
-        )
-
-
-@pytest.mark.parametrize(
-    "fields",
-    [
-        # A named commit, with and without the branch it claims to come from.
-        {"base_sha": "c" * 40},
-        {"base_sha": "c" * 40, "base_ref": "dev"},
-        # A ref that resolves to such a commit is the same request.
-        {"base_ref": "refs/pull/5/head"},
-    ],
-)
-async def test_a_base_outside_the_repository_history_is_refused_at_creation(
-    store: FakeStorage, monkeypatch, fields
-):
-    """GitHub serves a fork's pull request head by hash; that is not this repository's history.
-
-    The publisher fetches the base by hash and pushes a branch built on it, so
-    a base the repository's branches do not contain would have the platform
-    push someone else's commits under its own name.
-    """
-    app_creds = _HistoryApp(resolved="c" * 40, on_branch={"f" * 40})
-    jobs_before = dict(store.jobs)
-
-    created = await _create_with_history_app(store, monkeypatch, app_creds, **fields)
-
-    assert created.status_code == 400, created.text
-    error = created.json()["detail"]["error"]
-    assert error["type"] == "invalid_request"
-    assert "not in the history of branch" in error["message"]
-    assert "base_ref" in error["message"]
-    assert app_creds.checked == [("owner/name", "c" * 40, fields.get("base_ref"))]
-    assert store.jobs == jobs_before
-
-
-@pytest.mark.parametrize(
-    "fields", [{"base_sha": "f" * 40}, {"base_sha": "f" * 40, "base_ref": "dev"}, {}]
-)
-async def test_a_base_on_its_branch_is_accepted_at_creation(
-    store: FakeStorage, monkeypatch, fields
-):
-    """Only a base that exists is checked, and one on its branch is kept as named."""
-    app_creds = _HistoryApp(resolved="f" * 40, on_branch={"f" * 40})
-
-    created = await _create_with_history_app(store, monkeypatch, app_creds, **fields)
-
-    assert created.status_code == 201, created.text
-    assert created.json()["base_sha"] == fields.get("base_sha")
-    expected = [("owner/name", "f" * 40, fields.get("base_ref"))] if fields else []
-    assert app_creds.checked == expected
-
-
-async def test_branches_are_only_listed_for_an_entitled_repo(store: FakeStorage, monkeypatch):
-    """This reads through the platform's installation, so it needs the same gate.
-
-    Without it, the endpoint enumerates branches of any repository the App
-    happens to cover — which is the confused deputy again, one level down.
-    """
-    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name")
-    from cloud_agent.api.deps import get_agent_app_credentials
-
-    class BranchApp(_FakeGitHubApp):
-        async def branches_for_repo(self, repo: str) -> dict[str, Any]:
-            return {"default": "main", "branches": ["main", "dev"]}
-
-    app = _build_app(_store_with_grants(store))
-    app.dependency_overrides[get_agent_app_credentials] = lambda: BranchApp(
-        installations=[], repos_by_installation={}
-    )
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        mine = await client.get("/v1/agent/branches", params={"repo": "owner/name"})
-        theirs = await client.get("/v1/agent/branches", params={"repo": "someone/private"})
-
-    assert mine.status_code == 200
-    assert mine.json()["default"] == "main"
-    assert theirs.status_code == 403
-
-
-# ── MCP connections ───────────────────────────────────────────────────
-
-
-def _binding(
-    connection_id: int,
-    *,
-    alias: str = "github",
-    tools: dict[str, str] | None = None,
-    **overrides: Any,
-) -> dict[str, Any]:
-    """One ``McpBindingInput`` body, as the composer sends it.
-
-    ``tools`` is the selection itself, name to deny/confirm/allow. A name that
-    is absent is denied, which is why every case here names the tools it means.
-    """
-    binding: dict[str, Any] = {
-        "connection_id": connection_id,
-        "alias": alias,
-        "tools": {"get_issue": "allow"} if tools is None else tools,
-        "resources": {},
-        "prompts": {},
-        "enabled": True,
-    }
-    binding.update(overrides)
-    return binding
-
-
-def _job_body(**overrides: Any) -> dict[str, Any]:
-    """A valid submission, with the fields under test overridable."""
-    body: dict[str, Any] = {"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1"}
-    body.update(overrides)
-    return body
-
-
-@pytest.mark.parametrize(
-    ("runtime", "plugins"),
-    [
-        ("claude-code", [{"plugin": "reviewer@team-tools", "marketplace": "owner/plugins"}]),
-        ("codex", [{"plugin": "reviewer@team-tools", "marketplace": "owner/plugins"}]),
-        ("pi", [{"plugin": "@owner/agent-extension@1.2.3"}]),
-        ("opencode", [{"plugin": "@owner/agent-extension@1.2.3"}]),
-        ("kilo", [{"plugin": "@owner/agent-extension@1.2.3"}]),
-    ],
-)
-async def test_plugins_are_retained_and_visible_on_job_reads(
-    client: AsyncClient, store: FakeStorage, runtime: str, plugins: list[dict[str, str]]
-):
-    created = await client.post("/v1/agent/jobs", json=_job_body(runtime=runtime, plugins=plugins))
-
-    assert created.status_code == 201, created.text
-    job_id = created.json()["id"]
-    assert store.jobs[job_id]["plugins"] == plugins
-    assert [
-        {key: value for key, value in entry.items() if value is not None}
-        for entry in created.json()["plugins"]
-    ] == plugins
-    detail = await client.get(f"/v1/agent/jobs/{job_id}")
-    assert detail.status_code == 200, detail.text
-    assert detail.json()["plugins"] == created.json()["plugins"]
-
-
-async def test_plugins_cannot_be_changed_in_a_follow_up(client: AsyncClient, store: FakeStorage):
-    parent_id = await _create_job(client)
-    response = await _send(client, store, parent_id, {"prompt": "continue", "plugins": []})
-
-    assert response.status_code == 422, response.text
-    assert store.pending == {}
-
-
-async def test_duplicate_plugins_are_refused_before_model_lookup(
-    client: AsyncClient, store: FakeStorage
-):
-    plugin = {"plugin": "reviewer@team-tools", "marketplace": "owner/plugins"}
-    response = await client.post(
-        "/v1/agent/jobs", json=_job_body(plugins=[plugin, plugin], model="no-such-model")
-    )
-
-    assert response.status_code == 400, response.text
-    assert response.json()["detail"]["error"]["type"] == "invalid_plugin_selection"
-    assert store.jobs == {}
-
-
-async def test_plugin_shape_is_validated_for_the_requested_runtime(
-    client: AsyncClient, store: FakeStorage
-):
-    response = await client.post(
-        "/v1/agent/jobs",
-        json=_job_body(plugins=[{"plugin": "reviewer", "marketplace": "owner/plugins"}]),
-    )
-
-    assert response.status_code == 400, response.text
-    assert response.json()["detail"]["error"]["type"] == "invalid_plugin_selection"
-    assert store.jobs == {}
-
-
-async def test_plugin_changes_cannot_reuse_a_submission_key(
-    client: AsyncClient, store: FakeStorage
-):
-    first_plugins = [{"plugin": "reviewer@team-tools", "marketplace": "owner/plugins"}]
-    headers = {"Idempotency-Key": "plugin-submit"}
-    first = await client.post(
-        "/v1/agent/jobs", json=_job_body(plugins=first_plugins), headers=headers
-    )
-    assert first.status_code == 201, first.text
-    repeated = await client.post(
-        "/v1/agent/jobs", json=_job_body(plugins=first_plugins), headers=headers
-    )
-    assert repeated.status_code == 201, repeated.text
-    assert repeated.json()["id"] == first.json()["id"]
-    changed = await client.post(
-        "/v1/agent/jobs",
-        json=_job_body(plugins=[{**first_plugins[0], "marketplace": "owner/another-marketplace"}]),
-        headers=headers,
-    )
-    assert changed.status_code == 409, changed.text
-    assert len(store.jobs) == 1
-
-
-async def test_the_composer_is_told_which_connections_and_which_runtimes(
-    client: AsyncClient, store: FakeStorage
-):
-    """A picker built from anything but the create endpoint's rules is decoration.
-
-    The composer learns which connections exist, what they offer and whether
-    they currently work. It never learns the address or the credential:
-    ``McpConnectionSummary`` has no field either could land in.
-    """
-    store.connect_mcp(
-        user_id=_OWNER,
-        label="DeepWiki",
-        template="deepwiki",
-        url="https://wiki.example.com/mcp",
-        tools=("read_wiki",),
-    )
-    store.connect_mcp(user_id=_OWNER, label="GitHub", tools=("get_issue",))
-    config = (await client.get("/v1/agent/config")).json()
-
-    assert [entry["label"] for entry in config["mcp_connections"]] == ["DeepWiki", "GitHub"]
-    # The composer is told the same list the create path enforces, so a picker
-    # cannot offer a runtime that would then be refused.
-    assert config["mcp_runtimes"] == ["claude-code", "codex", "kilo", "opencode", "pi"]
-    assert sorted(config["plugin_runtimes"]) == ["claude-code", "codex", "kilo", "opencode", "pi"]
-    assert [entry["tool_count"] for entry in config["mcp_connections"]] == [1, 1]
-    assert all(entry["available"] for entry in config["mcp_connections"])
-    assert _UPSTREAM_TOKEN not in json.dumps(config)
-    assert "mcp.example.com" not in json.dumps(config)
-
-
-async def test_the_composer_offers_only_what_this_user_connected(
-    client: AsyncClient, store: FakeStorage
-):
-    """The property the deployment catalogue could not have.
-
-    Both users exist and both could connect the same service; only the
-    connection differs, and it is the only thing that may decide what the owner
-    sees.
-    """
-    store.connect_mcp(user_id=_OTHER, token="ghu_someone_elses_secret")
-
-    config = (await client.get("/v1/agent/config")).json()
-    assert config["mcp_connections"] == []
-    assert "ghu_someone_elses_secret" not in json.dumps(config)
-
-
-async def test_omitting_bindings_means_no_connections(client: AsyncClient, store: FakeStorage):
-    """Connecting is availability, not consent.
-
-    A task that says nothing about tools gets none: a job that silently received
-    every connection its owner has would be spending credentials the prompt was
-    never written around.
-    """
-    store.connect_mcp(user_id=_OWNER)
-    created = await client.post("/v1/agent/jobs", json=_job_body())
-
-    assert created.status_code == 201, created.text
-    assert created.json()["mcp_bindings"] == []
-
-
-async def test_an_explicit_empty_list_means_no_connections(client: AsyncClient, store: FakeStorage):
-    """Choosing none is a real choice and must not be read as "unset"."""
-    store.connect_mcp(user_id=_OWNER)
-    created = await client.post("/v1/agent/jobs", json=_job_body(mcp_bindings=[]))
-
-    assert created.status_code == 201, created.text
-    assert created.json()["mcp_bindings"] == []
-
-
-async def test_a_job_records_the_bindings_it_was_created_with(
-    client: AsyncClient, store: FakeStorage
-):
-    """The response names the connection by alias and label, never by address."""
-    row = store.connect_mcp(user_id=_OWNER, label="GitHub", tools=("get_issue",))
-    created = await client.post(
-        "/v1/agent/jobs", json=_job_body(mcp_bindings=[_binding(row["id"])])
-    )
-
-    assert created.status_code == 201, created.text
-    assert created.json()["mcp_bindings"] == [
-        {"connection_id": row["id"], "alias": "github", "label": "GitHub"}
-    ]
-    assert "mcp.example.com" not in created.text
-
-
-async def test_a_selection_is_stamped_against_the_snapshot_it_was_chosen_from(
-    client: AsyncClient, store: FakeStorage
-):
-    """An approval is an approval *of something*.
-
-    The fingerprint records the tool's description and schema at the moment the
-    owner allowed it. Without it, a server that later redefines the tool would
-    inherit the old approval for a different thing wearing the same name.
-    """
-    row = store.connect_mcp(user_id=_OWNER, tools=("get_issue",))
-    created = await client.post(
-        "/v1/agent/jobs", json=_job_body(mcp_bindings=[_binding(row["id"])])
-    )
-    assert created.status_code == 201, created.text
-
-    (binding,) = store.mcp_bindings[created.json()["thread_id"]]
-    rule = binding["rules"]["get_issue"]
-    assert rule["policy"] == "allow"
-    assert len(rule["fingerprint"]) == 64
-
-
-@pytest.mark.parametrize("explicit", [False, True])
-async def test_new_jobs_cannot_store_ambiguous_mcp_aliases(client, store, explicit):
-    first = store.connect_mcp(user_id=_OWNER, tools=("get_issue",))
-    second = store.connect_mcp(user_id=_OWNER, tools=("get_issue",))
-    selections = [_binding(first["id"]), _binding(second["id"])]
-    for selection in selections:
-        selection["alias"] = "github" if explicit else None
-    created = await client.post("/v1/agent/jobs", json=_job_body(mcp_bindings=selections))
-    if explicit:
-        assert created.status_code == 400
-        assert "more than one connection" in created.text
-    else:
-        assert created.status_code == 201, created.text
-        aliases = [binding["alias"] for binding in created.json()["mcp_bindings"]]
-        assert len(aliases) == len(set(aliases)) == 2
-
-
-@pytest.mark.parametrize("surface", ["resources", "prompts"])
-@pytest.mark.parametrize("policy", ["allow", "confirm", "deny", "invalid"])
-async def test_new_jobs_honor_mcp_resource_and_prompt_only_selections(
-    client, store, surface, policy
-):
-    connection = store.connect_mcp(user_id=_OWNER)
-    store.mcp_capabilities[connection["id"]][surface] = [{"name": "docs"}]
-    created = await client.post(
-        "/v1/agent/jobs",
-        json=_job_body(
-            mcp_bindings=[
-                {
-                    "connection_id": connection["id"],
-                    "tools": {},
-                    surface: {"docs": policy},
-                }
-            ]
-        ),
-    )
-    if policy == "invalid":
-        assert created.status_code == 400
-        assert store.mcp_bindings == {}
-    else:
-        assert created.status_code == 201, created.text
-        binding = store.mcp_bindings[created.json()["thread_id"]][0]
-        assert binding["enabled"] is (policy != "deny")
-        assert binding["resource_rules" if surface == "resources" else "prompt_rules"] == {
-            "docs": policy
-        }
-
-
-async def test_naming_a_connection_the_caller_does_not_own_is_refused_at_creation(
-    client: AsyncClient, store: FakeStorage
-):
-    """Refused in the same words as one that does not exist.
-
-    A caller must not be able to tell "nobody has this" from "somebody else has
-    this" -- the difference is another user's account state, and the reply to a
-    request that may not have it is the same either way.
-    """
-    theirs = store.connect_mcp(user_id=_OTHER, token="ghu_someone_elses_secret")
-
-    owned = await client.post(
-        "/v1/agent/jobs", json=_job_body(mcp_bindings=[_binding(theirs["id"])])
-    )
-    missing = await client.post("/v1/agent/jobs", json=_job_body(mcp_bindings=[_binding(9999)]))
-
-    assert owned.status_code == 400
-    assert (
-        owned.json()["detail"]["error"]["message"].replace(str(theirs["id"]), "9999")
-        == missing.json()["detail"]["error"]["message"]
-    )
-    assert "ghu_someone_elses_secret" not in owned.text
-
-
-@pytest.mark.parametrize("runtime", ["codex", "kilo", "claude-code", "opencode", "pi"])
-async def test_every_supported_runtime_accepts_mcp(
-    client: AsyncClient, store: FakeStorage, runtime
-):
-    """The composer and submission API promise the same MCP experience."""
-    row = store.connect_mcp(user_id=_OWNER)
-    created = await client.post(
-        "/v1/agent/jobs",
-        json=_job_body(runtime=runtime, mcp_bindings=[_binding(row["id"])]),
-    )
-    assert created.status_code == 201
-    assert created.json()["mcp_bindings"][0]["connection_id"] == row["id"]
-
-
-async def test_an_unknown_tool_selection_is_refused_at_creation(
-    client: AsyncClient, store: FakeStorage
-):
-    """A selection naming a tool the server does not offer is a refusal.
-
-    Accepting it would create a job around a tool the agent turns out not to
-    have, which does not fail -- it quietly produces the wrong work.
-    """
-    row = store.connect_mcp(user_id=_OWNER, tools=("get_issue",))
-    created = await client.post(
-        "/v1/agent/jobs",
-        json=_job_body(mcp_bindings=[_binding(row["id"], tools={"delete_repo": "allow"})]),
-    )
-
-    assert created.status_code == 400
-    assert "delete_repo" in created.text
-    assert "does not offer" in created.text
-
-
-async def test_a_connection_that_cannot_be_used_says_why_instead_of_vanishing(
-    client: AsyncClient, store: FakeStorage
-):
-    """Connected and unusable is a real state, and both surfaces must name it.
-
-    Omitting it from the composer leaves its owner with a picker that silently
-    drops the server they are looking for; letting a job name it puts a dead
-    credential behind tools the prompt was written around.
-    """
-    row = store.connect_mcp(
-        user_id=_OWNER,
-        label="GitHub",
-        expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
-    )
-
-    config = (await client.get("/v1/agent/config")).json()
-    (entry,) = config["mcp_connections"]
-    assert entry["connection_id"] == row["id"]
-    assert entry["available"] is False
-    assert "expired" in entry["error"]
-
-    created = await client.post(
-        "/v1/agent/jobs", json=_job_body(mcp_bindings=[_binding(row["id"])])
-    )
-    assert created.status_code == 400
-    assert "expired" in created.text
-
-
-async def test_disconnecting_clears_the_secret_and_bumps_the_epoch(
-    client: AsyncClient, store: FakeStorage
-):
-    """A tombstone that still holds a token is not a disconnect.
-
-    The row is kept so a binding can say *this was disconnected* rather than
-    *this never existed*, and its versions move so any approval made against the
-    old credential stops resolving instead of quietly continuing.
-    """
-    row = store.connect_mcp(user_id=_OWNER)
-    other = store.connect_mcp(user_id=_OTHER, token="ghu_someone_elses_secret")
-    created = await client.post(
-        "/v1/agent/jobs", json=_job_body(mcp_bindings=[_binding(row["id"])])
-    )
-    assert created.status_code == 201, created.text
-
-    assert (
-        await store.mcp.disconnect_mcp_connection(connection_id=row["id"], user_id=_OWNER) is True
-    )
-
-    assert row["access_token_ciphertext"] is None
-    assert row["refresh_token_ciphertext"] is None
-    assert row["deleted_at"] is not None
-    assert row["status"] == "disabled"
-    assert row["authorization_epoch"] == 2
-    # Only the caller's row: a disconnect without its owner scope would take
-    # everyone else's connection with it.
-    assert other["access_token_ciphertext"] is not None
-    assert (
-        await store.mcp.disconnect_mcp_connection(connection_id=other["id"], user_id=_OWNER)
-        is False
-    )
-    assert await store.mcp.list_mcp_connections(user_id=_OWNER) == []
-    assert len(await store.mcp.list_mcp_connections(user_id=_OWNER, include_deleted=True)) == 1
-
-
-async def test_a_follow_up_runs_when_an_account_connection_was_disconnected(
-    client: AsyncClient, store: FakeStorage
-):
-    """One disconnected integration must not prevent unrelated conversation work."""
-    row = store.connect_mcp(user_id=_OWNER, label="GitHub")
-    created = await client.post(
-        "/v1/agent/jobs", json=_job_body(mcp_bindings=[_binding(row["id"])])
-    )
-    job_id = created.json()["id"]
-    assert (
-        await store.mcp.disconnect_mcp_connection(connection_id=row["id"], user_id=_OWNER) is True
-    )
-
-    follow_up = await _next_turn(client, store, job_id, {"prompt": "again"})
-
-    assert follow_up["state"] == "queued"
-    from cloud_agent.mcp.registry import servers_for_thread
-
-    assert await servers_for_thread(store.mcp, thread_id=created.json()["thread_id"]) == {}
-
-
-async def test_a_follow_up_still_runs_while_its_thread_s_connection_is_connected(
-    client: AsyncClient, store: FakeStorage
-):
-    """The check must not refuse the ordinary case it runs on."""
-    row = store.connect_mcp(user_id=_OWNER)
-    created = await client.post(
-        "/v1/agent/jobs", json=_job_body(mcp_bindings=[_binding(row["id"])])
-    )
-
-    follow_up = await _next_turn(client, store, created.json()["id"], {"prompt": "again"})
-
-    assert follow_up["state"] == "queued"
-
-
-async def test_disconnecting_leaves_a_running_jobs_binding_list_alone(
-    client: AsyncClient, store: FakeStorage
-):
-    """A job keeps the connection it was created with and loses the credential.
-
-    Nothing hunts down live jobs on disconnect: bindings are read per call, so
-    the job's own list stays as it was and each call fails the usability check
-    -- which is what the follow-up case above pins at the HTTP surface.
-    """
-    row = store.connect_mcp(user_id=_OWNER)
-    created = await client.post(
-        "/v1/agent/jobs", json=_job_body(mcp_bindings=[_binding(row["id"])])
-    )
-    job_id = created.json()["id"]
-    assert created.json()["mcp_bindings"][0]["connection_id"] == row["id"]
-
-    assert (
-        await store.mcp.disconnect_mcp_connection(connection_id=row["id"], user_id=_OWNER) is True
-    )
-
-    job = (await client.get(f"/v1/agent/jobs/{job_id}")).json()
-    assert job["mcp_bindings"] == [
-        {"connection_id": row["id"], "alias": "github", "label": "GitHub"}
-    ]
-    assert row["access_token_ciphertext"] is None
-
-
-async def test_the_integrations_page_sees_every_connection_and_its_reason(
-    client: AsyncClient, store: FakeStorage
-):
-    """One request for one page, and an unusable connection is reported not hidden.
-
-    The aggregate endpoint is where the settings screen learns both halves at
-    once. A connection that has stopped working must appear with its reason:
-    a page that silently omits it leaves its owner looking for a server that is
-    right there, and the separate per-connection API is where they act on it.
-    """
-    working = store.connect_mcp(user_id=_OWNER, label="GitHub")
-    store.connect_mcp(user_id=_OTHER, label="Someone else's", template="sentry")
-    broken = store.connect_mcp(user_id=_OWNER, label="Broken", template="wiki")
-
-    response = await client.get("/v1/agent/integrations")
-
-    assert response.status_code == 200
-    rows = {entry["name"]: entry for entry in response.json()["mcp"]}
-    assert set(rows) == {"GitHub", "Broken"}
-    assert rows["GitHub"]["connected"] is True
-    assert rows["GitHub"]["configured"] is True
-    assert rows["GitHub"]["error"] is None
-    assert rows["Broken"]["connected"] is True
-    del working, broken
-
-
-async def test_the_claim_hands_the_runner_the_job_s_bindings(
-    client: AsyncClient, store: FakeStorage
-):
-    """The runner passes aliases to the adapter; it never learns the addresses."""
-    github = store.connect_mcp(user_id=_OWNER, label="GitHub", tools=("get_issue",))
-    wiki = store.connect_mcp(
-        user_id=_OWNER,
-        label="DeepWiki",
-        template="deepwiki",
-        url="https://wiki.example.com/mcp",
-        tools=("read_wiki",),
-    )
-    created = await client.post(
-        "/v1/agent/jobs",
-        json=_job_body(
-            mcp_bindings=[
-                _binding(github["id"]),
-                _binding(wiki["id"], alias="deepwiki", tools={"read_wiki": "allow"}),
-            ]
-        ),
-    )
-    assert created.status_code == 201, created.text
-
-    app = _build_app(store, claim_auth=True)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as runner:
-        claimed = await runner.post(
-            "/v1/agent/worker/claim", json={"worker_id": "w-1", "lease_ttl_seconds": 60}
-        )
-    assert claimed.status_code == 200
-    body = claimed.json()
-    # Aliases, not summaries: the runtime builds the relay URL's path segment
-    # from each name, so a dict here would either fail the schema or address a
-    # server that does not exist.
-    # The platform's memory tools ride the same endpoint, after the connections.
-    assert body["mcp_bindings"] == ["deepwiki", "github", worker.memory_tool.RUNTIME_SERVER_ID]
-    assert "mcp.example.com" not in json.dumps(body)
-    assert "wiki.example.com" not in json.dumps(body)
-
-
-async def test_the_claim_hands_over_the_mcp_credential_too(client: AsyncClient):
-    """**The whole MCP chain, measured across the claim boundary.**
-
-    This is where it broke and nothing noticed. `worker_claim` minted an
-    `mcp`-scoped token and computed the relay address, and
-    `WorkerClaimResponse` declared neither — so pydantic dropped both on the
-    way out and every sandbox got an empty MCP credential.
-
-    The relay's own tests all passed, because they construct a token and call
-    the endpoint directly. They never cross this boundary, which is exactly
-    where the two halves stopped agreeing: a field with a writer, a reader, and
-    a schema in between that knew about neither.
-    """
-    await _create_job(client)
-
-    body = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
-
-    assert body["mcp_token"], "the sandbox was handed no MCP credential"
-
-    from cloud_agent.tokens import SCOPE_MCP, parse_worker_token
-
-    # Scoped, and not the same credential as either of the other two.
-    assert parse_worker_token(body["mcp_token"])["scope"] == SCOPE_MCP
-    assert body["mcp_token"] != body["worker_token"]
-    assert body["mcp_token"] != body["sandbox_token"]
-
-
-@pytest.mark.parametrize("runtime", ["codex", "kilo", "claude-code", "opencode", "pi"])
-@pytest.mark.parametrize(
-    ("selection", "serper_key", "brave_key", "parallel_key"),
-    [
-        ("serper", "serper-claim-secret", "", ""),
-        ("brave", "", "brave-claim-secret", ""),
-        ("parallel", "", "", "parallel-claim-secret"),
-        ("auto", "serper-all-secret", "brave-all-secret", "parallel-all-secret"),
-    ],
-)
-async def test_web_search_provider_enables_mcp_without_exposing_keys(
-    client: AsyncClient,
-    monkeypatch: pytest.MonkeyPatch,
-    runtime: str,
-    selection: str,
-    serper_key: str,
-    brave_key: str,
-    parallel_key: str,
-) -> None:
-    values = {
-        worker.web_search.PROVIDER_SETTING: selection,
-        worker.web_search.SERPER_API_KEY_SETTING: serper_key,
-        worker.web_search.BRAVE_API_KEY_SETTING: brave_key,
-        worker.web_search.PARALLEL_API_KEY_SETTING: parallel_key,
-    }
-    monkeypatch.setattr(
-        worker.web_search,
-        "text_setting",
-        lambda key, fallback="": values.get(key, fallback),
-    )
-    created = await client.post("/v1/agent/jobs", json=_job_body(runtime=runtime))
-    assert created.status_code == 201, created.text
-
-    body = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
-
-    assert body["mcp_bindings"] == [
-        worker.web_search.RUNTIME_SERVER_ID,
-        worker.memory_tool.RUNTIME_SERVER_ID,
-    ]
-    assert body["mcp_token"]
-    assert all(
-        secret not in json.dumps(body) for secret in (serper_key, brave_key, parallel_key) if secret
-    )
-
-
-async def test_the_claim_names_no_mcp_relay_address(client: AsyncClient, monkeypatch):
-    """The relay is the claiming host's own, so the control plane names none.
-
-    It used to hand one over from `AGENT_SANDBOX_MCP_URL`, a copy of every
-    host's tunnel alias that nothing kept in step with the hosts. Left unset,
-    every turn whose owner had connected a tool failed at its resident launch.
-    A control plane whose environment still carries the variable must not
-    bring the copy back.
-    """
-    monkeypatch.setenv("AGENT_SANDBOX_MCP_URL", "http://agent-mcp:8000")
-    await _create_job(client)
-
-    body = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
-
-    assert "mcp_base_url" not in body
-    assert "agent-mcp" not in json.dumps(body)
-
-
-async def test_a_job_created_with_an_alias_stores_the_canonical_id(
-    client: AsyncClient, store: FakeStorage, monkeypatch
-):
-    """**Validated as an alias, stored as an alias — the shape of the bug.**
-
-    The gateway mints a grant against canonical ids. A job that recorded
-    `legacy-name` produced a grant whose `allowed_models` matched nothing, so
-    the job was created successfully and died at its first inference call with
-    a 404 for a model that plainly exists.
-
-    Resolution translates once; everything after it works in canonical ids.
-    """
-    monkeypatch.setitem(_FakeGateway.aliases, "legacy-name", _TEST_MODELS[0])
-
-    await _create_job(client, model="legacy-name")
-
-    (job,) = list(store.jobs.values())
-    assert job["model"] == _TEST_MODELS[0], "the alias was stored instead of the canonical id"
-
-
-async def test_the_owner_sees_what_their_turn_consumed(client: AsyncClient, store: FakeStorage):
-    """The footer's numbers, end to end: runner posts, owner reads."""
-    job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
-    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
-
-    ack = await client.post(
-        f"/v1/agent/worker/jobs/{job_id}/resources",
-        json={
-            "cpu_usec": 18_200_000,
-            "mem_peak_bytes": 1_288_490_188,
-            "net_rx_bytes": 35_651_584,
-            "net_tx_bytes": 2_097_152,
-            "sample_count": 42,
-            "coverage": 1.0,
-            "sampler_version": "1",
-        },
-        headers=auth,
-    )
-    assert ack.status_code == 200
-
-    job = (await client.get(f"/v1/agent/jobs/{job_id}")).json()
-    assert job["resources"]["cpu_usec"] == 18_200_000
-    assert job["resources"]["mem_peak_bytes"] == 1_288_490_188
-    assert job["resources"]["coverage"] == 1.0
-
-
-async def test_shared_member_accounting_refuses_container_attribution(
-    client: AsyncClient,
-):
-    """The semantic version is a server-enforced promise, not runner trust.
-
-    Fork siblings can overlap in one container.  Accepting either an aggregate
-    delta or a periodic tool sample under ``shared-member-v1`` would silently
-    charge one chat for the other's work.
-    """
-    job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
-    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
-    endpoint = f"/v1/agent/worker/jobs/{job_id}/resources"
-    base = {
-        "sample_count": 0,
-        "coverage": 0.0,
-        "sampler_version": "shared-member-v1",
-    }
-
-    invalid = [
-        {**base, "cpu_usec": 1},
-        {**base, "sample_count": 1},
-        {
-            **base,
-            "tool_calls": [
-                {
-                    "call_seq": 1,
-                    "tool_use_id": "toolu_1",
-                    "tool_name": "Bash",
-                    "sample_count": 2,
-                    "measured_span_ms": 1,
-                    "cpu_usec_exclusive": 1,
-                }
-            ],
-        },
-    ]
-    for payload in invalid:
-        refused = await client.post(endpoint, json=payload, headers=auth)
-        assert refused.status_code == 422, refused.text
-
-    accepted = await client.post(
-        endpoint,
-        json={
-            **base,
-            "tool_time_ms": 25,
-            "tool_calls": [
-                {
-                    "call_seq": 1,
-                    "tool_use_id": "toolu_1",
-                    "tool_name": "Bash",
-                    "duration_ms": 25,
-                    "sample_count": 0,
-                    "overlap_n": 1,
-                }
-            ],
-        },
-        headers=auth,
-    )
-    assert accepted.status_code == 200, accepted.text
-
-
-async def test_resource_sequences_and_process_references_are_consistent(
-    client: AsyncClient,
-):
-    """Malformed worker evidence is a 422, never a database primary-key 500."""
-    job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
-    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
-    endpoint = f"/v1/agent/worker/jobs/{job_id}/resources"
-    call = {
-        "call_seq": 1,
-        "tool_use_id": "toolu_1",
-        "tool_name": "Bash",
-    }
-    process = {
-        "process_seq": 1,
-        "uid": 11003,
-        "pid": 42,
-        "tgid": 42,
-        "comm": "tiny",
-        "started_offset_ms": 1,
-        "tool_call_seqs": [1],
-    }
-    base = {
-        "sampler_version": "shared-member-v1",
-        "process_observer": "kata-guest-ebpf-v1",
-    }
-    invalid = [
-        {**base, "tool_calls": [call, {**call, "tool_use_id": "toolu_2"}]},
-        {
-            **base,
-            "tool_calls": [{**call, "process_count": 2}],
-            "processes": [process, {**process, "pid": 43, "tgid": 43}],
-        },
-        {
-            **base,
-            "tool_calls": [{**call, "process_count": 1}],
-            "processes": [{**process, "tool_call_seqs": [1, 1]}],
-        },
-        {**base, "tool_calls": [call], "processes": [{**process, "tool_call_seqs": [2]}]},
-        {**base, "tool_calls": [{**call, "process_count": 1}]},
-    ]
-
-    for payload in invalid:
-        refused = await client.post(endpoint, json=payload, headers=auth)
-        assert refused.status_code == 422, refused.text
-
-
-async def test_per_call_rows_survive_the_wire_in_both_directions(
-    client: AsyncClient, store: FakeStorage
-):
-    """Posted by the runner, read by the owner, over the real request models.
-
-    Written against the wire rather than the store because that is where this
-    kind of field is lost: a model missing the attribute accepts the post,
-    answers 200, and drops it silently — which no test that hands a dict to
-    the store can see.
-    """
-    job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
-    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
-
-    ack = await client.post(
-        f"/v1/agent/worker/jobs/{job_id}/resources",
-        json={
-            "cpu_usec": 5_000_000,
-            "sample_count": 12,
-            "coverage": 1.0,
-            "sampler_version": "2",
-            "tool_time_ms": 9_543,
-            "tool_calls": [
-                {
-                    "call_seq": 1,
-                    "tool_use_id": "toolu_long",
-                    "tool_name": "Bash",
-                    "timing_source": "exact",
-                    "duration_ms": 9_523,
-                    "sample_count": 9,
-                    "overlap_n": 1,
-                    "measured_span_ms": 8_000,
-                    "cpu_usec_exclusive": 4_400_000,
-                    "mem_peak_exclusive_bytes": 270_000_000,
-                    "process_count": 1,
-                    "process_cpu_usec": 15_000,
-                    "process_mem_peak_bytes": 2_228_224,
-                    "process_io_read_bytes": 0,
-                    "process_io_write_bytes": 8_388_608,
-                    "process_resources_partial": True,
-                },
-                {
-                    "call_seq": 2,
-                    "tool_use_id": "toolu_short",
-                    "tool_name": "Read",
-                    "duration_ms": 20,
-                    "sample_count": 0,
-                    "overlap_n": 1,
-                },
-            ],
-            "tool_calls_truncated": False,
-            "process_observer": "kata-guest-ebpf-v1",
-            "process_observation_complete": True,
-            "process_events_lost": 0,
-            "processes": [
-                {
-                    "process_seq": 1,
-                    "uid": 11003,
-                    "pid": 42,
-                    "tgid": 42,
-                    "ppid": 7,
-                    "comm": "tiny",
-                    "executable": "/bin/tiny",
-                    "started_offset_ms": 12,
-                    "duration_ms": 1,
-                    "exit_code": 0,
-                    "observed_fork": True,
-                    "observed_exec": True,
-                    "observed_exit": True,
-                    "tool_call_seqs": [1],
-                    "cpu_usec": 15_000,
-                    "mem_peak_bytes": 2_228_224,
-                    "io_read_bytes": 0,
-                    "io_write_bytes": 8_388_608,
-                    "io_rchar_bytes": 8_390_683,
-                    "io_wchar_bytes": 8_388_701,
-                }
-            ],
-        },
-        headers=auth,
-    )
-    assert ack.status_code == 200, ack.text
-
-    job = (await client.get(f"/v1/agent/jobs/{job_id}")).json()
-    assert job["telemetry_attempt_id"] == claim["attempt_id"]
-    resources = job["resources"]
-    assert resources["tool_calls_truncated"] is False
-    assert resources["tool_time_ms"] == 9_543
-    long_call, short_call = resources["tool_calls"]
-    assert long_call["tool_name"] == "Bash"
-    assert long_call["timing_source"] == "exact"
-    assert short_call["timing_source"] == "message", "an unmarked call claimed precision"
-    assert long_call["cpu_usec_exclusive"] == 4_400_000
-    assert long_call["measured_span_ms"] == 8_000
-    assert long_call["process_count"] == 1
-    assert long_call["process_cpu_usec"] == 15_000
-    assert long_call["process_mem_peak_bytes"] == 2_228_224
-    assert long_call["process_io_write_bytes"] == 8_388_608
-    assert long_call["process_resources_partial"] is True
-    assert short_call["process_cpu_usec"] is None
-    assert short_call["process_resources_partial"] is False
-    assert resources["process_observer"] == "kata-guest-ebpf-v1"
-    assert resources["process_observation_complete"] is True
-    assert resources["process_events_lost"] == 0
-    (process,) = resources["processes"]
-    assert process["executable"] == "/bin/tiny"
-    assert process["duration_ms"] == 1
-    assert process["tool_call_seqs"] == [1]
-    assert process["cpu_usec"] == 15_000
-    assert process["mem_peak_bytes"] == 2_228_224
-    assert process["io_write_bytes"] == 8_388_608
-    assert process["io_rchar_bytes"] == 8_390_683
-    # The 97 % case, all the way to the reader: a row, a duration, and no
-    # counters at all. A zero here would be a number nobody measured.
-    assert short_call["sample_count"] == 0
-    assert short_call["cpu_usec_exclusive"] is None
-    assert short_call["cpu_usec_shared"] is None
-    assert short_call["mem_peak_exclusive_bytes"] is None
-
-
-async def test_a_turn_with_no_per_call_rows_reads_as_an_empty_list(
-    client: AsyncClient, store: FakeStorage
-):
-    """Every turn recorded before this shipped, and every unmeasured one."""
-    job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
-    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
-    await client.post(
-        f"/v1/agent/worker/jobs/{job_id}/resources",
-        json={"sample_count": 0, "coverage": 0.0, "sampler_version": "2"},
-        headers=auth,
-    )
-
-    resources = (await client.get(f"/v1/agent/jobs/{job_id}")).json()["resources"]
-    assert resources["tool_calls"] == []
-    assert resources["tool_calls_truncated"] is False
-    # Null, not zero: a turn nobody measured did not spend no time in tools.
-    assert resources["tool_time_ms"] is None
-
-
-async def test_more_calls_than_the_cap_are_refused_rather_than_truncated_server_side(
-    client: AsyncClient, store: FakeStorage
-):
-    """The runner caps and flags; the server must not quietly cap a second time."""
-    job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
-    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
-
-    response = await client.post(
-        f"/v1/agent/worker/jobs/{job_id}/resources",
-        json={
-            "sample_count": 1,
-            "coverage": 1.0,
-            "sampler_version": "2",
-            "tool_calls": [
-                {"call_seq": i + 1, "tool_use_id": f"t{i}", "tool_name": "Read"} for i in range(501)
-            ],
-        },
-        headers=auth,
-    )
-    assert response.status_code == 422
-
-
-async def test_a_rollup_is_the_same_window_said_twice_not_two_windows(
-    client: AsyncClient, store: FakeStorage
-):
-    """Retrying the post must not double a turn's consumption."""
-    job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
-    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
-    body = {"cpu_usec": 1_000, "sample_count": 5, "coverage": 1.0, "sampler_version": "1"}
-
-    await client.post(f"/v1/agent/worker/jobs/{job_id}/resources", json=body, headers=auth)
-    await client.post(f"/v1/agent/worker/jobs/{job_id}/resources", json=body, headers=auth)
-
-    job = (await client.get(f"/v1/agent/jobs/{job_id}")).json()
-    assert job["resources"]["cpu_usec"] == 1_000, "a retried post doubled the turn's CPU"
-
-
-async def test_a_superseded_attempt_cannot_relabel_what_the_live_one_used(
-    client: AsyncClient, store: FakeStorage
-):
-    """Fenced like every other worker write."""
-    job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
-    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
-    # A takeover moves the fence to a new attempt generation.
-    store.live_fence = (101, 2)
-
-    refused = await client.post(
-        f"/v1/agent/worker/jobs/{job_id}/resources",
-        json={"cpu_usec": 999, "sample_count": 1, "coverage": 1.0, "sampler_version": "1"},
-        headers=auth,
-    )
-    assert refused.status_code == 409
-
-    job = (await client.get(f"/v1/agent/jobs/{job_id}")).json()
-    assert job["resources"] is None
-
-
-def _turn_resources_body(
-    *,
-    report_seq: int = 1,
-    state: str = "final",
-    measurement_id: str = "00000000-0000-4000-8000-000000000001",
-    cpu_usec: int = 80_000_000,
-    observed_through_ms: int = 130_000,
-) -> dict[str, Any]:
-    """One canonical ``member_execution_window`` body, as the guest posts it."""
-    return {
-        "schema_version": 1,
-        "measurement_id": measurement_id,
-        "report_seq": report_seq,
-        "state": state,
-        "scope": "member_execution_window",
-        "source": "kata-guest-member-window-v1",
-        "window": {
-            "duration_ms": 130_000,
-            "observed_through_ms": observed_through_ms,
-            "open_scan_ms": 12,
-            "close_scan_ms": 15,
-        },
-        "cpu": {
-            "status": "available",
-            "method": "live_and_exit_task_counters",
-            "usec": cpu_usec,
-            "reason_codes": [],
-        },
-        "memory": {
-            "status": "available",
-            "method": "sampled_member_pss",
-            "peak_bytes": 1_288_490_189,
-            "sample_interval_ms": 1000,
-            "valid_samples": 131,
-            "expected_samples": 131,
-            "max_gap_ms": 1000,
-            "reason_codes": [],
-        },
-        "storage_io": {
-            "status": "unavailable",
-            "method": "task_io_accounting",
-            "read_bytes": None,
-            "write_bytes": None,
-            "reason_codes": ["filesystem_attribution_unverified"],
-        },
-    }
-
-
-async def test_a_turn_resource_snapshot_is_acknowledged_and_its_retry_too(
-    client: AsyncClient, store: FakeStorage
-):
-    """An acknowledged checkpoint whose response was lost must be safe to resend."""
-    job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
-    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
-    endpoint = f"/v1/agent/worker/jobs/{job_id}/turn-resources"
-    body = _turn_resources_body(report_seq=2)
-
-    first = await client.post(endpoint, json=body, headers=auth)
-    retry = await client.post(endpoint, json=body, headers=auth)
-
-    assert first.status_code == 200
-    assert first.json()["ok"] is True
-    assert retry.status_code == 200
-    assert retry.json()["ok"] is True
-    assert store.turn_summaries[claim["attempt_id"]]["seq"] == 2
-
-
-async def test_a_stale_or_disagreeing_snapshot_is_refused_with_409(
-    client: AsyncClient, store: FakeStorage
-):
-    """``conflict`` is not ``lease_lost``: the worker keeps going, the post does not."""
-    job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
-    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
-    endpoint = f"/v1/agent/worker/jobs/{job_id}/turn-resources"
-    assert (
-        await client.post(endpoint, json=_turn_resources_body(report_seq=5), headers=auth)
-    ).status_code == 200
-
-    stale = await client.post(endpoint, json=_turn_resources_body(report_seq=4), headers=auth)
-    disagreeing = await client.post(
-        endpoint, json=_turn_resources_body(report_seq=5, cpu_usec=1), headers=auth
-    )
-
-    assert stale.status_code == 409
-    assert stale.json()["detail"]["error"]["type"] == "turn_summary_conflict"
-    assert disagreeing.status_code == 409
-    assert disagreeing.json()["detail"]["error"]["type"] == "turn_summary_conflict"
-    assert store.turn_summaries[claim["attempt_id"]]["seq"] == 5
-
-
-async def test_a_superseded_attempt_cannot_file_a_turn_resource_snapshot(
-    client: AsyncClient, store: FakeStorage
-):
-    """The fence is the same one every other worker write uses."""
-    job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
-    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
-    store.live_fence = (101, 2)
-
-    refused = await client.post(
-        f"/v1/agent/worker/jobs/{job_id}/turn-resources",
-        json=_turn_resources_body(),
-        headers=auth,
-    )
-
-    assert refused.status_code == 409
-    assert refused.json()["detail"]["error"]["type"] == "lease_lost"
-    assert store.turn_summaries == {}
-
-
-async def test_an_oversized_turn_resource_snapshot_is_refused_before_parsing(
-    client: AsyncClient, store: FakeStorage
-):
-    """The 16 KiB cap is on the bytes that crossed the wire, not on the model.
-
-    The body carries a valid snapshot plus one long unknown field, so a server
-    that validated first and bounded second would answer 422 or 200 here. The
-    only correct answer is 413: the contract bounds the payload itself.
-    """
-    job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
-    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
-    body = _turn_resources_body()
-    body["padding"] = "x" * (16 * 1024)
-
-    refused = await client.post(
-        f"/v1/agent/worker/jobs/{job_id}/turn-resources", json=body, headers=auth
-    )
-
-    assert refused.status_code == 413
-    assert refused.json()["detail"]["error"]["type"] == "payload_too_large"
-    assert store.turn_summaries == {}
-
-
-async def test_a_turn_resource_response_never_echoes_body_identity(
-    client: AsyncClient, store: FakeStorage
-):
-    """Identity comes from the signed claims, so the body cannot name anything.
-
-    A body that tries to select another attempt must be stored against the
-    caller's own fenced attempt and answered with no identity at all.
-    """
-    job_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
-    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
-    body = _turn_resources_body()
-    body.update({"attempt_id": 999, "lease_generation": 7, "job_id": "ajob_someone_else"})
-
-    response = await client.post(
-        f"/v1/agent/worker/jobs/{job_id}/turn-resources", json=body, headers=auth
-    )
-
-    assert response.status_code == 200
-    assert response.json()["ok"] is True
-    assert set(store.turn_summaries) == {claim["attempt_id"]}
-    assert "job_id" not in response.text
-    assert "attempt_id" not in response.text
-
-
-async def test_an_unmeasured_turn_reports_nothing_rather_than_zero(
-    client: AsyncClient, store: FakeStorage
-):
-    """The distinction the whole feature rests on.
-
-    A turn nobody measured has no resources object at all. Reading zeros here
-    would be indistinguishable from a turn that genuinely consumed nothing —
-    and the reader would have no way to tell which they were looking at.
-    """
-    job_id = await _create_job(client)
-
-    job = (await client.get(f"/v1/agent/jobs/{job_id}")).json()
-
-    assert job["telemetry_attempt_id"] is None
-    assert job["resources"] is None
-    assert job["continuity_mode"] is None
-    assert job["started_at"] is None
-    assert job["finished_at"] is None
-    assert job["duration_ms"] is None
-
-
-@pytest.mark.parametrize("state", ["running", "failed"])
-async def test_job_timing_does_not_invent_a_missing_attempt_finish(
-    client: AsyncClient, store: FakeStorage, state: str
-):
-    """A job update or terminal state cannot supply an unrecorded end time."""
-    job_id = await _create_job(client)
-    started = datetime(2026, 9, 3, 10, 0, tzinfo=timezone.utc)
-    store.jobs[job_id].update(
-        state=state,
-        created_at=started - timedelta(minutes=1),
-        updated_at=started + timedelta(minutes=5),
-    )
-    store.attempt_telemetry[job_id] = [
-        {
-            "attempt_id": 100,
-            "attempt_no": 1,
-            "started_at": started,
-            "finished_at": None,
-        }
-    ]
-
-    for query in ("", "?include_resources=false"):
-        response = await client.get(f"/v1/agent/jobs/{job_id}{query}")
-        assert response.status_code == 200
-        job = response.json()
-        assert job["started_at"] == started.isoformat()
-        assert job["finished_at"] is None
-        assert job["duration_ms"] is None
-
-
-async def test_job_list_and_thread_do_not_substitute_job_dates_for_execution_timing(
-    client: AsyncClient, store: FakeStorage
-):
-    """Paths without a telemetry read leave the execution window unknown."""
-    job_id = await _create_job(client)
-    started = datetime(2026, 9, 3, 10, 0, tzinfo=timezone.utc)
-    store.jobs[job_id].update(
-        state="succeeded",
-        created_at=started - timedelta(minutes=1),
-        updated_at=started + timedelta(minutes=5),
-    )
-    store.attempt_telemetry[job_id] = [
-        {
-            "attempt_id": 100,
-            "attempt_no": 1,
-            "started_at": started,
-            "finished_at": started + timedelta(seconds=9),
-        }
-    ]
-
-    for path in ("/v1/agent/jobs", f"/v1/agent/jobs/{job_id}/thread"):
-        response = await client.get(path)
-        assert response.status_code == 200
-        job = response.json()["jobs"][0]
-        assert job["started_at"] is None
-        assert job["finished_at"] is None
-        assert job["duration_ms"] is None
-
-
-async def test_job_detail_keeps_each_retry_s_telemetry_on_its_attempt(
-    client: AsyncClient, store: FakeStorage
-):
-    """Selecting an old transcript must never show the retry's measurements."""
-    job_id = await _create_job(client)
-    started = datetime(2026, 9, 3, 10, 0, tzinfo=timezone.utc)
-    newest_started = started + timedelta(seconds=5)
-    store.attempt_telemetry = {
-        job_id: [
-            {
-                "attempt_id": 100,
-                "attempt_no": 1,
-                "continuity_mode": "replay",
-                "context_status": "lost",
-                "started_at": started,
-                "finished_at": started + timedelta(seconds=3),
-                "sampler_version": "2",
-                "cpu_usec": 1_000_000,
-                "sample_count": 3,
-                "coverage": 1.0,
-            },
-            {
-                "attempt_id": 101,
-                "attempt_no": 2,
-                "continuity_mode": "warm_native",
-                "context_status": "restored",
-                "started_at": newest_started,
-                "finished_at": newest_started + timedelta(seconds=9),
-                "sampler_version": "2",
-                "cpu_usec": 7_000_000,
-                "sample_count": 9,
-                "coverage": 1.0,
-            },
-        ]
-    }
-
-    job = (await client.get(f"/v1/agent/jobs/{job_id}")).json()
-
-    first, second = job["attempt_telemetry"]
-    assert (first["attempt_id"], first["attempt_no"]) == (100, 1)
-    assert first["duration_ms"] == 3_000
-    assert second["duration_ms"] == 9_000
-    assert "resources" not in first and "resources" not in second
-    # Existing clients still receive the newest attempt at the top level.
-    assert job["telemetry_attempt_id"] == 101
-    assert job["started_at"] == newest_started.isoformat()
-    assert job["finished_at"] == (newest_started + timedelta(seconds=9)).isoformat()
-    assert job["duration_ms"] == 9_000
-    assert job["resources"]["cpu_usec"] == 7_000_000
-
-    lightweight = (await client.get(f"/v1/agent/jobs/{job_id}?include_resources=false")).json()
-    assert lightweight["started_at"] == job["started_at"]
-    assert lightweight["finished_at"] == job["finished_at"]
-    assert lightweight["duration_ms"] == job["duration_ms"]
-
-    old = (await client.get(f"/v1/agent/jobs/{job_id}/attempts/100/telemetry")).json()
-    assert old["attempt_id"] == 100
-    assert old["duration_ms"] == 3_000
-    assert old["resources"]["cpu_usec"] == 1_000_000
-
-
-async def test_retry_picker_polls_only_summaries_and_fetches_one_detail(
-    client: AsyncClient, store: FakeStorage, monkeypatch
-):
-    """Adding retries must not multiply the polled tool/process payload."""
-    job_id = await _create_job(client)
-    store.attempt_telemetry[job_id] = [
-        {
-            "attempt_id": attempt_id,
-            "attempt_no": attempt_id,
-            "sampler_version": "2",
-            "sample_count": 1,
-            "coverage": 1.0,
-            "cpu_usec": attempt_id,
-            "tool_calls": [
-                {"call_seq": seq + 1, "tool_use_id": f"t{seq}", "tool_name": "Read"}
-                for seq in range(500)
-            ],
-        }
-        for attempt_id in range(1, 13)
-    ]
-    read_detail = AsyncMock(wraps=store.job_turn_telemetry)
-    monkeypatch.setattr(store, "job_turn_telemetry", read_detail)
-    # The real store already returns scalar summaries, independently of the
-    # detail reader. Keep the fake faithful to that separate query.
-    summaries = [
-        {key: row[key] for key in ("attempt_id", "attempt_no")}
-        for row in store.attempt_telemetry[job_id]
-    ]
-    monkeypatch.setattr(store, "job_attempts_telemetry", AsyncMock(return_value=summaries))
-    for _ in range(2):
-        response = await client.get(f"/v1/agent/jobs/{job_id}?include_resources=false")
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data["attempt_telemetry"]) == 12
-        assert data["resources"] is None
-        assert b'"tool_calls"' not in response.content
-        assert b'"processes"' not in response.content
-        assert len(response.content) < 5_000
-    read_detail.assert_not_awaited()
-    # Supply the full row only when the singular reader is called.
-    read_detail.side_effect = lambda **kwargs: store.attempt_telemetry[job_id][
-        kwargs["attempt_id"] - 1
-    ]
-    detail = await client.get(f"/v1/agent/jobs/{job_id}/attempts/3/telemetry")
-    assert detail.status_code == 200
-    assert len(detail.json()["resources"]["tool_calls"]) == 500
-    read_detail.assert_awaited_once_with(job_id=job_id, attempt_id=3)
-
-
-async def test_attempt_telemetry_is_fenced_to_the_owned_job(
-    client: AsyncClient, store: FakeStorage
-):
-    job_id = await _create_job(client)
-    another = await _create_job(client)
-    store.attempt_telemetry[another] = [{"attempt_id": 999, "attempt_no": 1}]
-    assert (await client.get(f"/v1/agent/jobs/{job_id}/attempts/999/telemetry")).status_code == 404
-    store.jobs[another]["user_id"] = "someone-else"
-    assert (await client.get(f"/v1/agent/jobs/{another}/attempts/999/telemetry")).status_code == 404
-
-
-# ── Reasoning effort ───────────────────────────────────────────────────
-
-
-async def test_effort_is_offered_only_where_runtime_and_model_both_deliver(client: AsyncClient):
-    """The composer is told both halves; it offers their intersection."""
-    config = (await client.get("/v1/agent/config")).json()
-
-    # claude-code can express effort; the Tier 2 runtimes cannot, and are
-    # absent rather than listed with an empty vocabulary.
-    # The raw capability, still the CLI's own vocabulary — the composer
-    # narrows it to the platform list rather than the backend pre-chewing it.
-    assert config["runtime_reasoning_efforts"]["claude-code"] == [
-        "low",
-        "medium",
-        "high",
-        "xhigh",
-        "max",
-    ]
-    assert config["runtime_reasoning_efforts"]["codex"][:3] == ["none", "minimal", "low"]
-    assert config["runtime_reasoning_efforts"]["pi"] == ["minimal", "low", "medium", "high"]
-    assert config["model_reasoning_efforts"] == {"glm-5.1": ["low", "high", "max"]}
-
-
-async def test_a_turn_records_the_effort_it_was_created_with(client: AsyncClient):
-    response = await client.post(
-        "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "fix it",
-            "model": "glm-5.1",
-            "reasoning_effort": "high",
-        },
-    )
-
-    assert response.status_code == 201, response.text
-    assert response.json()["reasoning_effort"] == "high"
-
-
-async def test_a_turn_without_an_effort_is_auto(client: AsyncClient):
-    """Auto is null, and null is what every turn before this control reports."""
-    job_id = await _create_job(client)
-
-    job = (await client.get(f"/v1/agent/jobs/{job_id}")).json()
-
-    assert job["reasoning_effort"] is None
-
-
-async def test_a_level_outside_the_platform_list_is_refused(client: AsyncClient):
-    """``xhigh`` is a real claude-code level, and not one this platform offers.
-
-    Refused rather than clamped to a neighbour: a turn served at a depth
-    nobody chose, while reporting the one they did, is the same lie as a flag
-    that resolves to nothing.
-    """
-    response = await client.post(
-        "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "fix it",
-            "model": "glm-5.1",
-            "reasoning_effort": "xhigh",
-        },
-    )
-
-    assert response.status_code == 400
-    detail = response.json()["detail"]["error"]
-    assert detail["type"] == "reasoning_effort_not_available"
-    # The refusal names what *is* available, so the caller can retry once.
-    assert "low, medium, high, max" in detail["message"]
-
-
-async def test_the_platform_list_is_offered_whatever_the_model_documents(
-    client: AsyncClient,
-):
-    """The model entry is a yes/no, not a vocabulary.
-
-    Per-model domains were withdrawn because the providers' docs disagreed
-    with their own APIs, so a level the platform offers is accepted for any
-    model that takes the parameter at all — `medium` here, which this
-    fixture's model does not list.
-    """
-    response = await client.post(
-        "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "fix it",
-            "model": "glm-5.1",
-            "reasoning_effort": "medium",
-        },
-    )
-
-    assert response.status_code == 201, response.text
-    assert response.json()["reasoning_effort"] == "medium"
-
-
-async def test_an_effort_on_a_model_that_takes_none_is_refused(client: AsyncClient):
-    response = await client.post(
-        "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "fix it",
-            "model": "qwen-next",
-            "reasoning_effort": "high",
-        },
-    )
-
-    assert response.status_code == 400
-    assert response.json()["detail"]["error"]["message"].endswith("Available: none.")
-
-
-async def test_a_follow_up_inherits_the_efforts_of_the_turn_before_it(
-    client: AsyncClient, store: FakeStorage
-):
-    created = await client.post(
-        "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "fix it",
-            "model": "glm-5.1",
-            "reasoning_effort": "high",
-        },
-    )
-    parent_id = created.json()["id"]
-
-    inherited = await _next_turn(client, store, parent_id, {"prompt": "keep going"})
-    assert inherited["reasoning_effort"] == "high"
-
-    switched = await _next_turn(
-        client, store, inherited["id"], {"prompt": "now the easy bit", "reasoning_effort": "low"}
-    )
-    assert switched["reasoning_effort"] == "low"
-
-
-async def test_a_follow_up_can_reset_an_inherited_effort_to_auto(
-    client: AsyncClient, store: FakeStorage
-):
-    """Null already means "inherit", so clearing takes the explicit sentinel."""
-    created = await client.post(
-        "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "fix it",
-            "model": "glm-5.1",
-            "reasoning_effort": "max",
-        },
-    )
-    parent_id = created.json()["id"]
-
-    reset = await _next_turn(
-        client, store, parent_id, {"prompt": "back to normal", "reasoning_effort": "auto"}
-    )
-
-    assert reset["reasoning_effort"] is None
-
-
-async def test_a_follow_up_effort_is_checked_against_the_model_it_switches_to(
-    client: AsyncClient, store: FakeStorage
-):
-    """A pair offered last turn need not be offered this one."""
-    created = await client.post(
-        "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "fix it",
-            "model": "glm-5.1",
-            "reasoning_effort": "high",
-        },
-    )
-    parent_id = created.json()["id"]
-
-    response = await _send(
-        client,
-        store,
-        parent_id,
-        {"prompt": "switch", "model": "qwen-next", "reasoning_effort": "high"},
-    )
-
-    assert response.status_code == 400
-    assert response.json()["detail"]["error"]["type"] == "reasoning_effort_not_available"
-    assert store.pending == {}
-
-
-async def test_a_level_the_runtime_cannot_express_is_refused_at_create(client: AsyncClient):
-    """The other half of the intersection: the model takes it, the CLI cannot say it.
-
-    pi reaches the wire with four of its six flag levels — `xhigh` arrives as
-    `high` and `off` sends nothing — so offering `xhigh` would hand someone a
-    depth this runtime cannot actually ask for. The refusal belongs here,
-    before the job exists.
-    """
-    response = await client.post(
-        "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "fix it",
-            "runtime": "pi",
-            "model": "glm-5.1",
-            "reasoning_effort": "xhigh",
-        },
-    )
-
-    assert response.status_code == 400
-    assert response.json()["detail"]["error"]["type"] == "reasoning_effort_not_available"
-
-
-async def test_every_runtime_still_takes_ordinary_turns(client: AsyncClient):
-    """And nothing else about them changed: Auto is every turn they ever ran."""
-    for runtime in ("pi", "opencode", "kilo", "codex"):
-        response = await client.post(
-            "/v1/agent/jobs",
-            json={
-                "repo": "owner/name",
-                "task_prompt": "fix it",
-                "runtime": runtime,
-                "model": "glm-5.1",
-            },
-        )
-        assert response.status_code == 201, f"{runtime}: {response.text}"
-        assert response.json()["reasoning_effort"] is None
-
-
-async def test_a_thread_read_returns_what_earlier_turns_did(
-    client: AsyncClient, store: FakeStorage
-):
-    """A follow-up must not make the previous turn's tool activity unreachable."""
-    first_id = await _create_job(client)
-    claim = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
-    auth = {"Authorization": f"Bearer {claim['worker_token']}"}
-    await client.post(
-        f"/v1/agent/worker/jobs/{first_id}/events",
-        json={"event_type": "tool_use", "payload": {"id": "t1", "name": "Bash"}},
-        headers=auth,
-    )
-    await client.post(
-        f"/v1/agent/worker/jobs/{first_id}/events",
-        json={"event_type": "message", "payload": {"text": "done"}},
-        headers=auth,
-    )
-    # With the worker's credential: the first turn has to have finished for
-    # the message below to become the next turn rather than wait for it.
-    finished = await client.post(
-        f"/v1/agent/worker/jobs/{first_id}/finish", json={"state": "succeeded"}, headers=auth
-    )
-    assert finished.status_code == 200
-    second = await _send(client, store, first_id, {"prompt": "and now the docs"})
-    second_id = second.json()["job"]["id"]
-
-    per_job = (await client.get(f"/v1/agent/jobs/{second_id}/events")).json()
-    assert per_job["events"] == []
-
-    thread = (await client.get(f"/v1/agent/jobs/{second_id}/thread/events")).json()
-    assert [event["event_type"] for event in thread["events"]] == ["tool_use", "message"]
-    assert {event["turn_no"] for event in thread["events"]} == {1}
-    assert thread["events"][0]["payload"]["name"] == "Bash"
-
-
-async def test_a_thread_event_read_refuses_a_foreign_job(client: AsyncClient, store: FakeStorage):
-    job_id = await _create_job(client)
-    store.jobs[job_id]["user_id"] = "someone-else"
-
-    response = await client.get(f"/v1/agent/jobs/{job_id}/thread/events")
-
-    assert response.status_code == 404
-
-
-@pytest.mark.parametrize("session_state", ["queued", "running", "idle", "failed"])
-async def test_session_listing_exposes_stable_titles_facets_and_archive_state(
-    client: AsyncClient, store: FakeStorage, monkeypatch, session_state: str
-):
-    job_id = await _create_job(client)
-    await store.conversation_commands.set_thread_archived(
-        job_id=job_id, user_id=_OWNER, archived=True
-    )
-    job = await store.conversation_queries.get_job(job_id)
-    assert job is not None
-    listing = AsyncMock(
-        return_value={
-            "sessions": [
-                {
-                    "thread_id": job["thread_id"],
-                    "title": "Stable conversation title",
-                    "archived_at": job["archived_at"],
-                    "job": job,
-                    "can_delete": False,
-                    "delete_block_reason": "fork_in_progress",
-                }
-            ],
-            "total": 51,
-            "next_cursor": "opaque-next-page",
-            "projects": [{"repo": "owner/name", "count": 51}],
-        }
-    )
-    monkeypatch.setattr(store, "list_sessions", listing, raising=False)
-
-    response = await client.get(
-        "/v1/agent/sessions",
-        params={
-            "archived": "true",
-            "search": "  Stable  ",
-            "repo": "owner/name",
-            "state": session_state,
-            "limit": 20,
-            "cursor": "previous-page",
-        },
-    )
-    assert response.status_code == 200
-    body = response.json()
-    assert body["sessions"][0]["title"] == "Stable conversation title"
-    assert body["sessions"][0]["archived_at"] == body["sessions"][0]["job"]["archived_at"]
-    assert body["sessions"][0]["delete_block_reason"] == "fork_in_progress"
-    assert body["total"] == 51 and body["next_cursor"] == "opaque-next-page"
-    assert body["projects"] == [{"repo": "owner/name", "count": 51}]
-    listing.assert_awaited_once_with(
-        user_id=_OWNER,
-        archived=True,
-        search="Stable",
-        repo="owner/name",
-        state=session_state,
-        limit=20,
-        cursor="previous-page",
-        include_summary=True,
-        temporary=False,
-    )
-
-
-async def test_job_response_preserves_turn_result_beside_conversation_activity(
-    client: AsyncClient, store: FakeStorage
-):
-    job_id = await _create_job(client)
-    store.jobs[job_id].update(state="cancelled", conversation_state="running")
-    response = await client.get(f"/v1/agent/jobs/{job_id}")
-    assert response.status_code == 200
-    assert response.json()["state"] == "cancelled"
-    assert response.json()["conversation_state"] == "running"
-
-
-async def test_session_list_can_omit_summary(client: AsyncClient, store: FakeStorage, monkeypatch):
-    listing = AsyncMock(
-        return_value={"sessions": [], "total": None, "projects": None, "next_cursor": None}
-    )
-    monkeypatch.setattr(store, "list_sessions", listing, raising=False)
-    response = await client.get("/v1/agent/sessions?include_summary=false&repo=owner/name")
-    assert response.status_code == 200
-    assert response.json() == {"sessions": [], "total": None, "projects": None, "next_cursor": None}
-    assert listing.call_args.kwargs["include_summary"] is False
-    assert listing.call_args.kwargs["repo"] == "owner/name"
-
-
-async def test_session_list_rejects_bad_cursor_and_display_filters(
-    client: AsyncClient, store: FakeStorage, monkeypatch
-):
-    listing = AsyncMock(side_effect=ValueError("Invalid session cursor for these filters"))
-    monkeypatch.setattr(store, "list_sessions", listing, raising=False)
-    assert (await client.get("/v1/agent/sessions?cursor=bad")).status_code == 400
-    for params in ({"state": "succeeded"}, {"limit": 201}, {"search": "bad\x00search"}):
-        assert (await client.get("/v1/agent/sessions", params=params)).status_code == 422
-    assert listing.await_count == 1
-
-
-async def test_session_mutations_use_explicit_owner_snapshot(
-    client: AsyncClient, store: FakeStorage, monkeypatch
-):
-    thread_ids = ["athr_1", "athr_2"]
-    archive = AsyncMock(
-        return_value={
-            "sessions": [{"thread_id": value, "archived_at": None} for value in thread_ids]
-        }
-    )
-    delete = AsyncMock(return_value={"thread_ids": thread_ids})
-    monkeypatch.setattr(store, "set_sessions_archived", archive, raising=False)
-    monkeypatch.setattr(store, "delete_sessions", delete, raising=False)
-    response = await client.post(
-        "/v1/agent/sessions/archive", json={"thread_ids": thread_ids, "archived": False}
-    )
-    assert response.status_code == 200
-    assert all(row["archived"] is False for row in response.json()["sessions"])
-    archive.assert_awaited_once_with(thread_ids=thread_ids, user_id=_OWNER, archived=False)
-    response = await client.post("/v1/agent/sessions/delete", json={"thread_ids": thread_ids})
-    assert response.status_code == 200 and response.json() == {"thread_ids": thread_ids}
-    delete.assert_awaited_once_with(thread_ids=thread_ids, user_id=_OWNER)
-
-
-@pytest.mark.parametrize(
-    ("error", "status"),
-    [
-        ("not_found", 404),
-        ("fork_in_progress", 409),
-        ("publication_pending", 409),
-    ],
-)
-async def test_session_delete_conflicts_have_actionable_types(
-    client: AsyncClient, store: FakeStorage, monkeypatch, error: str, status: int
-):
-    delete = AsyncMock(return_value={"error": error})
-    monkeypatch.setattr(store, "delete_sessions", delete, raising=False)
-    response = await client.post("/v1/agent/sessions/delete", json={"thread_ids": ["athr_1"]})
-    assert response.status_code == status
-    assert response.json()["detail"]["error"]["type"] == error
-
-
-@pytest.mark.parametrize("manager_fails", [False, True])
-async def test_session_delete_revokes_and_closes_released_residencies(
-    store: FakeStorage, monkeypatch, manager_fails: bool
-):
-    """A deleted chat's credential ends now; its host is told to close the process."""
-    released = [
-        {"thread_id": "athr_1", "generation": 4, "host": "runner-a", "grant_id": "agr_1"},
-        {"thread_id": "athr_2", "generation": 2, "host": "runner-a", "grant_id": ""},
-    ]
-    delete = AsyncMock(
-        return_value={"thread_ids": ["athr_1", "athr_2"], "released_residencies": released}
-    )
-    monkeypatch.setattr(store, "delete_sessions", delete, raising=False)
-    monkeypatch.setattr(
-        store, "get_host", AsyncMock(return_value={"host": "runner-a"}), raising=False
-    )
-    manager = SimpleNamespace(
-        shared_residency_lost=AsyncMock(
-            side_effect=RuntimeError("unreachable") if manager_fails else None
-        )
-    )
-    monkeypatch.setattr(sandbox_manager_routing, "sandbox_manager_for_host", lambda host: manager)
-
-    class RecordingGrants(_FakeGrants):
-        def __init__(self) -> None:
-            super().__init__()
-            self.revoked: list[str] = []
-
-        async def revoke(self, grant_id: str) -> bool:
-            self.revoked.append(grant_id)
-            return True
-
-    grants = RecordingGrants()
-    app = _build_app(store)
-    from cloud_agent.api.deps import get_grant_client
-
-    app.dependency_overrides[get_grant_client] = lambda: grants
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/v1/agent/sessions/delete", json={"thread_ids": ["athr_1", "athr_2"]}
-        )
-    # The delete has committed; a host that cannot be reached now closes the
-    # process on its next residency heartbeat instead.
-    assert response.status_code == 200
-    assert response.json() == {"thread_ids": ["athr_1", "athr_2"]}
-    assert grants.revoked == ["agr_1"]
-    # Rows are closed concurrently, so only the set of calls is fixed.
-    assert sorted(manager.shared_residency_lost.await_args_list, key=lambda made: made.args[0]) == [
-        call("athr_1", generation=4),
-        call("athr_2", generation=2),
-    ]
-
-
-async def test_session_delete_does_not_wait_on_a_host_that_never_answers(
-    store: FakeStorage, monkeypatch
-):
-    """A silent host cannot hold the owner's delete open; its heartbeat finishes the close."""
-    from cloud_agent.application import residency
-
-    monkeypatch.setattr(residency, "RELEASED_RESIDENCY_CLOSE_TIMEOUT_S", 0.2)
-    released = [
-        {
-            "thread_id": f"athr_{index}",
-            "generation": 1,
-            "host": "runner-a",
-            "grant_id": f"agr_{index}",
-        }
-        for index in range(20)
-    ]
-    thread_ids = [row["thread_id"] for row in released]
-    monkeypatch.setattr(
-        store,
-        "delete_sessions",
-        AsyncMock(return_value={"thread_ids": thread_ids, "released_residencies": released}),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        store, "get_host", AsyncMock(return_value={"host": "runner-a"}), raising=False
-    )
-    never = asyncio.Event()
-
-    async def silent(thread_id: str, *, generation: int) -> dict:
-        await never.wait()
-        return {}
-
-    manager = SimpleNamespace(shared_residency_lost=AsyncMock(side_effect=silent))
-    monkeypatch.setattr(sandbox_manager_routing, "sandbox_manager_for_host", lambda host: manager)
-
-    class RecordingGrants(_FakeGrants):
-        def __init__(self) -> None:
-            super().__init__()
-            self.revoked: list[str] = []
-
-        async def revoke(self, grant_id: str) -> bool:
-            self.revoked.append(grant_id)
-            return True
-
-    grants = RecordingGrants()
-    app = _build_app(store)
-    from cloud_agent.api.deps import get_grant_client
-
-    app.dependency_overrides[get_grant_client] = lambda: grants
-    transport = ASGITransport(app=app)
-    loop = asyncio.get_running_loop()
-    started = loop.time()
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await asyncio.wait_for(
-            client.post("/v1/agent/sessions/delete", json={"thread_ids": thread_ids}),
-            timeout=5,
-        )
-    assert response.status_code == 200
-    assert response.json() == {"thread_ids": thread_ids}
-    # One deadline for the whole batch, not one per silent host.
-    assert loop.time() - started < 2
-    # Every grant is revoked even though no host ever answered and every close
-    # slot stayed taken; at most the bounded number of hosts was being waited on.
-    assert sorted(grants.revoked) == sorted(row["grant_id"] for row in released)
-    assert (
-        manager.shared_residency_lost.await_count == residency.RELEASED_RESIDENCY_CLOSE_CONCURRENCY
-    )
-
-
-@pytest.mark.parametrize("thread_ids", [[], [""], ["a", "a"], ["bad\x00id"], ["x" * 129]])
-async def test_session_mutations_refuse_ambiguous_selections(client: AsyncClient, thread_ids):
-    for path, body in (
-        ("archive", {"thread_ids": thread_ids, "archived": False}),
-        ("delete", {"thread_ids": thread_ids}),
-    ):
-        assert (await client.post(f"/v1/agent/sessions/{path}", json=body)).status_code == 422
-    too_many = {"thread_ids": [f"athr_{index}" for index in range(1001)]}
-    assert (await client.post("/v1/agent/sessions/delete", json=too_many)).status_code == 422
-
-
-async def test_archived_history_is_readable_but_follow_up_requires_unarchive(
-    client: AsyncClient, store: FakeStorage
-):
-    job_id = await _create_job(client)
-    assert (await client.post(f"/v1/agent/jobs/{job_id}/archive")).status_code == 200
-    detail = await client.get(f"/v1/agent/jobs/{job_id}")
-    assert detail.status_code == 200 and detail.json()["archived_at"] is not None
-    assert (await client.get(f"/v1/agent/jobs/{job_id}/thread")).status_code == 200
-    blocked = await _send(client, store, job_id, {"prompt": "continue"})
-    assert blocked.status_code == 409
-    assert blocked.json()["detail"]["error"]["type"] == "session_archived"
-    assert len(store.jobs) == 1
-    assert store.pending == {}
-    assert (await client.delete(f"/v1/agent/jobs/{job_id}/archive")).status_code == 200
-    assert (await _send(client, store, job_id, {"prompt": "continue"})).status_code == 201
-
-
-async def test_follow_up_rechecks_archive_at_the_atomic_store_boundary(
-    client: AsyncClient, store: FakeStorage, monkeypatch
-):
-    """The store's locked check wins over the route's advisory read."""
-    job_id = await _create_job(client)
-    monkeypatch.setattr(
-        store, "submit_message", AsyncMock(return_value={"error": "session_archived"})
-    )
-    response = await _send(client, store, job_id, {"prompt": "continue"})
-    assert response.status_code == 409
-    assert response.json()["detail"]["error"]["type"] == "session_archived"
-
-
-async def test_an_idle_only_message_passes_its_guard_to_the_atomic_store(
-    client: AsyncClient, store: FakeStorage, monkeypatch
-):
-    """A stale action is refused before any queue settlement can send owner work."""
-    job_id = await _create_job(client)
-    store.jobs[job_id]["state"] = "succeeded"
-    submitted = AsyncMock(return_value={"error": "conversation_changed"})
-    settlement = AsyncMock()
-    monkeypatch.setattr(store, "submit_message", submitted)
-    monkeypatch.setattr(store, "settle_queue", settlement)
-
-    response = await _send(
-        client,
-        store,
-        job_id,
-        {"prompt": "watch the PR", "require_idle": True, "expected_latest_job_id": job_id},
-    )
-
-    assert response.status_code == 409, response.text
-    assert response.json()["detail"]["error"]["type"] == "conversation_changed"
-    submitted.assert_awaited_once()
-    assert submitted.await_args.kwargs["require_idle"] is True
-    assert submitted.await_args.kwargs["expected_latest_job_id"] == job_id
-    settlement.assert_not_awaited()
-    assert store.pending == {}
-    assert len(store.jobs) == 1
-
-
-@pytest.mark.parametrize(
-    "guard",
-    [
-        {"require_idle": True},
-        {"require_idle": True, "expected_latest_job_id": ""},
-        {"expected_latest_job_id": "ajob_0001"},
-        {"require_idle": "true", "expected_latest_job_id": "ajob_0001"},
-    ],
-)
-async def test_an_idle_only_message_requires_a_complete_strict_guard(
-    client: AsyncClient, store: FakeStorage, monkeypatch, guard: dict[str, Any]
-):
-    job_id = await _create_job(client)
-    submitted = AsyncMock()
-    monkeypatch.setattr(store, "submit_message", submitted)
-
-    response = await _send(client, store, job_id, {"prompt": "watch the PR", **guard})
-
-    assert response.status_code == 422, response.text
-    submitted.assert_not_awaited()
-    assert store.pending == {}
-    assert len(store.jobs) == 1
-
-
-async def test_an_idle_only_message_replays_after_its_turn_has_started(
-    client: AsyncClient, store: FakeStorage, monkeypatch
-):
-    job_id = await _create_job(client)
-    store.jobs[job_id]["state"] = "succeeded"
-    _attach_shared_workspace(store, job_id)
-    store.jobs[job_id]["thread_sandbox"]["workspace_publication_state"] = "published"
-    settlement = AsyncMock()
-    monkeypatch.setattr(store, "settle_queue", settlement)
-    body = {"prompt": "watch the PR", "require_idle": True, "expected_latest_job_id": job_id}
-    headers = {"Idempotency-Key": "watch-pr-once"}
-
-    first = await _send(client, store, job_id, body, headers=headers)
-    assert first.status_code == 201, first.text
-    watch_id = first.json()["job"]["id"]
-    store.jobs[watch_id]["state"] = "running"
-    again = await _send(client, store, job_id, body, headers=headers)
-
-    assert again.status_code == 201, again.text
-    assert again.json()["job"]["id"] == watch_id
-    assert len(store.jobs) == 2
-    assert store.pending == {}
-    changed_guard = await _send(
-        client,
-        store,
-        job_id,
-        {**body, "expected_latest_job_id": watch_id},
-        headers=headers,
-    )
-    assert changed_guard.status_code == 409, changed_guard.text
-    assert changed_guard.json()["detail"]["error"]["type"] == "idempotency_conflict"
-    assert len(store.jobs) == 2
-    assert store.pending == {}
-    settlement.assert_not_awaited()
-
-
-async def test_an_idle_only_message_creates_its_turn_with_prepared_choices_without_settlement(
-    client: AsyncClient, store: FakeStorage, monkeypatch
-):
-    job_id = await _create_job(client)
-    store.jobs[job_id]["state"] = "succeeded"
-    store.jobs[job_id]["reasoning_effort"] = "high"
-    thread_id = _attach_shared_workspace(store, job_id)
-    store.jobs[job_id]["thread_sandbox"]["workspace_publication_state"] = "published"
-    store.queue_paused[thread_id] = "failed"
-    prepared = PreparedFollowUp(
-        model="glm-5.1",
-        reasoning_effort=None,
-        reset_reasoning_effort=True,
-        skills=[
-            {
-                "id": 5,
-                "name": "Review",
-                "description": "Review changes",
-                "revision": 2,
-                "instructions": "Inspect tests and edge cases.",
-            }
-        ],
-        attachments=[
-            {"id": 42, "path": "notes.txt", "content_type": "text/plain", "size_bytes": 11}
-        ],
-    )
-    monkeypatch.setattr("cloud_agent.api.turns.prepare_follow_up", AsyncMock(return_value=prepared))
-    created = AsyncMock(wraps=store.create_follow_up)
-    settlement = AsyncMock()
-    monkeypatch.setattr(store, "create_follow_up", created)
-    monkeypatch.setattr(store, "settle_queue", settlement)
-
-    response = await _send(
-        client,
-        store,
-        job_id,
-        {
-            "prompt": "watch the PR",
-            "require_idle": True,
-            "expected_latest_job_id": job_id,
-            "reasoning_effort": "auto",
-            "skill_ids": [5],
-            "attachment_ids": [42],
-        },
-    )
-
-    assert response.status_code == 201, response.text
-    watch = response.json()["job"]
-    assert watch["parent_job_id"] == job_id
-    assert watch["reasoning_effort"] is None
-    assert store.jobs[watch["id"]]["skills"] == prepared.skills
-    created.assert_awaited_once()
-    assert created.await_args.kwargs["model"] == prepared.model
-    assert created.await_args.kwargs["reasoning_effort"] is None
-    assert created.await_args.kwargs["reset_reasoning_effort"] is True
-    assert created.await_args.kwargs["skills"] == prepared.skills
-    assert created.await_args.kwargs["attachments"] == prepared.attachments
-    assert created.await_args.kwargs["yield_to_queued"] is True
-    assert response.json()["pending"] is None
-    assert store.pending == {}
-    assert thread_id not in store.queue_paused
-    assert store.queue_settled[thread_id] == job_id
-    settlement.assert_not_awaited()
-
-
-async def test_deleted_history_cannot_be_read_resumed_forked_or_used_as_workspace(
-    client: AsyncClient, store: FakeStorage
-):
-    job_id = await _create_job(client)
-    thread_id = _thread_of(store, job_id)
-    store.jobs[job_id]["deleted_at"] = datetime.now(timezone.utc)
-    for suffix in (
-        "",
-        "/thread",
-        "/thread/stats",
-        "/thread/events",
-        "/events",
-        "/stream",
-        "/files",
-        "/git",
-    ):
-        response = await client.get(f"/v1/agent/jobs/{job_id}{suffix}")
-        assert response.status_code == 404, (suffix, response.text)
-    for suffix, body in (("/fork", {}), ("/cancel", {})):
-        response = await client.post(f"/v1/agent/jobs/{job_id}{suffix}", json=body)
-        assert response.status_code == 404, (suffix, response.text)
-    # The conversation's own routes answer the same way: a message, the queue,
-    # and continuing it.
-    for method, path, body in (
-        ("POST", f"/v1/agent/threads/{thread_id}/messages", {"prompt": "continue"}),
-        ("GET", f"/v1/agent/threads/{thread_id}/messages", None),
-        ("POST", f"/v1/agent/threads/{thread_id}/queue/resume", None),
-    ):
-        response = await client.request(method, path, json=body)
-        assert response.status_code == 404, (path, response.text)
-        assert response.json()["detail"]["error"]["type"] == "not_found"
-
-
-@pytest.fixture(autouse=True)
-def _configured_identity_issuer(monkeypatch):
-    monkeypatch.setenv("GATEWAY_ISSUER", "https://gateway.example")
-
-
-async def test_a_submission_key_reaches_the_store_with_a_fingerprint(
-    client: AsyncClient, store: FakeStorage
-):
-    """The ``Idempotency-Key`` header becomes the job's submission key."""
-    response = await client.post(
-        "/v1/agent/jobs",
-        json={"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1"},
-        headers={"Idempotency-Key": "submit-1"},
-    )
-    assert response.status_code == 201, response.text
-    created = store.jobs[response.json()["id"]]
-    assert created["client_request_id"] == "submit-1"
-    assert isinstance(created["client_request_fingerprint"], str)
-    assert len(created["client_request_fingerprint"]) == 64
-
-    parent_id = response.json()["id"]
-    follow = await _send(
-        client, store, parent_id, {"prompt": "and then"}, headers={"Idempotency-Key": "turn-2"}
-    )
-    assert follow.status_code == 201, follow.text
-    waiting = store.pending[follow.json()["pending"]["id"]]
-    key, fingerprint = waiting["client_request_id"], waiting["client_request_fingerprint"]
-    assert key == "turn-2" and isinstance(fingerprint, str) and len(fingerprint) == 64
-
-
-async def test_a_submission_without_a_key_carries_none(client: AsyncClient, store: FakeStorage):
-    job_id = await _create_job(client)
-    assert store.jobs[job_id]["client_request_id"] is None
-    assert store.jobs[job_id]["client_request_fingerprint"] is None
-
-
-async def test_idle_guards_preserve_ordinary_message_fingerprints_and_bind_the_newest_turn(
-    client: AsyncClient, store: FakeStorage, monkeypatch
-):
-    job_id = await _create_job(client)
-    store.jobs[job_id]["state"] = "succeeded"
-    submitted = AsyncMock(return_value={"error": "conversation_changed"})
-    monkeypatch.setattr(store, "submit_message", submitted)
-    bodies = [
-        {"prompt": "watch the PR"},
-        {"prompt": "watch the PR", "require_idle": False},
-        {"prompt": "watch the PR", "require_idle": True, "expected_latest_job_id": job_id},
-        {"prompt": "watch the PR", "require_idle": True, "expected_latest_job_id": "ajob_newer"},
-    ]
-    for index, body in enumerate(bodies):
-        response = await _send(
-            client, store, job_id, body, headers={"Idempotency-Key": f"fingerprint-{index}"}
-        )
-        assert response.status_code == 409, response.text
-    fingerprints = [call.kwargs["client_request_fingerprint"] for call in submitted.await_args_list]
-    legacy_payload = {
-        "kind": "thread_message",
-        "thread_id": _thread_of(store, job_id),
-        "prompt": "watch the PR",
-        "attachment_ids": None,
-        "model": None,
-        "reasoning_effort": None,
-    }
-    legacy_hash = hashlib.sha256(
-        json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-
-    assert fingerprints[0] == fingerprints[1] == legacy_hash
-    assert fingerprints[2] != fingerprints[0]
-    assert fingerprints[3] != fingerprints[2]
-    assert store.pending == {}
-    assert len(store.jobs) == 1
-
-
-async def test_a_reused_key_under_different_content_is_a_409(
-    client: AsyncClient, store: FakeStorage, monkeypatch
-):
-    """The store's conflict answer is the API's ``idempotency_conflict``."""
-
-    async def conflict(**_kwargs: Any) -> dict[str, Any]:
-        return {"error": "client_request_conflict"}
-
-    monkeypatch.setattr(store, "create_job", conflict)
-    response = await client.post(
-        "/v1/agent/jobs",
-        json={"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1"},
-        headers={"Idempotency-Key": "submit-1"},
-    )
-    assert response.status_code == 409
-    assert response.json()["detail"]["error"]["type"] == "idempotency_conflict"
-
-
-async def test_a_follow_up_resend_after_archiving_returns_the_first_turn(
-    client: AsyncClient, store: FakeStorage
-):
-    """The replay wins over a check that changed after the first send.
-
-    The first send succeeded and its response was lost; the session was then
-    archived. A retry under the same key and content is that same submission,
-    so it must return the turn the first send made rather than the 409 the
-    archive would give a genuinely new turn.
-    """
-    parent_id = await _create_job(client)
-    store.jobs[parent_id]["state"] = "succeeded"
-    body = {"prompt": "and then"}
-    headers = {"Idempotency-Key": "turn-2"}
-
-    first = await _send(client, store, parent_id, body, headers=headers)
-    assert first.status_code == 201, first.text
-
-    await store.conversation_commands.set_thread_archived(
-        job_id=parent_id, user_id=_OWNER, archived=True
-    )
-
-    again = await _send(client, store, parent_id, body, headers=headers)
-    assert again.status_code == 201, again.text
-    assert again.json()["job"]["id"] == first.json()["job"]["id"]
-    assert len(store.jobs) == 2
-
-
-async def test_a_follow_up_resend_after_the_sandbox_is_lost_returns_the_first_turn(
-    client: AsyncClient, store: FakeStorage
-):
-    """Same rule for the other advisory check the handler runs before the store."""
-    parent_id = await _create_job(client)
-    store.jobs[parent_id]["state"] = "succeeded"
-    body = {"prompt": "and then"}
-    headers = {"Idempotency-Key": "turn-2"}
-
-    first = await _send(client, store, parent_id, body, headers=headers)
-    assert first.status_code == 201, first.text
-
-    store.jobs[parent_id]["thread_sandbox"] = {"shared_live": True, "context_status": "lost"}
-
-    again = await _send(client, store, parent_id, body, headers=headers)
-    assert again.status_code == 201, again.text
-    assert again.json()["job"]["id"] == first.json()["job"]["id"]
-
-
-async def test_a_create_resend_after_a_connection_disconnects_returns_the_first_job(
-    client: AsyncClient, store: FakeStorage
-):
-    """A tool the first send was allowed to use is not re-authorised on a resend."""
-    row = store.connect_mcp(user_id=_OWNER)
-    body = _job_body(mcp_bindings=[_binding(row["id"])])
-    headers = {"Idempotency-Key": "submit-1"}
-
-    first = await client.post("/v1/agent/jobs", json=body, headers=headers)
-    assert first.status_code == 201, first.text
-
-    assert (
-        await store.mcp.disconnect_mcp_connection(connection_id=row["id"], user_id=_OWNER) is True
-    )
-
-    again = await client.post("/v1/agent/jobs", json=body, headers=headers)
-    assert again.status_code == 201, again.text
-    assert again.json()["id"] == first.json()["id"]
-    assert len(store.jobs) == 1
-
-
-async def test_a_new_key_still_runs_the_checks_that_can_refuse_it(
-    client: AsyncClient, store: FakeStorage
-):
-    """Answering the resend first must not turn the mutable checks off.
-
-    A different key is a different submission: the disconnected connection
-    that a replay may ignore still refuses a job that has not been created.
-    """
-    row = store.connect_mcp(user_id=_OWNER)
-    body = _job_body(mcp_bindings=[_binding(row["id"])])
-
-    first = await client.post("/v1/agent/jobs", json=body, headers={"Idempotency-Key": "submit-1"})
-    assert first.status_code == 201, first.text
-
-    assert (
-        await store.mcp.disconnect_mcp_connection(connection_id=row["id"], user_id=_OWNER) is True
-    )
-
-    fresh = await client.post("/v1/agent/jobs", json=body, headers={"Idempotency-Key": "submit-2"})
-    assert fresh.status_code == 400, fresh.text
-    assert len(store.jobs) == 1
-
-
-async def test_selected_skills_are_snapshotted_and_delivered_only_to_worker(
-    client, store, monkeypatch
-):
-    rows = [
-        {
-            "id": 5,
-            "name": "Review",
-            "description": "Review changes",
-            "revision": 1,
-            "instructions": "Inspect tests and edge cases.",
-            "default_enabled": True,
-        }
-    ]
-    lookup = AsyncMock(return_value=rows)
-    monkeypatch.setattr(store, "select_skills", lookup)
-    created = await client.post(
-        "/v1/agent/jobs",
-        json={"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"},
-        headers={"Idempotency-Key": "skill-submit"},
-    )
-    assert created.status_code == 201, created.text
-    job = created.json()
-    assert job["skills"] == [
-        {"id": 5, "name": "Review", "description": "Review changes", "revision": 1}
-    ]
-    assert job["task_prompt"] == "fix it"
-    lookup.assert_awaited_once_with(user_id=_OWNER, skill_ids=None)
-    rows[0]["instructions"] = "A later edit."
-    rows[0]["revision"] = 2
-    rows[0]["default_enabled"] = False
-    # A resend must retain the first accepted content even if defaults changed.
-    lookup.reset_mock()
-    replay = await client.post(
-        "/v1/agent/jobs",
-        json={"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"},
-        headers={"Idempotency-Key": "skill-submit"},
-    )
-    assert replay.json()["id"] == job["id"]
-    lookup.assert_not_awaited()
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
-    assert claim.status_code == 200, claim.text
-    assert "Inspect tests and edge cases." in claim.json()["task_prompt"]
-    assert "A later edit." not in claim.json()["task_prompt"]
-    assert claim.json()["task_prompt"].endswith("User task:\nfix it")
-    assert store.messages[0]["content"] == "fix it"
-    follow = await _next_turn(client, store, job["id"], {"prompt": "Continue"})
-    assert follow["skills"][0]["revision"] == 1
-    lookup.assert_not_awaited()
-    updated = await _next_turn(client, store, follow["id"], {"prompt": "Update", "skill_ids": [5]})
-    assert updated["skills"][0]["revision"] == 2
-    cleared = await _next_turn(client, store, updated["id"], {"prompt": "Clear", "skill_ids": []})
-    assert cleared["skills"] == []
-    assert store.jobs[cleared["id"]]["skills"] == []
-
-
-@pytest.mark.parametrize(
-    "selection,status", [([999], 400), ([5, 5], 400), ([0], 422), ([True], 422), (["5"], 422)]
-)
-async def test_invalid_skill_selections_never_create_jobs(client, store, selection, status):
-    result = await client.post(
-        "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "model": "glm-5.1",
-            "task_prompt": "fix it",
-            "skill_ids": selection,
-        },
-    )
-    assert result.status_code == status
-    assert not store.jobs
-
-
-# ── Returning a turn that never started ─────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_a_turn_that_never_started_goes_back_to_the_queue(store: FakeStorage):
-    """The host could not start the process; nobody should wait out its lease."""
-    app = _build_app(store)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        job_id = await _create_job(client)
-        claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "worker-1"})
-        auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
-
-        released = await client.post(
-            f"/v1/agent/worker/jobs/{job_id}/release",
-            json={"reason": "launch_failed"},
-            headers=auth,
-        )
-
-    assert released.status_code == 200
-    assert released.json() == {"ok": True, "state": "queued"}
-    assert store.jobs[job_id]["state"] == "queued"
-    assert store.jobs[job_id]["claim_retry_delay"] == 30
-    # And the reason travels, because "this host cannot start turns" is what an
-    # operator reads the trail for.
-    assert store.released[-1][2] == "launch_failed"
-
-
-@pytest.mark.asyncio
-async def test_a_turn_that_started_cannot_be_returned(store: FakeStorage):
-    """The refusal is the store's, not the caller's account of what happened.
-
-    Replaying an admitted prompt executes a user's instruction a second time.
-    A host that is wrong about what its child did must not be able to cause
-    that, so the check lives where the evidence is.
-    """
-    app = _build_app(store)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        job_id = await _create_job(client)
-        claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "worker-1"})
-        auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
-        store.jobs[job_id]["admitted"] = True
-
-        refused = await client.post(
-            f"/v1/agent/worker/jobs/{job_id}/release",
-            json={"reason": "launch_failed"},
-            headers=auth,
-        )
-
-    assert refused.status_code == 409
-    assert refused.json()["detail"]["error"]["type"] == "turn_not_releasable"
-    assert store.jobs[job_id]["state"] == "running", "nothing was changed"
-
-
-@pytest.mark.asyncio
-async def test_returning_a_turn_needs_that_turn_own_worker_token(store: FakeStorage):
-    app = _build_app(store)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        job_id = await _create_job(client)
-        await client.post("/v1/agent/worker/claim", json={"worker_id": "worker-1"})
-
-        unauthenticated = await client.post(
-            f"/v1/agent/worker/jobs/{job_id}/release", json={"reason": "launch_failed"}
-        )
-
-    assert unauthenticated.status_code == 401
-    assert store.jobs[job_id]["state"] == "running"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("reason", ["", "Launch Failed", "launch failed", "x" * 65])
-async def test_a_release_reason_outside_the_audit_vocabulary_is_refused(
-    store: FakeStorage, reason: str
-):
-    """The reason lands in an append-only trail; it is a token, not free text."""
-    app = _build_app(store)
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        job_id = await _create_job(client)
-        claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "worker-1"})
-        auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
-
-        refused = await client.post(
-            f"/v1/agent/worker/jobs/{job_id}/release", json={"reason": reason}, headers=auth
-        )
-
-    assert refused.status_code == 422
-    assert store.jobs[job_id]["state"] == "running"
-
-
-async def test_follow_up_receipts_include_retained_membership_on_create_and_replay(
-    client: AsyncClient, store: FakeStorage, monkeypatch
-):
-    """Commands return bare SQL job rows; the HTTP receipt must use the owner read."""
-    parent_id = await _create_job(client)
-    store.jobs[parent_id]["state"] = "succeeded"
-    sandbox = {
-        "sandbox_id": "asbx_side_contract",
-        "shared_live": True,
-        "fork_anchor_job_id": "ajob_main_anchor",
-        "native_state": "ready",
-        "origin_thread_id": "athread_main",
-    }
-    store.jobs[parent_id]["thread_sandbox"] = sandbox
-    create = store.create_follow_up
-    replay = store.replayed_submission
-
-    async def bare_create(**kwargs):
-        job = await create(**kwargs)
-        store.jobs[job["id"]]["thread_sandbox"] = sandbox
-        return {**job, "thread_sandbox": None}
-
-    async def bare_replay(**kwargs):
-        job = await replay(**kwargs)
-        return {**job, "thread_sandbox": None} if job else None
-
-    monkeypatch.setattr(store, "create_follow_up", bare_create)
-    monkeypatch.setattr(store, "replayed_submission", bare_replay)
-    first = await _send(
-        client, store, parent_id, {"prompt": "side reply"}, headers={"Idempotency-Key": "side-send"}
-    )
-    again = await _send(
-        client, store, parent_id, {"prompt": "side reply"}, headers={"Idempotency-Key": "side-send"}
-    )
-    for response in (first, again):
-        assert response.status_code == 201, response.text
-        receipt = response.json()["job"]
-        assert receipt["sandbox_id"] == sandbox["sandbox_id"]
-        assert receipt["fork_anchor_job_id"] == sandbox["fork_anchor_job_id"]
-        assert receipt["workspace_shared"] is True
-    assert first.json()["job"]["id"] == again.json()["job"]["id"]
-    assert len(store.jobs) == 2
-
-
-@pytest.mark.parametrize("runtime", ["codex", "kilo", "claude-code", "opencode", "pi"])
-async def test_claim_loads_current_default_servers_and_skips_unavailable_ones(
-    client: AsyncClient, store: FakeStorage, runtime
-):
-    """Every CLI receives the live, usable set without a composer selection."""
-    working = store.connect_mcp(user_id=_OWNER, label="Wiki")
-    expired = store.connect_mcp(
-        user_id=_OWNER,
-        label="Expired",
-        expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
-    )
-    paused = store.connect_mcp(user_id=_OWNER, label="Paused")
-    store.mcp_connections[paused["id"]]["enabled"] = False
-    created = await client.post("/v1/agent/jobs", json=_job_body(runtime=runtime))
-    assert created.status_code == 201
-    thread = created.json()["thread_id"]
-    # The real repository creates these defaults on list; storage tests exercise
-    # that owner-scoped insert against Postgres. Keep the route fake explicit.
-    store.mcp_bindings[thread] = [
-        store._thread_binding(
-            thread,
-            {
-                "connection_id": row["id"],
-                "alias": f"mcp{row['id']}",
-                "enabled": True,
-                "selection_pending": True,
-                "rules": {},
-                "config_revision": row["config_revision"],
-                "authorization_epoch": row["authorization_epoch"],
-                "capability_revision": row["capability_revision"],
-            },
-        )
-        for row in (working, expired, paused)
-    ]
-    app = _build_app(store, claim_auth=True)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as runner:
-        claimed = await runner.post(
-            "/v1/agent/worker/claim", json={"worker_id": "w-1", "lease_ttl_seconds": 60}
-        )
-    assert claimed.status_code == 200, claimed.text
-    assert claimed.json()["mcp_bindings"] == [
-        f"mcp{working['id']}",
-        worker.memory_tool.RUNTIME_SERVER_ID,
-    ]
-    assert claimed.json()["mcp_token"]
-
-
-async def test_claim_puts_durable_memories_with_their_ids_before_the_task(
-    client, store, monkeypatch
-):
-    read = AsyncMock(
-        return_value={
-            "repo": "owner/name",
-            "project": [{"id": "m-project", "content": "Use pnpm, not npm."}],
-            "user": [{"id": "m-user", "content": "Reply in Chinese."}],
-        }
-    )
-    mark = AsyncMock()
-    monkeypatch.setattr(store, "task_memories", read, raising=False)
-    monkeypatch.setattr(store, "mark_memories_used", mark, raising=False)
-    created = await client.post(
-        "/v1/agent/jobs",
-        json={"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"},
-    )
-    assert created.status_code == 201, created.text
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
-    assert claim.status_code == 200, claim.text
-    prompt = claim.json()["task_prompt"]
-    read.assert_awaited_once_with(_OWNER, "owner/name")
-    mark.assert_awaited_once_with(_OWNER, ["m-project", "m-user"])
-    assert '{"id": "m-project", "content": "Use pnpm, not npm."}' in prompt
-    assert '{"id": "m-user", "content": "Reply in Chinese."}' in prompt
-    assert "memory_update" in prompt
-    assert prompt.endswith("Current task:\nfix it")
-
-
-async def test_unavailable_durable_memory_never_blocks_a_claim(client, store, monkeypatch):
-    monkeypatch.setattr(
-        store, "task_memories", AsyncMock(side_effect=RuntimeError("down")), raising=False
-    )
-    created = await client.post(
-        "/v1/agent/jobs",
-        json={"repo": "owner/name", "model": "glm-5.1", "task_prompt": "fix it"},
-    )
-    assert created.status_code == 201, created.text
-    claim = await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})
-    assert claim.status_code == 200, claim.text
-    assert claim.json()["task_prompt"] == "fix it"

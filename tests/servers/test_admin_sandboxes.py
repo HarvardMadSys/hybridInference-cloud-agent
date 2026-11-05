@@ -8,10 +8,13 @@ import pytest
 from fastapi import FastAPI, HTTPException, Request as FastAPIRequest
 from httpx import ASGITransport, AsyncClient, ConnectError, ReadTimeout, Request
 from tests.servers.test_admin_runs import ADMIN, setup as run_setup  # noqa: F401
-from tests.unit.test_ledger_snapshots import END, START
+from tests.support.owners import SESSIONS
+from tests.support.usage import END, START
 
-from cloud_agent import identity, sandbox_manager_routing
+from cloud_agent import sandbox_manager_routing
+from cloud_agent.accounts.config import LOCAL_SESSION_COOKIE
 from cloud_agent.admin_observability import encode_cursor
+from cloud_agent.admin_sandbox_inventory import SandboxInventoryCursor, inventory_scope
 from cloud_agent.admin_sandboxes import (
     SANDBOX_CURSOR_SCOPE,
     SandboxCursor,
@@ -142,6 +145,7 @@ def setup(run_setup):  # noqa: F811 — imported pytest fixture
     )
     app.include_router(admin_sandboxes.router)
     app.dependency_overrides[admin_sandboxes.get_admin_sandbox_queries] = lambda: queries
+    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(local_accounts=SESSIONS)
     return app, queries, gateway
 
 
@@ -211,22 +215,86 @@ def terminal_probe(setup, monkeypatch):
     sandbox_manager_factory = Mock(return_value=sandbox_manager)
     monkeypatch.setattr(admin_sandboxes, "sandbox_manager_for_host", sandbox_manager_factory)
     app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
-        sandbox=commands, admin_sandboxes=queries, host_pool=host_pool
+        local_accounts=SESSIONS, sandbox=commands, admin_sandboxes=queries, host_pool=host_pool
     )
     return app, queries, commands, host_pool, sandbox_manager, sandbox_manager_factory
 
 
 @pytest.mark.parametrize("auth", ["missing", "invalid", "revoked"])
-async def test_listing_requires_current_admin_access(setup, auth):
+@pytest.mark.parametrize("sync", [False, True])
+async def test_listing_requires_current_admin_access(setup, auth, sync):
     app, queries, gateway = setup
     gateway.permissions = ["agent.use"]
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         headers = {"Authorization": "Bearer wrong"} if auth == "invalid" else {}
         if auth == "revoked":
-            client.cookies.set(identity.SESSION_COOKIE, identity.mint_session(user_id="admin"))
-        response = await client.get(PREFIX, headers=headers)
+            client.cookies.set(LOCAL_SESSION_COOKIE, SESSIONS.sign_in("admin"))
+        response = await client.get(PREFIX, headers=headers, params={"sync": sync})
     assert response.status_code == (403 if auth == "revoked" else 401)
     queries.list_running.assert_not_awaited()
+
+
+async def test_inventory_sync_preserves_delta_fields_and_content_boundary(setup):
+    app, queries, _ = setup
+    queries.inventory = SimpleNamespace(
+        read=AsyncMock(
+            return_value={
+                "mode": "delta",
+                "sandboxes": [sandbox()],
+                "deleted_ids": ["gone"],
+                "hosts": [{"host": "runner-one", "last_heartbeat_at": END}],
+                "observed_at": END,
+                "change_cursor": "next-change",
+                "total_count": None,
+                "PRIVATE": "PRIVATE metadata",
+            }
+        )
+    )
+    cursor = SandboxInventoryCursor(
+        scope=inventory_scope("running", False, 100), database_snapshot="4:8:4"
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(
+            PREFIX, headers=ADMIN, params={"sync": True, "cursor": encode_cursor(cursor)}
+        )
+        mismatched = await client.get(
+            PREFIX,
+            headers=ADMIN,
+            params={
+                "sync": True,
+                "cursor": encode_cursor(cursor),
+                "include_archived": True,
+            },
+        )
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["mode"] == "delta"
+    assert response.json()["deleted_ids"] == ["gone"]
+    assert response.json()["change_cursor"] == "next-change"
+    assert response.json()["hosts"][0]["host"] == "runner-one"
+    assert "private" not in response.text.lower()
+    assert mismatched.status_code == 422
+    queries.inventory.read.assert_awaited_once_with(
+        cursor=cursor, limit=100, state="running", include_archived=False
+    )
+
+
+async def test_inventory_sync_reports_expired_cursor_without_replaying_old_rows(setup):
+    app, queries, _ = setup
+    queries.inventory = SimpleNamespace(
+        read=AsyncMock(
+            return_value={
+                "sandboxes": [],
+                "observed_at": END,
+                "reset_required": True,
+            }
+        )
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(PREFIX, headers=ADMIN, params={"sync": True})
+    assert response.status_code == 200
+    assert response.json()["reset_required"] is True
+    assert response.json()["sandboxes"] == []
 
 
 @pytest.mark.parametrize("browser", [False, True])
@@ -234,7 +302,7 @@ async def test_listing_is_cross_owner_content_free_and_not_cached(setup, browser
     app, queries, _ = setup
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         if browser:
-            client.cookies.set(identity.SESSION_COOKIE, identity.mint_session(user_id="admin"))
+            client.cookies.set(LOCAL_SESSION_COOKIE, SESSIONS.sign_in("admin"))
         response = await client.get(PREFIX, headers={} if browser else ADMIN)
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
@@ -645,7 +713,7 @@ async def test_detail_and_control_require_current_admin_access(setup, method, pa
     app, _, gateway = setup
     gateway.permissions = ["agent.use"]
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        client.cookies.set(identity.SESSION_COOKIE, identity.mint_session(user_id="admin"))
+        client.cookies.set(LOCAL_SESSION_COOKIE, SESSIONS.sign_in("admin"))
         response = await client.request(
             method,
             PREFIX + path,
@@ -686,7 +754,7 @@ async def test_reviewed_stop_passes_authenticated_actor_to_atomic_command(setup,
         queries.detail.return_value = None
     commands = SimpleNamespace(request_admin_stop=AsyncMock(return_value=result))
     app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
-        sandbox=commands, admin_sandboxes=queries
+        local_accounts=SESSIONS, sandbox=commands, admin_sandboxes=queries
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
@@ -970,7 +1038,7 @@ async def test_inventory_controls_pass_review_and_authenticated_actor(
     )
     commands = SimpleNamespace(set_admin_archived=AsyncMock(return_value=result))
     app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
-        sandbox=commands, admin_sandboxes=queries
+        local_accounts=SESSIONS, sandbox=commands, admin_sandboxes=queries
     )
     action = "archive" if archived else "restore"
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -1007,7 +1075,7 @@ async def test_stale_inventory_removal_passes_review_without_contacting_host(set
     commands = SimpleNamespace(set_admin_archived=AsyncMock(return_value=result))
     host_pool = SimpleNamespace(get_host=AsyncMock(side_effect=AssertionError("host probe")))
     app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
-        sandbox=commands, admin_sandboxes=queries, host_pool=host_pool
+        local_accounts=SESSIONS, sandbox=commands, admin_sandboxes=queries, host_pool=host_pool
     )
     app.dependency_overrides[admin_sandboxes.admin_sandbox_deletion_available] = lambda: False
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -1054,7 +1122,7 @@ async def test_inventory_controls_reject_unreviewed_payloads(setup, action, chan
     app, queries, _ = setup
     commands = SimpleNamespace(set_admin_archived=AsyncMock())
     app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
-        sandbox=commands, admin_sandboxes=queries
+        local_accounts=SESSIONS, sandbox=commands, admin_sandboxes=queries
     )
     payload = {"generation": 1, "container_id": None, "last_activity_at": END.isoformat()}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -1082,7 +1150,7 @@ async def test_reviewed_delete_queues_authenticated_atomic_request(setup, result
     )
     commands = SimpleNamespace(request_admin_delete=AsyncMock(return_value=result))
     app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
-        sandbox=commands, admin_sandboxes=queries
+        local_accounts=SESSIONS, sandbox=commands, admin_sandboxes=queries
     )
     app.dependency_overrides[admin_sandboxes.admin_sandbox_deletion_available] = lambda: True
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -1416,7 +1484,7 @@ async def test_delete_body_cannot_claim_host_confirmation(setup):
     app, queries, _ = setup
     commands = SimpleNamespace(request_admin_delete=AsyncMock())
     app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
-        sandbox=commands, admin_sandboxes=queries
+        local_accounts=SESSIONS, sandbox=commands, admin_sandboxes=queries
     )
     app.dependency_overrides[admin_sandboxes.admin_sandbox_deletion_available] = lambda: True
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -1440,7 +1508,7 @@ async def test_delete_without_archive_configuration_does_not_fence_sandbox(setup
     app, queries, _ = setup
     commands = SimpleNamespace(request_admin_delete=AsyncMock())
     app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
-        sandbox=commands, admin_sandboxes=queries
+        local_accounts=SESSIONS, sandbox=commands, admin_sandboxes=queries
     )
     app.dependency_overrides[admin_sandboxes.admin_sandbox_deletion_available] = lambda: False
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -1471,7 +1539,7 @@ async def test_discard_deletion_does_not_require_archive_configuration(setup):
     )
     commands = SimpleNamespace(request_admin_delete=AsyncMock(return_value="accepted"))
     app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
-        sandbox=commands, admin_sandboxes=queries
+        local_accounts=SESSIONS, sandbox=commands, admin_sandboxes=queries
     )
     app.dependency_overrides[admin_sandboxes.admin_sandbox_deletion_available] = lambda: False
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:

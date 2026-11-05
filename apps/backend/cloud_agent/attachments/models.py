@@ -8,7 +8,10 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from cloud_agent.settings import integer_setting
-from cloud_agent_shared.git.source_archive import DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES
+from cloud_agent_shared.git.source_archive import (
+    DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES,
+    upload_archive_size,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -17,32 +20,30 @@ if TYPE_CHECKING:
 #: than an object store this service does not have, so the ceiling is what
 #: keeps that decision defensible rather than merely convenient.
 MAX_ATTACHMENT_FILE_BYTES = 5 * 1024 * 1024
-MAX_ATTACHMENT_TOTAL_BYTES = 20 * 1024 * 1024
-MAX_ATTACHMENT_FILES = 50
 MAX_ATTACHMENT_PATH_LENGTH = 512
 MAX_CONTENT_TYPE_LENGTH = 255
 
 #: What one conversation's ``/uploads`` may hold, every turn's files together.
 #: The host rebuilds that directory from all of them as one archive and
 #: refuses one over ``DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES``, which would fail that
-#: turn and every later one on a fresh container; the difference leaves room
-#: for the archive's own headers. Not admin settings, for the same reason: the
-#: host's limit is not one either.
+#: turn and every later one on a fresh container. The difference leaves room
+#: for the headers of a shallow tree; :func:`check_thread_total` measures the
+#: archive itself, which deep folders can fill with headers alone. Not admin
+#: settings, for the same reason: the host's limit is not one either.
 MAX_THREAD_ATTACHMENT_BYTES = DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES - 4 * 1024 * 1024
 MAX_THREAD_ATTACHMENT_FILES = 200
 
-#: Everything one owner's uploads keep in the database, staged or attached to a
-#: conversation that still exists. Attached bytes stay until the conversation
-#: is deleted, so the per-turn bounds alone would let one account grow the
-#: shared database without end.
-MAX_USER_ATTACHMENT_BYTES = 1024 * 1024 * 1024
 
-#: Where the sandbox sees them. Outside the worktree on purpose: the publish
-#: path stages the workspace with ``git add -A -N``, so an upload written into
-#: it would be committed and appear in the draft pull request.
+#: Where the sandbox sees them. Outside the worktree on purpose: an upload
+#: written into it would show as a change, and an agent's ``git add -A``
+#: would commit it into the pull request.
 SANDBOX_UPLOAD_DIR = "/uploads"
 
 _DRIVE_PREFIX = re.compile(r"^[A-Za-z]:[\\/]")
+
+#: Control characters, including the line breaks that would split one file
+#: reference into several lines in the prompt listing.
+_CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
 
 
 class AttachmentError(ValueError):
@@ -72,22 +73,22 @@ class AttachmentLimits(BaseModel):
 
 def attachment_max_files() -> int:
     """Read the current staging and turn quota without caching an admin edit."""
-    return integer_setting("attachments.max_files", MAX_ATTACHMENT_FILES)
+    return integer_setting("attachments.max_files")
 
 
 def attachment_max_file_bytes() -> int:
     """Read the per-file upload limit; the schema retains its absolute ceiling."""
-    return integer_setting("attachments.max_file_bytes", MAX_ATTACHMENT_FILE_BYTES)
+    return integer_setting("attachments.max_file_bytes")
 
 
 def attachment_max_total_bytes() -> int:
     """Read the combined staging and turn byte quota."""
-    return integer_setting("attachments.max_total_bytes", MAX_ATTACHMENT_TOTAL_BYTES)
+    return integer_setting("attachments.max_total_bytes")
 
 
 def attachment_max_user_bytes() -> int:
     """Read the ceiling on everything one owner's uploads keep stored."""
-    return integer_setting("attachments.max_user_bytes", MAX_USER_ATTACHMENT_BYTES)
+    return integer_setting("attachments.max_user_bytes")
 
 
 def attachment_size_label(size: int) -> str:
@@ -127,14 +128,24 @@ def safe_attachment_path(path: str) -> str:
     upload is no more trusted than one arriving from a repository. Refusing is
     the whole behaviour — a path is never rewritten into a safe one, because
     that hides the problem instead of reporting it.
+
+    A name is kept exactly as it was given. Surrounding whitespace is part of
+    the name — ``" report.csv "`` and ``"report.csv"`` are different files — so
+    it is never trimmed. A path that is only whitespace names nothing, and is
+    refused like an empty one.
     """
-    cleaned = (path or "").strip().replace("\\", "/")
-    if not cleaned or len(cleaned) > MAX_ATTACHMENT_PATH_LENGTH:
+    cleaned = (path or "").replace("\\", "/")
+    if not cleaned.strip() or len(cleaned) > MAX_ATTACHMENT_PATH_LENGTH:
         raise AttachmentError("An upload path must be 1 to 512 characters.")
     if cleaned.startswith("/") or _DRIVE_PREFIX.match(cleaned):
         raise AttachmentError("An upload path must be relative.")
     for part in cleaned.split("/"):
-        if not part or part in {".", ".."} or part.casefold() == ".git" or "\x00" in part:
+        if (
+            not part
+            or part in {".", ".."}
+            or part.casefold() == ".git"
+            or _CONTROL_CHARACTER.search(part)
+        ):
             raise AttachmentError(f"Unusable upload path: {path!r}")
     return cleaned
 
@@ -179,7 +190,8 @@ def check_thread_total(rows: list[dict[str, Any]]) -> None:
 
     ``rows`` are what it would hold with a new turn's files in (see
     :func:`current_uploads`): a file attached again counts once, as the host
-    imports it once.
+    imports it once. Last, the archive the host builds from them must fit its
+    limit, with a header for every file and folder.
     """
     if len(rows) > MAX_THREAD_ATTACHMENT_FILES:
         raise AttachmentError(
@@ -192,6 +204,13 @@ def check_thread_total(rows: list[dict[str, Any]]) -> None:
             "A conversation's uploaded files must total no more than "
             f"{attachment_size_label(MAX_THREAD_ATTACHMENT_BYTES)}. "
             "Start a new chat to attach more."
+        )
+    archive = upload_archive_size((str(row["path"]), int(row["size_bytes"])) for row in rows)
+    if archive > DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES:
+        raise AttachmentError(
+            "A conversation's uploaded files, with every folder they sit in, must fit in "
+            f"{attachment_size_label(DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES)}. Deep folders take "
+            "the most room. Start a new chat to attach more."
         )
 
 

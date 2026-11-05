@@ -9,7 +9,8 @@ command on one. What the platform does is here:
   platform's key;
 * build a sandbox group's whole SSH state for the claim, and push it to a
   running group's host when the owner changes something, so a removal takes
-  effect at once instead of at the next turn.
+  effect at once instead of at the next turn, and again when a turn marks its
+  group running, so a change made while the group started reaches that turn.
 
 See ``docs/agents/specs/2026-10-15-user-ssh-servers-design.zh-CN.md``.
 """
@@ -31,10 +32,15 @@ import httpx
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
+from cloud_agent.credential_cipher import (
+    USER_CREDENTIAL_ENCRYPTION_KEY,
+    CredentialCipher,
+    CredentialCipherError,
+)
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_manager_client import SandboxManagerError
-from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
-from cloud_agent.source_control import SourceControlCipher, SourceControlError
+from cloud_agent.sandbox_manager_routing import sandbox_manager_for_host
+from cloud_agent.settings import setting_env
 from cloud_agent_shared.ssh_access import (
     HOST_KEY_ALGORITHMS,
     HOST_KEY_TYPES,
@@ -62,6 +68,10 @@ _CHECK_TIMEOUT_S = 30
 #: What a check keeps of each output stream; a server sending more fails the check.
 _MAX_OUTPUT_BYTES = 64 * 1024
 _KEY_ORDER = {key_type: index for index, key_type in enumerate(HOST_KEY_TYPES)}
+_PUSH_BATCH_SIZE = 100
+_PUSH_CONCURRENCY = 8
+_PUSH_GROUP_TIMEOUT_S = 15.0
+_PUSH_PASS_TIMEOUT_S = 60.0
 
 
 class CheckFailed(Exception):
@@ -80,9 +90,12 @@ class SshStorage(Protocol):
     host_pool: HostPoolRepository
 
 
-def ssh_key_cipher(secret: str | None = None) -> SourceControlCipher:
+def ssh_key_cipher(secret: str | None = None) -> CredentialCipher:
     """The cipher server private keys are stored under."""
-    return SourceControlCipher(secret, domain=SSH_SERVER_KEY_DOMAIN)
+    material = (
+        secret if secret is not None else setting_env(USER_CREDENTIAL_ENCRYPTION_KEY, "") or ""
+    )
+    return CredentialCipher(material, domain=SSH_SERVER_KEY_DOMAIN)
 
 
 def generate_key_pair(comment: str) -> tuple[str, str]:
@@ -350,7 +363,7 @@ async def check_login(
         raise CheckFailed(_login_error(stderr.decode("utf-8", "replace")))
 
 
-def build_ssh_access(state: dict[str, Any] | None, cipher: SourceControlCipher) -> SshAccess | None:
+def build_ssh_access(state: dict[str, Any] | None, cipher: CredentialCipher) -> SshAccess | None:
     """A group state from the store, with its keys decrypted, as the host receives it.
 
     Only chats with a usable server are listed. The host clears every slot the
@@ -435,30 +448,101 @@ async def push_ssh_access(
 
     A push only takes access away from a running member: a server turned off,
     deleted or given a new key stops working at once, while one turned on
-    arrives with the member's next turn, whose runner masks its key. Best
-    effort by design: a group that is not running, or whose host cannot be
-    reached, gets the state before its next turn runs anything, because every
-    claim carries it.
+    arrives with the member's next turn, whose runner masks its key. Each
+    group's state goes to the host the group is on, addressed to a chat of
+    that group its sandbox manager knows. Best effort by design. A group that
+    is not running is sent its state when a turn marks it running
+    (``worker_mark_thread_sandbox_running``), because the claim's own state is
+    read before then and can miss a change made in between. A host that
+    cannot be reached gets the state with its next turn.
     """
     try:
-        groups = await store.ssh_servers.running_groups_for_ssh_change(
-            thread_ids=thread_ids, server_id=server_id
-        )
         cipher = ssh_key_cipher()
+        async with asyncio.timeout(_PUSH_PASS_TIMEOUT_S):
+            await _push_ssh_batches(store, cipher, thread_ids=thread_ids, server_id=server_id)
+    except TimeoutError:
+        logger.warning("agent_ssh_push_deadline")
     except Exception:
         logger.warning("agent_ssh_push_lookup_failed", exc_info=True)
-        return
+
+
+async def _push_ssh_batches(
+    store: SshStorage,
+    cipher: CredentialCipher,
+    *,
+    thread_ids: list[str] | None,
+    server_id: str | None,
+) -> None:
+    cursor = None
+    unavailable: set[str] = set()
+    semaphore = asyncio.Semaphore(_PUSH_CONCURRENCY)
+    while True:
+        groups = await store.ssh_servers.running_groups_for_ssh_change(
+            thread_ids=thread_ids,
+            server_id=server_id,
+            after_sandbox_id=cursor,
+            limit=_PUSH_BATCH_SIZE,
+        )
+        if not groups:
+            return
+        states = await store.ssh_servers.ssh_group_states(
+            thread_ids=[str(group["origin_thread_id"]) for group in groups]
+        )
+        by_host: dict[str, list[dict[str, Any]]] = {}
+        for group in groups:
+            by_host.setdefault(str(group["host"]), []).append(group)
+        async with asyncio.TaskGroup() as tasks:
+            for host, hosted in by_host.items():
+                tasks.create_task(
+                    _push_ssh_host(host, hosted, states, cipher, semaphore, unavailable)
+                )
+        if len(groups) < _PUSH_BATCH_SIZE:
+            return
+        cursor = str(groups[-1]["sandbox_id"])
+
+
+async def _push_ssh_host(
+    host: str,
+    groups: list[dict[str, Any]],
+    states: dict[str, dict[str, Any]],
+    cipher: CredentialCipher,
+    semaphore: asyncio.Semaphore,
+    unavailable: set[str],
+) -> None:
     for group in groups:
+        if host in unavailable:
+            return
         try:
-            state = await store.ssh_servers.ssh_group_state(thread_id=str(group["thread_id"]))
-            access = build_ssh_access(state, cipher)
-            if access is None:
+            origin = str(group["origin_thread_id"])
+            state = states.get(origin)
+            # Only the group's own state goes to it.
+            if state is None or state["sandbox_id"] != group["sandbox_id"]:
                 continue
-            client = await sandbox_manager_for_job(store.host_pool, str(group["job_id"]))
+            access = build_ssh_access(state, cipher)
+            client = sandbox_manager_for_host(group)
             if client is None:
                 continue
-            await client.sync_ssh_access(str(group["thread_id"]), access)
-        except (SandboxManagerError, SourceControlError, httpx.HTTPError, ValueError) as exc:
+            chats = [origin]
+            if group.get("resident_thread_id"):
+                chats.append(str(group["resident_thread_id"]))
+            async with semaphore, asyncio.timeout(_PUSH_GROUP_TIMEOUT_S):
+                for chat in chats:
+                    try:
+                        await client.sync_ssh_access(chat, access)
+                        break
+                    except SandboxManagerError as exc:
+                        # The origin may be absent from a post-restart manifest.
+                        if exc.status_code != 404 or chat == chats[-1]:
+                            raise
+        except (
+            SandboxManagerError,
+            CredentialCipherError,
+            httpx.HTTPError,
+            ValueError,
+            TimeoutError,
+        ) as exc:
+            if isinstance(exc, (httpx.HTTPError, TimeoutError)):
+                unavailable.add(host)
             logger.warning(
                 "agent_ssh_push_failed",
                 extra={

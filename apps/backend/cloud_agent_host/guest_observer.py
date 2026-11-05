@@ -20,8 +20,14 @@ import json
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
+from cloud_agent_host.guest_observer_scripts import (
+    BEGIN_SCRIPT,
+    CLEANUP_SCRIPT,
+    DRAIN_SCRIPT,
+    SNAPSHOT_SCRIPT,
+)
 from cloud_agent_host.tool_windows import TOOL_MARK_HELPER, ToolMark
 
 if TYPE_CHECKING:
@@ -90,6 +96,24 @@ class GuestObserverSnapshot:
     status: GuestObserverStatus
     journal_size: int
     guest_mono_ns: int
+    #: The guest's boot identifier, when the read was asked for it, else empty.
+    guest_boot_id: str = ""
+
+
+@dataclass(frozen=True)
+class _BeginRead:
+    """A begin's accepted opening read, then its fence and the clock bridge there.
+
+    ``fence`` is ``None`` when the fence failed after the opening read was
+    accepted, and ``problem`` says why: what the opening read calls for, such
+    as a rotation, is still decided on it.
+    """
+
+    opening: GuestObserverSnapshot
+    fence: GuestObserverSnapshot | None = None
+    problem: str = ""
+    mono_offset_ns: int = 0
+    clock_error_ns: int = 0
 
 
 @dataclass(frozen=True)
@@ -107,7 +131,7 @@ class GuestObserverCursor:
     journal_ino: int = 0
     guest_mono_ns: int = 0
     # Add this to a guest monotonic timestamp to place it on the sandbox manager host's
-    # monotonic axis.  ``clock_error_ns`` is half the Docker-exec round trip;
+    # monotonic axis.  ``clock_error_ns`` is its error bound (``_clock_bridge``);
     # attribution widens by it rather than claiming false boundary precision.
     mono_offset_ns: int = 0
     clock_error_ns: int = 0
@@ -261,56 +285,18 @@ class GuestObserverController:
     ) -> GuestObserverSnapshot:
         """Read one atomic status/size/guest-clock tuple from the root journal."""
         bounded_wait = min(3.0, max(0.0, wait_s))
-        script = (
-            "import json, os, sys, time\n"
-            "status_path, events_path, expected_binary = sys.argv[1:4]\n"
-            "wanted = int(sys.argv[4])\n"
-            "deadline = time.monotonic() + float(sys.argv[5])\n"
-            "while True:\n"
-            "    try:\n"
-            "        with open(status_path, encoding='utf-8') as handle:\n"
-            "            status = json.load(handle)\n"
-            "        pid = int(status.get('pid', 0))\n"
-            "        if pid <= 0 or not os.path.exists(f'/proc/{pid}'):\n"
-            "            raise RuntimeError('observer process is not alive')\n"
-            "        try:\n"
-            "            observer_alive = os.path.samefile(f'/proc/{pid}/exe', expected_binary)\n"
-            "        except OSError:\n"
-            "            observer_alive = False\n"
-            "        if not observer_alive:\n"
-            "            raise RuntimeError('observer pid does not name the trusted binary')\n"
-            "        if wanted < 0 or int(status.get('poll_seq', -1)) > wanted:\n"
-            "            break\n"
-            "    except (OSError, ValueError, TypeError, json.JSONDecodeError):\n"
-            "        status = None\n"
-            "    if time.monotonic() >= deadline:\n"
-            "        raise RuntimeError('observer status did not advance')\n"
-            "    time.sleep(0.01)\n"
-            "size = int(status.get('journal_bytes', -1))\n"
-            "journal_dev = int(status.get('journal_dev', -1))\n"
-            "journal_ino = int(status.get('journal_ino', -1))\n"
-            "journal = os.stat(events_path)\n"
-            "actual_size = int(journal.st_size)\n"
-            "if (size < 0 or actual_size < size or journal_dev < 0 or journal_ino <= 0 "
-            "        or int(journal.st_dev) != journal_dev "
-            "        or int(journal.st_ino) != journal_ino):\n"
-            "    raise RuntimeError('observer journal is behind its published fence')\n"
-            "print(json.dumps({'status': status, 'journal_size': size, "
-            "'guest_mono_ns': time.monotonic_ns()}, separators=(',', ':')))\n"
-        )
-        result = self._capture(
-            [
-                "python3",
-                "-c",
-                script,
-                GUEST_OBSERVER_STATUS,
-                GUEST_OBSERVER_EVENTS,
-                GUEST_OBSERVER_BINARY,
-                str(-1 if after_poll_seq is None else after_poll_seq),
-                str(bounded_wait),
-            ],
-            max(5.0, bounded_wait + 2.0),
-        )
+        argv = [
+            "python3",
+            "-I",
+            "-c",
+            SNAPSHOT_SCRIPT,
+            GUEST_OBSERVER_STATUS,
+            GUEST_OBSERVER_EVENTS,
+            GUEST_OBSERVER_BINARY,
+            str(-1 if after_poll_seq is None else after_poll_seq),
+            str(bounded_wait),
+        ]
+        result = self._capture(argv, max(5.0, bounded_wait + 2.0))
         if getattr(result, "returncode", 1) != 0:
             raise GuestObserverRuntimeError(
                 "guest observer snapshot failed: " + self._stderr(result)[-300:]
@@ -319,6 +305,71 @@ class GuestObserverController:
             return parse_snapshot(self._stdout(result))
         except GuestObserverProtocolError as exc:
             raise GuestObserverRuntimeError(str(exc)) from exc
+
+    def _opening(self, *, restart_if_missing: bool) -> _BeginRead:
+        """Read the opening fence and the fence after it, starting the helper if it is missing.
+
+        A cursor already open on the guest forbids a restart, so that caller
+        gets the full wait instead of a recovery attempt.
+        """
+        if not restart_if_missing:
+            return self._begin_read(opening_wait_s=3.0)
+        try:
+            return self._begin_read(opening_wait_s=0)
+        except GuestObserverRuntimeError:
+            self.ensure()
+        return self._begin_read(opening_wait_s=3.0)
+
+    def _begin_read(self, *, opening_wait_s: float) -> _BeginRead:
+        """Run the fixed begin script: the opening read, a full poll, then the fence.
+
+        The opening read is the liveness and trusted-binary check, the journal
+        size a rotation is decided on, the opening fence and the guest's boot.
+        Its publication may come from a poll that started before it, so the
+        fence crosses the following complete poll as well: pre-turn ring-buffer
+        events and loss counters are then the baseline's, not the new turn's.
+
+        Only an opening read that failed or was refused raises, which a restart
+        answers. A fence that failed after an accepted one comes back as a read
+        without a fence: a restart would not answer it.
+        """
+        argv = [
+            "python3",
+            "-I",
+            "-c",
+            BEGIN_SCRIPT,
+            GUEST_OBSERVER_STATUS,
+            GUEST_OBSERVER_EVENTS,
+            GUEST_OBSERVER_BINARY,
+            str(opening_wait_s),
+            "3.0",
+            GUEST_BOOT_ID_PATH,
+        ]
+        host_before = time.monotonic_ns()
+        # Both waits, plus the two seconds a single read is allowed.
+        result = self._capture(argv, opening_wait_s + 3.0 + 2.0)
+        host_after = time.monotonic_ns()
+        failed, stderr = getattr(result, "returncode", 1) != 0, self._stderr(result)[-300:]
+        opening_line, _, fence_line = self._stdout(result).partition(b"\n")
+        try:
+            opening = parse_snapshot(opening_line)
+        except GuestObserverProtocolError as exc:
+            detail = stderr if failed else str(exc)
+            raise GuestObserverRuntimeError("guest observer snapshot failed: " + detail) from exc
+        if failed:
+            return _BeginRead(opening, problem="guest observer fence failed: " + stderr)
+        try:
+            fence = parse_snapshot(fence_line)
+        except GuestObserverProtocolError as exc:
+            return _BeginRead(opening, problem=str(exc))
+        # Waited for in the guest and held here as well, as the drain does.
+        if (
+            fence.status.pid != opening.status.pid
+            or fence.status.poll_seq <= opening.status.poll_seq + 1
+        ):
+            return _BeginRead(opening, problem="guest observer fence did not cross a full poll")
+        offset, error = _clock_bridge(host_before, host_after, opening, fence)
+        return _BeginRead(opening, fence, mono_offset_ns=offset, clock_error_ns=error)
 
     def ensure(self) -> None:
         """Start the reviewed eBPF helper and wait until every probe is attached."""
@@ -336,45 +387,12 @@ class GuestObserverController:
 
     def start(self) -> None:
         """Replace one stale singleton; the caller holds the shared start lock."""
-        cleanup = (
-            "import json, os, signal, sys, time\n"
-            "status, events, expected_binary = sys.argv[1:4]\n"
-            "pid = 0\n"
-            "def is_expected_process():\n"
-            "    if pid <= 1:\n"
-            "        return False\n"
-            "    try:\n"
-            "        return os.path.samefile(f'/proc/{pid}/exe', expected_binary)\n"
-            "    except OSError:\n"
-            "        return False\n"
-            "try:\n"
-            "    with open(status, encoding='utf-8') as handle:\n"
-            "        pid = int(json.load(handle).get('pid', 0))\n"
-            "    if is_expected_process():\n"
-            "        os.kill(pid, signal.SIGTERM)\n"
-            "except (OSError, ValueError, TypeError, json.JSONDecodeError):\n"
-            "    pass\n"
-            "deadline = time.monotonic() + 1.0\n"
-            "while is_expected_process() and time.monotonic() < deadline:\n"
-            "    time.sleep(0.01)\n"
-            "if is_expected_process():\n"
-            "    os.kill(pid, signal.SIGKILL)\n"
-            "    deadline = time.monotonic() + 1.0\n"
-            "    while is_expected_process() and time.monotonic() < deadline:\n"
-            "        time.sleep(0.01)\n"
-            "if is_expected_process():\n"
-            "    raise RuntimeError('stale guest observer did not exit')\n"
-            "for item in (status, events):\n"
-            "    try:\n"
-            "        os.unlink(item)\n"
-            "    except FileNotFoundError:\n"
-            "        pass\n"
-        )
         cleaned = self._privileged(
             [
                 "python3",
+                "-I",
                 "-c",
-                cleanup,
+                CLEANUP_SCRIPT,
                 GUEST_OBSERVER_STATUS,
                 GUEST_OBSERVER_EVENTS,
                 GUEST_OBSERVER_BINARY,
@@ -402,21 +420,29 @@ class GuestObserverController:
                 time.sleep(0.05)
         raise GuestObserverRuntimeError(problem)
 
-    def rotate_if_needed(self, *, threshold: int = GUEST_OBSERVER_ROTATE_BYTES) -> bool:
+    def rotate_if_needed(
+        self,
+        *,
+        threshold: int = GUEST_OBSERVER_ROTATE_BYTES,
+        snapshot: GuestObserverSnapshot | None = None,
+    ) -> bool:
         """Reset an idle lifetime journal before its hard cap is exhausted.
 
         The caller must own the lifecycle guarantee that no cursor is active.
         This method serializes against starts, rechecks the published fence,
-        and returns whether it replaced the observer.
+        and returns whether it replaced the observer. ``snapshot`` is a fence
+        the caller already read under this controller's lock, as ``begin``'s
+        opening read is; the recheck then costs no exec of its own.
         """
         bounded_threshold = max(1, int(threshold))
         with self._lock:
-            try:
-                snapshot = self.snapshot(wait_s=0)
-            except Exception:
-                # ``begin`` will perform normal stale/missing recovery. A
-                # failed read is not evidence that a live journal is large.
-                return False
+            if snapshot is None:
+                try:
+                    snapshot = self.snapshot(wait_s=0)
+                except Exception:
+                    # ``begin`` will perform normal stale/missing recovery. A
+                    # failed read is not evidence that a live journal is large.
+                    return False
             if snapshot.journal_size < bounded_threshold:
                 return False
             try:
@@ -455,6 +481,7 @@ class GuestObserverController:
         *,
         user_uid: int,
         restart_if_missing: bool = True,
+        rotate_threshold: int | None = None,
         measurement_id: str | None = None,
     ) -> GuestObserverCursor:
         """Fence the journal immediately before one prompt is admitted.
@@ -464,6 +491,12 @@ class GuestObserverController:
         this new turn cannot restart the singleton and invalidate every older
         cursor.  Once those owners close, the next idle begin may recover it.
 
+        ``rotate_threshold`` replaces the helper first when its lifetime
+        journal has reached that size. Rotation is a restart, so it is only
+        considered when a restart is allowed, and it is decided on the opening
+        read rather than on a read of its own. The caller holds this
+        container's observer lock across the whole begin.
+
         ``measurement_id`` additionally makes this fence the start of a member
         execution window, so the observation also carries that window's live
         census cycles. The fence must be taken before the window's opening
@@ -471,19 +504,23 @@ class GuestObserverController:
         being attached afterwards.
         """
         try:
-            if restart_if_missing:
-                self.ensure()
-            opening = self.snapshot()
-            # The publication just read may have been written by a poll that
-            # started before this opening fence. Cross the following complete
-            # poll as well so pre-turn ring-buffer events and loss counters are
-            # part of the baseline rather than the new turn.
-            host_before = time.monotonic_ns()
-            snapshot = self.snapshot(after_poll_seq=opening.status.poll_seq + 1)
-            host_after = time.monotonic_ns()
+            read = self._opening(restart_if_missing=restart_if_missing)
+            if (
+                restart_if_missing
+                and rotate_threshold is not None
+                and read.opening.journal_size >= max(1, int(rotate_threshold))
+            ):
+                # Decided before the fence is acted on: nothing else replaces
+                # a helper that answers but has stopped publishing. Replaced or
+                # not, the helper the opening read described may be gone now,
+                # so both reads are taken again after the attempt.
+                self.rotate_if_needed(threshold=rotate_threshold, snapshot=read.opening)
+                read = self._opening(restart_if_missing=True)
         except Exception as exc:
             return GuestObserverCursor.unavailable(user_uid, str(exc))
-        host_midpoint = host_before + (host_after - host_before) // 2
+        snapshot = read.fence
+        if snapshot is None:
+            return GuestObserverCursor.unavailable(user_uid, read.problem)
         return GuestObserverCursor(
             uid=user_uid,
             offset=snapshot.journal_size,
@@ -495,92 +532,38 @@ class GuestObserverController:
             journal_dev=snapshot.status.journal_dev,
             journal_ino=snapshot.status.journal_ino,
             guest_mono_ns=snapshot.guest_mono_ns,
-            mono_offset_ns=host_midpoint - snapshot.guest_mono_ns,
-            clock_error_ns=max(0, (host_after - host_before) // 2),
+            mono_offset_ns=read.mono_offset_ns,
+            clock_error_ns=read.clock_error_ns,
             available=True,
-            guest_boot_id=self.guest_boot_id(),
+            guest_boot_id=read.opening.guest_boot_id,
             measurement_id=measurement_id,
         )
 
-    def finish(self, cursor: GuestObserverCursor | None) -> GuestObservation:
-        """Drain and read exactly one cursor's bounded event slice."""
+    def finish(
+        self,
+        cursor: GuestObserverCursor | None,
+        *,
+        wait_s: float = 3.0,
+    ) -> GuestObservation:
+        """Drain and read exactly one cursor's bounded event slice.
+
+        One fixed script takes the closing publication, waits for two more
+        polls and reads the slice, all in one exec. Nothing it returns is
+        parsed until both publications it reports have passed every check
+        against the cursor's fence: a slice read alongside a reset fence is
+        discarded unparsed.
+        """
         if cursor is None:
             return GuestObservation.unavailable("turn had no guest observer cursor")
         if not cursor.available:
             return GuestObservation.unavailable(cursor.detail)
         try:
-            closing = self.snapshot()
-            if closing.status.pid != cursor.observer_pid:
-                return GuestObservation.unavailable("guest observer restarted mid-turn")
-            if (
-                closing.status.journal_dev != cursor.journal_dev
-                or closing.status.journal_ino != cursor.journal_ino
-            ):
-                return GuestObservation.unavailable("guest observer journal changed mid-turn")
-            if closing.status.event_seq < cursor.event_seq:
-                return GuestObservation.unavailable("guest observer event sequence reset mid-turn")
-            if (
-                closing.status.lost < cursor.lost
-                or closing.status.journal_dropped < cursor.journal_dropped
-            ):
-                return GuestObservation.unavailable("guest observer loss counters reset mid-turn")
-            # Cross two publications after the closing snapshot. The first may
-            # already be in flight after its poll; the second closes that tail.
-            snapshot = self.snapshot(after_poll_seq=closing.status.poll_seq + 1)
-            if snapshot.status.pid != cursor.observer_pid:
-                return GuestObservation.unavailable("guest observer restarted while flushing")
-            if (
-                snapshot.status.journal_dev != cursor.journal_dev
-                or snapshot.status.journal_ino != cursor.journal_ino
-            ):
-                return GuestObservation.unavailable("guest observer journal changed while flushing")
-            if snapshot.status.event_seq < closing.status.event_seq:
-                return GuestObservation.unavailable(
-                    "guest observer event sequence reset while flushing"
-                )
-            if (
-                snapshot.status.lost < closing.status.lost
-                or snapshot.status.journal_dropped < closing.status.journal_dropped
-            ):
-                return GuestObservation.unavailable(
-                    "guest observer loss counters reset while flushing"
-                )
-            if snapshot.journal_size < cursor.offset:
-                return GuestObservation.unavailable("guest observer journal restarted mid-turn")
+            closing, snapshot, payload = self._drain(cursor, wait_s=wait_s)
+            problem = _drain_problem(cursor, closing, snapshot)
+            if problem is not None:
+                return GuestObservation.unavailable(problem)
             available = snapshot.journal_size - cursor.offset
             count = min(available, MAX_OBSERVATION_BYTES)
-            reader = (
-                "import os, sys\n"
-                "filename, offset, count = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])\n"
-                "expected_dev, expected_ino = int(sys.argv[4]), int(sys.argv[5])\n"
-                "with open(filename, 'rb', buffering=0) as handle:\n"
-                "    journal = os.fstat(handle.fileno())\n"
-                "    if (int(journal.st_dev) != expected_dev "
-                "            or int(journal.st_ino) != expected_ino):\n"
-                "        raise RuntimeError('observer journal changed before read')\n"
-                "    if int(journal.st_size) < offset + count:\n"
-                "        raise RuntimeError('observer journal is behind the read fence')\n"
-                "    handle.seek(offset)\n"
-                "    sys.stdout.buffer.write(handle.read(count))\n"
-            )
-            result = self._capture(
-                [
-                    "python3",
-                    "-c",
-                    reader,
-                    GUEST_OBSERVER_EVENTS,
-                    str(cursor.offset),
-                    str(count),
-                    str(cursor.journal_dev),
-                    str(cursor.journal_ino),
-                ],
-                10.0,
-            )
-            if getattr(result, "returncode", 1) != 0:
-                raise GuestObserverRuntimeError(
-                    "guest observer journal read failed: " + self._stderr(result)[-300:]
-                )
-            payload = self._stdout(result)
             if len(payload) != count:
                 raise GuestObserverRuntimeError(
                     "guest observer journal read stopped before its published fence"
@@ -593,6 +576,42 @@ class GuestObserverController:
             )
         except Exception as exc:
             return GuestObservation.unavailable(str(exc))
+
+    def _drain(
+        self,
+        cursor: GuestObserverCursor,
+        *,
+        wait_s: float,
+    ) -> tuple[GuestObserverSnapshot, GuestObserverSnapshot, bytes]:
+        """Run the fixed drain script for one cursor's fence."""
+        bounded_wait = min(3.0, max(0.0, wait_s))
+        result = self._capture(
+            [
+                "python3",
+                "-I",
+                "-c",
+                DRAIN_SCRIPT,
+                GUEST_OBSERVER_STATUS,
+                GUEST_OBSERVER_EVENTS,
+                GUEST_OBSERVER_BINARY,
+                str(cursor.offset),
+                str(cursor.journal_dev),
+                str(cursor.journal_ino),
+                str(MAX_OBSERVATION_BYTES),
+                str(bounded_wait),
+            ],
+            # Both publication waits, plus the ten seconds the journal read
+            # itself is allowed.
+            2 * bounded_wait + 10.0,
+        )
+        if getattr(result, "returncode", 1) != 0:
+            raise GuestObserverRuntimeError(
+                "guest observer journal drain failed: " + self._stderr(result)[-300:]
+            )
+        try:
+            return parse_drain(self._stdout(result))
+        except GuestObserverProtocolError as exc:
+            raise GuestObserverRuntimeError(str(exc)) from exc
 
 
 @dataclass
@@ -710,22 +729,6 @@ def _group_dead(event: dict[str, Any]) -> bool:
     return value
 
 
-def _close_group(
-    group: _MutableProcess,
-    mono_ns: int,
-    active: dict[int, _MutableProcess],
-    finished: list[_MutableProcess],
-) -> None:
-    """The thread group is dead: the process's lifetime ends here."""
-    if group.dead_seen:
-        return
-    group.dead_seen = True
-    group.exited_ns = mono_ns
-    if active.get(group.pid) is group:
-        active.pop(group.pid)
-        finished.append(group)
-
-
 def _bounded_text(value: Any, limit: int) -> str:
     """A single-line UTF-8-ish field bounded for storage and UI."""
     if not isinstance(value, str):
@@ -761,14 +764,18 @@ def parse_status(value: Any) -> GuestObserverStatus:
     )
 
 
-def parse_snapshot(payload: bytes) -> GuestObserverSnapshot:
-    """Parse one JSON snapshot emitted by the fixed in-guest probe command."""
+def _small_json(payload: bytes, what: str) -> Any:
+    """Decode one bounded JSON document the fixed guest scripts printed."""
     if len(payload) > 64 * 1024:
-        raise GuestObserverProtocolError("guest observer snapshot is too large")
+        raise GuestObserverProtocolError(f"{what} is too large")
     try:
-        value = json.loads(payload)
+        return json.loads(payload)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise GuestObserverProtocolError("guest observer snapshot is not JSON") from exc
+        raise GuestObserverProtocolError(f"{what} is not JSON") from exc
+
+
+def _snapshot_value(value: Any) -> GuestObserverSnapshot:
+    """Validate one decoded status/size/guest-clock publication."""
     if not isinstance(value, dict):
         raise GuestObserverProtocolError("guest observer snapshot is not an object")
     size = value.get("journal_size")
@@ -785,11 +792,105 @@ def parse_snapshot(payload: bytes) -> GuestObserverSnapshot:
     status = parse_status(value.get("status"))
     if size != status.journal_bytes:
         raise GuestObserverProtocolError("guest observer journal fence is inconsistent")
+    boot_id = value.get("boot_id", "")
+    if not isinstance(boot_id, str):
+        raise GuestObserverProtocolError("guest observer boot identifier is not text")
     return GuestObserverSnapshot(
         status=status,
         journal_size=size,
         guest_mono_ns=mono,
+        guest_boot_id=boot_id.strip()[:64],
     )
+
+
+def parse_snapshot(payload: bytes) -> GuestObserverSnapshot:
+    """Parse one JSON snapshot emitted by the fixed in-guest probe command."""
+    return _snapshot_value(_small_json(payload, "guest observer snapshot"))
+
+
+def parse_drain(payload: bytes) -> tuple[GuestObserverSnapshot, GuestObserverSnapshot, bytes]:
+    """Split the drain script's output into its two publications and the slice.
+
+    The first line holds the closing and the flushed publication, each held
+    to the same contract as a snapshot; everything after it is journal bytes.
+    """
+    header, newline, journal = payload.partition(b"\n")
+    if not newline:
+        raise GuestObserverProtocolError("guest observer drain has no status line")
+    value = _small_json(header, "guest observer drain status")
+    if not isinstance(value, dict):
+        raise GuestObserverProtocolError("guest observer drain status is not an object")
+    return _snapshot_value(value.get("closing")), _snapshot_value(value.get("flushed")), journal
+
+
+def _clock_bridge(
+    host_before: int, host_after: int, opening: GuestObserverSnapshot, fence: GuestObserverSnapshot
+) -> tuple[int, int]:
+    """The offset from the guest clock to the host's at the fence, and its error.
+
+    The guest read its clock at the opening read and again at the fence, in
+    one exec the host timed. The two clocks run at the same rate, as every
+    later conversion of the turn's events assumes over the whole turn, so the
+    fence was read no sooner than the span between those readings after the
+    exec began, and no later than its return. The wait for a full poll lies
+    inside that span and widens nothing: the error is half of what is left,
+    the exec's start before the opening reading and its return after the
+    fence, as when the fence was read in an exec of its own. A span that does
+    not fit the round trip means the clocks disagree, and then only the whole
+    exec brackets the fence.
+    """
+    span = fence.guest_mono_ns - opening.guest_mono_ns
+    if not 0 <= span <= host_after - host_before:
+        span = 0
+    earliest = host_before + span
+    width = host_after - earliest
+    # Rounded up, so an odd width's far end is still inside the bound.
+    return earliest + width // 2 - fence.guest_mono_ns, (width + 1) // 2
+
+
+def _drain_problem(
+    cursor: GuestObserverCursor,
+    closing: GuestObserverSnapshot,
+    flushed: GuestObserverSnapshot,
+) -> str | None:
+    """Why a drain's two publications cannot close this cursor, if they cannot.
+
+    The closing publication must continue the cursor's fence and the flushed
+    one the closing one: the same helper process, the same journal file, and
+    no counter gone backwards. Crossing a full poll is waited for in the guest
+    and held here as well: it is what puts the events the turn's last poll had
+    not yet journaled inside the slice.
+    """
+    if closing.status.pid != cursor.observer_pid:
+        return "guest observer restarted mid-turn"
+    if (
+        closing.status.journal_dev != cursor.journal_dev
+        or closing.status.journal_ino != cursor.journal_ino
+    ):
+        return "guest observer journal changed mid-turn"
+    if closing.status.event_seq < cursor.event_seq:
+        return "guest observer event sequence reset mid-turn"
+    if closing.status.lost < cursor.lost or closing.status.journal_dropped < cursor.journal_dropped:
+        return "guest observer loss counters reset mid-turn"
+    if flushed.status.pid != cursor.observer_pid:
+        return "guest observer restarted while flushing"
+    if (
+        flushed.status.journal_dev != cursor.journal_dev
+        or flushed.status.journal_ino != cursor.journal_ino
+    ):
+        return "guest observer journal changed while flushing"
+    if flushed.status.poll_seq <= closing.status.poll_seq + 1:
+        return "guest observer did not publish a full poll after the turn"
+    if flushed.status.event_seq < closing.status.event_seq:
+        return "guest observer event sequence reset while flushing"
+    if (
+        flushed.status.lost < closing.status.lost
+        or flushed.status.journal_dropped < closing.status.journal_dropped
+    ):
+        return "guest observer loss counters reset while flushing"
+    if flushed.journal_size < cursor.offset:
+        return "guest observer journal restarted mid-turn"
+    return None
 
 
 def _integer(event: dict[str, Any], name: str, *, positive: bool = False) -> int:
@@ -844,6 +945,244 @@ def _finish_process(item: _MutableProcess, cursor: GuestObserverCursor) -> Guest
     )
 
 
+def _task_ids(event: dict[str, Any]) -> tuple[int, int, int]:
+    """The task's pid, its thread group's id, and its parent pid (0 when unknown)."""
+    return (
+        _integer(event, "pid", positive=True),
+        _integer(event, "tgid", positive=True),
+        _integer(event, "ppid"),
+    )
+
+
+def _names(event: dict[str, Any]) -> tuple[str, str | None]:
+    """The command name and the executable a leader's record carries, bounded."""
+    comm = _bounded_text(event.get("comm"), MAX_COMM_BYTES) or "process"
+    executable = _bounded_text(event.get("filename"), MAX_EXECUTABLE_BYTES) or None
+    return comm, executable
+
+
+class _Journal:
+    """The processes and tool marks of one UID, rebuilt from one journal slice."""
+
+    def __init__(self, cursor: GuestObserverCursor) -> None:
+        self.cursor = cursor
+        self.malformed = False
+        self.active: dict[int, _MutableProcess] = {}
+        self.finished: list[_MutableProcess] = []
+        # Every group this slice created, live or exited, keyed by leader pid: a
+        # thread can exit after its leader's record was already closed, and its
+        # share of the group's CPU still belongs to that row.
+        self.by_tgid: dict[int, _MutableProcess] = {}
+        self.tool_marks: list[ToolMark] = []
+        self.next_process_seq = 1
+        # The byte fence and event fence describe the same append-only journal.
+        # Re-reading an event from at or before the cursor means those two
+        # fences disagreed, so the result must be partial rather than
+        # double-charging it.
+        self.previous_event_seq = cursor.event_seq
+
+    @property
+    def processes(self) -> int:
+        """How many process rows the slice has produced so far."""
+        return len(self.finished) + len(self.active)
+
+    def read(self, raw_line: bytes) -> None:
+        """Apply one event line, raising if it is malformed.
+
+        A record of another UID, or one timestamped at or before the cursor, is
+        skipped once its envelope has been checked.
+        """
+        event = json.loads(raw_line)
+        if not isinstance(event, dict):
+            raise GuestObserverProtocolError("guest process event is not an object")
+        version = _integer(event, "version", positive=True)
+        if version != GUEST_OBSERVER_VERSION:
+            raise GuestObserverProtocolError("guest process event version changed")
+        event_seq = _integer(event, "seq", positive=True)
+        if event_seq <= self.previous_event_seq:
+            raise GuestObserverProtocolError("guest process event sequence went backwards")
+        self.previous_event_seq = event_seq
+        if _integer(event, "uid") != self.cursor.uid:
+            return
+        kind: Any = event.get("kind")
+        if kind == "window_sample":
+            return
+        handler = self._HANDLERS.get(kind)
+        if handler is None:
+            raise GuestObserverProtocolError("guest process event kind is unknown")
+        mono_ns = _integer(event, "mono_ns", positive=True)
+        # A kernel event can be timestamped before the opening snapshot yet
+        # reach the userspace journal after its byte fence. The shared guest
+        # monotonic clock is the authoritative lower bound, so never charge
+        # such a late pre-turn event to the newly admitted prompt.
+        if mono_ns <= self.cursor.guest_mono_ns:
+            return
+        handler(self, event, mono_ns)
+
+    def result(self) -> tuple[tuple[GuestProcess, ...], tuple[ToolMark, ...], bool]:
+        """The slice's processes, oldest first and capped, its tool marks, and the flag."""
+        finished = [*self.finished, *self.active.values()]
+        finished.sort(key=lambda item: (item.started_ns, item.process_seq))
+        bounded = finished[:MAX_OBSERVED_PROCESSES]
+        return (
+            tuple(_finish_process(item, self.cursor) for item in bounded),
+            tuple(self.tool_marks),
+            self.malformed or len(finished) > len(bounded),
+        )
+
+    def _tool_mark(self, event: dict[str, Any], mono_ns: int) -> None:
+        tool_use_id = event.get("tool_use_id")
+        if (
+            not isinstance(tool_use_id, str)
+            or not tool_use_id
+            or len(tool_use_id) > 200
+            or any(
+                not (character.isascii() and (character.isalnum() or character in "_-"))
+                for character in tool_use_id
+            )
+        ):
+            raise GuestObserverProtocolError("guest tool mark id is malformed")
+        _integer(event, "pid", positive=True)
+        if len(self.tool_marks) >= MAX_OBSERVED_TOOL_MARKS:
+            # Exact boundaries are an optional precision layer. A same-UID
+            # caller can invoke the fixed helper and exhaust this cap, but that
+            # must not relabel the independent eBPF process census as
+            # incomplete. Missing pairs simply keep their calls on
+            # message-level timing.
+            return
+        self.tool_marks.append(
+            ToolMark(
+                host_mono=(mono_ns + self.cursor.mono_offset_ns) / 1_000_000_000,
+                phase="pre" if event["kind"] == "tool_pre" else "post",
+                tool_use_id=tool_use_id,
+                guest_mono_ns=mono_ns,
+            )
+        )
+
+    def _done(self, event: dict[str, Any], mono_ns: int) -> None:
+        # The task left the CPU for the last time and its scheduler runtime is
+        # final. Leader or thread, it belongs to the group.
+        pid, tgid, _ = _task_ids(event)
+        group = self.by_tgid.get(tgid)
+        if group is not None:
+            group.absorb(_exit_counters(event))
+            group.pending_done.discard(pid)
+
+    def _fork(self, event: dict[str, Any], mono_ns: int) -> None:
+        pid, tgid, ppid = _task_ids(event)
+        if pid != tgid:
+            # sched_process_fork also fires for threads. PR89's contract is
+            # process/tool accounting, so retain leaders and omit thread rows.
+            return
+        current = self.active.get(pid)
+        if current is not None:
+            # PID reuse without the previous exit means the journal has a gap.
+            # Preserve both identities and mark the window bad.
+            self.finished.append(current)
+            self.malformed = True
+        self._start(pid, ppid, *_names(event), mono_ns, observed_fork=True)
+
+    def _exec(self, event: dict[str, Any], mono_ns: int) -> None:
+        pid, tgid, ppid = _task_ids(event)
+        if pid != tgid:
+            return
+        comm, executable = _names(event)
+        current = self.active.get(pid)
+        if current is None:
+            # The observer may have started after fork but before exec; exec is
+            # still an exact lifecycle event and starts a useful (conservative)
+            # observed span.
+            current = self._start(pid, ppid, comm, executable, mono_ns, observed_fork=False)
+        current.observed_exec = True
+        current.comm = comm
+        current.executable = executable or current.executable
+        current.ppid = ppid or current.ppid
+
+    def _exit(self, event: dict[str, Any], mono_ns: int) -> None:
+        pid, tgid, _ = _task_ids(event)
+        if pid != tgid:
+            # A thread's exit still carries its own share of the group's I/O,
+            # and may be the exit that empties the group.
+            group = self.by_tgid.get(tgid)
+            if group is not None:
+                group.absorb(_exit_counters(event))
+                group.pending_done.add(pid)
+                if _group_dead(event):
+                    self._close(group, mono_ns)
+            return
+        current = self.active.get(pid)
+        if current is None:
+            # An exit with no fork/exec in this slice belongs to a baseline
+            # process (normally the resident CLI), not a process created by
+            # this turn. It is intentionally not manufactured into a row.
+            return
+        comm, _ = _names(event)
+        raw_exit = event.get("exit_code")
+        if isinstance(raw_exit, bool) or not isinstance(raw_exit, int):
+            raise GuestObserverProtocolError("guest process exit status is not an integer")
+        # Counters before the lifecycle flags: a malformed counter leaves the
+        # row alive and unexited, and the outer handler marks the slice
+        # partial, rather than closing a row whose consumption was half-read.
+        counters = _exit_counters(event)
+        group_dead = _group_dead(event)
+        current.absorb(counters)
+        current.pending_done.add(pid)
+        current.leader_exited = True
+        current.exit_code = _decoded_exit_code(raw_exit)
+        current.comm = comm or current.comm
+        # A leader whose threads live on has not ended the process; the row
+        # stays open until the group's live count hits zero, and reports no
+        # consumption if that never happens here.
+        if group_dead:
+            self._close(current, mono_ns)
+
+    def _start(
+        self,
+        pid: int,
+        ppid: int,
+        comm: str,
+        executable: str | None,
+        mono_ns: int,
+        *,
+        observed_fork: bool,
+    ) -> _MutableProcess:
+        """Open a row for the leader ``pid``."""
+        process = _MutableProcess(
+            process_seq=self.next_process_seq,
+            uid=self.cursor.uid,
+            pid=pid,
+            tgid=pid,
+            ppid=ppid or None,
+            comm=comm,
+            executable=executable,
+            started_ns=mono_ns,
+            observed_fork=observed_fork,
+        )
+        self.next_process_seq += 1
+        self.active[pid] = process
+        self.by_tgid[pid] = process
+        return process
+
+    def _close(self, group: _MutableProcess, mono_ns: int) -> None:
+        """The thread group is dead: the process's lifetime ends here."""
+        if group.dead_seen:
+            return
+        group.dead_seen = True
+        group.exited_ns = mono_ns
+        if self.active.get(group.pid) is group:
+            self.active.pop(group.pid)
+            self.finished.append(group)
+
+    _HANDLERS: ClassVar[dict[str, Callable[[_Journal, dict[str, Any], int], None]]] = {
+        "fork": _fork,
+        "exec": _exec,
+        "exit": _exit,
+        "done": _done,
+        "tool_pre": _tool_mark,
+        "tool_post": _tool_mark,
+    }
+
+
 def parse_events(
     payload: bytes,
     *,
@@ -857,203 +1196,33 @@ def parse_events(
     """
     if not cursor.available:
         return (), (), False
-    malformed = False
+    journal = _Journal(cursor)
     if payload and not payload.endswith(b"\n"):
         # A snapshot may catch the observer in its one short write.  Ignore the
         # partial tail, but never claim the resulting observation is complete.
         payload, _, _tail = payload.rpartition(b"\n")
         payload += b"\n" if payload else b""
-        malformed = True
-    active: dict[int, _MutableProcess] = {}
-    finished: list[_MutableProcess] = []
-    # Every group this slice created, live or exited, keyed by leader pid: a
-    # thread can exit after its leader's record was already closed, and its
-    # share of the group's CPU still belongs to that row.
-    by_tgid: dict[int, _MutableProcess] = {}
-    tool_marks: list[ToolMark] = []
-    next_process_seq = 1
-    # The byte fence and event fence describe the same append-only journal.
-    # Re-reading an event from at or before the cursor means those two fences
-    # disagreed, so the result must be partial rather than double-charging it.
-    previous_event_seq = cursor.event_seq
+        journal.malformed = True
     for raw_line in payload.splitlines():
-        if not raw_line:
-            continue
         # The journal carries two record families now: process lifecycle and
         # the member window's live censuses. A census is not a process event,
         # so it is skipped rather than judged malformed, and its own line bound
         # is the census serializer's, not this one's: one member's per-task
         # detail can legitimately exceed the process line cap.
-        if _is_window_record(raw_line):
+        if not raw_line or _is_window_record(raw_line):
             continue
         if len(raw_line) > 4096:
-            malformed = True
+            journal.malformed = True
             continue
         try:
-            event = json.loads(raw_line)
-            if not isinstance(event, dict):
-                raise GuestObserverProtocolError("guest process event is not an object")
-            version = _integer(event, "version", positive=True)
-            if version != GUEST_OBSERVER_VERSION:
-                raise GuestObserverProtocolError("guest process event version changed")
-            event_seq = _integer(event, "seq", positive=True)
-            if event_seq <= previous_event_seq:
-                raise GuestObserverProtocolError("guest process event sequence went backwards")
-            previous_event_seq = event_seq
-            uid = _integer(event, "uid")
-            if uid != cursor.uid:
-                continue
-            kind = event.get("kind")
-            if kind == "window_sample":
-                continue
-            if kind not in {"fork", "exec", "exit", "done", "tool_pre", "tool_post"}:
-                raise GuestObserverProtocolError("guest process event kind is unknown")
-            mono_ns = _integer(event, "mono_ns", positive=True)
-            # A kernel event can be timestamped before the opening snapshot yet
-            # reach the userspace journal after its byte fence. The shared guest
-            # monotonic clock is the authoritative lower bound, so never charge
-            # such a late pre-turn event to the newly admitted prompt.
-            if mono_ns <= cursor.guest_mono_ns:
-                continue
-            if kind in {"tool_pre", "tool_post"}:
-                tool_use_id = event.get("tool_use_id")
-                if (
-                    not isinstance(tool_use_id, str)
-                    or not tool_use_id
-                    or len(tool_use_id) > 200
-                    or any(
-                        not (character.isascii() and (character.isalnum() or character in "_-"))
-                        for character in tool_use_id
-                    )
-                ):
-                    raise GuestObserverProtocolError("guest tool mark id is malformed")
-                _integer(event, "pid", positive=True)
-                if len(tool_marks) >= MAX_OBSERVED_TOOL_MARKS:
-                    # Exact boundaries are an optional precision layer. A
-                    # same-UID caller can invoke the fixed helper and exhaust
-                    # this cap, but that must not relabel the independent eBPF
-                    # process census as incomplete. Missing pairs simply keep
-                    # their calls on message-level timing.
-                    continue
-                tool_marks.append(
-                    ToolMark(
-                        host_mono=(mono_ns + cursor.mono_offset_ns) / 1_000_000_000,
-                        phase="pre" if kind == "tool_pre" else "post",
-                        tool_use_id=tool_use_id,
-                        guest_mono_ns=mono_ns,
-                    )
-                )
-                continue
-            pid = _integer(event, "pid", positive=True)
-            tgid = _integer(event, "tgid", positive=True)
-            ppid_raw = _integer(event, "ppid")
-            if kind == "done":
-                # The task left the CPU for the last time and its scheduler
-                # runtime is final. Leader or thread, it belongs to the group.
-                group = by_tgid.get(tgid)
-                if group is not None:
-                    group.absorb(_exit_counters(event))
-                    group.pending_done.discard(pid)
-                continue
-            # sched_process_fork also fires for threads.  PR89's contract is
-            # process/tool accounting, so retain leaders and omit thread rows.
-            # A thread's exit still carries its own share of the group's I/O,
-            # and may be the exit that empties the group.
-            if pid != tgid:
-                if kind == "exit":
-                    group = by_tgid.get(tgid)
-                    if group is not None:
-                        group.absorb(_exit_counters(event))
-                        group.pending_done.add(pid)
-                        if _group_dead(event):
-                            _close_group(group, mono_ns, active, finished)
-                continue
-            comm = _bounded_text(event.get("comm"), MAX_COMM_BYTES) or "process"
-            executable = _bounded_text(event.get("filename"), MAX_EXECUTABLE_BYTES) or None
-            current = active.get(pid)
-            if kind == "fork":
-                if current is not None:
-                    # PID reuse without the previous exit means the journal has
-                    # a gap. Preserve both identities and mark the window bad.
-                    finished.append(current)
-                    malformed = True
-                current = _MutableProcess(
-                    process_seq=next_process_seq,
-                    uid=uid,
-                    pid=pid,
-                    tgid=tgid,
-                    ppid=ppid_raw or None,
-                    comm=comm,
-                    executable=executable,
-                    started_ns=mono_ns,
-                    observed_fork=True,
-                )
-                next_process_seq += 1
-                active[pid] = current
-                by_tgid[pid] = current
-            elif kind == "exec":
-                if current is None:
-                    # The observer may have started after fork but before exec;
-                    # exec is still an exact lifecycle event and starts a useful
-                    # (conservative) observed span.
-                    current = _MutableProcess(
-                        process_seq=next_process_seq,
-                        uid=uid,
-                        pid=pid,
-                        tgid=tgid,
-                        ppid=ppid_raw or None,
-                        comm=comm,
-                        executable=executable,
-                        started_ns=mono_ns,
-                    )
-                    next_process_seq += 1
-                    active[pid] = current
-                    by_tgid[pid] = current
-                current.observed_exec = True
-                current.comm = comm
-                current.executable = executable or current.executable
-                current.ppid = ppid_raw or current.ppid
-            else:
-                # An exit with no fork/exec in this slice belongs to a baseline
-                # process (normally the resident CLI), not a process created by
-                # this turn.  It is intentionally not manufactured into a row.
-                if current is None:
-                    continue
-                raw_exit = event.get("exit_code")
-                if isinstance(raw_exit, bool) or not isinstance(raw_exit, int):
-                    raise GuestObserverProtocolError("guest process exit status is not an integer")
-                # Counters before the lifecycle flags: a malformed counter
-                # leaves the row alive and unexited, and the outer handler
-                # marks the slice partial, rather than closing a row whose
-                # consumption was half-read.
-                counters = _exit_counters(event)
-                group_dead = _group_dead(event)
-                current.absorb(counters)
-                current.pending_done.add(pid)
-                current.leader_exited = True
-                current.exit_code = _decoded_exit_code(raw_exit)
-                current.comm = comm or current.comm
-                # A leader whose threads live on has not ended the process;
-                # the row stays open until the group's live count hits zero,
-                # and reports no consumption if that never happens here.
-                if group_dead:
-                    _close_group(current, mono_ns, active, finished)
+            journal.read(raw_line)
         except (GuestObserverProtocolError, UnicodeDecodeError, json.JSONDecodeError):
-            malformed = True
+            journal.malformed = True
             continue
-        if len(finished) + len(active) > MAX_OBSERVED_PROCESSES:
-            malformed = True
+        if journal.processes > MAX_OBSERVED_PROCESSES:
+            journal.malformed = True
             break
-    finished.extend(active.values())
-    finished.sort(key=lambda item: (item.started_ns, item.process_seq))
-    bounded = finished[:MAX_OBSERVED_PROCESSES]
-    if len(finished) > len(bounded):
-        malformed = True
-    return (
-        tuple(_finish_process(item, cursor) for item in bounded),
-        tuple(tool_marks),
-        malformed,
-    )
+    return journal.result()
 
 
 def _is_window_record(raw_line: bytes) -> bool:
@@ -1316,5 +1485,6 @@ __all__ = [
     "add_process_resources",
     "attribute_processes",
     "finish_observation",
+    "parse_drain",
     "parse_snapshot",
 ]

@@ -14,19 +14,24 @@ refuses any mount): the copy travels with the chat when its layer is archived
 or restored, and the host can drop its download without breaking the chat.
 
 The files come from the host's own runtime image through a stopped,
-networkless source container — the same path the Kilo runtime takes — and are
-activated only if every one is root-owned and writable by root alone, so no
-member can change the CLI another member runs.
+networkless source container (``tree_copy``, which the Kilo runtime uses
+too), and are activated only if every one is root-owned and writable by root
+alone, so no member can change the CLI another member runs.
 """
 
 from __future__ import annotations
 
 import secrets
-import subprocess
-from typing import TYPE_CHECKING, BinaryIO, cast
+from typing import TYPE_CHECKING
 
-from cloud_agent_host.runtime_images import discover, image_id, short_id
+from cloud_agent_host.chat_sandbox_exec import install_once
+from cloud_agent_host.runtime_images import (
+    discover,
+    image_id,
+    short_id,
+)
 from cloud_agent_host.sandbox import runtime_bin_dir
+from cloud_agent_host.tree_copy import has_root_marker, staged_tree
 from cloud_agent_shared.errors import SandboxError
 from cloud_agent_shared.runtime_catalog import downloadable_runtimes
 
@@ -89,6 +94,38 @@ def _source_image(manager: ChatSandboxManager, runtime_id: str, version: str) ->
     return builds[0].ref
 
 
+def _marker(manager: ChatSandboxManager, runtime_id: str, version: str) -> str | None:
+    """Where a chat's copy of ``version`` is marked whole; ``None`` for one it needs no copy of."""
+    if runtime_id not in downloadable_runtimes():
+        return None
+    if version in manager.backend.image_menu().get(runtime_id, []):
+        return None
+    return f"{runtime_bin_dir(runtime_id, version).removesuffix('/bin')}/{MARKER}"
+
+
+def ensure_downloaded_runtime_once(
+    manager: ChatSandboxManager, spec: ChatSandboxSpec, runtime_id: str, version: str
+) -> None:
+    """Run :func:`ensure_downloaded_runtime` under the chat's install lock, once per container.
+
+    Its marker names the runtime and version, and once found it holds for
+    the container's life. The activation moves in only a tree that root owns
+    and no one else can write, into a directory of the same kind under the
+    image's root-owned ``/opt/runtimes``, and writes the marker last, as root,
+    mode 0644. No member is ever root, so none can change, move or remove
+    either, and no platform exec replaces a version that has its marker. A
+    container proven since, or never proven, is asked again.
+    """
+    marker = _marker(manager, runtime_id, version)
+    if marker is not None:
+        install_once(
+            manager,
+            spec,
+            marker,
+            lambda: ensure_downloaded_runtime(manager, spec, runtime_id, version),
+        )
+
+
 def ensure_downloaded_runtime(
     manager: ChatSandboxManager, spec: ChatSandboxSpec, runtime_id: str, version: str
 ) -> None:
@@ -96,82 +133,22 @@ def ensure_downloaded_runtime(
 
     The caller serializes this with other trusted runtime preparation.
     """
-    if runtime_id not in downloadable_runtimes():
+    marker = _marker(manager, runtime_id, version)
+    if marker is None:
         return
-    if version in manager.backend.image_menu().get(runtime_id, []):
+    if has_root_marker(manager, spec, marker, version):
         return
-    prefix = runtime_bin_dir(runtime_id, version).removesuffix("/bin")
-    marker = f"{prefix}/{MARKER}"
-    present = manager.exec_capture(
-        spec,
-        [
-            "/bin/sh",
-            "-c",
-            'test "$(stat -c %u:%a "$1")" = 0:644 && test "$(cat "$1")" = "$2"',
-            "sh",
-            marker,
-            version,
-        ],
-        workdir="/",
-        timeout_s=20,
-        user_uid=0,
-        user_gid=0,
-    )
-    if present.returncode == 0:
-        return
-
-    docker = manager.backend.docker_binary
-    current = manager._require(spec)
-    source = manager._run(
-        [
-            docker,
-            "create",
-            "--network",
-            "none",
-            "--entrypoint",
-            "/bin/true",
-            _source_image(manager, runtime_id, version),
-        ],
-        timeout=60,
-    )
-    if source.returncode != 0:
-        raise SandboxError(f"could not read the downloaded {runtime_id} {version}")
-    source_id = source.stdout.strip()
+    prefix = marker.removesuffix(f"/{MARKER}")
     stage = f"/opt/runtimes/{runtime_id}/.install-{secrets.token_hex(8)}"
-    try:
-        made = manager.exec_capture(
-            spec,
-            ["mkdir", "-m", "0755", stage],
-            workdir="/",
-            timeout_s=20,
-            user_uid=0,
-            user_gid=0,
-        )
-        if made.returncode != 0:
-            raise SandboxError(f"could not prepare {runtime_id} {version} in this chat")
-        # Streamed, not buffered: a CLI is a few hundred megabytes. Root
-        # ownership stays in Docker's archive the whole way.
-        reader = subprocess.Popen(
-            [docker, "cp", f"{source_id}:{prefix}", "-"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
-        try:
-            copied = manager._run_bytes(
-                [docker, "cp", "-", f"{current.container_id}:{stage}"],
-                timeout=_COPY_TIMEOUT_S,
-                stdin=cast("BinaryIO", reader.stdout),
-            )
-        finally:
-            if reader.stdout is not None:
-                reader.stdout.close()
-            try:
-                read = reader.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                reader.kill()
-                read = -1
-        if read != 0 or copied.returncode != 0:
-            raise SandboxError(f"could not copy {runtime_id} {version} into this chat")
+    with staged_tree(
+        manager,
+        spec,
+        image=lambda: _source_image(manager, runtime_id, version),
+        source=prefix,
+        stage=stage,
+        what=f"{runtime_id} {version}",
+        copy_timeout_s=_COPY_TIMEOUT_S,
+    ):
         activated = manager.exec_capture(
             spec,
             ["/usr/bin/python3", "-I", "-c", _ACTIVATE, stage, prefix, version, MARKER],
@@ -186,8 +163,3 @@ def ensure_downloaded_runtime(
             raise SandboxError(
                 f"could not activate {runtime_id} {version} in this chat: " + detail.strip()[-300:]
             )
-    finally:
-        manager.exec_capture(
-            spec, ["rm", "-rf", stage], workdir="/", timeout_s=60, user_uid=0, user_gid=0
-        )
-        manager._run([docker, "rm", source_id], timeout=30)

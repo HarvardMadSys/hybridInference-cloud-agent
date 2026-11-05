@@ -7,12 +7,14 @@ import io
 import json
 import tarfile
 import threading
+import time
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, BinaryIO, cast
 
 import pytest
 
+from cloud_agent_host import sandbox_archives
 from cloud_agent_host.chat_sandbox import (
     ChatSandboxInspection,
     ChatSandboxManager,
@@ -20,6 +22,7 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxStatus,
     RetainedChatBackend,
 )
+from cloud_agent_host.sandbox_archive_bundle import SpooledSandboxArchive
 from cloud_agent_host.sandbox_archive_s3 import (
     ArchivePhase,
     SandboxArchiveAlreadyExists,
@@ -27,12 +30,20 @@ from cloud_agent_host.sandbox_archive_s3 import (
     SandboxArchiveS3Config,
     SandboxArchiveS3Uploader,
 )
-from cloud_agent_host.sandbox_archives import SandboxArchiveService
+from cloud_agent_host.sandbox_archives import (
+    INITIAL_ARCHIVE_MARKER_FORMAT_VERSION,
+    CaptureGate,
+    SandboxArchiveService,
+    SandboxInitialArchiveMarker,
+)
 from cloud_agent_host.shared_session_supervisor import SharedMemberManifest
 from cloud_agent_shared.errors import SandboxError
+from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from cloud_agent_host.sandbox_capture_gate import CaptureWaiter
 
 _ACCOUNT = "123456789012"
 _REGION = "us-east-1"
@@ -44,10 +55,13 @@ _PREPARATION_ID = "ajob_initial"
 
 
 def _config() -> SandboxArchiveS3Config:
-    return SandboxArchiveS3Config(
-        region=_REGION,
-        kms_key_arn=_KMS_KEY,
-        expected_bucket_owner=_ACCOUNT,
+    return SandboxArchiveS3Config.from_policy(
+        SandboxArchivePolicy(
+            enabled=True,
+            region=_REGION,
+            kms_key_arn=_KMS_KEY,
+            expected_bucket_owner=_ACCOUNT,
+        )
     )
 
 
@@ -140,6 +154,18 @@ class _Manager:
     ) -> bytes | None:
         assert expected_container_id == self.current.container_id
         return self.marker
+
+    def delete_initial_archive_marker(
+        self,
+        _spec: ChatSandboxSpec,
+        expected_payload: bytes,
+        *,
+        expected_container_id: str,
+    ) -> None:
+        assert expected_container_id == self.current.container_id
+        if self.marker != expected_payload:
+            raise SandboxError("marker changed before deletion")
+        self.marker = None
 
     def write_initial_archive_marker(
         self,
@@ -246,11 +272,38 @@ def _zero_clock() -> float:
     return 0.0
 
 
+class _ContendedSlot(CaptureGate):
+    """The one capture slot, saying when a capture has to wait for it."""
+
+    def __init__(self) -> None:
+        super().__init__(1)
+        self.contended = threading.Event()
+        self.urgent: list[bool] = []
+
+    def acquire(
+        self,
+        blocking: bool = True,
+        timeout: float | None = None,
+        *,
+        urgent: bool = False,
+        spool_bytes: int = 0,
+    ) -> CaptureWaiter | None:
+        self.urgent.append(urgent)
+        slot = super().acquire(blocking=False, urgent=urgent, spool_bytes=spool_bytes)
+        if slot is not None or not blocking:
+            return slot
+        self.contended.set()
+        return super().acquire(
+            blocking=True, timeout=timeout, urgent=urgent, spool_bytes=spool_bytes
+        )
+
+
 def _service(
     manager: _Manager,
     uploader: _Uploader,
     *,
     capture_capacity: int = 1,
+    capture_slots: CaptureGate | None = None,
     spool_budget_bytes: int = 8 * 1024 * 1024 * 1024,
     max_upload_attempts: int = 3,
     retry_delay_s: float = 0,
@@ -264,6 +317,7 @@ def _service(
         uploader=cast("SandboxArchiveS3Uploader", uploader),
         config=uploader.config,
         capture_capacity=capture_capacity,
+        capture_slots=capture_slots,
         spool_budget_bytes=spool_budget_bytes,
         max_upload_attempts=max_upload_attempts,
         retry_delay_s=retry_delay_s,
@@ -360,6 +414,167 @@ def test_initial_capture_is_synchronous_workspace_only_and_returns_safe_receipt(
     assert uploader.bodies[0].closed
 
 
+def test_a_capture_someone_waits_on_asks_for_the_slot_ahead_of_background_work() -> None:
+    """A first prompt's capture is urgent; a stopped chat's final archive is not."""
+    spec = _spec()
+    running = _Manager(spec, running=True)
+    initial_slot = _ContendedSlot()
+    service = _service(running, _Uploader(_config()), capture_slots=initial_slot)
+    service.start()
+    try:
+        service.capture_initial(
+            RetainedChatBackend(running, spec),  # type: ignore[arg-type]
+            expected_container_id=_CONTAINER_ID,
+            preparation_id=_PREPARATION_ID,
+            base_sha=_BASE_SHA,
+            members=_members(),
+        )
+    finally:
+        service.close()
+    stopped = _Manager(spec, running=False)
+    final_slot = _ContendedSlot()
+    service = _service(stopped, _Uploader(_config()), capture_slots=final_slot)
+    service.start()
+    try:
+        service.queue_final(spec, stopped.current, ())
+    finally:
+        service.close()
+
+    assert initial_slot.urgent == [True]
+    assert final_slot.urgent == [False]
+
+
+class _GateHolder(threading.Thread):
+    """One capture holding the gate from when it is admitted until told to finish."""
+
+    def __init__(self, gate: CaptureGate, name: str, *, urgent: bool, order: list[str]) -> None:
+        super().__init__(name=name, daemon=True)
+        self.gate, self.urgent, self.order = gate, urgent, order
+        self.holding = threading.Event()
+        self.finish = threading.Event()
+
+    def run(self) -> None:
+        if self.gate.acquire(timeout=5, urgent=self.urgent):
+            self.order.append(self.name)
+            self.holding.set()
+            self.finish.wait(5)
+            self.gate.release()
+
+
+def _gate_queue_is(gate: CaptureGate, count: int) -> None:
+    deadline = time.monotonic() + 5
+    while len(gate._waiting) != count:
+        assert time.monotonic() < deadline, "the captures never queued"
+        time.sleep(0.001)
+
+
+def _hold_gate(gate: CaptureGate, name: str, *, urgent: bool, order: list[str]) -> _GateHolder:
+    capture = _GateHolder(gate, name, urgent=urgent, order=order)
+    capture.start()
+    return capture
+
+
+def test_an_urgent_capture_goes_first_but_overtakes_a_waiting_one_at_most_twice() -> None:
+    gate = CaptureGate(1)
+    order: list[str] = []
+    assert gate.acquire(timeout=1)
+    final = _hold_gate(gate, "final", urgent=False, order=order)
+    _gate_queue_is(gate, 1)
+    first = _hold_gate(gate, "first", urgent=True, order=order)
+    _gate_queue_is(gate, 2)
+
+    gate.release()
+    assert first.holding.wait(5)
+    second = _hold_gate(gate, "second", urgent=True, order=order)
+    _gate_queue_is(gate, 2)
+    third = _hold_gate(gate, "third", urgent=True, order=order)
+    _gate_queue_is(gate, 3)
+    first.finish.set()
+    assert second.holding.wait(5)
+    second.finish.set()
+    assert final.holding.wait(5), "overtaken twice, the final archive goes next"
+    final.finish.set()
+    assert third.holding.wait(5)
+    third.finish.set()
+    for capture in (final, first, second, third):
+        capture.join(5)
+
+    assert order == ["first", "second", "final", "third"]
+
+
+def test_the_capture_gate_is_a_bounded_semaphore_otherwise() -> None:
+    gate = CaptureGate(1)
+    assert gate.acquire(blocking=False)
+    assert not gate.acquire(blocking=False)
+    assert not gate.acquire(timeout=0.01, urgent=True)
+    assert gate._waiting == [], "a wait that ended leaves nothing queued"
+    gate.release()
+    with pytest.raises(ValueError, match="released too many times"):
+        gate.release()
+    assert gate.acquire(blocking=False, urgent=True)
+
+
+def test_an_urgent_capture_spools_beside_a_background_one_while_both_fit() -> None:
+    gate = CaptureGate(1, spool_budget_bytes=8)
+    final = gate.acquire(blocking=False, spool_bytes=4)
+    assert final is not None
+
+    first = gate.acquire(blocking=False, urgent=True, spool_bytes=4)
+    assert first is not None and first.beside
+    # One urgent place, and the budget is spent: anything more waits as before.
+    assert gate.acquire(blocking=False, urgent=True) is None
+    assert gate.acquire(blocking=False) is None
+
+    gate.release(first)
+    assert gate.acquire(blocking=False, spool_bytes=4) is None, "the shared slot is still held"
+    gate.release(final)
+    assert gate.acquire(blocking=False, spool_bytes=4) is not None
+
+
+@pytest.mark.parametrize(
+    ("budget", "urgent", "beside"),
+    [
+        pytest.param(8, True, True, id="both-fit"),
+        pytest.param(7, True, False, id="the-two-would-not-fit"),
+        pytest.param(8, False, False, id="background-work-never"),
+        pytest.param(0, True, False, id="no-budget-no-place"),
+    ],
+)
+def test_only_an_urgent_capture_whose_worst_case_fits_spools_beside(
+    budget: int, urgent: bool, beside: bool
+) -> None:
+    gate = CaptureGate(1, spool_budget_bytes=budget)
+    assert gate.acquire(blocking=False, spool_bytes=4) is not None
+
+    assert (gate.acquire(blocking=False, urgent=urgent, spool_bytes=4) is not None) is beside
+
+
+def test_a_first_prompt_does_not_wait_for_a_background_capture_that_leaves_room() -> None:
+    """The place beside the shared slot, with the bound the runtime gives every service."""
+    config = _config()
+    gate = CaptureGate(1, spool_budget_bytes=4 * config.max_archive_bytes)
+    background = gate.acquire(blocking=False, spool_bytes=2 * config.max_archive_bytes)
+    assert background is not None, "a stopped chat's final archive is spooling"
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    uploader = _Uploader(config)
+    service = _service(manager, uploader, capture_slots=gate, operation_timeout_s=2)
+    service.start()
+    try:
+        service.capture_initial(
+            RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+            expected_container_id=_CONTAINER_ID,
+            preparation_id=_PREPARATION_ID,
+            base_sha=_BASE_SHA,
+            members=(),
+        )
+    finally:
+        service.close()
+        gate.release(background)
+
+    assert [call["phase"] for call in uploader.calls] == ["initial"]
+
+
 def test_initial_already_exists_is_a_successful_idempotent_result() -> None:
     spec = _spec()
     manager = _Manager(spec, running=True)
@@ -427,6 +642,38 @@ def test_initial_upload_failure_logs_safe_type_and_discards_the_spool(
     assert record.error_type == "RuntimeError"  # type: ignore[attr-defined]
     assert record.exc_info is None
     assert unsafe not in caplog.text
+
+
+def test_a_non_bytes_write_to_the_compressed_bundle_names_the_bundle_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The compressed bundle's writer names what writes to it, not the per-path callback."""
+
+    def writes_text(self: SpooledSandboxArchive, out, **_kwargs: object) -> dict[str, object]:
+        out.write("not bytes")
+        return {}
+
+    monkeypatch.setattr(SpooledSandboxArchive, "write", writes_text)
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    uploader = _Uploader(_config())
+    service = _service(manager, uploader)
+    service.start()
+    try:
+        with pytest.raises(
+            SandboxError, match=r"^sandbox archive bundle builder wrote non-bytes data$"
+        ):
+            service.capture_initial(
+                RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+                expected_container_id=_CONTAINER_ID,
+                preparation_id=_PREPARATION_ID,
+                base_sha=_BASE_SHA,
+                members=(),
+            )
+    finally:
+        service.close()
+
+    assert uploader.calls == []
 
 
 def test_initial_conditional_conflict_has_exactly_three_total_put_attempts(
@@ -728,6 +975,370 @@ def test_transient_initial_head_failure_preserves_marker_and_fails_closed() -> N
     assert manager.marker == marker
 
 
+def _record_write_levels(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Record the gzip level of every bundle the service writes from now on."""
+    levels: list[int] = []
+    write = SpooledSandboxArchive.write
+
+    def recording(
+        self: SpooledSandboxArchive, out: BinaryIO, *, compression_level: int
+    ) -> dict[str, object]:
+        levels.append(compression_level)
+        return write(self, out, compression_level=compression_level)
+
+    monkeypatch.setattr(SpooledSandboxArchive, "write", recording)
+    return levels
+
+
+def _gzip_xfl(payload: bytes) -> int:
+    """RFC 1952 XFL, byte 8: 2 for level 9, 4 for level 1, 0 for the levels between."""
+    return payload[8]
+
+
+def _marked_without_upload(
+    service: SandboxArchiveService,
+    manager: _Manager,
+    spec: ChatSandboxSpec,
+    *,
+    levels: tuple[int, ...] = sandbox_archives.INITIAL_ARCHIVE_COMPRESSION_LEVELS,
+) -> bytes:
+    """Capture on a host writing ``levels``; the upload dies after the marker."""
+    with pytest.MonkeyPatch.context() as host:
+        host.setattr(sandbox_archives, "INITIAL_ARCHIVE_COMPRESSION_LEVELS", levels)
+        with pytest.raises(SystemExit):
+            service.capture_initial(
+                RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+                expected_container_id=_CONTAINER_ID,
+                preparation_id=_PREPARATION_ID,
+                base_sha=_BASE_SHA,
+                members=(),
+            )
+    assert manager.marker is not None
+    return manager.marker
+
+
+def _lost_upload() -> _Uploader:
+    """An uploader whose first upload dies and whose later HEAD finds nothing."""
+    return _Uploader(
+        _config(),
+        outcomes=[SystemExit("upload process died")],
+        exists_outcomes=[False],
+    )
+
+
+def test_the_initial_bundle_is_written_at_gzip_level_1_and_the_final_at_6(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    levels = _record_write_levels(monkeypatch)
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    uploader = _Uploader(_config())
+    service = _service(manager, uploader)
+    service.start()
+    try:
+        service.capture_initial(
+            RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+            expected_container_id=_CONTAINER_ID,
+            preparation_id=_PREPARATION_ID,
+            base_sha=_BASE_SHA,
+            members=(),
+        )
+        manager.current = _inspection(spec, running=False)
+        service.queue_final(spec, manager.current, ())
+    finally:
+        service.close()
+
+    # A first prompt waits for the initial bundle; nothing waits for the final.
+    assert levels == [1, 6]
+    assert [(call["phase"], _gzip_xfl(call["payload"])) for call in uploader.calls] == [
+        ("initial", 4),
+        ("final", 0),
+    ]
+
+
+def test_a_new_marker_keeps_its_format_and_is_rebuilt_at_level_1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    uploader = _lost_upload()
+    service = _service(manager, uploader)
+    service.start()
+    levels = _record_write_levels(monkeypatch)
+    try:
+        marker = _marked_without_upload(service, manager, spec)
+        status = service.probe_initial(
+            RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+            expected_container_id=_CONTAINER_ID,
+            preparation_id=_PREPARATION_ID,
+            members=(),
+        )
+    finally:
+        service.close()
+
+    original, retried = uploader.calls
+    # The capture and then one rebuild, which matched at the first level.
+    assert levels == [1, 1]
+    assert _gzip_xfl(original["payload"]) == 4, "RFC 1952 XFL 4: the fastest level"
+    assert retried["payload"] == original["payload"]
+    assert status["stored"] is True
+    assert manager.marker == marker
+    assert json.loads(marker)["format_version"] == INITIAL_ARCHIVE_MARKER_FORMAT_VERSION == 2
+    assert SandboxInitialArchiveMarker.decode(marker).bundle_sha256 == original["sha256"]
+
+
+def test_a_marker_from_before_level_6_is_still_rebuilt_at_level_9(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hosts before #760 wrote level 9 bundles under this same marker format."""
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    uploader = _lost_upload()
+    service = _service(manager, uploader)
+    service.start()
+    try:
+        marker = _marked_without_upload(service, manager, spec, levels=(9,))
+        levels = _record_write_levels(monkeypatch)
+        status = service.probe_initial(
+            RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+            expected_container_id=_CONTAINER_ID,
+            preparation_id=_PREPARATION_ID,
+            members=(),
+        )
+    finally:
+        service.close()
+
+    original, retried = uploader.calls
+    assert _gzip_xfl(original["payload"]) == 2
+    # One fetch of the frozen workspace, written at 1, at 6 and then at 9.
+    assert levels == [1, 6, 9]
+    assert [call["path"] for call in manager.export_calls] == ["/workspace", "/workspace"]
+    assert retried["payload"] == original["payload"]
+    assert (retried["size"], retried["sha256"]) == (original["size"], original["sha256"])
+    assert {key: status[key] for key in ("enabled", "prepared", "stored", "base_sha")} == {
+        "enabled": True,
+        "prepared": True,
+        "stored": True,
+        "base_sha": _BASE_SHA,
+    }
+    assert manager.marker == marker
+    assert service.status()["phases"]["initial"] == {"pending": 0, "uploaded": 1, "failed": 1}
+
+
+def test_a_bundle_written_at_level_6_before_the_switch_is_rebuilt_here(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Markers from #760 to #1060 name level 6 bundles; a probe still proves them."""
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    uploader = _lost_upload()
+    service = _service(manager, uploader)
+    service.start()
+    try:
+        marker = _marked_without_upload(service, manager, spec, levels=(6,))
+        levels = _record_write_levels(monkeypatch)
+        status = service.probe_initial(
+            RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+            expected_container_id=_CONTAINER_ID,
+            preparation_id=_PREPARATION_ID,
+            members=(),
+        )
+    finally:
+        service.close()
+
+    original, retried = uploader.calls
+    assert _gzip_xfl(original["payload"]) == 0
+    assert levels == [1, 6]
+    assert (retried["size"], retried["sha256"]) == (original["size"], original["sha256"])
+    assert status["stored"] is True
+    assert manager.marker == marker
+
+
+@pytest.mark.parametrize("marker_level", [1, 6, 9])
+def test_a_changed_workspace_fails_the_probe_at_every_level(
+    monkeypatch: pytest.MonkeyPatch, marker_level: int
+) -> None:
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    uploader = _lost_upload()
+    service = _service(manager, uploader)
+    service.start()
+    try:
+        marker = _marked_without_upload(service, manager, spec, levels=(marker_level,))
+        manager.payloads["/workspace"] = b"workspace changed after the marked capture"
+        levels = _record_write_levels(monkeypatch)
+        with pytest.raises(SandboxError, match="no longer matches"):
+            service.probe_initial(
+                RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+                expected_container_id=_CONTAINER_ID,
+                preparation_id=_PREPARATION_ID,
+                members=(),
+            )
+    finally:
+        service.close()
+
+    assert levels == [1, 6, 9]
+    assert manager.marker == marker
+    assert len(uploader.calls) == 1
+    assert [call["path"] for call in manager.export_calls] == ["/workspace", "/workspace"]
+
+
+def test_a_rebuild_too_large_at_one_level_still_tries_the_next(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A level the marker never used can outgrow a ceiling its own bundle fitted under."""
+    ceiling = 64 * 1024
+    config = SandboxArchiveS3Config.from_policy(
+        replace(_config().policy, max_archive_bytes=ceiling, multipart_threshold_bytes=ceiling)
+    )
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    uploader = _Uploader(
+        config,
+        outcomes=[SystemExit("upload process died")],
+        exists_outcomes=[False],
+    )
+    service = _service(manager, uploader)
+    service.start()
+    attempted: list[int] = []
+    write = SpooledSandboxArchive.write
+
+    def level_1_outgrows_the_ceiling(
+        self: SpooledSandboxArchive, out: BinaryIO, *, compression_level: int
+    ) -> dict[str, object]:
+        attempted.append(compression_level)
+        if compression_level == 1:
+            out.write(bytes(ceiling + 1))
+        return write(self, out, compression_level=compression_level)
+
+    try:
+        marker = _marked_without_upload(service, manager, spec, levels=(9,))
+        monkeypatch.setattr(SpooledSandboxArchive, "write", level_1_outgrows_the_ceiling)
+        status = service.probe_initial(
+            RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+            expected_container_id=_CONTAINER_ID,
+            preparation_id=_PREPARATION_ID,
+            members=(),
+        )
+    finally:
+        service.close()
+
+    assert attempted == [1, 6, 9]
+    assert status["stored"] is True
+    assert uploader.calls[1]["payload"] == uploader.calls[0]["payload"]
+    assert manager.marker == marker
+
+
+def test_a_rebuild_failure_other_than_size_is_not_a_level_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    uploader = _lost_upload()
+    service = _service(manager, uploader)
+    service.start()
+    attempted: list[int] = []
+
+    def timed_out(
+        self: SpooledSandboxArchive, out: BinaryIO, *, compression_level: int
+    ) -> dict[str, object]:
+        attempted.append(compression_level)
+        raise SandboxError("sandbox archive operation timed out")
+
+    try:
+        marker = _marked_without_upload(service, manager, spec)
+        monkeypatch.setattr(SpooledSandboxArchive, "write", timed_out)
+        with pytest.raises(SandboxError, match="timed out"):
+            service.probe_initial(
+                RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+                expected_container_id=_CONTAINER_ID,
+                preparation_id=_PREPARATION_ID,
+                members=(),
+            )
+    finally:
+        service.close()
+
+    assert attempted == [1]
+    assert manager.marker == marker
+    assert len(uploader.calls) == 1
+
+
+def test_a_capture_over_the_object_ceiling_still_fails_as_a_sandbox_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Archive failure diagnostics name the exception class, so it must not change."""
+    ceiling = 64 * 1024
+    config = SandboxArchiveS3Config.from_policy(
+        replace(_config().policy, max_archive_bytes=ceiling, multipart_threshold_bytes=ceiling)
+    )
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    uploader = _Uploader(config)
+    service = _service(manager, uploader)
+    service.start()
+
+    def oversized(
+        self: SpooledSandboxArchive, out: BinaryIO, *, compression_level: int
+    ) -> dict[str, object]:
+        out.write(bytes(ceiling + 1))
+        raise AssertionError("the bounded writer accepted an oversized bundle")
+
+    monkeypatch.setattr(SpooledSandboxArchive, "write", oversized)
+    try:
+        with pytest.raises(
+            SandboxError, match=f"exceeds the {ceiling}-byte object limit"
+        ) as caught:
+            service.capture_initial(
+                RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+                expected_container_id=_CONTAINER_ID,
+                preparation_id=_PREPARATION_ID,
+                base_sha=_BASE_SHA,
+                members=(),
+            )
+    finally:
+        service.close()
+
+    assert type(caught.value) is SandboxError
+    assert manager.marker is None
+    assert uploader.calls == []
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"format_version": 1}, "invalid values"),
+        ({"format_version": 3}, "invalid values"),
+        ({"format_version": 3, "compression_level": 6}, "invalid schema"),
+    ],
+)
+def test_the_marker_format_is_unchanged_and_other_versions_are_refused(
+    change: dict[str, object], message: str
+) -> None:
+    """A marker recording its level would be a version this decoder refuses.
+
+    So would every host's before it, which is why the level is not recorded.
+    """
+    marker = SandboxInitialArchiveMarker(
+        namespace_sha256=hashlib.sha256(_NAMESPACE.encode()).hexdigest(),
+        sandbox_id="sandbox-123",
+        generation=7,
+        container_id=_CONTAINER_ID,
+        preparation_id=_PREPARATION_ID,
+        base_sha=_BASE_SHA,
+        policy=_config().as_policy(),
+        bundle_size_bytes=123,
+        bundle_sha256="a" * 64,
+    )
+    payload = marker.encode()
+    value = json.loads(payload)
+    assert value["format_version"] == INITIAL_ARCHIVE_MARKER_FORMAT_VERSION == 2
+    assert SandboxInitialArchiveMarker.decode(payload) == marker
+
+    changed = json.dumps({**value, **change}, sort_keys=True, separators=(",", ":")) + "\n"
+    with pytest.raises(SandboxError, match=message):
+        SandboxInitialArchiveMarker.decode(changed.encode("ascii"))
+
+
 def test_final_capture_requires_the_exact_stopped_container() -> None:
     spec = _spec()
     manager = _Manager(spec, running=True)
@@ -927,7 +1538,8 @@ def test_capture_capacity_blocks_before_copy_instead_of_dropping_a_clean_stop() 
     entered = threading.Event()
     release = threading.Event()
     uploader = _Uploader(_config(), entered=entered, release=release)
-    service = _service(manager, uploader, capture_capacity=1)
+    slot = _ContendedSlot()
+    service = _service(manager, uploader, capture_capacity=1, capture_slots=slot)
     service.start()
     failures: list[BaseException] = []
 
@@ -945,7 +1557,7 @@ def test_capture_capacity_blocks_before_copy_instead_of_dropping_a_clean_stop() 
         second.start()
         # The second capture waits on the semaphore before inspect/export, so
         # only the first final's three roots can have reached Docker.
-        second.join(timeout=0.05)
+        assert slot.contended.wait(timeout=5), "the second final did not wait for the slot"
         assert second.is_alive()
         assert len(manager.export_calls) == 3
         assert service.status()["pending"] == 2
@@ -969,7 +1581,8 @@ def test_close_is_bounded_and_prevents_a_waiter_from_starting_copy() -> None:
     entered = threading.Event()
     release = threading.Event()
     uploader = _Uploader(_config(), entered=entered, release=release)
-    service = _service(manager, uploader, capture_capacity=1)
+    slot = _ContendedSlot()
+    service = _service(manager, uploader, capture_capacity=1, capture_slots=slot)
     service.start()
     failures: list[BaseException] = []
 
@@ -992,9 +1605,13 @@ def test_close_is_bounded_and_prevents_a_waiter_from_starting_copy() -> None:
     try:
         assert entered.wait(timeout=5)
         waiter.start()
-        waiter.join(timeout=0.05)
+        assert slot.contended.wait(timeout=5), "the waiting final did not wait for the slot"
         assert waiter.is_alive()
         closer.start()
+        # Closing stops new work at once, then waits for the work it admitted.
+        deadline = time.monotonic() + 5
+        while service.status()["running"] and time.monotonic() < deadline:
+            time.sleep(0.01)
         closer.join(timeout=0.05)
         assert closer.is_alive()
         assert uploader.close_calls == 0
@@ -1189,3 +1806,50 @@ def test_a_service_without_checkpoints_keeps_its_status_shape() -> None:
     assert set(service.status()["phases"]) == {"initial", "final"}
     with pytest.raises(SandboxError, match="not configured"):
         service.capture_checkpoint(spec, manager.current, _members())
+
+
+def test_a_restored_containers_inherited_baseline_is_not_its_own() -> None:
+    """A checkpoint carries the stopped generation's initial marker into its restore.
+
+    The restored container is a later generation with another id. Probing finds
+    no baseline of its own instead of refusing, and a capture writes its own.
+    """
+    spec = _spec()
+    manager = _Manager(spec, running=True)
+    uploader = _Uploader(_config())
+    service = _service(manager, uploader)
+    service.start()
+    service.capture_initial(
+        RetainedChatBackend(manager, spec),  # type: ignore[arg-type]
+        expected_container_id=_CONTAINER_ID,
+        preparation_id=_PREPARATION_ID,
+        base_sha=_BASE_SHA,
+        members=(),
+    )
+    inherited = manager.marker
+    assert inherited is not None
+    restored = replace(spec, generation=spec.generation + 1)
+    manager.current = replace(
+        _inspection(restored, running=True), container_id="container-restored"
+    )
+
+    probe = service.probe_initial(
+        RetainedChatBackend(manager, restored),  # type: ignore[arg-type]
+        expected_container_id="container-restored",
+        preparation_id=_PREPARATION_ID,
+        members=(),
+    )
+    assert probe == {"enabled": True, "prepared": False, "stored": False}
+
+    service.capture_initial(
+        RetainedChatBackend(manager, restored),  # type: ignore[arg-type]
+        expected_container_id="container-restored",
+        preparation_id=_PREPARATION_ID,
+        base_sha=_BASE_SHA,
+        members=(),
+    )
+    service.close()
+
+    assert manager.marker != inherited
+    marker = SandboxInitialArchiveMarker.decode(manager.marker)
+    assert (marker.generation, marker.container_id) == (8, "container-restored")

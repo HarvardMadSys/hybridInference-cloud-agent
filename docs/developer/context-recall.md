@@ -83,12 +83,17 @@ The pinned Claude 2.1.220 CLI has a reproduced retry-parent-chain defect: a
 delayed `system/api_error` can bypass a successfully retried assistant reply on
 a later resume. When the driver sees `system/api_retry`, it settles the current
 turn, saves the native locator, and gracefully retires the process. The next
-turn resumes that same session in the same container. A successful turn without
-a retry keeps the live process. This handling does not repair transcripts that
-the older behavior already damaged.
+turn resumes that same session in the same container, once the retiring process
+has flushed its history; a retirement that cannot confirm the exit still
+settles the turn, and the next launch reaps the member's slot before it starts.
+A successful turn without a retry keeps the live process. This handling does
+not repair transcripts that the older behavior already damaged.
 
-The sandbox's `http-agent-live-bridge=4` helper pin is required by host
-attestation. Version 4 gates every turn on the current live SSE subscription,
+The sandbox's `http-agent-live-bridge=5` helper pin is required by host
+attestation. Version 5 reads, as each turn starts and from a thread of its
+own, what the turn's first request is sent with, for the Context view; the
+read is dropped rather than waited for when it is slow, large, or would arrive
+after the turn ends. Version 4 gates every turn on the current live SSE subscription,
 and aborts an active native turn if that non-replayable stream is lost. It also
 extends autonomous permission replies for both OpenCode and Kilo to the Task
 child sessions the root turn explicitly reports, retries a failed one-shot
@@ -127,13 +132,13 @@ shared-live membership.
 2. Verify the exact host/API SHA, reverse sandbox manager probe and fresh heartbeat using
    [deployment reliability](deployment-reliability.md). A working model call does
    not prove the intended host revision is serving jobs.
-3. Run the opt-in behavior preflight from the target checkout against the target
-   inference Gateway:
+3. Run the opt-in behavior preflight from the target checkout against the
+   model provider the deployment's owners use, with a test key the tester holds:
 
    ```bash
    CLOUD_AGENT_TEST_API_KEY_FILE=/path/to/test-key \
      uv run python -m deploy.preflight.check_model_context \
-     https://gateway.example.com --repetitions 3
+     https://provider.example.com --repetitions 3
    ```
 
    `CLOUD_AGENT_TEST_PROXY` optionally names an HTTP proxy. The key remains in
@@ -157,7 +162,7 @@ shared-live membership.
    before attributing it to persistence.
 
 The preflight is opt-in and is not automatically run by deployment workflows.
-CI receives no inference key. Repeat it when Gateway model routes, model
+CI receives no inference key. Repeat it when provider model routes, model
 deployment or CLI pins change. Finite samples test the reported failure without
 guaranteeing that a model never makes another incorrect claim.
 

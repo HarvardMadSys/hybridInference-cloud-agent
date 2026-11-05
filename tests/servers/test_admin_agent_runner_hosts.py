@@ -10,7 +10,7 @@ actually opens.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -68,12 +68,12 @@ class FakeHostStore(AllCapabilities):
             "multipart_threshold_bytes": 8 * 1024**2,
             "multipart_part_bytes": 8 * 1024**2,
             "revision": 0,
-            "updated_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(UTC),
         }
         self.audit = _AuditTrail()
 
     def seed(self, host: str, *, active: bool = False, seen_minutes_ago: float = 0.0) -> None:
-        seen = datetime.now(timezone.utc) - timedelta(minutes=seen_minutes_ago)
+        seen = datetime.now(UTC) - timedelta(minutes=seen_minutes_ago)
         self.rows[host] = {
             "host": host,
             "last_worker_id": f"w-{host}",
@@ -97,7 +97,7 @@ class FakeHostStore(AllCapabilities):
             key=lambda row: row["last_seen_at"],
             reverse=True,
         )
-        return rows, self.active_host, dict(self.runtime_versions), datetime.now(timezone.utc)
+        return rows, self.active_host, dict(self.runtime_versions), datetime.now(UTC)
 
     async def set_runtime_version(self, *, runtime: str, version: str | None) -> bool:
         # Mirrors the store: a version no host offers is refused, never stored.
@@ -164,9 +164,8 @@ class FakeHostStore(AllCapabilities):
             return None
         self.archive_settings = {
             **settings,
-            "s3_uri": "s3://freeinference/cloud-agent/sandbox",
             "revision": expected_revision + 1,
-            "updated_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(UTC),
         }
         return {**self.archive_settings, "_changed": True}
 
@@ -404,9 +403,19 @@ async def test_a_version_no_image_holds_is_refused_rather_than_stored(admin_clie
     )
 
     assert response.status_code == 404
-    # The refusal has to say how to make it true, or it is a dead end: the
-    # version has to be built into the image before it can be picked.
-    assert "EXTRA_VERSIONS" in response.json()["detail"]
+    # The refusal has to say how to make it true, or it is a dead end. An
+    # agent Settings can update is downloaded by updating to the version…
+    detail = response.json()["detail"]
+    assert "Update to it from Settings" in detail
+    assert "EXTRA_VERSIONS" not in detail
+    # …and only one it cannot, Kilo, has to be built into the image.
+    kilo = await client.put(
+        "/admin/agent/runtime-versions",
+        json={"runtime": "kilo", "version": "9.9.9"},
+        headers=ADMIN,
+    )
+    assert kilo.status_code == 404
+    assert "EXTRA_VERSIONS" in kilo.json()["detail"]
     assert store.runtime_versions == {}
 
 
@@ -589,7 +598,12 @@ async def test_the_pool_lists_every_setting_an_admin_may_set_with_its_bounds(adm
         "terminal_output_max_mib",
         "terminal_input_max_kib",
         "terminal_max_streams_per_session",
+        "lease_ttl_s",
     }
+    # A lease shorter than one renewal round trip would expire before it renews.
+    assert definitions["lease_ttl_s"]["minimum"] == 41
+    assert definitions["lease_ttl_s"]["maximum"] == 900
+    assert definitions["lease_ttl_s"]["scope"] == "runner"
     assert definitions["source_import_max_mib"] | {"label": None, "description": None} == {
         "key": "source_import_max_mib",
         "env": "AGENT_SOURCE_IMPORT_MAX_MIB",
@@ -744,6 +758,7 @@ async def test_archive_policy_is_read_saved_and_audited_atomically(admin_client)
         "new_revision": 1,
         "old_settings": {
             "enabled": False,
+            "s3_uri": "s3://freeinference/cloud-agent/sandbox",
             "region": "",
             "kms_key_arn": "",
             "expected_bucket_owner": "",
@@ -758,6 +773,7 @@ async def test_archive_policy_is_read_saved_and_audited_atomically(admin_client)
             key: value for key, value in _archive_policy().items() if key != "revision"
         }
         | {
+            "s3_uri": "s3://freeinference/cloud-agent/sandbox",
             "aws_access_key_id": "",
             "aws_secret_access_key_configured": False,
             "checkpoints_enabled": True,
@@ -783,6 +799,43 @@ async def test_archive_policy_is_read_saved_and_audited_atomically(admin_client)
     assert no_op.json()["revision"] == retry.json()["revision"] == 1
     assert future.status_code == 409
     assert len(store.audit) == 1
+
+
+@pytest.mark.asyncio
+async def test_archive_policy_saves_another_bucket_and_keeps_it_when_omitted(admin_client):
+    client, store = admin_client
+    uri = "s3://example-archives/cloud-agent/sandbox"
+
+    saved = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json={**_archive_policy(), "s3_uri": uri},
+        headers=ADMIN,
+    )
+    assert saved.status_code == 200
+    assert saved.json()["s3_uri"] == uri
+    assert store.audit[-1]["details"]["old_settings"]["s3_uri"] == (
+        "s3://freeinference/cloud-agent/sandbox"
+    )
+    assert store.audit[-1]["details"]["new_settings"]["s3_uri"] == uri
+
+    # An editor that does not send the destination keeps it, rather than
+    # moving archives back to the default bucket.
+    kept = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json=_archive_policy(revision=1, max_archive_bytes=1024**3),
+        headers=ADMIN,
+    )
+    assert kept.status_code == 200
+    assert kept.json()["s3_uri"] == uri
+    assert kept.json()["revision"] == 2
+
+    elsewhere = await client.put(
+        "/admin/agent/sandbox-archive-settings",
+        json={**_archive_policy(revision=2), "s3_uri": "s3://example-archives/other-prefix"},
+        headers=ADMIN,
+    )
+    assert elsewhere.status_code == 422
+    assert store.archive_settings["s3_uri"] == uri
 
 
 @pytest.mark.asyncio

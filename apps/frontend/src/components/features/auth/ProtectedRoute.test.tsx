@@ -150,6 +150,55 @@ describe('ProtectedRoute', () => {
     }
   });
 
+  it('shows a signed-out visitor the page it was given instead of sending them to sign in', async () => {
+    // The app's root passes its home page here; every other route passes nothing.
+    vi.mocked(getSessionUser).mockResolvedValue(null);
+    stubLocation('/', '');
+
+    render(
+      <AuthProvider>
+        <ProtectedRoute signedOut={<h1>home page</h1>}>
+          <p>task list</p>
+        </ProtectedRoute>
+      </AuthProvider>,
+    );
+
+    expect(await screen.findByRole('heading', { name: 'home page' })).toBeInTheDocument();
+    expect(screen.queryByText('task list')).not.toBeInTheDocument();
+    expect(assign).not.toHaveBeenCalled();
+  });
+
+  it('gives a signed-in user the app, not the signed-out page', async () => {
+    vi.mocked(getSessionUser).mockResolvedValue({ id: 'u1' });
+
+    render(
+      <AuthProvider>
+        <ProtectedRoute signedOut={<h1>home page</h1>}>
+          <p>task list</p>
+        </ProtectedRoute>
+      </AuthProvider>,
+    );
+
+    expect(await screen.findByText('task list')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'home page' })).not.toBeInTheDocument();
+    expect(assign).not.toHaveBeenCalled();
+  });
+
+  it('still reports an outage rather than showing the signed-out page', async () => {
+    vi.mocked(getSessionUser).mockRejectedValueOnce(new Error('Control plane unavailable'));
+
+    render(
+      <AuthProvider>
+        <ProtectedRoute signedOut={<h1>home page</h1>}>
+          <p>task list</p>
+        </ProtectedRoute>
+      </AuthProvider>,
+    );
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('cannot confirm your access');
+    expect(screen.queryByRole('heading', { name: 'home page' })).not.toBeInTheDocument();
+  });
+
   it('renders the app for a signed-in user and redirects nobody', async () => {
     vi.mocked(getSessionUser).mockResolvedValue({
       id: 'u1',

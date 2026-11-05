@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi import FastAPI, Request
@@ -118,7 +118,7 @@ async def test_a_stale_or_refused_approval_never_dispatches(
     elif change == "policy":
         waiting_store.bindings[0]["policy_revision"] += 1
     else:
-        waiting_store.created_invocations[0]["expires_at"] = datetime.now(timezone.utc) - timedelta(
+        waiting_store.created_invocations[0]["expires_at"] = datetime.now(UTC) - timedelta(
             seconds=1
         )
     response = await asyncio.wait_for(task, timeout=3)

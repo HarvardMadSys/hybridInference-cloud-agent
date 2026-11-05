@@ -310,6 +310,42 @@ def test_an_overlong_launch_error_is_trimmed_to_what_the_control_plane_accepts(m
     assert bodies[2]["launch_error"] is None, "an unreported reason must stay unreported"
 
 
+def test_the_host_speaks_only_the_sandbox_manager_names(credential_file, monkeypatch, capsys):
+    """It reports sandbox_manager_url, and heeds sandbox_manager_error alone.
+
+    The control plane's dated broker_url alias waits only on hosts that do not.
+    """
+    bodies: list[dict[str, Any]] = []
+    answers = iter(
+        [
+            {"host": "h1", "credential": "hc_secret", "status": "enrolling", "broker_error": "x"},
+            {"status": "online", "broker_error": "x"},
+            {"status": "online", "sandbox_manager_error": "unreachable from here"},
+        ]
+    )
+
+    def record(url, body, bearer=""):
+        bodies.append(body)
+        return next(answers)
+
+    monkeypatch.setattr(enrollment, "_post", record)
+    identity = enrollment.register(
+        base_url="http://cp", host="h1", enroll_token="t", sandbox_manager_url="http://sm:8092"
+    )
+    enrollment.heartbeat(
+        base_url="http://cp", identity=identity, sandbox_manager_url="http://sm:8092"
+    )
+    unheeded = capsys.readouterr().err
+    enrollment.heartbeat(
+        base_url="http://cp", identity=identity, sandbox_manager_url="http://sm:8092"
+    )
+
+    assert [body["sandbox_manager_url"] for body in bodies] == ["http://sm:8092"] * 3
+    assert not any("broker_url" in body for body in bodies)
+    assert "sandbox manager address" not in unheeded
+    assert "unreachable from here" in capsys.readouterr().err
+
+
 def test_a_registration_without_a_status_claims_nothing_yet(credential_file, monkeypatch) -> None:
     """An older control plane must not talk this runner into the pool."""
     monkeypatch.setenv(enrollment.ENV_ENROLL_TOKEN, "enroll-once")
@@ -978,7 +1014,7 @@ def test_each_beat_reports_downloads_and_hands_on_the_targets(monkeypatch) -> No
         {"claude-code": {"version": "2.1.300", "state": "ready", "progress": 100}},
     ]
     target = {"runtime": "claude-code", "version": "2.1.300", "before": "x", "nonce": "n"}
-    handed: list[list[dict]] = []
+    handed: list[list[dict] | None] = []
     bodies: list[dict] = []
     beat = enrollment.HostHeartbeat(
         base_url="http://cp",
@@ -1006,5 +1042,6 @@ def test_each_beat_reports_downloads_and_hands_on_the_targets(monkeypatch) -> No
 
     assert [body["runtime_versions_available"] for body in bodies] == menus
     assert [body["runtime_downloads"] for body in bodies] == reports
-    # Only the first answer had targets; the second leaves downloads as they are.
-    assert handed == [[target]]
+    # Only the first answer had targets. The second is handed on as ``None``:
+    # downloads stay as they are, and nothing is removed on its word.
+    assert handed == [[target], None]

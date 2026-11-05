@@ -78,8 +78,8 @@ safe. Follow [retained Docker storage](operations.md#retained-docker-storage-on-
 1. Record current deployment markers, placement, host status, container
    inventory and encryption-key version identifiers. Schedule a maintenance
    window and prevent new admissions and admin configuration changes. Drain
-   hosts and wait for active attempts and publications to finish; record which
-   hosts were already draining or disabled so their state is preserved.
+   hosts and wait for active attempts to finish; record which hosts were
+   already draining or disabled so their state is preserved.
 2. Stop the main API and MCP listener after draining. This also stops compute
    reconciliation and background writers. Stop retained sandbox containers and
    each host stack, then stop `docker.socket`, Docker and containerd before
@@ -123,9 +123,10 @@ native-session restore.
 2. Verify the selected set's hashes and decryption material. Restore into an
    isolated database first, using compatible Postgres and the selected release.
    Restore the matching configuration/root keys before starting a listener.
-   Follow [identity binding](minimal-identity.md) and the existing
-   [database recovery procedures](operations.md#preserving-an-old-chain-database)
-   for historical schema chains. Do not improvise an Alembic downgrade.
+   A restored database must be bound to the account system; a Gateway-era one
+   is refused and stays an archive
+   ([old databases](operations.md#preserving-an-old-chain-database)). Do not
+   improvise an Alembic downgrade.
 3. Restore the complete stopped host state with a compatible Docker/storage
    driver and the correct mounts. Check mount availability before starting
    Docker. Retain the matching enrollment credential, namespace, and container
@@ -144,7 +145,8 @@ native-session restore.
    restored database. Keep external ingress closed while completing activation
    and checking the restored system. Verify sign-in, file access,
    retained continuation, separate Fork context, a queued turn, cancellation,
-   publication, and a host restart with disposable test conversations. Reopen
+   a pull request the agent opens, and a host restart with disposable test
+   conversations. Reopen
    production admissions only after these checks and external health/queue
    monitoring pass.
 

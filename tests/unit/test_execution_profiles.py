@@ -7,14 +7,14 @@ from cloud_agent.execution_profiles import (
     shared_sandbox_claim_attested,
 )
 from cloud_agent.schemas import WorkerClaimAttestation
-from cloud_agent_host.shared_protocol import (
+from cloud_agent_shared.shared_protocol import (
+    FORK_HELPER,
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
     SHARED_SANDBOX_RUNTIME_PINS,
     shared_deployment_capability,
 )
-from cloud_agent_shared.shared_protocol import FORK_HELPER
 
 TARGET = "target-sha"
 

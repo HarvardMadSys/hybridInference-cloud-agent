@@ -20,12 +20,13 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
-from cloud_agent.api.admin_compute import CredentialSafeRoute, get_compute_commands
+from cloud_agent.api._compute_route_policy import ComputeSensitiveRoute
+from cloud_agent.api.admin_compute import get_compute_commands
 
 if TYPE_CHECKING:
     from cloud_agent.application.compute_resources import ComputeCommands
 
-router = APIRouter(prefix="/v1/compute", route_class=CredentialSafeRoute)
+router = APIRouter(prefix="/v1/compute", route_class=ComputeSensitiveRoute)
 
 
 class NodeRegistrationRequest(BaseModel):

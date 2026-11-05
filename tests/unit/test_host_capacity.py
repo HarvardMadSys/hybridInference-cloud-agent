@@ -21,15 +21,8 @@ from typing import Any
 import pytest
 
 from cloud_agent_host import host_capacity
-from cloud_agent_host.chat_sandbox import (
-    CHAT_NAMESPACE_LABEL,
-    CHAT_SANDBOX_ID_LABEL,
-    CHAT_SANDBOX_LABEL,
-)
+from cloud_agent_host.chat_sandbox import CHAT_SANDBOX_LABEL
 from cloud_agent_host.host_capacity import (
-    CHAT_NAMESPACE_LABEL as MIRRORED_NAMESPACE_LABEL,
-    CHAT_SANDBOX_ID_LABEL as MIRRORED_SANDBOX_ID_LABEL,
-    CHAT_SANDBOX_LABEL as MIRRORED_SANDBOX_LABEL,
     CPU_MISSING_COUNTER_RESET,
     CPU_MISSING_INVALID_SAMPLE,
     CPU_MISSING_SOURCE_UNAVAILABLE,
@@ -171,23 +164,6 @@ def healthy_files(**counters: int) -> dict[str, str]:
         "stat": stat_text(**counters),
         "meminfo": meminfo_text(),
     }
-
-
-# ── The four labels the collector mirrors ─────────────────────────────
-
-
-def test_the_mirrored_labels_match_the_sandbox_module() -> None:
-    """The collector cannot import the sandbox stack, so the copy is checked.
-
-    ``cloud_agent/capacity_protocol.py`` imports this module from the control
-    plane, which must not drag in egress, container backends and guest
-    observers just to read a CPU percentage. The constants are therefore
-    duplicated — and a rename on one side would silently make every container
-    foreign, which reads as an idle host rather than as a bug.
-    """
-    assert MIRRORED_SANDBOX_LABEL == CHAT_SANDBOX_LABEL
-    assert MIRRORED_NAMESPACE_LABEL == CHAT_NAMESPACE_LABEL
-    assert MIRRORED_SANDBOX_ID_LABEL == CHAT_SANDBOX_ID_LABEL
 
 
 # ── Parsing ───────────────────────────────────────────────────────────

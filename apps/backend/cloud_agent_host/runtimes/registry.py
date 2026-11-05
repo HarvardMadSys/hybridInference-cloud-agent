@@ -27,36 +27,6 @@ def registered_runtimes() -> list[str]:
     return sorted(_REGISTRY)
 
 
-def runtimes_supporting_mcp() -> list[str]:
-    """Runtime ids that can be given MCP servers safely.
-
-    Used by the composer and by job creation, so a job never reaches a sandbox
-    having been promised tools its harness will not load.
-    """
-    return sorted(
-        name for name, runtime_cls in _REGISTRY.items() if runtime_cls().capabilities().mcp
-    )
-
-
-def runtime_reasoning_efforts() -> dict[str, list[str]]:
-    """Effort levels each registered runtime can express, in its own words.
-
-    A runtime that cannot express one is absent rather than empty-listed, so
-    the composer reaches "no control here" the same way whether the runtime
-    cannot say it or the platform is talking to something too old to answer.
-
-    Used by the composer and by job creation, so a turn is never created
-    carrying a depth its harness has no flag for — the MCP argument applied to
-    the other thing a runtime either can or cannot do.
-    """
-    efforts: dict[str, list[str]] = {}
-    for name, runtime_cls in _REGISTRY.items():
-        declared = runtime_cls().capabilities().reasoning_efforts
-        if declared:
-            efforts[name] = list(declared)
-    return efforts
-
-
 def get_runtime(name: str) -> AgentRuntime:
     """Return one of the five live-session runtime adapters.
 

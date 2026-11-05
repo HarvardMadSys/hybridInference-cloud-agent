@@ -8,14 +8,17 @@ import socket
 import threading
 import time
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
 import httpx
 import pytest
+from pydantic import ValidationError
+from tests.support.owners import connection_access, residency_connection
 
+from cloud_agent.schemas import WorkerSandboxAbandonRequest
 from cloud_agent_host import control_plane_client, runner as runner_mod
 from cloud_agent_host.chat_sandbox import ChatSandboxSpec
 from cloud_agent_host.runner import ClaimedJob, LeaseLost
@@ -23,6 +26,7 @@ from cloud_agent_host.runtimes import ClaudeCodeRuntime, get_runtime
 from cloud_agent_host.sandbox import ContainerBackend, ProcessBackend, SandboxError
 from cloud_agent_host.session_supervisor_client import SessionSupervisorError
 from cloud_agent_shared import operation_profiling
+from cloud_agent_shared.environment import BoundEnvironment
 
 
 @pytest.fixture(autouse=True)
@@ -43,13 +47,13 @@ _JOB = ClaimedJob(
     runtime="claude-code",
     model="model",
     worker_token="ajt.a.b",
-    sandbox_token="grant",
     thread_id="athr_1",
     runtime_version=runner_mod.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
+    model_connection=connection_access("claude-code"),
 )
 
 
-def _stamp() -> dict:
+def _stamp(**_: object) -> dict:
     return {
         "sandbox_image_digest": "sha256:shared-image",
         "runtime_versions": dict(runner_mod.SHARED_SANDBOX_RUNTIME_PINS),
@@ -65,70 +69,6 @@ def _configure_host(monkeypatch) -> None:
     monkeypatch.setenv("AGENT_SHARED_RESIDENT_CAPACITY", "8")
     monkeypatch.setenv("AGENT_SANDBOX_MANAGER_URL", "http://sandbox_manager:8092")
     monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "sandbox-manager-token")
-
-
-def test_shared_live_is_the_only_capability_without_feature_switches(monkeypatch):
-    _configure_host(monkeypatch)
-    # Old rollout variables are deliberately inert when stale values remain in
-    # a deployment's .env after the cutover.
-    monkeypatch.setenv("AGENT_RESTARTABLE_SANDBOX", "0")
-    monkeypatch.setenv("AGENT_SHARED_LIVE_SANDBOX", "0")
-    monkeypatch.setenv("AGENT_RESTARTABLE_RUNTIMES", "claude-code")
-
-    assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), _stamp()) == [
-        "shared-sandbox-v1",
-        "native-fork-at-anchor-v1",
-        "goal_report_v1",
-        "mid-turn-input-v1:claude-code",
-        "mid-turn-input-v1:codex",
-        "sandbox-archive-settings-v1",
-        "sandbox-checkpoints-v1",
-        "sandbox-restore-v1",
-    ]
-
-
-def test_exact_deployment_capability_requires_the_completed_marker(monkeypatch, tmp_path):
-    _configure_host(monkeypatch)
-    monkeypatch.setenv("AGENT_DEPLOYMENT_SHA", "target-sha")
-    ready_file = tmp_path / "shared-live-ready"
-    monkeypatch.setenv("AGENT_SHARED_LIVE_READY_FILE", str(ready_file))
-
-    ready_file.write_text("pending:target-sha\n")
-    assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), _stamp()) == [
-        "shared-sandbox-v1",
-        "native-fork-at-anchor-v1",
-        "goal_report_v1",
-        "mid-turn-input-v1:claude-code",
-        "mid-turn-input-v1:codex",
-        "sandbox-archive-settings-v1",
-        "sandbox-checkpoints-v1",
-        "sandbox-restore-v1",
-    ]
-
-    ready_file.write_text("different-sha\n")
-    assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), _stamp()) == [
-        "shared-sandbox-v1",
-        "native-fork-at-anchor-v1",
-        "goal_report_v1",
-        "mid-turn-input-v1:claude-code",
-        "mid-turn-input-v1:codex",
-        "sandbox-archive-settings-v1",
-        "sandbox-checkpoints-v1",
-        "sandbox-restore-v1",
-    ]
-
-    ready_file.write_text("target-sha\n")
-    assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), _stamp()) == [
-        "shared-sandbox-v1",
-        "native-fork-at-anchor-v1",
-        "goal_report_v1",
-        "mid-turn-input-v1:claude-code",
-        "mid-turn-input-v1:codex",
-        "sandbox-archive-settings-v1",
-        "sandbox-checkpoints-v1",
-        "sandbox-restore-v1",
-        "shared-sandbox-deployment:target-sha",
-    ]
 
 
 def test_pending_deployment_heartbeats_but_does_not_poll(monkeypatch, tmp_path):
@@ -154,8 +94,8 @@ def test_pending_deployment_heartbeats_but_does_not_poll(monkeypatch, tmp_path):
         ("AGENT_HOST_SLOTS", "1"),
         ("AGENT_HOST_SLOTS", "nope"),
         ("AGENT_HOST_SLOTS", "129"),
-        ("AGENT_SHARED_RESIDENT_CAPACITY", "1"),
-        ("AGENT_SHARED_RESIDENT_CAPACITY", "129"),
+        # A bad local AGENT_SHARED_RESIDENT_CAPACITY no longer withholds them:
+        # test_host_late_settings.py pins the default it falls back to.
     ],
 )
 def test_shared_live_attestation_rejects_an_incomplete_host(monkeypatch, name, value):
@@ -179,27 +119,20 @@ def test_shared_live_attestation_requires_every_pinned_runtime_and_helper(monkey
     assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), stamp) == []
 
 
-def test_a_claim_names_protocol_v2_for_a_control_plane_older_than_this_release(monkeypatch):
-    """Hosts roll out before the API, so a replacement runner polls the old one.
-
-    That control plane refuses every claim without the image's shared-sandbox
-    protocol, which this image no longer labels. The runner states the v2 its
-    image would have declared, and only once its own checks have passed.
-    """
+def test_a_claim_without_the_fork_helper_attests_no_shared_capability(monkeypatch):
+    """The capabilities are stated only once the image's own checks have passed."""
     _configure_host(monkeypatch)
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(backend, "version_stamp", _stamp)
-    assert runner_mod._claim_attestation(backend)["shared_sandbox_protocol"] == "v2"
+    assert runner_mod._claim_attestation(backend)["runner_capabilities"]
 
-    def without_fork_helper() -> dict:
+    def without_fork_helper(**_: object) -> dict:
         stamp = _stamp()
         del stamp["helper_versions"]["claude-session-fork"]
         return stamp
 
     monkeypatch.setattr(backend, "version_stamp", without_fork_helper)
-    refused = runner_mod._claim_attestation(backend)
-    assert refused["runner_capabilities"] == []
-    assert "shared_sandbox_protocol" not in refused
+    assert runner_mod._claim_attestation(backend)["runner_capabilities"] == []
 
 
 def test_shared_live_attestation_refuses_a_non_container_backend(monkeypatch):
@@ -457,11 +390,10 @@ def test_first_turn_requires_a_native_session_locator():
         )
 
 
-def test_run_once_dispatches_only_to_shared_live(monkeypatch):
+def test_a_claimed_turn_dispatches_only_to_shared_live(monkeypatch):
     _configure_host(monkeypatch)
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(backend, "version_stamp", _stamp)
-    claim_calls: list[dict] = []
     dispatched: list[dict] = []
 
     class Control:
@@ -483,11 +415,6 @@ def test_run_once_dispatches_only_to_shared_live(monkeypatch):
         def stop(self):
             pass
 
-    def claim(**kwargs):
-        claim_calls.append(kwargs)
-        return _JOB
-
-    monkeypatch.setattr(runner_mod, "claim", claim)
     monkeypatch.setattr(runner_mod, "ControlPlane", lambda *_args, **_kwargs: Control())
     monkeypatch.setattr(runner_mod, "Heartbeater", Heart)
     monkeypatch.setattr(
@@ -497,48 +424,16 @@ def test_run_once_dispatches_only_to_shared_live(monkeypatch):
     )
 
     assert (
-        runner_mod.run_once(
+        runner_mod.run_turn(
+            _JOB,
             base_url="http://control",
-            gateway_url="http://gateway",
-            host_credential="host-credential",
             worker_id="runner-1",
             backend=backend,
             host="host-a",
         )
         == 0
     )
-    assert claim_calls[0]["attestation"]["runner_capabilities"] == [
-        "shared-sandbox-v1",
-        "native-fork-at-anchor-v1",
-        "goal_report_v1",
-        "mid-turn-input-v1:claude-code",
-        "mid-turn-input-v1:codex",
-        "sandbox-archive-settings-v1",
-        "sandbox-checkpoints-v1",
-        "sandbox-restore-v1",
-        "environment-v1",
-        "environment-inference-v1",
-        "environment-snapshot-v1",
-        "ssh-access-v1",
-    ]
     assert dispatched[0]["job"] is _JOB
-    assert dispatched[0]["gateway_base_url"] == "http://gateway"
-
-
-def test_run_once_empty_queue_is_clean(monkeypatch):
-    backend = ContainerBackend(image="img")
-    monkeypatch.setattr(backend, "version_stamp", _stamp)
-    monkeypatch.setattr(runner_mod, "claim", lambda **_kwargs: None)
-    assert (
-        runner_mod.run_once(
-            base_url="http://control",
-            host_credential="host-credential",
-            worker_id="runner-1",
-            backend=backend,
-            host="host-a",
-        )
-        == 0
-    )
 
 
 @pytest.mark.parametrize(
@@ -551,9 +446,7 @@ def test_preparation_error_outside_shared_handler_finishes_before_stopping_heart
     """Post-claim setup errors must not leave a running lease with no heartbeater."""
     _configure_host(monkeypatch)
     backend = ContainerBackend(image="img")
-    # The first inspection builds claim attestation; the second is post-claim.
-    monkeypatch.setattr(backend, "version_stamp", Mock(side_effect=[_stamp(), error]))
-    monkeypatch.setattr(runner_mod, "claim", Mock(return_value=_JOB))
+    monkeypatch.setattr(backend, "version_stamp", Mock(side_effect=error))
     control = Mock()
     heart = Mock()
     order = []
@@ -568,9 +461,9 @@ def test_preparation_error_outside_shared_handler_finishes_before_stopping_heart
     monkeypatch.setattr(runner_mod, "ControlPlane", Mock(return_value=control))
     monkeypatch.setattr(runner_mod, "Heartbeater", Mock(return_value=heart))
 
-    code = runner_mod.run_once(
+    code = runner_mod.run_turn(
+        _JOB,
         base_url="http://control",
-        host_credential="host-credential",
         worker_id="runner-1",
         backend=backend,
         host="host-a",
@@ -592,19 +485,16 @@ def test_preparation_lease_rejection_does_not_attempt_terminal_write(monkeypatch
     """An already fenced preparation path cannot overwrite a newer owner."""
     _configure_host(monkeypatch)
     backend = ContainerBackend(image="img")
-    monkeypatch.setattr(
-        backend, "version_stamp", Mock(side_effect=[_stamp(), LeaseLost("expired")])
-    )
-    monkeypatch.setattr(runner_mod, "claim", Mock(return_value=_JOB))
+    monkeypatch.setattr(backend, "version_stamp", Mock(side_effect=LeaseLost("expired")))
     control = Mock()
     heart = Mock()
     monkeypatch.setattr(runner_mod, "ControlPlane", Mock(return_value=control))
     monkeypatch.setattr(runner_mod, "Heartbeater", Mock(return_value=heart))
 
     assert (
-        runner_mod.run_once(
+        runner_mod.run_turn(
+            _JOB,
             base_url="http://control",
-            host_credential="host-credential",
             worker_id="runner-1",
             backend=backend,
             host="host-a",
@@ -640,7 +530,6 @@ def test_historical_one_to_one_sandbox_fails_closed():
         heart=SimpleNamespace(),
         backend=backend,
         host="host-a",
-        gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=lambda state, detail=None, **_kwargs: finished.append((state, detail)),
     )
@@ -743,10 +632,12 @@ def _run_shared_boundary_case(
             **(job_changes or {}),
         ),
         control=control,
-        heart=heart or SimpleNamespace(cancel_requested=False, lease_lost=False),
+        heart=heart
+        or SimpleNamespace(
+            cancel_requested=False, lease_lost=False, ttl=runner_mod.DEFAULT_LEASE_TTL_S
+        ),
         backend=backend,
         host="host-a",
-        gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=finish,
         measurement=measurement,
@@ -912,9 +803,10 @@ def test_a_lease_lost_before_admission_admits_nothing(monkeypatch):
 def _probe_then_replace(control, supervisor, *, residency: dict) -> None:
     """The live process refuses the probe, so a residency is established anew."""
     control.establish_shared_residency.return_value = {
-        "credential": "grant-2",
+        "credential": "provider-key-2",
         "generation": 12,
         "model": _JOB.model,
+        **residency_connection("claude-code"),
         **residency,
     }
     answer = supervisor.ensure_shared_resident.side_effect
@@ -929,11 +821,7 @@ def _probe_then_replace(control, supervisor, *, residency: dict) -> None:
 
 @pytest.mark.parametrize(
     ("residency", "opened_with"),
-    [
-        ({"mcp_credential": "amr.residency-12"}, "amr.residency-12"),
-        # A control plane from before residency credentials: this turn's own token.
-        ({}, "ajt.turn-token"),
-    ],
+    [({"mcp_credential": "amr.residency-12"}, "amr.residency-12")],
 )
 def test_a_live_probe_carries_no_mcp_credential_and_a_new_process_gets_one(
     monkeypatch, residency, opened_with
@@ -948,7 +836,7 @@ def test_a_live_probe_carries_no_mcp_credential_and_a_new_process_gets_one(
         configure=lambda control, supervisor, _finish: _probe_then_replace(
             control, supervisor, residency=residency
         ),
-        job_changes={"mcp_bindings": [":platform:memory"], "mcp_token": "ajt.turn-token"},
+        job_changes={"mcp_bindings": [":platform:memory"]},
     )
 
     assert result == 0
@@ -958,7 +846,7 @@ def test_a_live_probe_carries_no_mcp_credential_and_a_new_process_gets_one(
         "",
         None,
     )
-    assert (opened.mcp_credential, opened.credential) == (opened_with, "grant-2")
+    assert (opened.mcp_credential, opened.credential) == (opened_with, "provider-key-2")
     assert opened.residency_generation == 12
 
 
@@ -972,7 +860,7 @@ def test_a_turn_without_mcp_opens_its_process_with_no_mcp_credential(monkeypatch
         configure=lambda control, supervisor, _finish: _probe_then_replace(
             control, supervisor, residency={"mcp_credential": "amr.residency-12"}
         ),
-        job_changes={"mcp_bindings": [], "mcp_token": "ajt.turn-token"},
+        job_changes={"mcp_bindings": []},
     )
 
     opened = supervisor.ensure_shared_resident.mock_calls[-1].kwargs["launch"]
@@ -1033,6 +921,72 @@ def test_a_stop_during_the_resident_start_is_honoured_right_before_admission(mon
     control.admit_chat_turn.assert_not_called()
     assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is False
     assert finish.call_args.args[:2] == ("cancelled", "cancelled by owner")
+
+
+def test_a_stop_during_environment_preparation_cancels_the_turn(monkeypatch):
+    """Stop kills the running setup script, and the preparation it ends is no failure.
+
+    Nothing has reached the CLI, so the Stop is honoured as anywhere else before
+    admission. The killed script used to fail the turn instead.
+    """
+    heart = SimpleNamespace(cancel_requested=False, lease_lost=False)
+
+    def configure(_control, supervisor, _finish):
+        def prepare(*_args, cancelled, **_kwargs):
+            heart.cancel_requested = True
+            assert cancelled()
+            raise SessionSupervisorError(
+                500,
+                "sandbox manager failed unexpectedly (SandboxError in POST "
+                "/workspaces/{workspace_id}/environment/prepare)",
+            )
+
+        supervisor.prepare_environment.side_effect = prepare
+
+    result, control, supervisor, finish = _run_shared_boundary_case(
+        monkeypatch,
+        0,
+        None,
+        "claude-code",
+        configure=configure,
+        heart=heart,
+        job_changes={"environment": BoundEnvironment(binding_id="b", setup_script="npm ci")},
+    )
+
+    assert result == 0
+    supervisor.prepare_environment.assert_called_once()
+    control.admit_chat_turn.assert_not_called()
+    assert supervisor.abandon_shared.call_args.kwargs["lost"] is False
+    assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is False
+    finish.assert_called_once()
+    assert finish.call_args.args[:2] == ("cancelled", "cancelled by owner")
+    assert all(call.args[0].event_type != "error" for call in control.append_event.call_args_list)
+
+
+def test_a_follow_up_claimed_while_its_sandbox_is_busy_goes_back_to_the_queue(monkeypatch):
+    """A snapshot capture can outlast the sandbox manager's wait; nothing has run yet.
+
+    The control plane claims a follow-up whatever the group is doing, and the
+    turn used to fail with the capture's busy refusal although the chat was
+    untouched and the next try would have run it.
+    """
+
+    def configure(_control, supervisor, _finish):
+        supervisor.acquire_shared.side_effect = SessionSupervisorError(
+            409, "shared workspace snapshot is in progress"
+        )
+
+    result, control, supervisor, finish = _run_shared_boundary_case(
+        monkeypatch, 0, None, "claude-code", configure=configure
+    )
+
+    assert result == 0
+    control.release_turn.assert_called_once_with("sandbox_busy")
+    finish.assert_not_called()
+    assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is False
+    supervisor.abandon_shared.assert_not_called()
+    control.admit_chat_turn.assert_not_called()
+    assert all(call.args[0].event_type != "error" for call in control.append_event.call_args_list)
 
 
 @pytest.mark.parametrize(
@@ -1315,6 +1269,99 @@ def test_control_lease_rejection_never_retries_settlement(monkeypatch):
     request.assert_called_once()
 
 
+@pytest.mark.parametrize("stage", ["admission", "control_settle"])
+def test_a_control_plane_restart_at_the_turn_boundary_does_not_fail_the_turn(monkeypatch, stage):
+    """Admission and settlement wait out the control plane being recreated.
+
+    A deploy refuses connections for longer than the three quick tries these
+    receipts had. A settlement given up on that way failed a turn the sandbox
+    had already settled, and the control plane marked the conversation lost.
+    """
+    clock = _virtual_clock(monkeypatch)
+    tries: list[float] = []
+
+    def receipt(**_kwargs):
+        tries.append(clock.now)
+        if clock.now < 30:
+            raise httpx.ConnectError("connection refused")
+        return {}
+
+    def configure(control, _supervisor, _finish):
+        if stage == "admission":
+            control.admit_chat_turn.side_effect = receipt
+        else:
+            control.settle_chat_sandbox.side_effect = receipt
+
+    result, control, supervisor, finish = _run_shared_boundary_case(
+        monkeypatch, 0, None, "claude-code", configure=configure
+    )
+
+    assert result == 0
+    assert [call.args[0] for call in finish.call_args_list] == ["succeeded"]
+    supervisor.settle_shared.assert_called_once()
+    supervisor.abandon_shared.assert_not_called()
+    control.abandon_chat_sandbox.assert_not_called()
+    assert len(tries) > 3 and tries[-1] >= 30
+    assert max(clock.sleeps) == control_plane_client._EVENT_RETRY_MAX_DELAY_S
+
+
+@pytest.mark.parametrize("lease_runs_out", [True, False])
+def test_a_settlement_the_control_plane_never_records_keeps_the_sandboxs_session(
+    monkeypatch, lease_runs_out
+):
+    """Once the sandbox has settled the turn, its session is never torn down as lost.
+
+    The receipt is retried while the lease holds: the control plane marks an
+    admitted turn it never saw settle lost however the attempt ends, so only
+    the receipt landing keeps the conversation. Once the heartbeat has lost the
+    lease, nothing more is sent. A control plane that keeps renewing the lease
+    while it fails the receipt is given up on after one lease, and the failure
+    reported.
+    """
+    clock = _virtual_clock(monkeypatch)
+    tries: list[float] = []
+    ttl = runner_mod.DEFAULT_LEASE_TTL_S
+
+    class Heart:
+        cancel_requested = False
+
+        def __init__(self) -> None:
+            self.ttl = ttl
+
+        @property
+        def lease_lost(self) -> bool:
+            # The heartbeat's last renewal was 30 seconds before the turn ended.
+            return lease_runs_out and clock.now >= ttl - 30
+
+    def receipt(**_kwargs):
+        tries.append(clock.now)
+        if lease_runs_out:
+            raise httpx.ConnectError("connection refused")
+        raise _status_error(503)
+
+    def configure(control, _supervisor, _finish):
+        control.settle_chat_sandbox.side_effect = receipt
+
+    result, control, supervisor, finish = _run_shared_boundary_case(
+        monkeypatch, 0, None, "claude-code", configure=configure, heart=Heart()
+    )
+
+    supervisor.settle_shared.assert_called_once()
+    supervisor.abandon_shared.assert_not_called()
+    assert max(clock.sleeps) == control_plane_client._EVENT_RETRY_MAX_DELAY_S
+    if lease_runs_out:
+        assert result == 3
+        assert tries[-1] >= ttl - 30
+        finish.assert_not_called()
+        assert all(
+            call.args[0].event_type != "error" for call in control.append_event.call_args_list
+        )
+    else:
+        assert result == 2
+        assert ttl - control_plane_client._EVENT_RETRY_MAX_DELAY_S <= tries[-1] <= ttl
+        assert [call.args[0] for call in finish.call_args_list] == ["failed"]
+
+
 @pytest.mark.parametrize(
     ("code", "frame", "preserved"),
     [
@@ -1434,11 +1481,16 @@ class _Supervisor:
 
 
 class _Control:
+    lease_lost = False
+
     def __init__(self):
         self.events = []
 
     def append_event(self, event):
         self.events.append((event.event_type, event.payload))
+
+    def flush(self):
+        """Each event is recorded as it is appended, so nothing is left to deliver."""
 
 
 @pytest.mark.parametrize(
@@ -1510,6 +1562,38 @@ def _run_frames(frames):
         heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         lease_token="lease",
         timeout_s=30,
+    )
+
+
+def test_tool_output_cut_inside_a_surrogate_pair_does_not_end_the_turn():
+    """A sandbox manager forwards the half pair its CLI's JSON escaped.
+
+    UTF-8 has no surrogates, so the event could be neither measured nor sent:
+    the error escaped the stream, and the turn failed with its context lost.
+    """
+    control = _Control()
+
+    code, *_ = runner_mod._stream_shared_agent_turn(
+        supervisor=_Supervisor(
+            [
+                {
+                    "kind": "event",
+                    "event_type": "tool_result",
+                    "payload": {"tool_use_id": "toolu_1", "content": "build ok \ud83d"},
+                },
+                {"kind": "result", "status": "completed", "exit_code": 0},
+            ]
+        ),
+        job=_JOB,
+        control=control,
+        heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
+        lease_token="lease",
+        timeout_s=30,
+    )
+
+    assert code == 0
+    assert ("tool_result", {"tool_use_id": "toolu_1", "content": "build ok \ufffd"}) in (
+        control.events
     )
 
 
@@ -1670,117 +1754,65 @@ def _event_control(endpoint) -> runner_mod.ControlPlane:
     return control
 
 
-def test_a_control_plane_restart_mid_turn_does_not_lose_the_turn(monkeypatch):
-    """Events refused for ten seconds are replayed; the turn still settles.
+def test_a_turn_can_end_with_a_reason_its_sandbox_printed():
+    """The reason quotes the CLI: a NUL, or half the surrogate pair it cut.
 
-    A deploy recreates the control-plane container, so connections are refused
-    for a while. That used to escape the stream after one immediate retry, and
-    the turn failed with its native context marked lost.
+    httpx writes JSON as UTF-8, which has no surrogates, so that finish never
+    left the host, and the control plane stores no NUL.
     """
-    clock = _virtual_clock(monkeypatch)
-    delivered: list[dict[str, Any]] = []
-    refused: list[int] = []
+    sent: list[dict[str, Any]] = []
+
+    def endpoint(request):
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "state": "failed"})
+
+    control = _event_control(endpoint)
+    try:
+        control.finish("failed", "agent reported an error: cat\x00/proc/self/cmdline \ud83d")
+    finally:
+        control.close()
+
+    assert sent == [
+        {
+            "state": "failed",
+            "detail": "agent reported an error: cat\ufffd/proc/self/cmdline \ufffd",
+            "base_sha": None,
+        }
+    ]
+
+
+def test_a_long_reason_still_releases_the_activation():
+    """The control plane holds an abandon's reason to 1000 characters.
+
+    The runner sent its failure as it was, so an unexpected error with a long
+    message had its release refused, and with it the immediate end of the
+    member's residency and grant.
+    """
+    released: list[dict[str, Any]] = []
 
     def endpoint(request):
         body = json.loads(request.content)
-        if body["event_type"] == "assistant" and clock.now < 10:
-            refused.append(body["event_seq"])
-            raise httpx.ConnectError("connection refused", request=request)
-        delivered.append(body)
-        return httpx.Response(201, json={"event_id": len(delivered)})
+        try:
+            WorkerSandboxAbandonRequest.model_validate(body)
+        except ValidationError:
+            return httpx.Response(422, json={"detail": "refused"})
+        released.append(body)
+        return httpx.Response(200, json={})
 
-    events = _event_control(endpoint)
-    stream = _Stream(
-        [
-            {"kind": "event", "event_type": "assistant", "payload": {"text": "hi"}},
-            {"kind": "result", "status": "completed", "exit_code": 0},
-        ]
-    )
-    stream_turn = runner_mod._stream_shared_agent_turn
-
-    def configure(control, supervisor, _finish):
-        control.append_event.side_effect = events.append_event
-        supervisor.start_shared_turn.return_value = stream
-        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream_turn)
-
+    reason = "shared live chat failed unexpectedly: " + "docker: no space left on device. " * 40
+    control = _event_control(endpoint)
     try:
-        result, control, supervisor, finish = _run_shared_boundary_case(
-            monkeypatch, 0, None, "claude-code", configure=configure
+        control.abandon_chat_sandbox(
+            sandbox_generation=1,
+            activation_generation=3,
+            lost=True,
+            detail=reason,
+            idle_timeout_seconds=1800,
         )
     finally:
-        events.close()
-
-    assert result == 0
-    finish.assert_called_once()
-    assert finish.call_args.args[0] == "succeeded"
-    supervisor.abandon_shared.assert_not_called()
-    control.abandon_chat_sandbox.assert_not_called()
-    assert len(refused) > 2 and clock.now >= 10
-    # Every try carried the same number, so the owner's stream holds it once.
-    assistant = [body for body in delivered if body["event_type"] == "assistant"]
-    assert [body["event_seq"] for body in assistant] == [refused[0]]
-    assert set(refused) == {refused[0]}
-    assert [body["event_seq"] for body in delivered] == list(range(1, len(delivered) + 1))
-
-
-@pytest.mark.parametrize(
-    ("answers", "outcome", "requests"),
-    [
-        ([httpx.ConnectError("refused"), 502, 503, 201], None, 4),
-        ([408, 429, 500, 504, 201], None, 5),
-        ([409], LeaseLost, 1),
-        ([422], httpx.HTTPStatusError, 1),
-        ([401], httpx.HTTPStatusError, 1),
-    ],
-)
-def test_event_upload_retries_only_what_a_replay_can_fix(monkeypatch, answers, outcome, requests):
-    """Transient refusals back off and replay; a fence or a rejection does not."""
-    clock = _virtual_clock(monkeypatch)
-    pending = list(answers)
-    bodies: list[dict[str, Any]] = []
-
-    def endpoint(request):
-        bodies.append(json.loads(request.content))
-        answer = pending.pop(0)
-        if isinstance(answer, Exception):
-            raise answer
-        return httpx.Response(answer, json={"event_id": 1})
-
-    control = _event_control(endpoint)
-    event = runner_mod.NormalizedEvent("assistant", {"text": "hi"})
-    try:
-        if outcome is None:
-            control.append_event(event)
-        else:
-            with pytest.raises(outcome):
-                control.append_event(event)
-    finally:
         control.close()
 
-    assert len(bodies) == requests
-    assert all(body["event_seq"] == 1 for body in bodies)
-    assert clock.sleeps == ([1.0, 2.0, 4.0, 8.0][: requests - 1] if outcome is None else [])
-
-
-def test_event_upload_gives_up_inside_its_budget(monkeypatch):
-    """A control plane that never answers ends the turn before the lease would."""
-    clock = _virtual_clock(monkeypatch)
-    tries: list[float] = []
-
-    def endpoint(request):
-        tries.append(clock.now)
-        raise httpx.ConnectError("refused", request=request)
-
-    control = _event_control(endpoint)
-    try:
-        with pytest.raises(httpx.ConnectError):
-            control.append_event(runner_mod.NormalizedEvent("assistant", {"text": "hi"}))
-    finally:
-        control.close()
-
-    assert len(tries) > 2
-    assert max(clock.sleeps) == control_plane_client._EVENT_RETRY_MAX_DELAY_S
-    assert clock.now <= control_plane_client._EVENT_RETRY_BUDGET_S < runner_mod.DEFAULT_LEASE_TTL_S
+    assert [body["detail"] for body in released] == [reason[:1000]]
 
 
 def test_run_forever_refuses_to_enroll_a_host_that_cannot_attest(monkeypatch):
@@ -1790,24 +1822,10 @@ def test_run_forever_refuses_to_enroll_a_host_that_cannot_attest(monkeypatch):
     with pytest.raises(RuntimeError, match="cannot attest shared-sandbox-v1"):
         runner_mod.run_forever(
             base_url="http://control",
-            gateway_url="http://gateway",
             worker_id="runner",
             backend=backend,
             host="host-a",
         )
-
-
-def test_runner_source_contains_no_push_or_legacy_execution_path():
-    source = __import__("inspect").getsource(runner_mod)
-    assert "git push" not in source
-    # The executor count is the supervisor's pool, sized from the control
-    # plane; a replica count read from the environment would be a second,
-    # stale answer to the same question.
-    assert "AGENT_RUNNER_REPLICAS" not in source
-    assert "def _run_retained_attempt" not in source
-    assert "def run_agent" not in source
-    assert "AGENT_RESTARTABLE_SANDBOX" not in source
-    assert "AGENT_SHARED_LIVE_SANDBOX" not in source
 
 
 def _enable_profiling(monkeypatch, **overrides):
@@ -1815,7 +1833,7 @@ def _enable_profiling(monkeypatch, **overrides):
     run = {
         "run_id": "runner-stages-1",
         "operations": [runner_mod.STARTUP_OPERATION],
-        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
+        "expires_at": (datetime.now(UTC) + timedelta(minutes=30)).isoformat(),
         "max_operations": 5,
     }
     run.update(overrides)
@@ -2133,7 +2151,9 @@ def test_stream_helper_closes_the_measurement_at_the_prompt_handoff(monkeypatch,
     code, _tail, _errors, _frame, _reported = runner_mod._stream_shared_agent_turn(
         supervisor=SimpleNamespace(start_shared_turn=start_shared_turn),
         job=_JOB,
-        control=SimpleNamespace(append_event=lambda _event: None),
+        control=SimpleNamespace(
+            append_event=lambda _event: None, flush=lambda: None, lease_lost=False
+        ),
         heart=SimpleNamespace(lease_lost=False, cancel_requested=False),
         lease_token="lease",
         timeout_s=5,
@@ -2183,120 +2203,6 @@ def test_a_failed_prompt_handoff_is_a_failure_stage_with_a_duration(monkeypatch,
     assert record["stages"][-1]["stage"] == "prompt_dispatch"
     assert record["stages"][-1]["duration_us"] >= 0
     assert record["measurement_complete"] is True
-
-
-def test_a_poll_with_no_job_does_not_spend_the_only_profiling_slot(monkeypatch, tmp_path):
-    """An empty claim must leave a one-operation experiment able to measure.
-
-    Regression: the budget was consumed when the measurement was created, so a
-    single empty claim -- the normal result of polling an idle queue -- used up
-    a `max_operations: 1` run before it measured anything.
-    """
-    _configure_host(monkeypatch)
-    sink = tmp_path / "startup.jsonl"
-    _enable_profiling(monkeypatch, max_operations=1)
-    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
-
-    class Control:
-        job_id = ""
-
-        def __getattr__(self, _name):
-            return lambda *_args, **_kwargs: None
-
-    class Heart:
-        lease_lost = False
-        cancel_requested = False
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-    backend = ContainerBackend(image="img")
-    monkeypatch.setattr(backend, "version_stamp", _stamp)
-    monkeypatch.setattr(runner_mod, "ControlPlane", lambda *_args, **_kwargs: Control())
-    monkeypatch.setattr(runner_mod, "Heartbeater", lambda *_args, **_kwargs: Heart())
-    monkeypatch.setattr(
-        runner_mod,
-        "_run_shared_live_attempt",
-        lambda **kwargs: 0 if kwargs["measurement"] is not None else 7,
-    )
-    monkeypatch.setattr(runner_mod, "claim", lambda **_kwargs: None)
-
-    assert (
-        runner_mod.run_once(
-            base_url="http://control",
-            host_credential="host-credential",
-            worker_id="runner-1",
-            backend=backend,
-            host="host-a",
-        )
-        == 0
-    )
-
-    # The queue is empty, so the run still has its only slot for a real attempt.
-    monkeypatch.setattr(runner_mod, "claim", lambda **_kwargs: _JOB)
-    assert (
-        runner_mod.run_once(
-            base_url="http://control",
-            host_credential="host-credential",
-            worker_id="runner-1",
-            backend=backend,
-            host="host-a",
-        )
-        == 0
-    ), "the claimed attempt was not measured"
-
-
-def test_profiling_off_adds_no_record_and_no_measurement(monkeypatch, caplog, tmp_path):
-    """The default deployment must not pay for, or emit, any of this."""
-    _configure_host(monkeypatch)
-    sink = tmp_path / "startup.jsonl"
-    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
-    operation_profiling.reset_cache()
-    caplog.set_level(logging.INFO, logger=operation_profiling.__name__)
-    dispatched: list[dict] = []
-
-    class Control:
-        job_id = ""
-
-        def __getattr__(self, _name):
-            return lambda *_args, **_kwargs: None
-
-    class Heart:
-        lease_lost = False
-        cancel_requested = False
-
-        def start(self):
-            return None
-
-        def stop(self):
-            return None
-
-    monkeypatch.setattr(runner_mod, "claim", lambda **_kwargs: _JOB)
-    monkeypatch.setattr(runner_mod, "ControlPlane", lambda *_args, **_kwargs: Control())
-    monkeypatch.setattr(runner_mod, "Heartbeater", lambda *_args, **_kwargs: Heart())
-    monkeypatch.setattr(
-        runner_mod, "_run_shared_live_attempt", lambda **kwargs: dispatched.append(kwargs) or 0
-    )
-
-    backend = ContainerBackend(image="img")
-    monkeypatch.setattr(backend, "version_stamp", _stamp)
-    assert (
-        runner_mod.run_once(
-            base_url="http://control",
-            host_credential="host-credential",
-            worker_id="runner-1",
-            backend=backend,
-            host="host-a",
-        )
-        == 0
-    )
-
-    assert dispatched[0]["measurement"] is None
-    assert not sink.exists()
-    assert "agent_operation_profile" not in caplog.text
 
 
 def test_the_runner_hands_its_selection_to_the_sandbox_manager(monkeypatch, tmp_path):
@@ -2502,9 +2408,10 @@ def test_a_retried_call_is_a_second_fragment_that_must_also_answer(monkeypatch, 
         monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
         # The retry rotates the residency grant before reopening the process.
         control.establish_shared_residency.return_value = {
-            "credential": "grant-2",
+            "credential": "provider-key-2",
             "generation": 2,
             "model": _JOB.model,
+            **residency_connection("claude-code"),
         }
 
         def flaky(_thread_id, **kwargs):

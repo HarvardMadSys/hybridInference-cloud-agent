@@ -10,6 +10,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cloud_agent.storage._sql.goals import PAUSE_GOALS_SQL
+from cloud_agent.storage._sql.rows import job_row_to_dict
+from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
 
 if TYPE_CHECKING:
     from typing import Any
@@ -20,9 +22,9 @@ if TYPE_CHECKING:
 # thread's values under the job's keys.
 JOB_OWN_COLUMNS = (
     "id, thread_id, parent_job_id, turn_no, native_turn_no, user_id, base_sha, task_prompt, "
-    "runtime, model, reasoning_effort, state, "
+    "runtime, model, model_connection_id, reasoning_effort, state, "
     "cancel_requested, terminal_resume_pending, current_attempt_id, "
-    "published_pr_url, published_commit_sha, detail, "
+    "published_pr_url, detail, "
     "metadata, skills, attachments, fork_source_job_id, "
     "turn_source, goal_round, goal_round_kind, goal_revision, goal_id, "
     "goal_report_parse, goal_report_outcome, goal_report_reason, goal_report_detail, "
@@ -104,10 +106,26 @@ QUALIFIED_JOB_SUMMARY_COLUMNS = QUALIFIED_JOB_COLUMNS.replace("j.skills", SKILL_
 JOB_SUMMARY_SELECT = JOB_SELECT.replace(QUALIFIED_JOB_COLUMNS, QUALIFIED_JOB_SUMMARY_COLUMNS)
 
 
+async def read_job(conn: Any, job_id: str) -> dict[str, Any] | None:
+    """Read one job on a caller-owned connection."""
+    row = await conn.fetchrow(
+        f"""
+        SELECT {QUALIFIED_JOB_SUMMARY_COLUMNS}, t.title, t.title_source, t.pinned_at,
+               t.archived_at, t.deleted_at, to_jsonb(s) AS thread_sandbox
+        FROM agent_jobs j
+        LEFT JOIN agent_threads t ON t.id = j.thread_id
+        LEFT JOIN {THREAD_SANDBOX_SOURCE} ON s.thread_id = j.thread_id
+        WHERE j.id = $1
+        """,
+        job_id,
+    )
+    return job_row_to_dict(row) if row else None
+
+
 # Permanent deletion hides a chat from its owner whether or not it is archived
 # or working: the delete itself cancels its turns and revokes its residency.
-# Only a Fork or a publication in flight still refuses, because each is a
-# short shared-workspace transition another chat may depend on. The retained
+# Only a Fork in flight still refuses, because it is a short
+# shared-workspace transition another chat may depend on. The retained
 # rows keep lineage and billing attributable.
 SESSION_DELETE_BLOCK_SQL = """
 CASE
@@ -119,16 +137,59 @@ CASE
         SELECT 1 FROM agent_thread_sandbox_memberships m
         WHERE m.thread_id = t.session_id AND m.fork_operation_id IS NOT NULL
     ) THEN 'fork_in_progress'
-    WHEN EXISTS (
-        SELECT 1 FROM agent_sandbox_snapshots snapshot
-        JOIN agent_snapshot_jobs included ON included.snapshot_id = snapshot.id
-        JOIN agent_jobs included_job ON included_job.id = included.job_id
-        WHERE included_job.thread_id = t.session_id
-          AND snapshot.state IN ('pending', 'capturing', 'captured', 'publishing')
-    ) THEN 'publication_pending'
     ELSE NULL
 END
 """
+
+
+def first_unfinished_turn(job: str) -> str:
+    """SQL: whether turn ``job`` is the oldest unfinished turn of its conversation.
+
+    A conversation runs its turns one at a time and in order, so no later turn
+    is handed out while an earlier one is queued or running.
+    """
+    return f"""NOT EXISTS (
+        SELECT 1 FROM agent_jobs earlier
+        WHERE earlier.thread_id = {job}.thread_id
+          AND earlier.turn_no < {job}.turn_no
+          AND earlier.state IN ('queued', 'running')
+    )"""
+
+
+def runnable_queued_turn(job: str, *, including_backoff: bool = False) -> str:
+    """SQL: whether queued turn ``job`` may be handed to a Host, whichever asks, in parentheses.
+
+    It is not cancelled, is out of claim backoff, and is the oldest unfinished
+    turn of its conversation (:func:`first_unfinished_turn`). An automatic
+    goal round must also still be for the goal its conversation is working
+    toward: a round queued for an objective the owner has since replaced,
+    paused or cleared must never run, since it would work toward a withdrawn
+    objective and pay for it. The sweep in ``sweep_goal_scheduling`` cancels
+    what this skips, so nothing waits forever. Each caller adds what it needs
+    of the Host and of the turn's group.
+
+    ``including_backoff`` also admits a turn in claim backoff. No claim hands
+    it out until the backoff ends, but it is still waiting for a Host.
+    """
+    backoff = (
+        ""
+        if including_backoff
+        else f" AND ({job}.claim_retry_at IS NULL OR {job}.claim_retry_at <= clock_timestamp())"
+    )
+    return f"""({job}.state = 'queued' AND {job}.cancel_requested = FALSE{backoff}
+      AND {first_unfinished_turn(job)}
+      AND (
+            {job}.turn_source <> 'goal'
+            OR EXISTS (
+                SELECT 1 FROM agent_threads goal_thread
+                WHERE goal_thread.id = {job}.thread_id
+                  AND goal_thread.deleted_at IS NULL
+                  AND goal_thread.goal_state = 'active'
+                  AND goal_thread.goal_id = {job}.goal_id
+                  AND goal_thread.goal_revision = {job}.goal_revision
+            )
+      )
+    )"""
 
 
 async def fail_unrunnable_follow_ups(
@@ -160,7 +221,7 @@ async def fail_unrunnable_follow_ups(
 #:
 #: Every terminal path that can pause a goal writes ``agent_threads`` while it
 #: already holds ``agent_jobs`` rows, and the writers on the other side --
-#: ``pause_goal``, ``clear_goal``, ``set_goal`` and ``_create_follow_up`` --
+#: ``pause_goal``, ``clear_goal``, ``set_goal`` and ``insert_follow_up`` --
 #: take the conversation first and then reach those same job rows. Two orders
 #: over the same two rows is a cycle, and it is not theoretical: cancelling a
 #: queued automatic round while its goal is being paused reproduces
@@ -198,36 +259,46 @@ async def fail_discontinuous_follow_ups(
 ) -> None:
     """Fail queued descendants that cannot preserve native continuity.
 
-    A successful parent requires a usable shared membership. The whole
-    pending tail fails if that membership is missing or lost. Terminal
+    A chat whose sandbox is lost -- its own context, or the group it shares,
+    as when the group's restores run out -- is never claimed again, whatever
+    the turn before it did. A successful parent also requires a shared
+    membership: the whole pending tail fails if it has none. Terminal
     writers scope this cleanup to the parent they just changed; the
-    periodic sweep handles legacy rows. Scheduling itself only checks
-    eligibility and never needs to promote a queued turn.
+    periodic sweep handles the rest, such as the turns a Fork sibling had
+    queued when a writer for another chat lost their group. Scheduling
+    itself only checks eligibility and never needs to promote a queued turn.
     """
     invalid = await conn.fetch(
         """
             WITH invalid_threads AS (
-                SELECT DISTINCT child.thread_id
+                SELECT DISTINCT child.thread_id,
+                       COALESCE(
+                           m.context_status = 'lost' OR m.native_state = 'lost'
+                           OR g.state IN ('stopped_dirty', 'lost'),
+                           FALSE
+                       ) AS sandbox_lost
                 FROM agent_jobs child
                 JOIN agent_jobs parent ON parent.id = child.parent_job_id
+                LEFT JOIN agent_thread_sandbox_memberships m ON m.thread_id = child.thread_id
+                LEFT JOIN agent_sandboxes g ON g.id = m.sandbox_id
                 WHERE child.state = 'queued'
-                  AND parent.state = 'succeeded'
                   AND ($1::text IS NULL OR parent.id = $1)
-                  AND NOT EXISTS (
-                        SELECT 1
-                        FROM agent_thread_sandbox_memberships m
-                        JOIN agent_sandboxes g ON g.id = m.sandbox_id
-                        WHERE m.thread_id = child.thread_id
-                          AND m.context_status <> 'lost'
-                          AND m.native_state <> 'lost'
-                          AND g.state NOT IN ('stopped_dirty', 'lost')
+                  AND (
+                        m.context_status = 'lost' OR m.native_state = 'lost'
+                        OR g.state IN ('stopped_dirty', 'lost')
+                        OR (parent.state = 'succeeded' AND m.thread_id IS NULL)
                   )
             )
             UPDATE agent_jobs pending
             SET state = 'failed',
-                detail = 'not run because its parent predates retained-session continuity',
+                detail = CASE
+                    WHEN invalid.sandbox_lost
+                        THEN 'not run because the chat''s sandbox was lost'
+                    ELSE 'not run because its parent predates retained-session continuity'
+                END,
                 updated_at = NOW()
-            WHERE pending.thread_id IN (SELECT thread_id FROM invalid_threads)
+            FROM invalid_threads invalid
+            WHERE pending.thread_id = invalid.thread_id
               AND pending.state = 'queued'
             RETURNING pending.thread_id
             """,

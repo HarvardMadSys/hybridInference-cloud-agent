@@ -2,13 +2,13 @@
 
 Lifted out of the follow-up route unchanged, so that every writer of a person's
 next turn asks the same questions in the same order: is the session still open,
-is its native context still there, is the harness the thread's own, does the
-model resolve, is the effort offered for that model, may this owner still reach
+is its native context still there, is the harness the thread's own, can its
+model connection run it, may this owner still reach
 the repository, and do the skills and uploads it names still exist. A second
 copy of these rules would be a second place for them to drift.
 
-What comes back is the resolved form a store writes — canonical model id,
-validated effort, skill snapshots and the upload manifest — and never the raw
+What comes back is the resolved form a store writes (model and connection,
+validated effort, skill snapshots and the upload manifest) and never the raw
 request. Refusals are the route's own ``HTTPException``s, with the same types and
 messages the route has always answered with.
 """
@@ -21,11 +21,11 @@ from typing import TYPE_CHECKING, Any, Protocol
 from fastapi import HTTPException
 
 from cloud_agent.application.job_admission import (
-    _require_offered_effort,
-    _require_registered_runtime,
-    _require_resolvable_model,
-    _resolve_attachment_selection,
-    _resolve_skill_selection,
+    model_connection_required,
+    require_connection_source,
+    require_registered_runtime,
+    resolve_attachment_selection,
+    resolve_skill_selection,
 )
 from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.schemas import RESET_REASONING_EFFORT
@@ -33,6 +33,7 @@ from cloud_agent.schemas import RESET_REASONING_EFFORT
 if TYPE_CHECKING:
     from cloud_agent.ports import (
         AttachmentRepository,
+        ModelConnectionRepository,
         SkillRepository,
         SourceControlRepository as SourceControlPort,
     )
@@ -44,6 +45,7 @@ class _FollowUpStorage(Protocol):
     attachments: AttachmentRepository
     skills: SkillRepository
     source_control: SourceControlPort
+    model_connections: ModelConnectionRepository
 
 
 @dataclass(frozen=True)
@@ -51,6 +53,9 @@ class PreparedFollowUp:
     """A follow-up's per-turn choices, resolved and checked.
 
     ``model`` is the canonical id, or ``None`` to inherit the parent's.
+    ``model_connection_id`` is its source when ``model`` is set -- the owner's
+    connection -- and means nothing otherwise: an
+    inherited model keeps the parent's source.
     ``reasoning_effort`` is the validated level, or ``None`` to inherit;
     ``reset_reasoning_effort`` is the one way to clear an inherited level back
     to Auto. ``skills`` is ``None`` to inherit the previous turn's snapshots.
@@ -62,6 +67,7 @@ class PreparedFollowUp:
     reset_reasoning_effort: bool
     skills: list[dict[str, Any]] | None
     attachments: list[dict[str, Any]] | None
+    model_connection_id: str | None = None
 
 
 def sandbox_context_lost_error() -> HTTPException:
@@ -93,6 +99,39 @@ def session_archived_error() -> HTTPException:
     )
 
 
+async def _prepare_model(
+    parent: dict[str, Any],
+    *,
+    user: dict[str, Any],
+    model: str | None,
+    model_connection_id: str | None,
+    reasoning_effort: str | None,
+    store: _FollowUpStorage,
+) -> tuple[str | None, str | None, bool]:
+    """The model, the validated effort and whether it resets, for one turn.
+
+    A model is named with its connection. An inherited model keeps its
+    connection, and an inherited connection is checked again now, so a message
+    is refused while its author is looking rather than failing later. A turn
+    with no connection at all (one following a turn from before connections
+    were the only source) is refused: there is nothing else to run it on.
+    """
+    reset_effort = reasoning_effort == RESET_REASONING_EFFORT
+    requested_effort = None if reset_effort else reasoning_effort
+    connection_id = model_connection_id if model else parent.get("model_connection_id")
+    if not connection_id:
+        raise model_connection_required()
+    await require_connection_source(
+        store.model_connections,
+        user_id=user["user_id"],
+        connection_id=str(connection_id),
+        runtime=parent["runtime"],
+        model=model or parent["model"],
+        reasoning_effort=requested_effort,
+    )
+    return model, None, reset_effort
+
+
 async def prepare_follow_up(
     parent: dict[str, Any],
     *,
@@ -104,7 +143,7 @@ async def prepare_follow_up(
     reasoning_effort: str | None,
     store: _FollowUpStorage,
     app_credentials: Any | None,
-    gateway: Any,
+    model_connection_id: str | None = None,
 ) -> PreparedFollowUp:
     """Check a follow-up against the turn it would follow, and resolve it.
 
@@ -127,7 +166,7 @@ async def prepare_follow_up(
     # working; a *different* runtime is refused rather than silently starting
     # a turn the thread's memory cannot follow.
     if runtime is not None:
-        _require_registered_runtime(runtime)
+        require_registered_runtime(runtime)
         if runtime != parent["runtime"]:
             raise HTTPException(
                 status_code=400,
@@ -142,27 +181,14 @@ async def prepare_follow_up(
                     }
                 },
             )
-    # A follow-up may switch models; the switched-to model gets the same
-    # fail-fast as a fresh job. An omitted model inherits the parent's, which
-    # was validated when it was chosen.
-    canonical = None
-    if model:
-        canonical = await _require_resolvable_model(model, gateway=gateway, user=user)
-    # Effort is per turn, like the model, and inherits when omitted. Unlike the
-    # model it needs a way *back*: null already means "no override, inherit", so
-    # clearing an inherited effort takes the explicit reset sentinel. Validated
-    # against the model this turn will run — which may be the switched-to one,
-    # and a pair that was offered last turn need not be offered this one.
-    effort: str | None = None
-    reset_effort = reasoning_effort == RESET_REASONING_EFFORT
-    if reasoning_effort is not None and not reset_effort:
-        effort = await _require_offered_effort(
-            reasoning_effort,
-            runtime=parent["runtime"],
-            model=canonical or parent["model"],
-            gateway=gateway,
-            user=user,
-        )
+    canonical, effort, reset_effort = await _prepare_model(
+        parent,
+        user=user,
+        model=model,
+        model_connection_id=model_connection_id,
+        reasoning_effort=reasoning_effort,
+        store=store,
+    )
     try:
         # A temporary workspace has no repository to lose access to.
         if parent["repo"] is not None:
@@ -181,17 +207,17 @@ async def prepare_follow_up(
     # work. The runner receives only usable servers, resolved when it claims
     # this turn, and Tools retains each connection's diagnosis.
     skills = (
-        await _resolve_skill_selection(store.skills, user_id=user["user_id"], skill_ids=skill_ids)
+        await resolve_skill_selection(store.skills, user_id=user["user_id"], skill_ids=skill_ids)
         if skill_ids is not None
         else None
     )
-    attachments = await _resolve_attachment_selection(
+    attachments = await resolve_attachment_selection(
         store.attachments, user_id=user["user_id"], attachment_ids=attachment_ids
     )
     return PreparedFollowUp(
-        # Canonical, or the parent's when omitted — never the alias the caller
-        # typed, which the gateway's grant would not match.
+        # The model named with its connection, or the parent's when omitted.
         model=canonical if model else None,
+        model_connection_id=model_connection_id if model else None,
         reasoning_effort=effort,
         reset_reasoning_effort=reset_effort,
         skills=skills,

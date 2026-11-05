@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent_host import incident_relay
 from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_shared.host_settings import admin_values
 from cloud_agent_shared.sandbox_archive_settings import (
@@ -150,6 +151,10 @@ class HostIdentity:
     #: ``None`` means that control plane does not send them, which leaves
     #: downloads as they are rather than treating every target as withdrawn.
     runtime_downloads: list[dict[str, Any]] | None = None
+    #: The npm registry the control plane says this deployment downloads
+    #: agent versions from ("" for the public registry). ``None`` means that
+    #: control plane does not manage it, so the host keeps its own value.
+    runtime_registry_url: str | None = None
 
 
 def credential_path() -> Path:
@@ -274,7 +279,7 @@ def register(
         {
             "enroll_token": enroll_token,
             "name": host,
-            "broker_url": sandbox_manager_url,
+            "sandbox_manager_url": sandbox_manager_url,
             "slots_total": slots_total,
             "capabilities": capabilities or [],
             "runner_version": runner_version,
@@ -316,7 +321,7 @@ def _warn_sandbox_manager_error(answer: dict[str, Any], host: str) -> None:
     sandbox manager token says so while somebody is still watching, instead of at the
     first terminal request of the first job.
     """
-    error = answer.get("sandbox_manager_error", answer.get("broker_error"))
+    error = answer.get("sandbox_manager_error")
     if not error:
         return
     logger.warning(
@@ -351,7 +356,6 @@ def heartbeat(
     sandbox_image_digest: str | None = None,
     runtime_versions: dict[str, str] | None = None,
     runtime_versions_available: dict[str, list[str]] | None = None,
-    residencies: list[dict[str, Any]] | None = None,
     retained_sandboxes: list[dict[str, Any]] | None = None,
     capacity: dict[str, Any] | None = None,
     profiling: dict[str, Any] | None = None,
@@ -359,6 +363,7 @@ def heartbeat(
     settings_local: dict[str, int | float] | None = None,
     sandbox_archive_settings_applied_revision: int | None = None,
     runtime_downloads: list[dict[str, Any]] | None = None,
+    config_reports: dict[str, str] | None = None,
     on_residencies_lost: Callable[[list[dict[str, Any]]], None] | None = None,
     on_retained_sandboxes_stop: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> HostIdentity:
@@ -401,14 +406,13 @@ def heartbeat(
             "launch_error": (
                 None if launch_error is None else launch_error[:HOST_LAUNCH_ERROR_MAX_CHARS]
             ),
-            "broker_url": sandbox_manager_url,
+            "sandbox_manager_url": sandbox_manager_url,
             "capabilities": capabilities,
             "runner_version": runner_version,
             "sandbox_runtime": sandbox_runtime,
             "sandbox_image_digest": sandbox_image_digest,
             "runtime_versions": runtime_versions,
             "runtime_versions_available": runtime_versions_available,
-            "residencies": residencies,
             "retained_sandboxes": retained_sandboxes,
             "capacity": capacity,
             "profiling": profiling,
@@ -418,6 +422,7 @@ def heartbeat(
                 sandbox_archive_settings_applied_revision
             ),
             "runtime_downloads": runtime_downloads,
+            "config_reports": config_reports,
             "physical_host": os.environ.get("AGENT_PHYSICAL_HOST", "").strip() or None,
         },
         bearer=identity.credential,
@@ -430,6 +435,9 @@ def heartbeat(
         # an exact (thread, generation) match, so a late answer to an old
         # beat cannot end a successor residency.
         on_residencies_lost([item for item in lost if isinstance(item, dict)])
+    # What the beat's ``retained_sandboxes`` carried of sandbox incidents is
+    # forgotten only on this word from the control plane.
+    incident_relay.settle(answer.get("incidents"))
     stop_retained = answer.get("retained_sandboxes_stop")
     if stop_retained and on_retained_sandboxes_stop is not None:
         on_retained_sandboxes_stop([item for item in stop_retained if isinstance(item, dict)])
@@ -474,6 +482,8 @@ def heartbeat(
     identity.runtime_downloads = (
         [item for item in targets if isinstance(item, dict)] if isinstance(targets, list) else None
     )
+    registry = answer.get("runtime_registry_url")
+    identity.runtime_registry_url = registry if isinstance(registry, str) else None
     return identity
 
 
@@ -595,7 +605,6 @@ class HostHeartbeat:
             dict[str, list[str]] | Callable[[], dict[str, list[str]] | None] | None
         ) = None,
         readiness_marker: str | None = None,
-        residency_beats: Callable[[], list[dict[str, Any]]] | None = None,
         retained_sandbox_beats: Callable[[], list[dict[str, Any]] | None] | None = None,
         capacity_beats: Callable[[], dict[str, Any] | None] | None = None,
         profiling: Callable[[], dict[str, Any] | None] | None = None,
@@ -606,7 +615,9 @@ class HostHeartbeat:
         sandbox_archive_settings_report: Callable[[], int | None] | None = None,
         on_sandbox_archive_settings: Callable[[dict[str, Any] | None], None] | None = None,
         runtime_downloads_report: Callable[[], list[dict[str, Any]]] | None = None,
-        on_runtime_downloads: Callable[[list[dict[str, Any]]], None] | None = None,
+        on_runtime_downloads: Callable[[list[dict[str, Any]] | None], None] | None = None,
+        config_reports: Callable[[], dict[str, str]] | None = None,
+        on_runtime_registry: Callable[[str | None], object] | None = None,
         on_residencies_lost: Callable[[list[dict[str, Any]]], None] | None = None,
         on_retained_sandboxes_stop: Callable[[list[dict[str, Any]]], None] | None = None,
     ) -> None:
@@ -644,7 +655,6 @@ class HostHeartbeat:
         self._readiness_marker_value = self._read_readiness_marker()
         # Freshly asked on every beat — a static list would report sandboxes
         # the pool has already torn down.
-        self._residency_beats = residency_beats
         self._retained_sandbox_beats = retained_sandbox_beats
         # Also asked per beat: the age is recomputed from the sampler's
         # monotonic clock at send time, so a cached block cannot be made to
@@ -665,9 +675,14 @@ class HostHeartbeat:
         self._sandbox_archive_settings_report = sandbox_archive_settings_report
         self._on_sandbox_archive_settings = on_sandbox_archive_settings
         # Asked per beat for each download's progress, and told after each
-        # answered beat which versions the control plane wants.
+        # answered beat which versions the control plane wants, or ``None``
+        # when the answer does not say.
         self._runtime_downloads_report = runtime_downloads_report
         self._on_runtime_downloads = on_runtime_downloads
+        # Asked per beat for the non-numeric configuration this host uses,
+        # and told after each answered beat which registry to download from.
+        self._config_reports = config_reports
+        self._on_runtime_registry = on_runtime_registry
         self._on_residencies_lost = on_residencies_lost
         self._on_retained_sandboxes_stop = on_retained_sandboxes_stop
         self._stop = threading.Event()
@@ -760,9 +775,6 @@ class HostHeartbeat:
                         if callable(self._runtime_versions_available)
                         else self._runtime_versions_available
                     ),
-                    residencies=(
-                        self._residency_beats() if self._residency_beats is not None else None
-                    ),
                     retained_sandboxes=(
                         self._retained_sandbox_beats()
                         if self._retained_sandbox_beats is not None
@@ -778,9 +790,13 @@ class HostHeartbeat:
                         if self._runtime_downloads_report is not None
                         else None
                     ),
+                    config_reports=(
+                        self._config_reports() if self._config_reports is not None else None
+                    ),
                     on_residencies_lost=self._on_residencies_lost,
                     on_retained_sandboxes_stop=self._on_retained_sandboxes_stop,
                 )
+                self._apply_runtime_registry()
                 self._apply_settings()
                 self._apply_sandbox_archive_settings()
                 self._apply_runtime_downloads()
@@ -852,13 +868,32 @@ class HostHeartbeat:
                 },
             )
 
-    def _apply_runtime_downloads(self) -> None:
-        """Hand the answered download targets on, without stopping the beats."""
-        targets = self._identity.runtime_downloads
-        if self._on_runtime_downloads is None or targets is None:
+    def _apply_runtime_registry(self) -> None:
+        """Hand the answered registry on before the targets that will use it."""
+        if self._on_runtime_registry is None:
             return
         try:
-            self._on_runtime_downloads(list(targets))
+            self._on_runtime_registry(self._identity.runtime_registry_url)
+        except Exception:
+            logger.exception(
+                "agent_runtime_registry_apply_failed",
+                extra={
+                    "event": "agent_runtime_registry_apply_failed",
+                    "host": self._identity.host,
+                },
+            )
+
+    def _apply_runtime_downloads(self) -> None:
+        """Hand the answered download targets on, without stopping the beats.
+
+        ``None`` is an answer without them: the downloader keeps what it holds
+        and removes nothing on that answer's word.
+        """
+        if self._on_runtime_downloads is None:
+            return
+        targets = self._identity.runtime_downloads
+        try:
+            self._on_runtime_downloads(None if targets is None else list(targets))
         except Exception:
             logger.exception(
                 "agent_runtime_downloads_apply_failed",

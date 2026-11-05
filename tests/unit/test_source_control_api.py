@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, Mock
 from urllib.parse import parse_qs, urlparse
@@ -74,7 +74,7 @@ def _connection(gitlab: GitLabOAuthClient, *, expired: bool) -> dict[str, Any]:
         "web_url": "https://gitlab.com/octo",
         "access_token_ciphertext": gitlab.cipher.encrypt("access-one"),
         "refresh_token_ciphertext": gitlab.cipher.encrypt("refresh-one"),
-        "expires_at": datetime.now(timezone.utc) + timedelta(hours=-1 if expired else 1),
+        "expires_at": datetime.now(UTC) + timedelta(hours=-1 if expired else 1),
     }
 
 
@@ -95,7 +95,7 @@ async def test_integrations_gitlab_uses_source_control_repository(
                     "access_token": "access-two",
                     "refresh_token": "refresh-two",
                     "expires_in": 7200,
-                    "created_at": datetime.now(timezone.utc).timestamp(),
+                    "created_at": datetime.now(UTC).timestamp(),
                 },
             )
         assert request.url.path == "/api/v4/projects"

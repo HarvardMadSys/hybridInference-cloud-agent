@@ -183,7 +183,6 @@ export interface AutomaticComputeSetupStatus {
   deployment_sha: string | null;
   blocked_reasons: BlockedReason[];
   machine_defaults?: {
-    gateway: { address: string };
     control: { address: string };
   };
   defaults?: Omit<AutomaticComputeSetupRequest, 'request_id'>;
@@ -192,9 +191,7 @@ export interface AutomaticComputeSetupStatus {
 
 export interface AutomaticComputeSetupRequest {
   request_id: string;
-  gateway: { connection_id: string; address: string; port: number; username: string };
   control: { connection_id: string; address: string; port: number; username: string };
-  gateway_port: number;
   chat_network_pool: string;
   dns_server: string;
   protected_cidrs: string[];
@@ -297,8 +294,6 @@ export const saveComputeConnection = (
 
 export const createComputeServer = (body: ServerRequest) =>
   write<{ operation: ComputeOperation }>('/servers', body);
-export const preflightComputeServer = (body: ServerRequest) =>
-  write<{ operation: ComputeOperation }>('/server-preflights', body);
 export const importComputeResource = (body: ServerRequest) =>
   write<{ operation: ComputeOperation }>('/compute-allocations/import', {
     request_id: body.request_id,
@@ -362,6 +357,12 @@ export const resolveComputeOperation = (id: string, externalId: string) =>
   write<{ operation: ComputeOperation }>(`/compute-operations/${encodeURIComponent(id)}/resolve`, {
     external_id: externalId,
   });
+
+export const confirmComputeOperationAbsent = (id: string) =>
+  write<{ operation: ComputeOperation }>(
+    `/compute-operations/${encodeURIComponent(id)}/confirm-absent`,
+    {},
+  );
 
 export interface CloudLabAutoscalingConfiguration {
   project?: string;

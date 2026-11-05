@@ -245,11 +245,16 @@ export function ToolStepDetails({
   }
 
   const resultText = step.result ? stripAnsi(resultEmptyText(step)).text : '';
-  const activity = parseToolActivity(step.toolName ?? step.label, step.payloadValue);
+  const activity = parseToolActivity(
+    step.toolName ?? step.label,
+    step.payloadValue,
+    step.mcpServer,
+  );
   const resultPayload = resultEvents[0]?.payload ?? {};
   const reply = recordedDelegationReply({
     tool: step.toolName ?? step.label,
     input: step.payloadValue,
+    mcpServer: step.mcpServer,
     resultState:
       step.ambiguity || step.status === 'unknown'
         ? 'unknown'

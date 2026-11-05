@@ -5,12 +5,15 @@ streams the member Agent CLI's output through the sandbox manager. Its shape
 follows from the adjudicated security model rather than convenience:
 
 - **Narrow credentials.** The enrolled host claims with its own identity. Only
-  a member-scoped inference grant, an attempt-fenced MCP token, and a
-  short-lived repository-scoped GitHub App write token enter the sandbox.
-  Worker-control, account and service credentials stay outside.
-- **Snapshot-out, not push.** The runner never pushes. The trusted publisher
-  captures and validates a quiescent shared-workspace snapshot, then pushes it.
-  The sandbox may also publish directly using its repository-scoped token.
+  a member-scoped inference grant, an attempt-fenced MCP token, and a GitHub
+  relay placeholder (``agh.``) that GitHub itself refuses enter the sandbox.
+  The read-only clone token, the owner's GitHub token, and worker-control,
+  account and service credentials stay outside.
+- **The agent pushes, not the platform.** The runner never pushes. It clones
+  with a read-only token, puts the worktree on a local ``agent/<thread>``
+  branch and leaves a credential-free ``origin``. The agent commits, pushes
+  and opens pull requests itself through the GitHub relay, as the
+  conversation's owner.
 - **Heartbeats are how cancellation arrives.** A background thread renews the
   lease and watches the reply for ``cancel_requested``; the agent is killed on
   the next beat. Losing the lease (409) is fatal by design — a runner whose
@@ -41,7 +44,7 @@ import tempfile
 import threading
 import time
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, BinaryIO
 
 from cloud_agent_shared.sandbox_manager_compat import SANDBOX_MANAGER_PRODUCER, manager_env
 
@@ -50,6 +53,7 @@ if TYPE_CHECKING:
 
 import httpx
 
+from cloud_agent_host import incident_relay
 from cloud_agent_host.bounded_output import OutputPump, TextTail
 from cloud_agent_host.chat_sandbox import (
     CHAT_UPLOADS_DIR,
@@ -65,10 +69,15 @@ from cloud_agent_host.claimed_job import (
     ClaimUnreachable as ClaimUnreachable,
     LeaseLost as LeaseLost,
     WorkWaitUnsupported as WorkWaitUnsupported,
+    claim_secret_values as _claim_secret_values,
+    model_connection_launch,
+    require_residency_connection,
 )
 from cloud_agent_host.control_plane_client import (
+    _EVENT_RETRY_MAX_DELAY_S,
     _HEARTBEAT_TIMEOUT_S,
     ControlPlane as ControlPlane,
+    _log_control_failure,
 )
 from cloud_agent_host.drivers import (
     LINE,
@@ -76,28 +85,33 @@ from cloud_agent_host.drivers import (
     driver_for,
 )
 from cloud_agent_host.enrollment import HostHeartbeat, ensure_enrolled
+from cloud_agent_host.github_relay_env import residency_github_launch
 from cloud_agent_host.host_capacity import (
     HostCapacityCollector,
     build_storage_probe,
     capacity_enabled,
 )
+from cloud_agent_host.host_control import (
+    claim_payload as claim_payload,
+    keepalive_client,
+    release_turn as release_turn,
+    wait_for_work as wait_for_work,
+)
 from cloud_agent_host.host_runtime import (
     HANDOVER_ACCEPTED,
     HANDOVER_DECLINED,
-    HANDOVER_TIMEOUT_S,
     HOST_CONCURRENCY_CAPABILITY,
-    LAUNCH_NOT_STARTED,
     LAUNCH_STARTED,
     LAUNCH_UNCERTAIN,
     LaunchResult,
     TurnPool,
     decode_turn,
     default_slots,
-    encode_turn,
     read_handover,
     requested_slots,
     write_handover,
 )
+from cloud_agent_host.local_settings import local_shared_resident_capacity
 from cloud_agent_host.logging_utils import configure_process_logging, get_logger
 from cloud_agent_host.measurement_delivery import (
     DELIVERY_ATTEMPTS_MAX,
@@ -105,14 +119,20 @@ from cloud_agent_host.measurement_delivery import (
     DELIVERY_DRAIN_S,
     DELIVERY_HANDOFF_DRAIN_S,
     DELIVERY_QUEUE_MAX,
-    DELIVERY_TIMEOUT_S as DELIVERY_TIMEOUT_S,
     attempts_exhausted,
     classify_exception,
     classify_response,
 )
 from cloud_agent_host.profiling_policy import ProfilingPolicySync
+from cloud_agent_host.resident_probe import probe_live_resident
 from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.resources import shared_member_resource_rollup
+from cloud_agent_host.retired_configuration import refuse_retired_host_configuration
+from cloud_agent_host.runner_stop import (
+    STOPPING as _STOPPING,
+    drain_on_sigterm as _drain_on_sigterm,
+    stay_down as _stay_down,
+)
 from cloud_agent_host.runtime_downloads import (
     ENV_RUNTIME_DOWNLOAD_NETWORK,
     ENV_RUNTIME_REGISTRY_URL,
@@ -139,25 +159,33 @@ from cloud_agent_host.session_supervisor_client import (
     SessionSupervisorError,
 )
 from cloud_agent_host.setup import run_setup
+from cloud_agent_host.source_prefetch import SourcePrefetch
+from cloud_agent_host.source_preparation import read_tracked_lockfiles, run_source_git
 from cloud_agent_host.storage_admission import new_sandbox_storage_error
-from cloud_agent_shared import operation_profiling
+from cloud_agent_host.turn_launch import (
+    TurnSpare,
+    child_turn_payload,
+    handed_worker_id,
+    read_turn_input,
+    spawn_turn,
+)
+from cloud_agent_host.upload_import import import_uploads as _import_uploads
+from cloud_agent_shared import operation_profiling, sandbox_archive_settings
 from cloud_agent_shared.environment import (
     ENVIRONMENT_CAPABILITY,
     ENVIRONMENT_INFERENCE_CAPABILITY,
 )
 from cloud_agent_shared.environment_snapshots import (
     ENVIRONMENT_SNAPSHOT_CAPABILITY,
-    MAX_LOCKFILES,
     EnvironmentSnapshotRef,
-    is_lockfile,
 )
-from cloud_agent_shared.git.patch_gate import branch_name_for
+from cloud_agent_shared.git.branches import branch_name_for
 from cloud_agent_shared.git.source_archive import (
     DEFAULT_MAX_SOURCE_ARCHIVE_BYTES,
     build_base_bundle,
     build_source_archive,
-    build_upload_archive,
 )
+from cloud_agent_shared.git.source_cancellation import check_source_stop, checked_entries
 from cloud_agent_shared.git.temporary_workspace import (
     EMPTY_TREE_SHA,
     TEMPORARY_WORKSPACE_BASE_SHA,
@@ -170,12 +198,11 @@ from cloud_agent_shared.host_settings import (
     RUNNER_SETTING_KEYS,
     reported_values,
 )
-from cloud_agent_shared.sandbox_archive_settings import (
-    SANDBOX_ARCHIVE_CAPABILITY,
-    SANDBOX_CHECKPOINT_CAPABILITY,
-)
+from cloud_agent_shared.model_connections import HOST_MODEL_CONNECTION_CAPABILITIES
+from cloud_agent_shared.sandbox_manager_wire import member_manifest
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 from cloud_agent_shared.sandbox_restore import (
+    RESTORE_FAILED_RELEASE_REASON,
     SANDBOX_RESTORE_CAPABILITY,
 )
 from cloud_agent_shared.secret_redaction import SecretRedactor
@@ -186,6 +213,7 @@ from cloud_agent_shared.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     PLATFORM_MCP_SERVER_PREFIX,
     PROFILING_CONTROL_CAPABILITY,
+    SANDBOX_BROWSER_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
     SHARED_SANDBOX_RUNTIME_PINS,
@@ -203,23 +231,25 @@ HEARTBEAT_INTERVAL_S = 30.0
 FIRST_SETTINGS_WAIT_S = 30.0
 # Heartbeats use a short per-request timeout and retry promptly, so a slow
 # control request cannot consume the remaining lease in normal cadence sleeps.
-# Idempotent lifecycle receipts reuse the same short retry interval.
+# Idempotent lifecycle receipts reuse the same short retry interval, except the
+# control plane's admission and settlement, which wait out a restart instead.
 _CONTROL_RETRY_INTERVAL_S = 5.0
+#: Answers a repeated receipt can change: the answer was lost on the way, or
+#: the server was briefly unavailable. Anything else is the receipt refused.
+_RECEIPT_RETRY_STATUSES = frozenset({408, 502, 503, 504})
 #: Heartbeat answers no retry can change. The worker token and the job it names
 #: are fixed for the attempt, so a renewal refused for either is refused every
 #: time, and the lease runs out regardless.
 _HEARTBEAT_REFUSALS = frozenset({401, 403, 404})
-#: The longest lease that still cannot be renewed: the first renewal is sent
-#: one heartbeat interval in and may take a whole request timeout to land, so a
-#: lease no longer than that expires first and every attempt is lost at its
-#: first beat. The control plane itself only requires a positive number.
+#: The longest lease that still cannot be renewed: each renewal after the first
+#: is sent one heartbeat interval after the last and may take a whole request
+#: timeout to land, so a lease no longer than that expires first and every
+#: attempt is lost by its second beat. The control plane itself only requires a
+#: positive number.
 _UNRENEWABLE_LEASE_S = HEARTBEAT_INTERVAL_S + _HEARTBEAT_TIMEOUT_S
 #: How long a host polls before asking again for the wait endpoint a control
 #: plane did not have. Hosts deploy first, so this is the rest of a rollout.
 WORK_WAIT_RETRY_S = 300.0
-#: Added to a wait's own timeout for the client's, so the control plane always
-#: answers first.
-_WORK_WAIT_GRACE_S = 10.0
 DEFAULT_AGENT_TIMEOUT_S = float(HOST_SETTINGS_BY_KEY["agent_timeout_s"].default)
 # How often the control checks run while the agent is silent.
 _POLL_INTERVAL_S = 0.5
@@ -241,18 +271,6 @@ _CLONE_WATCH_INTERVAL_S = 0.5
 STARTUP_OPERATION = "attempt.startup"
 
 logger = get_logger(__name__)
-
-
-def _log_control_failure(operation: str, job_id: str, exc: Exception) -> None:
-    """Keep a diagnosable failure without logging tokens or arbitrary response bodies."""
-    status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
-    logger.warning(
-        "agent_control_failure operation=%s job_id=%s error_type=%s status_code=%s",
-        operation,
-        job_id,
-        type(exc).__name__,
-        status,
-    )
 
 
 def _owner_visible_error(exc: Exception) -> str:
@@ -282,11 +300,48 @@ def _retry_lifecycle_receipt(operation: str, job_id: str, call: Callable[[], Any
                 if isinstance(exc, SessionSupervisorError)
                 else None
             )
-            if attempt == 2 or (status is not None and status not in {408, 502, 503, 504}):
+            if attempt == 2 or (status is not None and status not in _RECEIPT_RETRY_STATUSES):
                 raise
             _log_control_failure(operation, job_id, exc)
             time.sleep(_CONTROL_RETRY_INTERVAL_S)
     raise AssertionError("lifecycle retry exhausted without a result")
+
+
+def _retry_control_receipt(
+    operation: str, job_id: str, call: Callable[[], Any], *, heart: Heartbeater
+) -> Any:
+    """Retry the control plane's admission or settlement receipt while the lease holds.
+
+    A deploy that recreates the control-plane container refuses connections,
+    or its proxy answers 502, for longer than three quick tries cover, and
+    giving up on either receipt failed the turn over a restart. A settlement
+    costs more: however the attempt then ends, by a failed finish or by the
+    lease reaper, the control plane marks an admitted turn it never saw settle
+    lost, though the sandbox holds it settled. So these back off as event
+    uploads do for as long as the lease holds; once the heartbeat has lost it,
+    no receipt can land. A control plane that renews the lease all along but
+    fails the receipt for a whole lease is not restarting, and is given up on.
+    """
+    give_up_at: float | None = None
+    delay = 1.0
+    while True:
+        try:
+            return call()
+        except (httpx.TransportError, httpx.HTTPStatusError) as exc:
+            if (
+                isinstance(exc, httpx.HTTPStatusError)
+                and exc.response.status_code not in _RECEIPT_RETRY_STATUSES
+            ):
+                raise
+            if heart.lease_lost:
+                raise LeaseLost(f"lease lost while retrying {operation}") from exc
+            if give_up_at is None:
+                give_up_at = time.monotonic() + heart.ttl
+            if time.monotonic() + delay > give_up_at:
+                raise
+            _log_control_failure(operation, job_id, exc)
+        time.sleep(delay)
+        delay = min(delay * 2, _EVENT_RETRY_MAX_DELAY_S)
 
 
 # Both are interpolated into a URL and handed to git, which reads a leading
@@ -366,6 +421,11 @@ class Heartbeater:
         self.cancel_requested = False
         self.lease_lost = False
 
+    @property
+    def ttl(self) -> float:
+        """How long each renewal extends the lease."""
+        return self._ttl
+
     def start(self) -> None:
         """Begin heartbeating on a daemon thread."""
         self._thread = threading.Thread(target=self._run, daemon=True, name="agent-heartbeat")
@@ -378,7 +438,11 @@ class Heartbeater:
             self._thread.join(timeout=5)
 
     def _run(self) -> None:
-        delay = self._interval
+        # The first renewal goes out at once. The lease runs from the claim,
+        # and the process running the turn has already spent part of it on its
+        # handover and preflight; a whole interval more let a slow start reach
+        # an expired lease, which the control plane refuses to renew.
+        delay = 0.0
         last_success = time.monotonic()
         failures = 0
         while not self._stop.wait(delay):
@@ -443,90 +507,6 @@ class Heartbeater:
                 self.cancel_requested = True
 
 
-def claim(
-    *,
-    base_url: str,
-    host_credential: str,
-    worker_id: str,
-    lease_ttl: float,
-    attestation: dict[str, Any] | None = None,
-) -> ClaimedJob | None:
-    """Claim the next queued job with this enrolled host's credential.
-
-    The credential names the machine, so the body cannot claim as another
-    host. It remains in the trusted runner and never enters the agent process.
-    """
-    payload = claim_payload(
-        base_url=base_url,
-        host_credential=host_credential,
-        worker_id=worker_id,
-        lease_ttl=lease_ttl,
-        attestation=attestation,
-    )
-    return ClaimedJob.from_response(payload) if payload else None
-
-
-def claim_payload(
-    *,
-    base_url: str,
-    host_credential: str,
-    worker_id: str,
-    lease_ttl: float,
-    attestation: dict[str, Any] | None = None,
-) -> dict[str, Any] | None:
-    """Claim the next queued job and return the control plane's raw answer.
-
-    The host service hands this document to the child that will run the turn,
-    unread beyond the few fields it needs to account for the claim. Parsing it
-    into a :class:`ClaimedJob` is the child's job, in the process that will
-    actually use the credentials it carries.
-    """
-    payload: dict[str, Any] = {"worker_id": worker_id, "lease_ttl_seconds": lease_ttl}
-    if attestation:
-        payload["attestation"] = attestation
-    try:
-        response = httpx.post(
-            f"{base_url.rstrip('/')}/v1/agent/worker/claim",
-            json=payload,
-            headers={"Authorization": f"Bearer {host_credential}"},
-            timeout=30.0,
-        )
-    except httpx.TransportError as exc:
-        # Tagged at the one place where "the gateway is unreachable" also means
-        # "no job was claimed". The same error from a later call — an event, an
-        # group snapshot, a terminal transition — happens with an attempt already
-        # running, and reporting *that* as an unreached gateway would hide the
-        # job an operator has to go look at.
-        raise ClaimUnreachable(str(exc)) from exc
-    response.raise_for_status()
-    body = response.json()
-    return body if body else None
-
-
-def wait_for_work(
-    *, base_url: str, host_credential: str, since: str | None, timeout_s: float
-) -> str:
-    """Wait until the control plane says there may be work, and return its token.
-
-    Answers at once when ``since`` is stale and at the latest after
-    ``timeout_s``; the host claims after either. Raises
-    :class:`WorkWaitUnsupported` for a control plane without the endpoint.
-    """
-    try:
-        response = httpx.post(
-            f"{base_url.rstrip('/')}/v1/agent/worker/wait",
-            json={"since": since, "timeout_seconds": timeout_s},
-            headers={"Authorization": f"Bearer {host_credential}"},
-            timeout=timeout_s + _WORK_WAIT_GRACE_S,
-        )
-    except httpx.TransportError as exc:
-        raise ClaimUnreachable(str(exc)) from exc
-    if response.status_code == 404:
-        raise WorkWaitUnsupported(response.text[:200])
-    response.raise_for_status()
-    return str(response.json()["token"])
-
-
 class _WorkWaiter:
     """Parks an idle host until the control plane says the queue changed.
 
@@ -539,9 +519,12 @@ class _WorkWaiter:
     wait fails.
     """
 
-    def __init__(self, *, base_url: str, interval_s: float) -> None:
+    def __init__(
+        self, *, base_url: str, interval_s: float, client: httpx.Client | None = None
+    ) -> None:
         self._base_url = base_url
         self._interval_s = interval_s
+        self._client = client
         self._token: str | None = None
         self._poll_until = 0.0
 
@@ -556,6 +539,7 @@ class _WorkWaiter:
                 host_credential=host_credential,
                 since=self._token,
                 timeout_s=self._interval_s,
+                client=self._client,
             )
         except WorkWaitUnsupported:
             self._poll_until = time.monotonic() + WORK_WAIT_RETRY_S
@@ -569,50 +553,28 @@ class _WorkWaiter:
             time.sleep(self._interval_s)
 
 
-def release_turn(*, base_url: str, worker_token: str, job_id: str, reason: str) -> bool:
-    """Hand a claimed turn back to the queue, having proved it never began.
-
-    Called only where this host can show the turn was not started — the child
-    could not be spawned, or exited without taking delivery. The control plane
-    checks the same thing from its own side and refuses otherwise, so a host
-    that is wrong about it cannot requeue work that ran.
-
-    Returns whether the turn went back. ``False`` is not an error path worth
-    retrying: the lease is the backstop it always was, and a turn this call
-    could not release is one the control plane has already decided about.
-    """
-    try:
-        response = httpx.post(
-            f"{base_url.rstrip('/')}/v1/agent/worker/jobs/{job_id}/release",
-            json={"reason": reason},
-            headers={"Authorization": f"Bearer {worker_token}"},
-            timeout=30.0,
-        )
-    except httpx.HTTPError as exc:
-        _log_control_failure("release", job_id, exc)
-        return False
-    if response.status_code >= 400:
-        logger.warning(
-            "agent_turn_release_refused",
-            extra={
-                "event": "agent_turn_release_refused",
-                "job_id": job_id,
-                "status": response.status_code,
-            },
-        )
-        return False
-    return True
-
-
 def _run_git(
     args: list[str],
     *,
     cwd: str | None = None,
     env_extra: dict[str, str] | None = None,
     input_text: str | None = None,
+    stop: threading.Event | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one git command hermetically and return the completed process."""
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **_GIT_ENV, **(env_extra or {})}
+    if stop is not None:
+        result = run_source_git(
+            args,
+            cwd=cwd,
+            env=env,
+            timeout=_GIT_TIMEOUT_S,
+            stop=stop,
+            input_bytes=None if input_text is None else input_text.encode(),
+        )
+        return subprocess.CompletedProcess(
+            result.args, result.returncode, result.stdout.decode(), result.stderr.decode()
+        )
     return subprocess.run(
         ["git", *args],
         cwd=cwd,
@@ -641,27 +603,16 @@ def _checkout_bytes(workdir: str) -> int:
     return total
 
 
-def tracked_lockfiles(workdir: str) -> dict[str, str] | None:
-    """Each tracked dependency manifest's Git object id, the snapshot match key.
-
-    Equal object ids mean byte-identical files, on the host checkout of a
-    snapshot's build and of a later task alike. ``None`` when Git cannot say,
-    or when a repository has more manifests than a snapshot records, so that it
-    is never matched.
-    """
-    listed = _run_git(["ls-files", "-s", "-z"], cwd=workdir)
-    if listed.returncode != 0:
-        return None
-    found: dict[str, str] = {}
-    for entry in listed.stdout.split("\0"):
-        meta, _, path = entry.partition("\t")
-        fields = meta.split()
-        if len(fields) != 3 or not is_lockfile(path):
-            continue
-        found[path] = fields[1]
-        if len(found) > MAX_LOCKFILES:
-            return None
-    return found
+def tracked_lockfiles(
+    workdir: str, *, stop: threading.Event | None = None
+) -> dict[str, str] | None:
+    """Each tracked manifest's object id, or ``None`` when Git cannot say."""
+    return read_tracked_lockfiles(
+        workdir,
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **_GIT_ENV},
+        timeout=_GIT_TIMEOUT_S,
+        stop=stop,
+    )
 
 
 def _choose_environment_snapshot(
@@ -675,9 +626,10 @@ def _choose_environment_snapshot(
 
     Only a group this turn creates can, and only from a snapshot built on
     this host's sandbox image and from the same dependency manifests as the
-    checkout. Waiting for the checkout here costs only the turns that were
-    handed a snapshot. The outcome is ``None`` when there is nothing to
-    report: no installation to snapshot, or a checkout that failed.
+    checkout. Only the turns that were handed a snapshot wait here, for Git
+    to list the manifests; the archive is built while the group starts. The
+    outcome is ``None`` when there is nothing to report: no installation to
+    snapshot, or a checkout that failed.
     """
     environment = job.environment
     if (
@@ -804,7 +756,9 @@ def _basic_credential(clone_token: str) -> str:
     return base64.b64encode(f"x-access-token:{clone_token}".encode()).decode()
 
 
-def _assert_no_credential_on_disk(workdir: str, clone_token: str | None) -> None:
+def _assert_no_credential_on_disk(
+    workdir: str, clone_token: str | None, *, stop: threading.Event | None = None
+) -> None:
     """Fail rather than mount a worktree that carries the clone credential.
 
     No repository credential may be stored in the source tree, which is about
@@ -824,7 +778,7 @@ def _assert_no_credential_on_disk(workdir: str, clone_token: str | None) -> None
         base64.b64encode(clone_token.encode()).decode().rstrip("="),
     )
     git_dir = pathlib.Path(workdir) / ".git"
-    for path in git_dir.rglob("*"):
+    for path in checked_entries(git_dir.rglob("*"), stop):
         # Object and pack files hold repository content, not our configuration,
         # and are compressed; skipping them keeps this check bounded.
         if not path.is_file() or path.is_symlink() or "objects" in path.parts:
@@ -859,11 +813,10 @@ def prepare_worktree(
     at this point the worktree is ours, not the agent's, so running git here is
     safe because later Git inspection runs inside the retained container.
 
-    A shallow single-commit fetch, with no remote recorded. Not adding a remote
-    is the point — it is what keeps the credential out of ``.git/config``, and
-    the runner has no reason to offer the agent a push path it must not use.
-    ``depth`` 2 also brings the commit's parent, for a caller that bundles only
-    what the commit adds to it.
+    A shallow fetch by URL with the credential in the environment only, then
+    ``origin`` recorded as the plain HTTPS URL: the agent pushes through it, and
+    the GitHub relay, not this URL, decides what that buys. ``depth`` 2 also
+    brings the commit's parent, for a caller that bundles only what it adds.
 
     ``max_bytes`` is the import limit the checkout is about to be held to. The
     fetch and the checkout are stopped once ``workdir`` holds more than that,
@@ -888,12 +841,12 @@ def prepare_worktree(
         args: list[str], env_extra: dict[str, str] | None = None
     ) -> subprocess.CompletedProcess[str]:
         if max_bytes is None:
-            return _run_git(args, cwd=workdir, env_extra=env_extra)
+            return _run_git(args, cwd=workdir, env_extra=env_extra, stop=stop)
         return _run_git_within(
             args, cwd=workdir, max_bytes=max_bytes, env_extra=env_extra, stop=stop
         )
 
-    init = _run_git(["init", "--quiet", workdir])
+    init = _run_git(["init", "--quiet", workdir], stop=stop)
     if init.returncode != 0:
         raise WorktreeError(f"git init failed: {init.stderr.strip()[:200]}")
 
@@ -913,12 +866,14 @@ def prepare_worktree(
     if checkout.returncode != 0:
         raise WorktreeError(f"could not check out {ref}: {checkout.stderr.strip()[:200]}")
 
-    resolved = _run_git(["rev-parse", "HEAD"], cwd=workdir).stdout.strip()
-    _assert_no_credential_on_disk(workdir, clone_token)
+    if _run_git(["remote", "add", "origin", url], cwd=workdir, stop=stop).returncode != 0:
+        raise WorktreeError("could not record origin")
+    resolved = _run_git(["rev-parse", "HEAD"], cwd=workdir, stop=stop).stdout.strip()
+    _assert_no_credential_on_disk(workdir, clone_token, stop=stop)
     return resolved or (base_sha or "")
 
 
-def prepare_temporary_worktree(*, workdir: str) -> str:
+def prepare_temporary_worktree(*, workdir: str, stop: threading.Event | None = None) -> str:
     """Start a temporary workspace in ``workdir`` and return its first commit.
 
     A temporary workspace has no repository, so nothing is fetched and no
@@ -936,7 +891,7 @@ def prepare_temporary_worktree(*, workdir: str) -> str:
         env_extra: dict[str, str] | None = None,
         input_text: str | None = None,
     ) -> str:
-        result = _run_git(args, cwd=workdir, env_extra=env_extra, input_text=input_text)
+        result = _run_git(args, cwd=workdir, env_extra=env_extra, input_text=input_text, stop=stop)
         if result.returncode != 0:
             raise WorktreeError(
                 f"could not start the temporary workspace: git {args[0]} failed: "
@@ -1016,10 +971,12 @@ def source_import_max_bytes(env: dict[str, str] | None = None) -> int:
     return mib * 1024 * 1024
 
 
-def checkout_output_branch(workdir: str, branch_id: str) -> str:
-    """Put a fresh durable worktree on the publisher's local output branch."""
+def checkout_output_branch(
+    workdir: str, branch_id: str, *, stop: threading.Event | None = None
+) -> str:
+    """Put a fresh durable worktree on the conversation's local ``agent/<id>`` branch."""
     branch = branch_name_for(branch_id)
-    switched = _run_git(["checkout", "--quiet", "-B", branch, "HEAD"], cwd=workdir)
+    switched = _run_git(["checkout", "--quiet", "-B", branch, "HEAD"], cwd=workdir, stop=stop)
     if switched.returncode != 0:
         raise WorktreeError(
             f"could not create workspace branch {branch}: {switched.stderr.strip()[:200]}"
@@ -1126,6 +1083,11 @@ def runtime_version_unavailable(job: ClaimedJob, backend: SandboxBackend) -> str
     container: the image's labels, which ``install-runtimes.sh`` writes from
     the same argument it installs, plus the versions this host downloaded since
     an admin updated the agent, each kept only after its check passed.
+
+    The image's own menu, and a retained chat's pinned version, answer without
+    Docker. Only a version found in neither lists the downloaded ones, which
+    takes seconds on a host holding many images, and it lists them anew: a menu
+    read earlier could predate the download, and must not fail the turn.
     """
     version = job.runtime_version
     if not version:
@@ -1133,8 +1095,14 @@ def runtime_version_unavailable(job: ClaimedJob, backend: SandboxBackend) -> str
         # that never reported a version. The image default is exactly right.
         return None
     stamper = getattr(backend, "version_stamp", None)
-    stamp: dict[str, Any] = stamper() if stamper is not None else {}
-    available = (stamp.get("runtime_versions_available") or {}).get(job.runtime)
+    if stamper is None:
+        return None
+    available = (stamper(downloads="skip").get("runtime_versions_available") or {}).get(job.runtime)
+    if available is not None and version in available:
+        return None
+    available = (stamper(downloads="fresh").get("runtime_versions_available") or {}).get(
+        job.runtime
+    )
     if available is None or version in available:
         return None
     return (
@@ -1158,7 +1126,7 @@ def _shared_live_ready_file() -> str:
     return (os.environ.get("AGENT_SHARED_LIVE_READY_FILE") or "").strip()
 
 
-def _shared_live_host_capabilities(
+def _shared_live_host_capabilities(  # noqa: PLR0912 complexity baseline, #771
     backend: SandboxBackend,
     stamp: dict[str, Any],
 ) -> list[str]:
@@ -1180,12 +1148,10 @@ def _shared_live_host_capabilities(
         default_slots()
     except ValueError:
         return []
-    try:
-        resident_capacity = int(os.environ.get("AGENT_SHARED_RESIDENT_CAPACITY") or 8)
-    except ValueError:
-        return []
-    if not 2 <= resident_capacity <= 128:
-        return []
+    # Sessions per sandbox is no longer checked here: the local value is only
+    # a bootstrap, an unusable one falls back to the default
+    # (local_settings.local_shared_resident_capacity), and an admin's value is validated
+    # before it is saved and again when it arrives.
     if not (manager_env("AGENT_SANDBOX_MANAGER_URL") or "").strip():
         return []
     if not (manager_env("AGENT_SANDBOX_MANAGER_TOKEN") or "").strip():
@@ -1222,24 +1188,24 @@ def _shared_live_host_capabilities(
     capabilities = [
         SHARED_SANDBOX_CAPABILITY,
         NATIVE_FORK_AT_ANCHOR_CAPABILITY,
-        # A live resident session is also what makes a turn's final message
-        # readable: the settle path that ends the turn is the one that reports
-        # it whole, before anything bounds it. This host therefore never
-        # advertises the goal report without the contract it rides on.
+        # A live resident session is what makes a turn's final message readable
+        # whole (the settle path reports it), so the goal report rides on it.
         GOAL_REPORT_CAPABILITY,
         # Named per runtime: the sandbox manager of this same deployment takes a
         # message into a running turn only through a driver that wires it.
         *steerable,
-        # This exact replica can accept the deployment-wide DB archive policy
-        # over its authenticated sandbox manager channel. A claim also attests the
-        # exact revision that sandbox manager confirmed.
-        SANDBOX_ARCHIVE_CAPABILITY,
+        # This replica takes the deployment-wide DB archive policy over its
+        # sandbox manager channel; a claim attests the revision it confirmed.
+        sandbox_archive_settings.SANDBOX_ARCHIVE_CAPABILITY,
         # The same-deployment sandbox manager understands the policy's
         # checkpoint switch and reports checkpoint receipts.
-        SANDBOX_CHECKPOINT_CAPABILITY,
+        sandbox_archive_settings.SANDBOX_CHECKPOINT_CAPABILITY,
+        # ... and archives to whichever bucket the policy names.
+        sandbox_archive_settings.SANDBOX_ARCHIVE_DESTINATION_CAPABILITY,
         # ... and recreates a group another host left behind from its
         # checkpoint, so a claim may hand this replica a cold group.
         SANDBOX_RESTORE_CAPABILITY,
+        *([SANDBOX_BROWSER_CAPABILITY] if helpers.get("cloud-agent-browser") else []),
     ]
     deployment_sha = (os.environ.get("AGENT_DEPLOYMENT_SHA") or "").strip()
     ready_file = _shared_live_ready_file()
@@ -1264,15 +1230,25 @@ def _environment_host_capabilities(backend: SandboxBackend, stamp: dict[str, Any
         ENVIRONMENT_INFERENCE_CAPABILITY,
         ENVIRONMENT_SNAPSHOT_CAPABILITY,
         SSH_ACCESS_CAPABILITY,
+        *HOST_MODEL_CONNECTION_CAPABILITIES,
     ]
 
 
-def _claim_secret_values(job: ClaimedJob) -> dict[str, str]:
-    """Every value the claim put in the sandbox that output must never show."""
-    values = job.environment.secrets() if job.environment else {}
-    if job.ssh_access is not None:
-        values = {**values, **job.ssh_access.secrets()}
-    return values
+def _advertised_host_capabilities(backend: SandboxBackend, stamp: dict[str, Any]) -> list[str]:
+    """What this host advertises, at enrollment and on every heartbeat alike.
+
+    The concurrency, profiling-control and host-settings capabilities say this
+    runner applies ``slots_desired``, a runtime profiling configuration and the
+    admin's host settings. They let the admin page tell a host that will pick
+    up a new value from one that needs a redeploy. They are advertised beside
+    the shared-live capabilities, never instead of them.
+    """
+    return [
+        *_environment_host_capabilities(backend, stamp),
+        HOST_CONCURRENCY_CAPABILITY,
+        PROFILING_CONTROL_CAPABILITY,
+        HOST_SETTINGS_CAPABILITY,
+    ]
 
 
 def _shared_live_deployment_ready(
@@ -1326,15 +1302,6 @@ def _claim_attestation(
         stamp["sandbox_archive_settings_applied_revision"] = (
             sandbox_archive_settings_applied_revision
         )
-    if stamp["runner_capabilities"]:
-        # For a control plane older than this release. Hosts roll out before
-        # the API, so a replacement runner polls that API for a while, and it
-        # refuses every claim that does not name the image's shared-sandbox
-        # protocol. This image has no such label. Its "v2" meant a fork
-        # helper that takes an anchor, which the capabilities above already
-        # required. This control plane reads nothing from it. Remove once
-        # every deployment's control plane is at least this release.
-        stamp["shared_sandbox_protocol"] = "v2"
     return stamp
 
 
@@ -1361,13 +1328,13 @@ def _session_supervisor_from_env(*, timeout: float = 180) -> SessionSupervisorCl
 def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
     """Read Docker truth from the host singleton without breaking host beats.
 
-    The host heartbeat must remain a liveness signal even while the workspace
-    sandbox manager is restarting. Returning ``None`` means "not observed this beat";
-    it must never be confused with an authoritative empty list or deletion.
+    The heartbeat stays a liveness signal while the sandbox manager restarts:
+    ``None`` is "not observed this beat", never an empty list or a deletion.
     """
     client: SessionSupervisorClient | None = None
     try:
         client = _session_supervisor_from_env(timeout=_HOST_BEAT_SANDBOX_MANAGER_TIMEOUT_S)
+        incident_relay.confirm(client)
         rows = client.list()
         observations: list[dict[str, Any]] = []
         now = time.monotonic()
@@ -1382,13 +1349,11 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
             active = active or bool(row.get("workspace_suspended"))
             deadline = row.get("idle_deadline_monotonic")
             # A generation-zero RUNNING entry with no local deadline was just
-            # reconstructed after a sandbox manager restart. Its empty in-memory token
-            # set is not proof that the group has been idle: the sandbox manager may
-            # have restarted while a terminal had cleared the durable
-            # deadline. Report activity as unknown. The control plane installs
-            # one recovery deadline only when its durable deadline is also
-            # NULL; unlike reporting a fresh full timeout on every heartbeat,
-            # that window cannot be extended forever by healthy heartbeats.
+            # rebuilt after a sandbox manager restart; its empty token set does
+            # not prove idleness (a terminal may have cleared the durable
+            # deadline). Report activity as unknown: the control plane installs
+            # one recovery deadline only when its own is NULL too, so healthy
+            # heartbeats cannot extend that window forever.
             activity_known = activation_generation > 0 or active or deadline is not None
             idle_remaining = None
             if activity_known and deadline is not None:
@@ -1421,6 +1386,7 @@ def _retained_sandbox_heartbeat_rows() -> list[dict[str, Any]] | None:
                     "checkpoint": (
                         row.get("checkpoint") if isinstance(row.get("checkpoint"), dict) else None
                     ),
+                    "incidents": incident_relay.carry(row),
                 }
             )
         return observations
@@ -1636,19 +1602,10 @@ def _handle_host_residencies_lost(lost: list[dict[str, Any]]) -> None:
             client.close()
 
 
-class _SourcePrefetch:
-    """A new chat's source, cloned and archived while its container starts.
+class _SourcePrefetch(SourcePrefetch):
+    """A new chat's source, made with this module's Git steps; see :class:`SourcePrefetch`.
 
-    Cloning outside the chat, scrubbing credentials and building the
-    normalized tar all happen on the host and need nothing from the container,
-    so they run on a thread of their own beside the activation, which creates
-    and boots the guest, instead of after it. Only the import waits for both.
-    A failure is raised where the checkout always failed, in the checkout
-    stage; a turn that stops before then discards whatever was prepared.
-
-    The thread is not a daemon: a turn that ends while the clone is still
-    running waits for it at exit, so its temporary directory is always removed.
-    Discarding stops a clone still running, so that wait is short.
+    The steps are looked up here when they run, so they stay this module's.
     """
 
     def __init__(self, job: ClaimedJob, *, uid: int, gid: int, max_bytes: int | None) -> None:
@@ -1656,105 +1613,32 @@ class _SourcePrefetch:
         self._uid = uid
         self._gid = gid
         self._max_bytes = source_import_max_bytes() if max_bytes is None else max_bytes
-        self._lock = threading.Lock()
-        self._done = threading.Event()
-        self._stop = threading.Event()
-        self._discarded = False
-        self._base_sha = ""
-        self._lockfiles: dict[str, str] | None = None
-        self._archive: Any = None
-        self._error: BaseException | None = None
-        self._thread = threading.Thread(target=self._prepare, name="source-prefetch")
-        self._thread.start()
+        super().__init__()
 
-    def _prepare(self) -> None:
-        archive: Any = None
-        try:
-            with tempfile.TemporaryDirectory(prefix="freeinference-source-") as source:
-                if self._job.repo is None:
-                    # Nothing to clone and nothing to publish, so no output branch.
-                    base_sha = prepare_temporary_worktree(workdir=source)
-                else:
-                    base_sha = prepare_worktree(
-                        workdir=source,
-                        repo=self._job.repo,
-                        base_sha=self._job.base_sha,
-                        clone_token=self._job.clone_token,
-                        remote_base=repo_clone_base_url(clone_token=self._job.clone_token),
-                        max_bytes=self._max_bytes,
-                        stop=self._stop,
-                    )
-                    checkout_output_branch(source, self._job.thread_id)
-                self._lockfiles = tracked_lockfiles(source)
-                # Unnamed and outside the checkout: the archive is spooled to
-                # disk, not held in this process, and gone when it is closed,
-                # which import_into or discard does once the clone is done.
-                archive = tempfile.TemporaryFile(  # noqa: SIM115 — outlives this thread.
-                    prefix="freeinference-source-", suffix=".tar"
-                )
-                build_source_archive(
-                    source,
-                    archive,
-                    uid=self._uid,
-                    gid=self._gid,
-                    max_bytes=self._max_bytes,
-                )
-                archive.flush()
-                archive.seek(0)
-        except BaseException as exc:
-            if archive is not None:
-                archive.close()
-            self._error = exc
-        else:
-            with self._lock:
-                if self._discarded:
-                    archive.close()
-                else:
-                    self._base_sha, self._archive = base_sha, archive
-        finally:
-            self._done.set()
+    def _check_out(self, workdir: str, stop: threading.Event) -> str:
+        if self._job.repo is None:
+            # Nothing to clone and nothing to publish, so no output branch.
+            return prepare_temporary_worktree(workdir=workdir, stop=stop)
+        base_sha = prepare_worktree(
+            workdir=workdir,
+            repo=self._job.repo,
+            base_sha=self._job.base_sha,
+            clone_token=self._job.clone_token,
+            remote_base=repo_clone_base_url(clone_token=self._job.clone_token),
+            max_bytes=self._max_bytes,
+            stop=stop,
+        )
+        check_source_stop(stop)
+        checkout_output_branch(workdir, self._job.thread_id, stop=stop)
+        return base_sha
 
-    def lockfiles(self) -> dict[str, str] | None:
-        """The checkout's dependency manifests, once it is prepared; ``None`` if it failed."""
-        self._done.wait()
-        return None if self._error is not None else self._lockfiles
+    def _list_lockfiles(self, workdir: str, stop: threading.Event) -> dict[str, str] | None:
+        return tracked_lockfiles(workdir, stop=stop)
 
-    def base_sha(self) -> str | None:
-        """The commit the checkout resolved, once it is prepared."""
-        self._done.wait()
-        return self._base_sha or None
-
-    def import_into(
-        self,
-        manager: ChatSandboxManager,
-        spec: ChatSandboxSpec,
-        *,
-        observer: operation_profiling.StageObserver | None = None,
-    ) -> str:
-        """Import the prepared archive into the chat and return its base commit."""
-        with operation_profiling.substage(observer, "source_wait"):
-            self._done.wait()
-        if self._error is not None:
-            raise self._error
-        with self._lock:
-            archive, self._archive = self._archive, None
-        if archive is None:
-            raise SandboxError("the prepared source was already discarded")
-        try:
-            with operation_profiling.substage(observer, "source_import"):
-                manager.import_archive(spec, CHAT_WORKDIR, archive)
-        finally:
-            archive.close()
-        return self._base_sha
-
-    def discard(self) -> None:
-        """Release the archive now, and stop a clone that is still running."""
-        self._stop.set()
-        with self._lock:
-            self._discarded = True
-            archive, self._archive = self._archive, None
-        if archive is not None:
-            archive.close()
+    def _build_archive(self, workdir: str, out: BinaryIO, stop: threading.Event) -> None:
+        build_source_archive(
+            workdir, out, uid=self._uid, gid=self._gid, max_bytes=self._max_bytes, stop=stop
+        )
 
 
 def _prefetch_retained_source(
@@ -1768,44 +1652,6 @@ def _prefetch_retained_source(
     return _SourcePrefetch(job, uid=uid, gid=gid, max_bytes=max_bytes)
 
 
-def _import_uploads(
-    *,
-    job: ClaimedJob,
-    control: ControlPlane,
-    manager: ChatSandboxManager,
-    spec: ChatSandboxSpec,
-    fresh_container: bool,
-) -> int:
-    """Place this conversation's uploaded files under ``/uploads``.
-
-    Always the whole thread's files, never a delta: the import overwrites the
-    same paths, so one code path serves a new container and a container that
-    gained a file this turn.
-
-    It runs when the container is new, or when this turn attached something.
-    A retained container already holds the earlier turns' files — ``/uploads``
-    is root-owned and read-only, so the sandbox cannot have removed them — and
-    re-fetching them on every follow-up would move the whole conversation's
-    bytes again to write what is already there.
-
-    The files never touch ``CHAT_WORKDIR``. The publish path stages the
-    workspace with ``git add -A -N``, so an upload written there would be
-    committed and appear in the draft pull request.
-    """
-    if job.thread_attachment_count <= 0:
-        return 0
-    if not fresh_container and job.turn_attachment_count <= 0:
-        return 0
-    files: list[tuple[str, bytes]] = []
-    for entry in control.list_attachments():
-        path, content = control.read_attachment(int(entry["id"]))
-        files.append((path, content))
-    if not files:
-        return 0
-    manager.import_archive(spec, CHAT_UPLOADS_DIR, build_upload_archive(files))
-    return len(files)
-
-
 def _import_retained_base(
     *,
     job: ClaimedJob,
@@ -1815,11 +1661,10 @@ def _import_retained_base(
 ) -> str:
     """Fetch a follow-up base outside the sandbox and import objects only.
 
-    A base missing here is usually a published commit whose own import was
-    missed, and its parent is the base the workspace already had. Then the
-    bundle carries only what the commit adds; the whole tree, which for a
-    large repository does not fit a bundle, goes only to a workspace that
-    lacks the parent too.
+    When the workspace already holds the base's parent, the bundle carries
+    only what the commit adds; the whole tree, which for a large repository
+    does not fit a bundle, goes only to a workspace that lacks the parent
+    too.
     """
     with tempfile.TemporaryDirectory(prefix="freeinference-base-") as source:
         held: str | None = None
@@ -1840,13 +1685,13 @@ def _import_retained_base(
             held = (parent.stdout.strip() or None) if parent.returncode == 0 else None
             if held and not _sandbox_has_commit(CHAT_WORKDIR, held, backend):
                 held = None
-        bundle = build_base_bundle(source, commit=resolved, prerequisite=held)
-        manager.import_base_bundle(
-            spec,
-            bundle,
-            commit=resolved,
-            env=dict(_SAFE_DIRECTORY_ENV),
-        )
+        with build_base_bundle(source, commit=resolved, prerequisite=held) as bundle:
+            manager.import_base_bundle(
+                spec,
+                bundle,
+                commit=resolved,
+                env=dict(_SAFE_DIRECTORY_ENV),
+            )
     return resolved
 
 
@@ -1893,20 +1738,7 @@ def _shared_group_manifest(reservation: dict[str, Any], *, thread_id: str) -> li
     members = [dict(item) for item in raw or [] if isinstance(item, dict)]
     if not members:
         members = [dict(reservation)]
-    allowed = {
-        "thread_id",
-        "native_session_id",
-        "context_status",
-        "activation_generation",
-        "process_generation",
-        "residency_generation",
-        "resident_state",
-        "resident_slot_id",
-        "last_settled_job_id",
-    }
-    projected = [
-        {key: value for key, value in member.items() if key in allowed} for member in members
-    ]
+    projected = member_manifest(members)
     if not any(member.get("thread_id") == thread_id for member in projected):
         raise SandboxError("shared sandbox manifest omitted the claimed chat")
     for member in projected:
@@ -1962,7 +1794,7 @@ def _reportable_turn_resources(payload: Any) -> dict[str, Any] | None:
     return payload
 
 
-def _stream_shared_agent_turn(
+def _stream_shared_agent_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     *,
     supervisor: SessionSupervisorClient,
     job: ClaimedJob,
@@ -2016,6 +1848,8 @@ def _stream_shared_agent_turn(
     sandbox_error: str | None = None
 
     def outcome(exit_code: int) -> tuple[int, str, list[str], dict[str, Any] | None, str | None]:
+        # Events the control plane could not record fail the turn before its outcome counts.
+        control.flush()
         if agent_error:
             reported = f"agent reported an error: {agent_error[:900]}"
         elif sandbox_error:
@@ -2027,11 +1861,12 @@ def _stream_shared_agent_turn(
     try:
         # The sandbox manager admits and dispatches the prompt before opening this
         # response stream. Resident follow-ups need not emit a native init
-        # event, so report this shared boundary before waiting for CLI output.
+        # event, so store this shared boundary before waiting for CLI output.
         control.append_event(NormalizedEvent("lifecycle", {"phase": "turn_started"}))
+        control.flush()
         frames = OutputPump(stream.frames(), name="shared-agent-stream")
         while True:
-            if heart.lease_lost:
+            if heart.lease_lost or control.lease_lost:
                 with contextlib.suppress(Exception):
                     supervisor.interrupt_shared(job.thread_id, token=lease_token)
                 raise LeaseLost("lease lost while the shared Agent CLI was running")
@@ -2124,15 +1959,8 @@ def _stream_shared_agent_turn(
         elif status != "completed" and exit_code == 0:
             exit_code = 1
         if tool_errors:
-            control.append_event(
-                NormalizedEvent(
-                    "error",
-                    {
-                        "detail": f"{len(tool_errors)} tool call(s) failed",
-                        "first": tool_errors[0],
-                    },
-                )
-            )
+            summary = {"detail": f"{len(tool_errors)} tool call(s) failed", "first": tool_errors[0]}
+            control.append_event(NormalizedEvent("error", summary))
         return outcome(exit_code)
     finally:
         if frames is not None:
@@ -2175,11 +2003,19 @@ def _stage(measurement: operation_profiling.Measurement | None, name: str) -> st
     return name
 
 
-class _RestoreHandBack(Exception):
-    """The sandbox manager could not recreate a moved group; the turn goes back."""
+class _HandBack(Exception):
+    """The sandbox manager refused the turn before anything ran; the turn goes back.
+
+    It could not recreate a moved group, or the group stayed busy past its
+    wait. ``reason`` is the release reason the control plane records.
+    """
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(detail)
+        self.reason = reason
 
 
-def _run_shared_live_attempt(
+def _run_shared_live_attempt(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     *,
     runtime: AgentRuntime,
     job: ClaimedJob,
@@ -2187,7 +2023,6 @@ def _run_shared_live_attempt(
     heart: Heartbeater,
     backend: SandboxBackend,
     host: str | None,
-    gateway_base_url: str,
     agent_timeout_s: float,
     finish_attempt: Any,
     measurement: operation_profiling.Measurement | None = None,
@@ -2211,10 +2046,6 @@ def _run_shared_live_attempt(
     if not host or not job.thread_id:
         finish_attempt("failed", "shared live chats require an enrolled host and thread id")
         return 2
-    driver = driver_for(runtime)
-    if getattr(driver, "launch_live", None) is None:
-        finish_attempt("failed", f"runtime {job.runtime!r} has no shared live transport")
-        return 2
     mcp_url = _sandbox_mcp_url()
     if job.mcp_bindings and not mcp_url:
         if any(not alias.startswith(PLATFORM_MCP_SERVER_PREFIX) for alias in job.mcp_bindings):
@@ -2227,7 +2058,10 @@ def _run_shared_live_attempt(
         job = replace(job, mcp_bindings=[])
 
     manager = ChatSandboxManager(backend)
-    stamp = backend.version_stamp()
+    # Only the image's facts are read here. The downloaded versions take a
+    # Docker listing of seconds, which the version check below makes only
+    # when it must.
+    stamp = backend.version_stamp(downloads="skip")
     existing = job.thread_sandbox or {}
     if existing and existing.get("shared_live") is not True:
         finish_attempt("failed", "the control plane returned a non-shared sandbox mapping")
@@ -2250,8 +2084,7 @@ def _run_shared_live_attempt(
     capacity = int(
         existing.get("resident_slot_capacity")
         or settings.get("shared_resident_capacity")
-        or os.environ.get("AGENT_SHARED_RESIDENT_CAPACITY")
-        or HOST_SETTINGS_BY_KEY["shared_resident_capacity"].default
+        or local_shared_resident_capacity()
     )
     if not 2 <= capacity <= 128:
         finish_attempt("failed", "shared resident capacity must be between 2 and 128")
@@ -2382,6 +2215,9 @@ def _run_shared_live_attempt(
     source: _SourcePrefetch | None = None
     lease_token: str | None = None
     settled = False
+    # The sandbox manager has settled the turn: its session is good whatever
+    # the control plane's receipt says next, and no longer leased to this attempt.
+    locally_settled = False
     abandoned = False
     turn_admitted = False
     terminals_suspended = False
@@ -2395,7 +2231,7 @@ def _run_shared_live_attempt(
         nonlocal abandoned
         if abandoned or settled:
             return
-        if supervisor is not None and lease_token is not None:
+        if supervisor is not None and lease_token is not None and not locally_settled:
             try:
                 supervisor.abandon_shared(job.thread_id, token=lease_token, lost=lost)
             except Exception as exc:
@@ -2510,7 +2346,14 @@ def _run_shared_live_attempt(
             )
         except SessionSupervisorError as exc:
             if restore is not None and exc.status_code == 424:
-                raise _RestoreHandBack(str(exc)) from exc
+                raise _HandBack(
+                    RESTORE_FAILED_RELEASE_REASON, f"sandbox restore failed: {exc}"
+                ) from exc
+            if exc.status_code == 409:
+                # The group stayed busy past the sandbox manager's wait: a
+                # snapshot capture can take longer, and the control plane
+                # claims a follow-up whatever the group is doing.
+                raise _HandBack("sandbox_busy", f"sandbox busy: {exc}") from exc
             context_invalid = has_context and exc.status_code == 410
             raise
         lease_token = str(lease["token"])
@@ -2568,7 +2411,7 @@ def _run_shared_live_attempt(
                     "workspace_shared": True,
                     "container_id": lease["container_id"],
                     "activation_generation": activation_generation,
-                    **retained.sandbox_metadata(),
+                    **{**retained.sandbox_metadata(), **job.started_context_fields()},
                 },
             )
         )
@@ -2580,11 +2423,13 @@ def _run_shared_live_attempt(
 
         imported_base: str | None = None
         recovered_initial = False
-        if not has_context:
+        if not has_context and container_action != "create":
             # A previous activation may have committed the immutable S3
             # baseline and then died before returning its receipt. Resolve
             # that durable marker before reset, setup, permissions, or uploads
-            # can alter the exact prepared bytes it names.
+            # can alter the exact prepared bytes it names. A container this
+            # acquire created holds no marker it wrote, so none to resolve: the
+            # capture clears one a checkpoint carried and refuses any other.
             stage = _stage(measurement, "initial_archive_status")
             initial_status = supervisor.initial_archive_status(
                 spec,
@@ -2702,6 +2547,7 @@ def _run_shared_live_attempt(
             # first-turn job can still add files of its own and must import the
             # thread's current attachment set before prompt admission.
             fresh_container=not has_context and not recovered_initial,
+            container_id=str(lease["container_id"]),
         )
         if imported_uploads:
             control.append_event(
@@ -2728,12 +2574,15 @@ def _run_shared_live_attempt(
                 expected_container_id=str(lease["container_id"]),
                 preparation_id=job.job_id,
                 base_sha=base_sha,
+                # The bundle durable on the host fixes the bytes; S3 can follow.
+                defer_upload=True,
             )
             archive_enabled = initial_archive.get("enabled")
             archive_stored = initial_archive.get("stored")
+            pending = archive_stored is False and initial_archive.get("upload") == "pending"
             if not (
-                (archive_enabled is False and archive_stored is False)
-                or (archive_enabled is True and archive_stored is True)
+                (archive_enabled is False and archive_stored is False and not pending)
+                or (archive_enabled is True and (archive_stored is True or pending))
             ):
                 raise SandboxError("sandbox manager returned an invalid initial archive receipt")
             control.append_event(
@@ -2743,6 +2592,7 @@ def _run_shared_live_attempt(
                         "phase": "initial_archive",
                         "enabled": archive_enabled,
                         "stored": archive_stored,
+                        **({"upload": "pending"} if pending else {}),
                     },
                 )
             )
@@ -2781,7 +2631,7 @@ def _run_shared_live_attempt(
             abandon_before_finish(lost=False, detail=failure_detail)
             finish_attempt("failed", failure_detail, base_sha=base_sha)
             return 1
-        if not retained.has_binary(runtime.binary):
+        if lease.get("resident_state") != "live" and not retained.has_binary(runtime.binary):
             failure_detail = f"runtime binary {runtime.binary!r} is not installed"
             abandon_before_finish(lost=False, detail=failure_detail)
             finish_attempt("failed", failure_detail, base_sha=base_sha)
@@ -2807,12 +2657,19 @@ def _run_shared_live_attempt(
                 job.thread_id, job.ssh_access.with_slot(job.thread_id, ssh_slot), starting=True
             )
         if job.environment is not None:
-            prepared = supervisor.prepare_environment(
-                job.thread_id,
-                job.environment,
-                activation_owner=lease_token,
-                cancelled=lambda: heart.cancel_requested or heart.lease_lost,
-            )
+            try:
+                prepared = supervisor.prepare_environment(
+                    job.thread_id,
+                    job.environment,
+                    activation_owner=lease_token,
+                    cancelled=lambda: heart.cancel_requested or heart.lease_lost,
+                )
+            except SessionSupervisorError:
+                # A Stop kills the running script, and the preparation then
+                # fails. Nothing has reached the CLI yet, so it is no failure.
+                if stopped_before_admission(base_sha):
+                    return 0
+                raise
             control.append_event(
                 NormalizedEvent("lifecycle", {"phase": "environment_prepared", **prepared})
             )
@@ -2829,9 +2686,7 @@ def _run_shared_live_attempt(
             native_session_id=native_session_id,
             model=job.model,
             reasoning_effort=job.reasoning_effort,
-            gateway_base_url=gateway_base_url,
             credential=None,
-            github_token=job.github_token,
             environment=job.environment,
             github_repo=job.repo or "",
             plugins=tuple(job.plugins),
@@ -2842,27 +2697,20 @@ def _run_shared_live_attempt(
             # (``compatible_with``). Only a process opened below receives one.
             mcp_base_url=mcp_url if job.mcp_bindings else "",
             mcp_credential="",
+            sandbox_mcp_servers=job.sandbox_mcp_servers if job.mcp_bindings else (),
             slot_id=slot_id,
             residency_generation=int(running.get("residency_generation") or 0),
+            **model_connection_launch(job),
         )
         stage = _stage(measurement, "resident_start")
-        resident_descriptor: dict[str, Any] | None = None
-        if lease.get("resident_state") == "live":
-            try:
-                resident_call = operation_profiling.expect_fragment(
-                    measurement, SANDBOX_MANAGER_PRODUCER, "resident_start"
-                )
-                resident_descriptor = supervisor.ensure_shared_resident(
-                    job.thread_id,
-                    token=lease_token,
-                    launch=launch,
-                    profiling=operation_profiling.measurement_context(measurement, resident_call),
-                )
-            except SessionSupervisorError:
-                # A process-fixed model/MCP setting changed, the process died,
-                # or this sandbox manager restarted. Rotate only this member's grant and
-                # resume its exact native session below.
-                resident_descriptor = None
+        resident_descriptor, resident_call = probe_live_resident(
+            measurement,
+            supervisor,
+            lease=lease,
+            thread_id=job.thread_id,
+            token=lease_token,
+            launch=launch,
+        )
         if resident_descriptor is None:
             residency = control.establish_shared_residency(
                 sandbox_id=spec.sandbox_id,
@@ -2872,22 +2720,20 @@ def _run_shared_live_attempt(
             credential = str(residency.get("credential") or "")
             if not credential:
                 raise SandboxError("control plane returned no shared residency credential")
+            # The residency's: this process serves later turns' tools without a restart.
+            mcp_credential = str(residency.get("mcp_credential") or "") if job.mcp_bindings else ""
+            if job.mcp_bindings and not mcp_credential:
+                raise SandboxError("control plane returned no shared residency MCP credential")
             grant_model = residency.get("model")
             if grant_model not in {None, job.model}:
                 raise SandboxError("shared residency grant model does not match this turn")
+            require_residency_connection(job, residency)
             launch = replace(
                 launch,
                 credential=credential,
-                # The residency's MCP credential lets this process serve later
-                # turns' tools without a restart. A control plane that predates
-                # it sends none; the turn's own token then works for this turn,
-                # and the next one restarts the process as it always did.
-                mcp_credential=(
-                    str(residency.get("mcp_credential") or "") or job.mcp_token
-                    if job.mcp_bindings
-                    else ""
-                ),
+                mcp_credential=mcp_credential,
                 residency_generation=int(residency["generation"]),
+                **residency_github_launch(job.repo, residency),
             )
             resident_call = operation_profiling.expect_fragment(
                 measurement, SANDBOX_MANAGER_PRODUCER, "resident_start"
@@ -2925,24 +2771,24 @@ def _run_shared_live_attempt(
                     "prepare" if not has_context else ("base_import" if imported_base else "reuse")
                 ),
             )
+        continuity: tuple[str | None, str] = (None, "new")
+        if context_status == "live":
+            continuity = ("hot", "live")
+        elif has_context:
+            continuity = ("warm_native", "restored")
         control.record_chat_process(
             sandbox_generation=spec.generation,
             activation_generation=activation_generation,
             residency_generation=launch.residency_generation,
             process_generation=process_generation,
+            continuity=continuity,
         )
-        if context_status == "live":
-            control.report_continuity("hot", context_status="live")
-        elif has_context:
-            control.report_continuity("warm_native", context_status="restored")
-        else:
-            control.report_context_status("new")
 
         stage = _stage(measurement, "prompt_admission")
         # The last point at which a Stop costs nothing.
         if stopped_before_admission(base_sha):
             return 0
-        _retry_lifecycle_receipt(
+        _retry_control_receipt(
             "prompt_admission_retry",
             job.job_id,
             lambda: control.admit_chat_turn(
@@ -2950,6 +2796,7 @@ def _run_shared_live_attempt(
                 activation_generation=activation_generation,
                 residency_generation=launch.residency_generation,
             ),
+            heart=heart,
         )
         turn_admitted = True
         result_frame: dict[str, Any] | None = None
@@ -3043,10 +2890,9 @@ def _run_shared_live_attempt(
             finish_attempt("failed", failure_detail, base_sha=base_sha)
             return 1
         if tool_errors:
-            # Match the existing conservative no-change rule only after a
-            # publication snapshot can attribute the shared diff. A successful
-            # shared turn may race a sibling, so tool errors alone do not prove
-            # this member produced no useful state.
+            # Reported, not failed: a successful shared turn may race a
+            # sibling, so tool errors alone do not prove this member produced
+            # no useful state.
             control.append_event(
                 NormalizedEvent(
                     "lifecycle",
@@ -3070,7 +2916,8 @@ def _run_shared_live_attempt(
             observed_session_id=local_settle.get("native_session_id"),
             has_context=has_context,
         )
-        _retry_lifecycle_receipt(
+        locally_settled = True
+        _retry_control_receipt(
             "control_settlement_retry",
             job.job_id,
             lambda: control.settle_chat_sandbox(
@@ -3082,6 +2929,7 @@ def _run_shared_live_attempt(
                 base_sha=base_sha,
                 idle_timeout_seconds=idle_timeout_s,
             ),
+            heart=heart,
         )
         settled = True
         if settled_failure:
@@ -3100,7 +2948,6 @@ def _run_shared_live_attempt(
                     {
                         "phase": "shared_workspace_settled",
                         "workspace_shared": True,
-                        "publication": "pending_snapshot",
                     },
                 )
             )
@@ -3112,7 +2959,7 @@ def _run_shared_live_attempt(
             _log_control_failure("completion_event", job.job_id, exc)
         finish_decided(
             "succeeded",
-            "agent completed (shared workspace; publication snapshot pending)",
+            "agent completed (shared workspace)",
             base_sha,
         )
         return 0
@@ -3120,12 +2967,14 @@ def _run_shared_live_attempt(
         failure_detail = "attempt lease lost during shared live execution"
         operation_profiling.finish(measurement, outcome="lease_lost", failure_stage=stage)
         return 3
-    except _RestoreHandBack as exc:
-        # Nothing ran and the checkpoint is unchanged: give the group back to
-        # it and the turn back to the queue, for this host or another to try
-        # again. Once the control plane has run out of attempts it marks the
-        # group lost instead, and this turn fails with it.
-        failure_detail = f"sandbox restore failed: {exc}"
+    except _HandBack as exc:
+        # Nothing ran and the chat is unchanged: release the activation, which
+        # gives a group being restored back to its checkpoint, and the turn
+        # back to the queue, for this host or another to try again once the
+        # control plane's retry delay has passed. Once the control plane has
+        # run out of restore attempts it marks the group lost instead, and this
+        # turn fails with it.
+        failure_detail = str(exc)
         _log_control_failure(stage, job.job_id, exc)
         abandoned = True
         try:
@@ -3133,7 +2982,7 @@ def _run_shared_live_attempt(
                 sandbox_generation=spec.generation,
                 activation_generation=activation_generation,
                 lost=False,
-                detail=failure_detail[:1000],
+                detail=failure_detail,
                 idle_timeout_seconds=idle_timeout_s,
             )
         except Exception as abandon_exc:
@@ -3142,7 +2991,7 @@ def _run_shared_live_attempt(
         if isinstance(group, dict) and group.get("state") == "lost":
             report_failure()
             return 2
-        return 0 if control.release_turn("sandbox_restore_failed") else 2
+        return 0 if control.release_turn(exc.reason) else 2
     except (DriverError, SandboxError, SessionSupervisorError, WorktreeError) as exc:
         failure_detail = str(exc)
         _log_control_failure(stage, job.job_id, exc)
@@ -3175,92 +3024,10 @@ def _run_shared_live_attempt(
                 control.resume_terminals()
 
 
-def run_once(
-    *,
-    base_url: str,
-    gateway_url: str = "",
-    host_credential: str,
-    worker_id: str,
-    lease_ttl: float = DEFAULT_LEASE_TTL_S,
-    agent_timeout_s: float = DEFAULT_AGENT_TIMEOUT_S,
-    backend: SandboxBackend | None = None,
-    host: str | None = None,
-) -> int:
-    """Claim and deliver one turn through the shared retained-session protocol.
-
-    Claim and execution in one process. The deployed host service separates
-    them — it claims, and a child process of its own runs the turn — but a
-    single-turn path is what local tooling and the tests that exercise the
-    protocol end to end use, and it is the same execution either way.
-
-    A runner-created backend is preflighted before claim. The retained
-    container owns the only workspace, so there is deliberately no host
-    worktree argument or bind-mount fallback.
-    """
-    if backend is None:
-        backend = build_backend_from_env()
-        backend.preflight()
-
-    # Opt-in timing for the startup chain. `None` unless an experiment selects
-    # this operation, and every helper below is a no-op on `None`.
-    measurement = operation_profiling.start_operation(
-        operation=STARTUP_OPERATION,
-        host=host,
-        worker_id=worker_id,
-    )
-    try:
-        with operation_profiling.span(measurement, "claim"):
-            attestation = _claim_attestation(backend)
-            job = claim(
-                base_url=base_url,
-                host_credential=host_credential,
-                worker_id=worker_id,
-                lease_ttl=lease_ttl,
-                attestation=attestation,
-            )
-    except BaseException:
-        # A claim that never returned allocated no attempt, so there is nothing
-        # to report and the run must not spend a slot on a failed poll.
-        operation_profiling.discard(measurement)
-        raise
-    if job is None:
-        # Nothing was claimed, so there is no startup to measure.
-        operation_profiling.discard(measurement)
-        print("no queued agent job; nothing to do")
-        return 0
-    # Target filters on job/thread/sandbox can only be applied now. A
-    # measurement that falls out of scope emits nothing.
-    if measurement is not None and not operation_profiling.bind(
-        measurement,
-        attempt_id=job.attempt_id,
-        job_id=job.job_id,
-        thread_id=job.thread_id,
-        sandbox_id=str((job.thread_sandbox or {}).get("sandbox_id") or "") or None,
-        runtime_id=job.runtime,
-        runtime_version=job.runtime_version,
-        execution_profile=job.execution_profile,
-    ):
-        operation_profiling.discard(measurement)
-        measurement = None
-
-    return run_turn(
-        job,
-        base_url=base_url,
-        gateway_url=gateway_url,
-        worker_id=worker_id,
-        lease_ttl=lease_ttl,
-        agent_timeout_s=agent_timeout_s,
-        backend=backend,
-        host=host,
-        measurement=measurement,
-    )
-
-
 def run_turn(
     job: ClaimedJob,
     *,
     base_url: str,
-    gateway_url: str = "",
     worker_id: str,
     lease_ttl: float = DEFAULT_LEASE_TTL_S,
     agent_timeout_s: float = DEFAULT_AGENT_TIMEOUT_S,
@@ -3280,7 +3047,6 @@ def run_turn(
         return _run_turn(
             job,
             base_url=base_url,
-            gateway_url=gateway_url,
             worker_id=worker_id,
             lease_ttl=lease_ttl,
             agent_timeout_s=agent_timeout_s,
@@ -3478,7 +3244,6 @@ def _run_turn(
     job: ClaimedJob,
     *,
     base_url: str,
-    gateway_url: str = "",
     worker_id: str,
     lease_ttl: float = DEFAULT_LEASE_TTL_S,
     agent_timeout_s: float = DEFAULT_AGENT_TIMEOUT_S,
@@ -3534,22 +3299,11 @@ def _run_turn(
     control.job_id = job.job_id
     heart = Heartbeater(control, ttl=lease_ttl, interval=HEARTBEAT_INTERVAL_S)
 
-    def finish_attempt(
-        state: str,
-        detail: str | None = None,
-        *,
-        base_sha: str | None = None,
-    ) -> None:
-        if base_sha is None:
-            control.finish(state, detail)
-        else:
-            control.finish(state, detail, base_sha=base_sha)
-
     try:
         runtime = get_runtime(job.runtime)
     except KeyError as exc:
         operation_profiling.finish(measurement, outcome="failed", failure_stage="runtime_lookup")
-        finish_attempt("failed", str(exc))
+        control.finish("failed", str(exc))
         control.close()
         return 2
 
@@ -3562,9 +3316,8 @@ def _run_turn(
             heart=heart,
             backend=backend,
             host=host,
-            gateway_base_url=gateway_url,
             agent_timeout_s=agent_timeout_s,
-            finish_attempt=finish_attempt,
+            finish_attempt=control.finish,
             measurement=measurement,
             host_settings=host_settings,
         )
@@ -3578,7 +3331,7 @@ def _run_turn(
         # that will later be misreported as a lease failure.
         _log_control_failure("attempt_dispatch", job.job_id, exc)
         try:
-            finish_attempt("failed", f"attempt dispatch failed ({type(exc).__name__})")
+            control.finish("failed", f"attempt dispatch failed ({type(exc).__name__})")
         except Exception as finish_exc:
             _log_control_failure("finish", job.job_id, finish_exc)
         return 2
@@ -3588,43 +3341,6 @@ def _run_turn(
         operation_profiling.finish(measurement, outcome="incomplete", failure_stage="preflight")
         heart.stop()
         control.close()
-
-
-#: Set by SIGTERM. A container being replaced gets one, and until this existed
-#: it killed the process outright — Python's default handler terminates, and
-#: only ``KeyboardInterrupt`` (SIGINT) was caught. Every `docker compose up -d`
-#: that recreated a runner therefore abandoned whatever job it was running.
-#:
-#: That is not only a deploy problem, but the deploy is where it bites on a
-#: schedule: since CD, every merge to dev recreates these containers.
-_STOPPING = threading.Event()
-
-
-def _drain_on_sigterm() -> None:
-    """Finish the job in hand on SIGTERM, then exit; SIGINT still stops now.
-
-    The split is deliberate. `docker stop` sends SIGTERM; supported activation
-    asks the Engine to wait indefinitely, so a job finishes before its runner
-    is replaced. Direct, out-of-band Compose operations retain their configured
-    grace period. A person pressing Ctrl-C means *now*, and turning that into a
-    several-minute wait would be its own surprise.
-
-    The lease machinery remains the backstop for a host failure or an explicit
-    forced kill, not the deployment plan.
-    """
-
-    def handler(signum: int, frame: object) -> None:
-        _STOPPING.set()
-        print(
-            "agent runner: SIGTERM received; finishing the current job, then exiting",
-            file=sys.stderr,
-            flush=True,
-        )
-
-    # Only the main thread may install one; tests and embedders that call
-    # `serve` from elsewhere get the old behaviour rather than an exception.
-    with contextlib.suppress(ValueError):
-        signal.signal(signal.SIGTERM, handler)
 
 
 def _sandbox_manager_url_from_env() -> str | None:
@@ -3706,19 +3422,8 @@ def _start_host_capacity_collector(backend: SandboxBackend) -> HostCapacityColle
     return collector
 
 
-#: The parent's additions a turn's child does read: the profiling selection,
-#: and the runtime settings the turn runs with. Every other underscore key is
-#: parent bookkeeping.
-_CHILD_HANDOFF_KEYS = frozenset({"_profiling", "_host_settings"})
-
-
-def _child_turn_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
-    """Strip parent bookkeeping while preserving the profiling and settings handoff."""
-    return {
-        key: value
-        for key, value in payload.items()
-        if not key.startswith("_") or key in _CHILD_HANDOFF_KEYS
-    }
+#: The runner's name for what a turn's child is handed (turn_launch).
+_child_turn_payload = child_turn_payload
 
 
 def _turn_host_settings(raw: Any) -> dict[str, float]:
@@ -3740,180 +3445,41 @@ def _spawn_turn(
     payload: dict[str, Any],
     *,
     base_url: str,
-    gateway_url: str,
     worker_id: str,
     lease_ttl: float,
     agent_timeout_s: float,
     host: str,
     qualification: HostQualification | None = None,
+    spare: TurnSpare | None = None,
 ) -> LaunchResult:
-    """Start a child for one claimed turn and find out whether it took it.
+    """Hand one claimed turn to a child and find out whether it took it.
 
-    The turn travels on the child's standard input, because it carries this
-    attempt's credentials and both ``/proc/<pid>/cmdline`` and
-    ``/proc/<pid>/environ`` are readable by anyone who can see the process. The
-    child's answer comes back on a descriptor of its own, because its standard
-    output is the container log and a reader that stopped draining that would
-    block the turn it was waiting for.
-
-    Every path that returns ``LAUNCH_NOT_STARTED`` has shown the child never
-    had the turn: no process was created or the child explicitly declined it.
-    Silence, EOF, an unexpected answer, and any failure after spawn are
-    ambiguous: the turn stays claimed, the child stays tracked, and its lease
-    remains the backstop.
+    The handover is :func:`cloud_agent_host.turn_launch.spawn_turn`'s. This
+    is the name the service calls and its tests replace, and it reads the
+    answer with this module's ``read_handover``, which they replace too.
     """
-    child = _child_turn_payload(payload)
-    verdict = qualification.verdict() if qualification is not None else None
-    if verdict is not None:
-        # Added after the claim's own underscore keys were stripped: only this
-        # host, which proved the runtime itself, can spare the child the probe.
-        child[VERDICT_KEY] = verdict
-    try:
-        encoded_child = encode_turn(child)
-    except (TypeError, ValueError) as exc:
-        return LaunchResult(
-            outcome=LAUNCH_NOT_STARTED,
-            detail=f"the turn payload could not be encoded: {type(exc).__name__}: {exc}",
-        )
-    try:
-        read_fd, write_fd = os.pipe()
-    except OSError as exc:
-        return LaunchResult(
-            outcome=LAUNCH_NOT_STARTED,
-            detail=f"could not create the turn handover pipe: {exc}",
-        )
-    argv = [
-        sys.executable,
-        "-m",
-        "cloud_agent_host.runner",
-        "--turn",
-        "--handover-fd",
-        str(write_fd),
-        "--base-url",
-        base_url,
-        "--gateway-url",
-        gateway_url,
-        "--worker-id",
-        worker_id,
-        "--host",
-        host,
-        "--lease-ttl",
-        str(lease_ttl),
-        "--agent-timeout",
-        str(agent_timeout_s),
-    ]
-    try:
-        process = subprocess.Popen(
-            argv,
-            stdin=subprocess.PIPE,
-            pass_fds=(write_fd,),
-        )
-    except OSError as exc:
-        os.close(read_fd)
-        os.close(write_fd)
-        return LaunchResult(
-            outcome=LAUNCH_NOT_STARTED, detail=f"could not start a turn process: {exc}"
-        )
-    read_open = True
-    write_open = True
-    try:
-        # This process's copy, closed so the read below ends at end-of-file
-        # when the child exits rather than waiting out the deadline.
-        os.close(write_fd)
-        write_open = False
-        assert process.stdin is not None
-        # Most underscore-prefixed keys are parent bookkeeping. Profiling is
-        # the one intentional child handoff: stripping it makes the deployed
-        # multi-process path silently measure nothing.
-        process.stdin.write(encoded_child)
-        process.stdin.close()
-        # read_handover owns and always closes this descriptor, including when
-        # it raises. Mark it transferred before entering the call so cleanup
-        # never closes a descriptor number that another thread could reuse.
-        read_open = False
-        answer = read_handover(read_fd)
-    except KeyboardInterrupt:
-        # Ctrl-C means immediate shutdown. This child is not in TurnPool until
-        # this function returns, so reap it here rather than orphaning it in
-        # the handover window.
-        if read_open:
-            with contextlib.suppress(OSError):
-                os.close(read_fd)
-        if write_open:
-            with contextlib.suppress(OSError):
-                os.close(write_fd)
-        if process.stdin is not None:
-            with contextlib.suppress(OSError, ValueError):
-                process.stdin.close()
-        with contextlib.suppress(OSError):
-            process.kill()
-        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-            process.wait(timeout=10)
-        raise
-    except Exception as exc:
-        # The process exists and may already have accepted the turn. Losing
-        # the handover transport is not proof that it is safe to requeue or
-        # omit this child from graceful shutdown accounting.
-        if read_open:
-            with contextlib.suppress(OSError):
-                os.close(read_fd)
-        if write_open:
-            with contextlib.suppress(OSError):
-                os.close(write_fd)
-        if process.stdin is not None:
-            with contextlib.suppress(OSError, ValueError):
-                process.stdin.close()
-        return LaunchResult(
-            outcome=LAUNCH_UNCERTAIN,
-            handle=process,
-            detail=(
-                f"handover failed ({type(exc).__name__}); the turn stays claimed "
-                "because the spawned child may already own it"
-            ),
-        )
-    prefix = answer.split(" ", 1)[0] if answer else ""
-    if prefix == HANDOVER_ACCEPTED:
-        return LaunchResult(outcome=LAUNCH_STARTED, handle=process)
-    if prefix == HANDOVER_DECLINED:
-        _reap_unstarted(process)
-        return LaunchResult(outcome=LAUNCH_NOT_STARTED, detail=answer or HANDOVER_DECLINED)
-    if answer is None:
-        detail = f"no answer within {HANDOVER_TIMEOUT_S:.0f}s"
-    elif not answer:
-        detail = "the handover closed without a trustworthy answer"
-    else:
-        detail = f"the child returned an unexpected handover answer: {answer!r}"
-    return LaunchResult(
-        outcome=LAUNCH_UNCERTAIN,
-        handle=process,
-        detail=f"{detail}; the turn stays claimed because silence is not proof it did not start",
+    return spawn_turn(
+        payload,
+        base_url=base_url,
+        worker_id=worker_id,
+        lease_ttl=lease_ttl,
+        agent_timeout_s=agent_timeout_s,
+        host=host,
+        qualification=qualification,
+        spare=spare,
+        read_answer=read_handover,
     )
-
-
-def _reap_unstarted(process: subprocess.Popen[bytes]) -> None:
-    """Collect a child that never took its turn, without waiting on it forever.
-
-    It explicitly declined, so it is on its way out. A child that somehow is
-    not gets killed: it holds no turn, so there is nothing for it to finish,
-    and leaving it would leak a process per failure.
-    """
-    try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            process.wait(timeout=10)
 
 
 def _serve_turn(
     *,
     handover_fd: int,
     base_url: str,
-    gateway_url: str,
     worker_id: str,
     lease_ttl: float,
     agent_timeout_s: float,
     host: str | None,
+    spare: bool = False,
 ) -> int:
     """Run the one turn delivered on standard input, or decline having none.
 
@@ -3928,6 +3494,9 @@ def _serve_turn(
     image and the network without running the turn, so failing it means the
     turn has not begun — and answering first would instead strand that turn behind
     a lease it will never use, having spent one of its attempts.
+
+    ``spare`` is a child started before its turn was claimed (turn_launch).
+    One retired without a turn exits at once, without the probe.
     """
     # Install before reading the payload or probing the runtime. The parent
     # does not signal children during a graceful drain, but this also protects
@@ -3938,7 +3507,9 @@ def _serve_turn(
 
     # Drained first, and before anything slow, so the host is never left
     # blocked writing a long prompt into a pipe this process has not read yet.
-    raw = sys.stdin.read()
+    raw = read_turn_input(spare=spare)
+    if raw is None:
+        return 0
     # Recover only the parent's optional timing selection before preflight.
     # This does not accept the turn or reserve a slot: declined children
     # discard their timing without emitting, and the host retains its budget.
@@ -3951,13 +3522,13 @@ def _serve_turn(
         if payload is not None:
             measurement = operation_profiling.attach_selection(payload.get("_profiling"))
 
-    # Empty or undecodable input always exercises the full deployment canary.
-    # A real turn may carry the host's runtime verdict, so the child repeats
-    # only what can change between turns: the update marker and the network.
+    # Empty input runs the full deployment canary; a real turn adopts what its host proved.
     operation_profiling.mark(measurement, "preflight")
     try:
         with operation_profiling.span(measurement, "preflight"):
             backend = build_backend_from_env()
+            if payload is not None:
+                backend.adopt_rules_verification(payload)
             verdict = payload.get(VERDICT_KEY) if payload is not None else None
             if isinstance(backend, ContainerBackend) and adopt_verdict(backend, verdict):
                 backend.check_network()
@@ -4001,9 +3572,10 @@ def _serve_turn(
     return run_turn(
         job,
         base_url=base_url,
-        gateway_url=gateway_url,
-        worker_id=worker_id,
-        lease_ttl=lease_ttl,
+        worker_id=handed_worker_id(payload, worker_id),
+        # The lease the parent claimed this turn with, so its renewals ask for
+        # the same length the claim did.
+        lease_ttl=host_settings.get("lease_ttl_s", lease_ttl),
         agent_timeout_s=host_settings.get("agent_timeout_s", agent_timeout_s),
         backend=backend,
         host=host,
@@ -4012,18 +3584,16 @@ def _serve_turn(
     )
 
 
-def run_forever(
+def run_forever(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
     *,
     base_url: str,
-    gateway_url: str = "",
     worker_id: str,
     lease_ttl: float = DEFAULT_LEASE_TTL_S,
     agent_timeout_s: float = DEFAULT_AGENT_TIMEOUT_S,
-    idle_sleep_s: float = 5.0,
     backend: SandboxBackend | None = None,
     host: str | None = None,
     spawn_turn: Callable[[dict[str, Any]], LaunchResult] | None = None,
-    tick_s: float | None = None,
+    tick_s: float = 5.0,
 ) -> int:
     """Serve this host: claim turns up to its limit, and run each in its own child.
 
@@ -4045,11 +3615,11 @@ def run_forever(
     owns every retained container and resident Agent CLI process, so this loop
     never creates or bind-mounts a host worktree.
     """
-    backend = backend or build_backend_from_env()
+    backend = backend or build_backend_from_env(keep_network_helper=True)
     # The host proves its runtime here, once, and its children inherit that
     # verdict rather than each booting a probe guest of its own.
     qualification = (
-        HostQualification(backend)
+        HostQualification(backend, renew_network=True)
         if isinstance(backend, ContainerBackend) and spawn_turn is None
         else None
     )
@@ -4057,10 +3627,6 @@ def run_forever(
         qualification.backend.check_network()
     else:
         backend.preflight()
-
-    checker = getattr(backend, "check_gateway_reachable", None)
-    if checker is not None:
-        checker(gateway_url or base_url)
 
     stamper = getattr(backend, "version_stamp", None)
     stamp: dict[str, Any] = stamper() if stamper is not None else {}
@@ -4086,21 +3652,12 @@ def run_forever(
     except ValueError as exc:
         raise RuntimeError(str(exc)) from exc
 
-    # Advertised beside the shared-live capabilities, never instead of them: it
-    # says this runner applies ``slots_desired``, which is what lets the admin
-    # page tell a host that will honour a new number from one that needs a
-    # redeploy to change.
-    host_capabilities = [
-        *_environment_host_capabilities(backend, stamp),
-        HOST_CONCURRENCY_CAPABILITY,
-        HOST_SETTINGS_CAPABILITY,
-    ]
     identity = ensure_enrolled(
         base_url=base_url,
         host=host,
         sandbox_manager_url=_sandbox_manager_url_from_env(),
         slots_total=host_default,
-        capabilities=host_capabilities,
+        capabilities=_advertised_host_capabilities(backend, stamp),
         runner_version=_runner_version(),
     )
     if identity is None:
@@ -4110,23 +3667,35 @@ def run_forever(
         )
 
     qualification_error = ""
+    # The child the next turn goes to, started after each handover so its
+    # imports are done before that claim (turn_launch). Only _spawn_turn
+    # starts one, so a host given its own launcher never has one.
+    spare = TurnSpare(
+        base_url=base_url,
+        worker_id=worker_id,
+        lease_ttl=lease_ttl,
+        agent_timeout_s=agent_timeout_s,
+        host=host,
+    )
     launch = spawn_turn or (
         lambda payload: _spawn_turn(
             payload,
             base_url=base_url,
-            gateway_url=gateway_url or base_url,
             worker_id=str(payload.get("_worker_id") or worker_id),
             lease_ttl=lease_ttl,
             agent_timeout_s=agent_timeout_s,
             host=host,
             qualification=qualification,
+            spare=spare,
         )
     )
     turns = TurnPool(launch=launch)
     from cloud_agent_host.environment_tests import EnvironmentTestWorker
 
     environment_tests = (
-        EnvironmentTestWorker(base_url, backend) if isinstance(backend, ContainerBackend) else None
+        EnvironmentTestWorker(base_url, backend, on_idle=turns.slot_freed)
+        if isinstance(backend, ContainerBackend)
+        else None
     )
     # The limit this host is willing to serve right now. Held across beats so
     # a control plane that is briefly unreachable leaves the host running what
@@ -4143,7 +3712,7 @@ def run_forever(
     except Exception:
         settings_sandbox_manager = None
     runtime_settings = RuntimeSettings(
-        _runner_local_settings(agent_timeout_s),
+        _runner_local_settings(agent_timeout_s, lease_ttl),
         sandbox_manager=None
         if settings_sandbox_manager is None
         else settings_sandbox_manager.apply_host_settings,
@@ -4212,7 +3781,8 @@ def run_forever(
 
         def downloaded() -> None:
             # Offered on the next beat, not an interval later, and not from a
-            # menu read before the download finished.
+            # menu read before the download finished; a version removed is
+            # withdrawn the same way.
             offered.invalidate()
             pool.wake()
 
@@ -4225,6 +3795,8 @@ def run_forever(
             registry=os.environ.get(ENV_RUNTIME_REGISTRY_URL, "").strip() or None,
             on_change=downloaded,
         )
+        # A menu too long to report keeps these first (``version_stamp``).
+        offered.targets = downloads.targets
 
     pool = HostHeartbeat(
         base_url=base_url,
@@ -4235,21 +3807,16 @@ def run_forever(
         # operator's number.
         slots_total=lambda: limit,
         launch_error=lambda: qualification_error or turns.launch_error,
-        capabilities=lambda: [
-            *_environment_host_capabilities(backend, stamp),
-            HOST_CONCURRENCY_CAPABILITY,
-            # Advertised so an operator can tell a host that will pick up a
-            # runtime configuration from one that needs a redeploy, which is
-            # the same distinction the concurrency capability draws.
-            PROFILING_CONTROL_CAPABILITY,
-            HOST_SETTINGS_CAPABILITY,
-        ],
+        # Read per beat: the claim loop replaces ``stamp`` when a qualification
+        # refresh changes what this host can run.
+        capabilities=lambda: _advertised_host_capabilities(backend, stamp),
         runner_version=_runner_version(),
         sandbox_runtime=stamp.get("sandbox_runtime"),
         sandbox_image_digest=stamp.get("sandbox_image_digest"),
         runtime_versions=stamp.get("runtime_versions"),
         # Read per beat: the image's own menu, plus whatever has been
-        # downloaded since this runner started.
+        # downloaded since this runner started, as last listed; each beat
+        # past a few seconds lists it again in the background.
         runtime_versions_available=(
             (lambda: backend.version_stamp().get("runtime_versions_available"))
             if stamper is not None
@@ -4257,6 +3824,8 @@ def run_forever(
         ),
         runtime_downloads_report=None if downloads is None else downloads.report,
         on_runtime_downloads=None if downloads is None else downloads.apply,
+        config_reports=None if downloads is None else downloads.registry_report,
+        on_runtime_registry=None if downloads is None else downloads.set_registry,
         readiness_marker=_shared_live_ready_file(),
         retained_sandbox_beats=_retained_sandbox_heartbeat_rows,
         # Read per beat, so the age it carries is the age it had when the beat
@@ -4312,9 +3881,15 @@ def run_forever(
         flush=True,
     )
 
-    idle_wait = tick_s if tick_s is not None else idle_sleep_s
-    work = _WorkWaiter(base_url=base_url, interval_s=idle_wait)
+    # One keep-alive client for the claims, the waits between them and a turn
+    # handed back. Each used to open a connection of its own: with the
+    # environment-test claim, three in every idle cycle. Credentials still go
+    # per request, so a rotated host credential is used at once and a release
+    # sends its own turn's token.
+    host_client = keepalive_client()
+    work = _WorkWaiter(base_url=base_url, interval_s=tick_s, client=host_client)
     immediate = False
+    rejected = False
     claims = 0
     try:
         while True:
@@ -4341,6 +3916,7 @@ def run_forever(
                     file=sys.stderr,
                     flush=True,
                 )
+                rejected = True
                 break
 
             # Whatever the last successful beat carried, including nothing:
@@ -4372,14 +3948,13 @@ def run_forever(
                 pool.wake()
 
             if not pool.claimable:
-                time.sleep(idle_wait)
+                time.sleep(tick_s)
                 continue
             test_slots = int(environment_tests is not None and environment_tests.busy)
             if not turns.may_claim(max(0, limit - test_slots)):
-                # A freed local slot should be noticed promptly. This does
-                # not increase empty-queue polls or retry traffic to the API.
-                slot_wait = min(idle_wait, 1.0) if turns.running() >= limit else idle_wait
-                time.sleep(slot_wait)
+                # A turn's child exiting or an environment test ending ends this wait at once,
+                # and nothing else does; the tick is the fallback. No API poll or retry is added.
+                turns.wait_for_slot(min(tick_s, 1.0) if turns.running() >= limit else tick_s)
                 continue
             if qualification is not None:
                 try:
@@ -4394,7 +3969,7 @@ def run_forever(
                         qualification_error = error
                         logger.warning("agent_runtime_qualification_failed", exc_info=True)
                         pool.wake()
-                    time.sleep(idle_wait)
+                    time.sleep(tick_s)
                     continue
                 if qualification_error:
                     qualification_error = ""
@@ -4405,20 +3980,20 @@ def run_forever(
             # does not enforce this generation's exact-SHA attestation, so this
             # host stays idle until its own checks complete.
             if not _shared_live_deployment_ready(backend, stamp):
-                time.sleep(idle_wait)
+                time.sleep(tick_s)
                 continue
             # A host that restarted can claim before its first heartbeat answer
             # arrives, and a turn claimed then would run with this host's own
             # settings rather than an admin's. Wait for that answer, but only so
             # long: claiming must not come to depend on the heartbeat.
             if not runtime_settings.adopted and time.monotonic() < settings_deadline:
-                time.sleep(idle_wait)
+                time.sleep(tick_s)
                 continue
             # Archive policy is a stop-safety boundary. The sandbox manager must
             # explicitly confirm the complete DB revision, including an
             # explicit disabled policy, before this process creates work.
             if not archive_settings.ready:
-                time.sleep(idle_wait)
+                time.sleep(tick_s)
                 continue
 
             # A distinct lease owner per turn. Fencing never reads this
@@ -4427,8 +4002,8 @@ def run_forever(
             # exactly when it is worth asking.
             claims += 1
             turn_worker_id = f"{worker_id}-{claims}"
-            # Selected before the request, exactly as the single-process path
-            # does: the wait for a claim is part of the startup a user feels.
+            # Selected before the request: the wait for a claim is part of
+            # the startup a user feels.
             # The slot is claimed here and not in the child, so one attempt
             # costs one sample however the turn is actually executed.
             measurement = operation_profiling.start_operation(
@@ -4438,16 +4013,22 @@ def run_forever(
             )
             try:
                 with operation_profiling.span(measurement, "claim"):
+                    # Built once a pass: after an empty claim, the
+                    # environment-test claim presents this same proof.
+                    attestation = _claim_attestation(
+                        backend,
+                        sandbox_archive_settings_applied_revision=archive_settings.report(),
+                        host_settings=runtime_settings.turn_settings(),
+                    )
                     payload = claim_payload(
                         base_url=base_url,
                         host_credential=pool.credential,
                         worker_id=turn_worker_id,
-                        lease_ttl=lease_ttl,
-                        attestation=_claim_attestation(
-                            backend,
-                            sandbox_archive_settings_applied_revision=archive_settings.report(),
-                            host_settings=runtime_settings.turn_settings(),
-                        ),
+                        # The lease an admin set, adopted from the latest
+                        # heartbeat answer; this host's own until then.
+                        lease_ttl=runtime_settings.turn_settings().get("lease_ttl_s", lease_ttl),
+                        attestation=attestation,
+                        client=host_client,
                     )
             except ClaimUnreachable as exc:
                 operation_profiling.discard(measurement)
@@ -4456,14 +4037,14 @@ def run_forever(
                     file=sys.stderr,
                     flush=True,
                 )
-                time.sleep(idle_wait)
+                time.sleep(tick_s)
                 continue
             except Exception as exc:
                 operation_profiling.discard(measurement)
                 print(
                     f"agent runner: claim failed unexpectedly: {exc}", file=sys.stderr, flush=True
                 )
-                time.sleep(idle_wait)
+                time.sleep(tick_s)
                 continue
 
             if payload is None:
@@ -4471,7 +4052,7 @@ def run_forever(
                 # the poll must not spend a slot.
                 operation_profiling.discard(measurement)
                 if environment_tests is not None:
-                    environment_tests.poll(pool.credential)
+                    environment_tests.poll(pool.credential, attestation)
                 work.wait(pool.credential)
                 continue
 
@@ -4482,14 +4063,22 @@ def run_forever(
                 worker_id=turn_worker_id,
                 measurement=_bound_measurement(measurement, payload),
                 host_settings=runtime_settings.turn_settings(),
+                client=host_client,
             )
     except KeyboardInterrupt:
         immediate = True
     finally:
         try:
+            # It holds no turn, so a drain never waits for it.
+            spare.close(immediate=immediate)
             turns.shutdown(immediate=immediate)
         finally:
-            stop_all()
+            try:
+                stop_all()
+            finally:
+                host_client.close()
+    if rejected:
+        _stay_down()
     return 0
 
 
@@ -4707,6 +4296,7 @@ def _hand_over_turn(
     worker_id: str,
     measurement: operation_profiling.Measurement | None = None,
     host_settings: Mapping[str, float] | None = None,
+    client: httpx.Client | None = None,
 ) -> None:
     """Give one claimed turn to a child, and requeue it only if it never began.
 
@@ -4721,10 +4311,10 @@ def _hand_over_turn(
         delivery_job = ClaimedJob.from_response(payload)
     except (KeyError, TypeError, ValueError):
         delivery_job = None
-    # Carried beside the turn rather than in it: the child logs under the same
-    # name the claim recorded as this turn's lease owner. Stripped before
-    # delivery, so the payload the child parses is the control plane's answer
-    # and nothing this host added to it.
+    # Carried beside the turn under an underscore key: the child logs under
+    # the same name the claim recorded as this turn's lease owner. The
+    # handover strips the claim's own underscore keys, then hands the child
+    # this one (turn_launch.spawn_turn), so a claim can never supply it.
     # The selection rides beside the turn for the same reason the worker id
     # does: the child runs the part worth measuring, and the parent holds the
     # budget slot. It is discarded once the child is gone, because the child's
@@ -4820,6 +4410,7 @@ def _hand_over_turn(
         worker_token=worker_token,
         job_id=job_id,
         reason="launch_failed",
+        client=client,
     )
     logger.warning(
         "agent_turn_not_started",
@@ -4845,7 +4436,7 @@ def _env_float(name: str, fallback: float) -> float:
 
 
 def _lease_ttl_arg(raw: str) -> float:
-    """Parse ``--lease-ttl``, refusing a lease that expires before its first renewal."""
+    """Parse ``--lease-ttl``, refusing a lease that expires before its next renewal."""
     try:
         ttl = float(raw)
     except ValueError as exc:
@@ -4903,25 +4494,26 @@ def _new_sandbox_storage_error(job: ClaimedJob, settings: Mapping[str, float] | 
     return new_sandbox_storage_error(minimum_mib=minimum)
 
 
-def _runner_local_settings(agent_timeout_s: float) -> dict[str, float]:
+def _runner_local_settings(
+    agent_timeout_s: float, lease_ttl: float = DEFAULT_LEASE_TTL_S
+) -> dict[str, float]:
     """This host's own value for each setting the runner applies.
 
     Legacy bootstrap values, used only before the first settings heartbeat.
-    ``agent_timeout_s`` was already read from ``AGENT_TIMEOUT_S`` or its flag.
-    The admin settings replace every value, including defaults, once adopted.
+    ``agent_timeout_s`` and ``lease_ttl`` were already read from
+    ``AGENT_TIMEOUT_S`` and ``AGENT_LEASE_TTL`` or their flags. The admin
+    settings replace every value, including defaults, once adopted.
     """
     return {
         "agent_timeout_s": agent_timeout_s,
+        "lease_ttl_s": lease_ttl,
         "chat_idle_timeout_s": _chat_idle_timeout_s(),
         "source_import_max_mib": source_import_max_bytes() // (1024 * 1024),
         "storage_min_available_mib": _env_float(
             "AGENT_STORAGE_MIN_AVAILABLE_MIB",
             float(HOST_SETTINGS_BY_KEY["storage_min_available_mib"].default),
         ),
-        "shared_resident_capacity": int(
-            os.environ.get("AGENT_SHARED_RESIDENT_CAPACITY")
-            or HOST_SETTINGS_BY_KEY["shared_resident_capacity"].default
-        ),
+        "shared_resident_capacity": local_shared_resident_capacity(),
         **{
             key: _sandbox_resource_setting(key, {})
             for key in ("sandbox_cpu_millicores", "sandbox_memory_mib", "sandbox_disk_mib")
@@ -4992,29 +4584,12 @@ def build_parser() -> argparse.ArgumentParser:
     a runner container crash-loops.
     """
     parser = argparse.ArgumentParser(description="Run queued agent jobs.")
-    # **Two origins, and after the split they are two services.** The runner
-    # claims work, reports events and renews its lease against this *control
-    # plane*; the sandbox calls models against the *gateway*. They were one
-    # value while the agent lived inside the gateway, and pointing that single
-    # value at either service after the split breaks whichever half it is not.
-    #
-    # `AGENT_CONTROL_PLANE_URL` falls back to the gateway URL so a host that
-    # has not been reconfigured keeps behaving exactly as it did — wrong in the
-    # same way as before rather than newly broken, which is the only safe
-    # default while both shapes are deployed.
+    # The control plane is the only origin a host is configured with; owners
+    # supply their own inference connections.
     parser.add_argument(
         "--base-url",
-        default=(
-            os.environ.get("AGENT_CONTROL_PLANE_URL")
-            or os.environ.get("AGENT_GATEWAY_URL")
-            or os.environ.get("FREEINFERENCE_BASE_URL", "")
-        ),
+        default=os.environ.get("AGENT_CONTROL_PLANE_URL", ""),
         help="Control plane: claim, heartbeat, events, lifecycle, terminals.",
-    )
-    parser.add_argument(
-        "--gateway-url",
-        default=os.environ.get("AGENT_GATEWAY_URL") or os.environ.get("FREEINFERENCE_BASE_URL", ""),
-        help="Inference gateway, as the sandbox reaches it. Model calls only.",
     )
     parser.add_argument("--worker-id", default=default_worker_id())
     parser.add_argument(
@@ -5042,9 +4617,11 @@ def build_parser() -> argparse.ArgumentParser:
     # and the exact configuration it was given itself; the turn arrives on that
     # child's standard input and its answer goes back on the descriptor named
     # here. Started by hand, a turn process reads an empty standard input,
-    # declines, and exits.
+    # declines, and exits. A spare, started before its turn is claimed, reads
+    # an empty one as being retired and exits without the probe.
     parser.add_argument("--turn", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--handover-fd", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--spare", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -5055,13 +4632,17 @@ def main(argv: list[str] | None = None) -> int:
 
     # In the source repo, importing sandbox configured root logging as a side
     # effect; the host shim removed that on purpose. This is the sanctioned
-    # replacement (MIGRATION.md's deferred-behaviour register, the
+    # replacement (the extraction record's deferred-behaviour register, the
     # runner-logging row) — without it every INFO event a runner emits goes
     # nowhere.
     configure_process_logging()
 
+    try:
+        refuse_retired_host_configuration()
+    except ValueError as exc:
+        parser.error(str(exc))
     if not args.base_url:
-        parser.error("AGENT_CONTROL_PLANE_URL (or AGENT_GATEWAY_URL) is required")
+        parser.error("AGENT_CONTROL_PLANE_URL is required")
 
     if args.turn:
         if args.handover_fd is None:
@@ -5069,15 +4650,16 @@ def main(argv: list[str] | None = None) -> int:
         return _serve_turn(
             handover_fd=args.handover_fd,
             base_url=args.base_url,
-            gateway_url=args.gateway_url or args.base_url,
             worker_id=args.worker_id,
             lease_ttl=args.lease_ttl,
             agent_timeout_s=args.agent_timeout,
             host=args.host,
+            spare=args.spare,
         )
+    if args.spare:
+        parser.error("--spare is a turn process's flag; the host service supplies it with --turn")
     return run_forever(
         base_url=args.base_url,
-        gateway_url=args.gateway_url or args.base_url,
         worker_id=args.worker_id,
         lease_ttl=args.lease_ttl,
         agent_timeout_s=args.agent_timeout,
@@ -5099,6 +4681,5 @@ __all__ = [
     "prepare_temporary_worktree",
     "prepare_worktree",
     "run_forever",
-    "run_once",
     "run_turn",
 ]

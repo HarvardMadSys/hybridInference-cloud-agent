@@ -4,15 +4,16 @@ import type { HostSettingDefinition } from '@/lib/api/admin';
 import type { AgentAdminSettings } from '@/lib/api/adminSettings';
 
 import { buildSettingsSearchItems, searchSettingsItems } from './settingsSearchIndex';
+import { accountProviderSnapshot } from './settingsTestFixtures';
 
 const snapshot: AgentAdminSettings = {
   revision: 1,
   definitions: [
     {
-      key: 'github_publish_token',
-      label: 'GitHub publication token',
-      description: 'Credential used to publish pull requests.',
-      category: 'Publication',
+      key: 'control_signing_secret',
+      label: 'Control signing secret',
+      description: 'Credential used to sign control requests.',
+      category: 'Security',
       kind: 'string',
       default: 'private-default-value',
       secret: true,
@@ -27,6 +28,15 @@ const snapshot: AgentAdminSettings = {
       secret: false,
     },
     {
+      key: 'runtime_registry_url',
+      label: 'Agent package registry',
+      description: 'The npm registry agent versions come from.',
+      category: 'Agent versions',
+      kind: 'string',
+      default: '',
+      secret: false,
+    },
+    {
       key: 'future.setting',
       label: 'Future limit',
       description: 'A newly introduced setting.',
@@ -36,8 +46,8 @@ const snapshot: AgentAdminSettings = {
       secret: false,
     },
   ],
-  values: { github_publish_token: null, 'future.setting': 73129 },
-  secret_configured: { github_publish_token: true },
+  values: { control_signing_secret: null, 'future.setting': 73129 },
+  secret_configured: { control_signing_secret: true },
   bootstrap: [
     {
       key: 'AGENT_DATABASE_URL',
@@ -65,7 +75,6 @@ function items(over: Partial<Parameters<typeof buildSettingsSearchItems>[0]> = {
     hostDefinitions: [hostDefinition],
     runtimes: ['claude-code', 'future-agent'],
     archiveAvailable: true,
-    applicationTab: 'application-Source%20control',
     ...over,
   });
 }
@@ -73,20 +82,20 @@ function items(over: Partial<Parameters<typeof buildSettingsSearchItems>[0]> = {
 describe('settings search', () => {
   it('searches merged and original application categories, related groups, and descriptions', () => {
     const catalog = items();
-    const token = catalog.find((item) => item.applicationKey === 'github_publish_token');
-    expect(searchSettingsItems(catalog, 'source control publication')).toEqual([token]);
-    expect(searchSettingsItems(catalog, 'github credential requests')).toEqual([token]);
+    const token = catalog.find((item) => item.applicationKey === 'control_signing_secret');
+    expect(searchSettingsItems(catalog, 'identity access security')).toEqual([token]);
+    expect(searchSettingsItems(catalog, 'encryption keys credential requests')).toEqual([token]);
     expect(token).toMatchObject({
-      tab: 'application-Source%20control',
-      targetId: 'application-setting-github_publish_token',
-      section: 'Source control',
+      tab: 'application-Identity%20%26%20access',
+      targetId: 'application-setting-control_signing_secret',
+      section: 'Identity & access',
     });
   });
 
   it('normalizes case, underscores, and punctuation and requires every query token', () => {
     const catalog = items();
-    expect(searchSettingsItems(catalog, '  GITHUB_PUBLISH.TOKEN  ')).toEqual([
-      catalog.find((item) => item.id === 'application:github_publish_token'),
+    expect(searchSettingsItems(catalog, '  CONTROL_SIGNING.SECRET  ')).toEqual([
+      catalog.find((item) => item.id === 'application:control_signing_secret'),
     ]);
     expect(searchSettingsItems(catalog, 'AGENT_TERMINAL_MAX_SESSIONS sandbox')).toEqual([
       catalog.find((item) => item.id === 'host:terminal_max_sessions'),
@@ -94,6 +103,16 @@ describe('settings search', () => {
     expect(searchSettingsItems(catalog, 'github unmatched-term')).toEqual([]);
     expect(searchSettingsItems(catalog, '   ')).toEqual([]);
     expect(searchSettingsItems(catalog, '__...--')).toEqual([]);
+  });
+
+  it('routes the agent package registry to the Agent versions tab', () => {
+    expect(searchSettingsItems(items(), 'npm registry')).toEqual([
+      expect.objectContaining({
+        applicationKey: 'runtime_registry_url',
+        tab: 'versions',
+        section: 'Agent versions',
+      }),
+    ]);
   });
 
   it('keeps new definitions searchable and routes archive storage into Sandbox', () => {
@@ -113,15 +132,12 @@ describe('settings search', () => {
     ]);
   });
 
-  it('routes deployment, host, agent version, archive, and CloudLab metadata to their controls', () => {
+  it('routes host, agent version, archive, and CloudLab metadata to their controls', () => {
     const catalog = items();
-    expect(searchSettingsItems(catalog, 'agent_database_url')).toEqual([
-      expect.objectContaining({
-        tab: 'application-Source%20control',
-        section: 'Deployment setup',
-        targetId: 'application-bootstrap-AGENT_DATABASE_URL',
-      }),
-    ]);
+    // Deployment notes are not settings; they never become a search destination.
+    expect(searchSettingsItems(catalog, 'agent_database_url')).toEqual([]);
+    expect(searchSettingsItems(catalog, 'Database connection')).toEqual([]);
+    expect(catalog.some((item) => item.id.startsWith('bootstrap:'))).toBe(false);
     expect(searchSettingsItems(catalog, 'terminal_max_sessions')).toEqual([
       expect.objectContaining({ tab: 'sandbox', targetId: 'host-setting-terminal_max_sessions' }),
     ]);
@@ -166,5 +182,42 @@ describe('settings search', () => {
       expect(item).not.toHaveProperty('secret_configured');
     }
     expect(JSON.stringify(catalog)).not.toContain('private-default-value');
+  });
+});
+
+describe('provider-aware search items', () => {
+  const keys = (items: { applicationKey?: string }[]) => items.map((item) => item.applicationKey);
+  const build = (values = {}, isSettingVisible?: (key: string) => boolean) =>
+    buildSettingsSearchItems({
+      snapshot: accountProviderSnapshot(values),
+      hostDefinitions: [],
+      runtimes: [],
+      archiveAvailable: false,
+      isSettingVisible,
+    });
+
+  it('leaves out fields that do not apply to the saved providers', () => {
+    const items = build({ 'accounts.sms_provider': 'tencent' });
+    expect(keys(items)).toContain('accounts.smtp_host');
+    for (const hidden of [
+      'accounts.tencent_ses_region',
+      'accounts.sms_provider',
+      'accounts.tencent_sms_app_id',
+      'accounts.tencent_secret_id',
+    ]) {
+      expect(keys(items)).not.toContain(hidden);
+    }
+    expect(keys(searchSettingsItems(items, 'tencent'))).toEqual([
+      'accounts.email_provider',
+      'accounts.sms_enabled',
+    ]);
+  });
+
+  it('uses the caller’s visibility, which includes unsaved drafts', () => {
+    const items = build({}, (key) => !key.startsWith('accounts.smtp_'));
+    expect(keys(searchSettingsItems(items, 'smtp'))).toEqual(['accounts.email_provider']);
+    expect(keys(searchSettingsItems(items, 'Tencent SES region'))).toEqual([
+      'accounts.tencent_ses_region',
+    ]);
   });
 });

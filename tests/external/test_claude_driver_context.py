@@ -56,7 +56,7 @@ def native_driver(tmp_path, monkeypatch):
 
     context = drivers.LaunchContext(
         workdir=str(workdir),
-        gateway_base_url=f"http://127.0.0.1:{gateway.port}",
+        model_base_url=f"http://127.0.0.1:{gateway.port}",
         credential="local-context-test",
         provides_isolation=False,
         state_dir=str(tmp_path),
@@ -65,7 +65,7 @@ def native_driver(tmp_path, monkeypatch):
     sessions = []
 
     def open_session(session_id=None, *, extra_env=None):
-        driver = drivers.ClaudeCodeDriver(ClaudeCodeRuntime())
+        driver = drivers.driver_for(ClaudeCodeRuntime())
         launch_context = replace(
             context,
             spawn_live=lambda argv, env: spawn(argv, {**env, **(extra_env or {})}),

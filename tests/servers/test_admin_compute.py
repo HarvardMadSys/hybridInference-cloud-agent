@@ -278,6 +278,14 @@ class MemoryResources:
         row["state"] = "cancelled"
         return row
 
+    async def confirm_acquisition_absent(self, *, operation_id):
+        row = self.operations[operation_id]
+        row.update(state="cancelled", result={**row["result"], "confirmed_absent": True})
+        self.allocations[row["allocation_id"]].update(
+            desired_state="absent", observed_state="absent"
+        )
+        return row
+
 
 class NoProviderCalls:
     """Any cloud side effect during an API request fails this suite."""
@@ -777,11 +785,6 @@ def automatic_setup_request() -> dict[str, Any]:
     """Use infrastructure descriptors without including deployment credentials."""
     return {
         "request_id": "automatic-setup-once",
-        "gateway": {
-            "connection_id": "gateway-key",
-            "address": "gateway-input-canary.example.org",
-            "username": "gateway_operator",
-        },
         "control": {
             "connection_id": "control-key",
             "address": "control-input-canary.example.org",
@@ -847,15 +850,10 @@ async def test_automatic_setup_parses_targets_and_audits_only_profile_ids(comput
     parsed = service.create.await_args.args[0]
     assert isinstance(parsed, AutomaticDeploymentSetup)
     assert parsed.request_id == body["request_id"]
-    assert parsed.gateway.connection_id == "gateway-key"
-    assert parsed.gateway.address == body["gateway"]["address"]
-    assert parsed.gateway.username == "gateway_operator"
-    assert parsed.gateway.port == 22
     assert parsed.control.connection_id == "control-key"
     assert parsed.control.address == body["control"]["address"]
     assert parsed.control.username == "control_operator"
     assert parsed.control.port == 22
-    assert parsed.gateway_port == 8080
     assert parsed.slots == 2
     assert parsed.protected_cidrs == ["192.0.2.0/24", "198.51.100.0/24"]
     assert len(repo.audit_rows) == 1
@@ -863,7 +861,6 @@ async def test_automatic_setup_parses_targets_and_audits_only_profile_ids(comput
     assert repo.audit_rows[0]["actor_id"] == "admin-token"
     assert repo.audit_rows[0]["details"] == {"profile_id": "automatic-primary,automatic-spare"}
     for canary in (
-        body["gateway"]["address"],
         body["control"]["address"],
         service.sandbox_manager_token,
         service.private_key,
@@ -1695,6 +1692,59 @@ async def test_impact_whitelists_scope_and_irreversible_release_disables_actions
 
 
 @pytest.mark.asyncio
+async def test_a_release_that_stopped_its_runners_shows_its_scan_and_cannot_be_cancelled(
+    compute_api,
+):
+    """Cancelling would reopen a Host whose runner nothing starts again."""
+    client, repo, _ = compute_api
+    _, operation = await allocation(client)
+    repo.operations[operation["id"]].update(
+        kind="retire",
+        state="blocked",
+        step="checking_retention",
+        result={
+            "runners_stopping": True,
+            "inventory": [
+                {
+                    "node_id": "node-1",
+                    "probes_removed": 2,
+                    "complete": True,
+                    "retained_containers": 0,
+                    "unknown_containers": True,
+                    "orphan_state": False,
+                    "blocked_reasons": ["unmanaged_containers_present", "Not A Code"],
+                    "address": "10.0.0.7",
+                },
+                "not a scan",
+            ],
+        },
+    )
+
+    observed = await client.get(f"/admin/agent/compute-operations/{operation['id']}", headers=ADMIN)
+
+    view = observed.json()["operation"]
+    assert view["allowed_actions"] == ["retry"]
+    # Known fields of the right type, reason codes only: never anything else
+    # a node's answer could carry.
+    assert view["result"]["inventory"] == [
+        {
+            "node_id": "node-1",
+            "probes_removed": 2,
+            "complete": True,
+            "retained_containers": 0,
+            "orphan_state": False,
+            "blocked_reasons": ["unmanaged_containers_present"],
+        }
+    ]
+    assert "10.0.0.7" not in observed.text
+    cancel = await client.post(
+        f"/admin/agent/compute-operations/{operation['id']}/cancel", headers=ADMIN, json={}
+    )
+    assert cancel.status_code == 409
+    assert repo.operations[operation["id"]]["state"] == "blocked"
+
+
+@pytest.mark.asyncio
 async def test_definite_pre_submit_autoscale_rejection_can_be_cancelled(compute_api):
     client, repo, _ = compute_api
     _, operation = await allocation(client)
@@ -1780,6 +1830,45 @@ async def test_released_unknown_acquisition_cannot_be_resolved(compute_api):
         json={"external_id": "already-released"},
     )
     assert resolved.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_unknown_acquisition_closes_as_never_created_and_is_audited(compute_api):
+    client, repo, _ = compute_api
+    _, operation = await allocation(client)
+    repo.operations[operation["id"]].update(state="unknown", result={"external_pending": True})
+    path = f"/admin/agent/compute-operations/{operation['id']}"
+
+    observed = await client.get(path, headers=ADMIN)
+    assert "confirm_absent" in observed.json()["operation"]["allowed_actions"]
+    closed = await client.post(f"{path}/confirm-absent", headers=ADMIN, json={})
+
+    assert closed.status_code == 202, closed.text
+    assert closed.json()["operation"]["state"] == "cancelled"
+    assert closed.json()["operation"]["allowed_actions"] == []
+    assert repo.audit_rows[-1]["action"] == "agent.compute.operation.confirm_absent"
+    again = await client.post(f"{path}/confirm-absent", headers=ADMIN, json={})
+    assert again.status_code == 409
+    assert again.json()["detail"]["code"] == "absence_not_confirmable"
+
+
+@pytest.mark.asyncio
+async def test_acquisition_that_named_its_resource_is_not_closed_as_never_created(compute_api):
+    client, repo, _ = compute_api
+    _, operation = await allocation(client)
+    repo.operations[operation["id"]].update(
+        state="unknown", result={"resource_ref": {"external_id": "experiment"}}
+    )
+    path = f"/admin/agent/compute-operations/{operation['id']}"
+
+    observed = await client.get(path, headers=ADMIN)
+    assert "confirm_absent" not in observed.json()["operation"]["allowed_actions"]
+    refused = await client.post(f"{path}/confirm-absent", headers=ADMIN, json={})
+
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["code"] == "absence_not_confirmable"
+    assert repo.operations[operation["id"]]["state"] == "unknown"
+    assert not any(row["action"].endswith("confirm_absent") for row in repo.audit_rows)
 
 
 @pytest.mark.asyncio

@@ -207,6 +207,7 @@ jobs:
           # The web image is built twice, and only here is either variant built
           # in CI: a mount prefix is resolved while the bundle is compiled, so
           # the two are different images and neither was verified before this.
+          # BEGIN GENERATED ARTIFACT MATRIX
           - name: control
             arch: arm64
             smoke_args: --role control
@@ -221,14 +222,6 @@ jobs:
             build_args: |
               NEXT_PUBLIC_BASE_PATH=
               NEXT_PUBLIC_AGENT_API_URL=/api
-          - name: web-agents
-            arch: arm64
-            smoke_args: --role web --variant agents
-            dockerfile: deploy/control-plane/Dockerfile.web
-            runner: '["self-hosted","Linux","ARM64","image-verify-arm64"]'
-            build_args: |
-              NEXT_PUBLIC_BASE_PATH=/agents
-              NEXT_PUBLIC_AGENT_API_URL=/agents/api
           - name: runner
             arch: amd64
             smoke_args: --role runner
@@ -244,9 +237,10 @@ jobs:
           - name: tunnel
             arch: amd64
             smoke_args: --role tunnel
-            dockerfile: deploy/host/Dockerfile.agent-gateway-tunnel
+            dockerfile: deploy/host/Dockerfile.agent-ssh-tunnel
             runner: '["self-hosted","Linux","X64","image-verify-x64"]'
             build_args: ""
+          # END GENERATED ARTIFACT MATRIX
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
@@ -621,16 +615,15 @@ jobs:
             --publisher-run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             --output release/release.json
 
-      # The `/agents` variant, because that is the one production serves and the
-      # one whose base path a wrong binding would break. The root variant's image
-      # is started by the smoke in its own cell above.
+      # The root web image, the only one built: the app is served at the root
+      # of its own hostname.
       - name: Deploy it, and check what came up
         run: |
           set -euo pipefail
           uv run python deploy/release/acceptance.py \
             --manifest release/release.json \
             --recipe release/recipe.tar.gz \
-            --variant agents \
+            --variant root \
             --workdir "${WORKDIR}" \
             --project "${PROJECT}"
 

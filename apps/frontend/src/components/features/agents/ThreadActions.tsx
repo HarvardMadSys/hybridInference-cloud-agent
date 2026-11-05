@@ -4,6 +4,8 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import toast from 'react-hot-toast';
 import { useT } from '@/components/providers';
+import { MENU_ACTIONS, MENU_POSITIONED, MENU_ROW, menuRowClass } from '@/components/ui/menuStyles';
+import { usePopupMenu } from '@/components/ui/usePopupMenu';
 import {
   listAllAgentThreadEvents,
   pinAgentJob,
@@ -71,20 +73,14 @@ export function ThreadActions({
   }
 
   useEffect(() => {
-    if (!open && !renaming) return;
-    if (renaming) {
-      input.current?.focus();
-      input.current?.select();
-    } else
-      menu.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus();
-    const outside = (event: PointerEvent) => {
-      if (
-        open &&
-        !menu.current?.contains(event.target as Node) &&
-        !trigger.current?.contains(event.target as Node)
-      )
-        setOpen(false);
-    };
+    if (!renaming) return;
+    input.current?.focus();
+    input.current?.select();
+  }, [renaming]);
+
+  // Renaming is a small form of its own; Escape belongs to it while it is open.
+  useEffect(() => {
+    if (!renaming) return;
     const escape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       // Run cancellation also listens on window. Consume this before its bubble listener.
@@ -92,13 +88,20 @@ export function ThreadActions({
       event.stopImmediatePropagation();
       if (!mutation.current) close();
     };
-    document.addEventListener('pointerdown', outside);
     window.addEventListener('keydown', escape, true);
-    return () => {
-      document.removeEventListener('pointerdown', outside);
-      window.removeEventListener('keydown', escape, true);
-    };
-  }, [open, renaming]);
+    return () => window.removeEventListener('keydown', escape, true);
+  }, [renaming]);
+
+  const popup = usePopupMenu({
+    open,
+    onOpenChange: (nextOpen) => {
+      if (nextOpen) setError(null);
+      setOpen(nextOpen);
+    },
+    triggerRef: trigger,
+    menuRef: menu,
+    placement: { gap: 4, width: 192, maxWidth: 240, preferredHeight: 220, maxHeight: 400 },
+  });
 
   async function saveTitle() {
     const nextTitle = title.trim();
@@ -166,8 +169,7 @@ export function ThreadActions({
     }
   }
 
-  const itemClass =
-    'ui-button ui-button-ghost w-full justify-start text-left text-foreground focus:bg-surface-hover';
+  const itemClass = (inactive: boolean) => (inactive ? menuRowClass({ disabled: true }) : MENU_ROW);
   return (
     <div className="relative shrink-0">
       <button
@@ -182,6 +184,7 @@ export function ThreadActions({
           setError(null);
           setOpen(!open);
         }}
+        onKeyDown={popup.triggerKeyDown}
         className="ui-icon-button ui-button-ghost"
       >
         <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
@@ -196,34 +199,15 @@ export function ThreadActions({
           ref={menu}
           role="menu"
           aria-label={t('taskActions.options')}
-          className="ui-card absolute right-0 top-full z-50 mt-1 w-48 p-1.5 shadow-xl"
-          onKeyDown={(event) => {
-            if (event.key === 'Tab') {
-              setOpen(false);
-              return;
-            }
-            if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
-            event.preventDefault();
-            const items = [
-              ...menu.current!.querySelectorAll<HTMLButtonElement>(
-                '[role="menuitem"]:not(:disabled)',
-              ),
-            ];
-            const current = items.indexOf(document.activeElement as HTMLButtonElement);
-            const next =
-              event.key === 'Home'
-                ? 0
-                : event.key === 'End'
-                  ? items.length - 1
-                  : (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
-            items[next]?.focus();
-          }}
+          style={popup.style}
+          className={`${MENU_ACTIONS} ${MENU_POSITIONED} w-48`}
+          onKeyDown={popup.onKeyDown}
         >
           <button
             role="menuitem"
             tabIndex={-1}
             disabled={busy}
-            className={itemClass}
+            className={itemClass(busy)}
             onClick={() => {
               setTitle(job.title);
               setError(null);
@@ -238,7 +222,7 @@ export function ThreadActions({
               type="button"
               role="menuitem"
               tabIndex={-1}
-              className={itemClass}
+              className={itemClass(false)}
               onClick={() => {
                 setOpen(false);
                 onEnvironment();
@@ -251,7 +235,7 @@ export function ThreadActions({
             role="menuitem"
             tabIndex={-1}
             disabled={busy}
-            className={itemClass}
+            className={itemClass(busy)}
             onClick={() => void togglePin()}
           >
             {t(pinned ? 'taskActions.unpin' : 'taskActions.pin')}
@@ -260,7 +244,7 @@ export function ThreadActions({
             role="menuitem"
             tabIndex={-1}
             disabled={!canFork || forking || busy}
-            className={itemClass}
+            className={itemClass(!canFork || forking || busy)}
             onClick={() => {
               close();
               onFork();
@@ -273,7 +257,7 @@ export function ThreadActions({
             tabIndex={-1}
             disabled={downloading}
             aria-busy={downloading}
-            className={itemClass}
+            className={itemClass(downloading)}
             onClick={() => void downloadSessionLog()}
           >
             {t(downloading ? 'taskActions.downloadingLog' : 'taskActions.downloadLog')}

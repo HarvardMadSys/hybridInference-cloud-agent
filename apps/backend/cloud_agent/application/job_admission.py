@@ -1,7 +1,7 @@
 """Admission checks a submitted job or follow-up passes before it is written.
 
-Model resolution, runtime registration, reasoning-effort availability, skill
-selection, MCP binding resolution and the idempotency fence: the rules that
+The model connection a turn runs on, runtime registration, skill selection,
+MCP binding resolution and the idempotency fence: the rules that
 decide whether a submission is accepted at all. The create-job and follow-up
 entry points share them, which is why they have one home rather than one copy
 per router module.
@@ -18,8 +18,13 @@ from typing import TYPE_CHECKING, Protocol
 
 from fastapi import HTTPException
 
+from cloud_agent.application.model_connections import (
+    model_connections_enabled,
+    resolve_turn_connection,
+)
 from cloud_agent.attachments.models import AttachmentError
 from cloud_agent.attachments.selection import resolve_attachments
+from cloud_agent.domain.model_connections import ModelConnectionUnusable
 from cloud_agent.domain.requests import request_fingerprint
 from cloud_agent.domain.ssh_servers import SshServerUnavailable
 from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
@@ -35,21 +40,13 @@ from cloud_agent.mcp.registry import resolve_connection
 from cloud_agent.schemas import (
     BASE_REF_METADATA_KEY,
     ONCALL_METADATA_KEY,
-    PLATFORM_REASONING_EFFORTS,
-    RESET_REASONING_EFFORT,
 )
 from cloud_agent.skills.models import SkillError
 from cloud_agent.skills.selection import resolve_skills
-from cloud_agent.visible_models import (
-    agent_canonical_model,
-    agent_model_reasoning_efforts,
-    agent_visible_models,
-)
 from cloud_agent_shared.git.temporary_workspace import TEMPORARY_WORKSPACE_BASE_SHA
 from cloud_agent_shared.plugins import validate_sandbox_plugins
 from cloud_agent_shared.runtime_catalog import (
     registered_runtimes,
-    runtime_reasoning_efforts,
     runtimes_supporting_mcp,
 )
 
@@ -60,6 +57,7 @@ if TYPE_CHECKING:
         AttachmentRepository,
         ConversationCommands,
         McpConnectionRepository,
+        ModelConnectionRepository,
         SkillRepository,
         SourceControlRepository as SourceControlPort,
     )
@@ -77,47 +75,101 @@ class _JobCreationStorage(Protocol):
 
     conversation_commands: ConversationCommands
     mcp: McpConnectionRepository
+    model_connections: ModelConnectionRepository
     attachments: AttachmentRepository
     skills: SkillRepository
     source_control: SourceControlPort
 
 
-async def _require_resolvable_model(
-    model: str,
-    *,
-    gateway: Any,
-    user: dict[str, Any],
-) -> str:
-    """Resolve the requested model to its canonical id, or refuse the job.
+def model_connection_required() -> HTTPException:
+    """409 for a turn that names no model connection: there is no other source.
 
-    Fail-fast on a model the job's first call would 404 on: rejecting here
-    costs a 400, while accepting costs a claim, a clone and an attempt before
-    the sandbox's first model call dies with an error that reads like a broken
-    model.
-
-    **Returns the canonical id, and the caller stores that.** Validating an
-    alias and then recording the alias was the bug this signature exists to
-    prevent: the gateway mints a grant against canonical ids, so a job carrying
-    `claude-3-opus-latest` produced a grant whose `allowed_models` matched
-    nothing. The job was created, and died at its first inference call with a
-    404 from a model that plainly exists.
+    A verdict, not an outage, so a waiting message is held with this sentence
+    rather than retried.
     """
-    canonical = await agent_canonical_model(model, gateway, user_id=user["user_id"])
-    if canonical is not None:
-        return canonical
-    visible = await agent_visible_models(gateway, user_id=user["user_id"])
-    raise HTTPException(
-        status_code=400,
+    return HTTPException(
+        status_code=409,
         detail={
             "error": {
-                "type": "model_not_available",
+                "type": "model_connection_required",
                 "message": (
-                    f"Model {model!r} is not available to agent jobs on this deployment. "
-                    f"Available: {', '.join(visible[:20]) or 'none'}."
+                    "Choose a model from one of your own model connections, or add one in Settings."
                 ),
             }
         },
     )
+
+
+def model_connection_unusable(exc: ModelConnectionUnusable) -> HTTPException:
+    """400 for a turn its owner's connection cannot run, naming the reason.
+
+    A 400 rather than a 503: nothing about it improves by waiting, and a
+    waiting message's check holds the message with this sentence until its
+    owner changes the connection or the model.
+    """
+    return HTTPException(
+        status_code=400,
+        detail={
+            "error": {
+                "type": "model_connection_unusable",
+                "reason": exc.reason,
+                "message": str(exc),
+            }
+        },
+    )
+
+
+async def require_connection_source(
+    connections: ModelConnectionRepository,
+    *,
+    user_id: str,
+    connection_id: str,
+    runtime: str,
+    model: str,
+    reasoning_effort: str | None,
+) -> None:
+    """Refuse a turn on an owner connection it cannot run on.
+
+    The model id is the provider's exact spelling, never resolved through
+    aliases. Refused outright while an operator has switched connections off.
+    """
+    try:
+        if not model_connections_enabled():
+            raise ModelConnectionUnusable("feature_disabled")
+        await resolve_turn_connection(
+            connections,
+            user_id=user_id,
+            connection_id=connection_id,
+            runtime=runtime,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
+    except ModelConnectionUnusable as exc:
+        raise model_connection_unusable(exc) from None
+
+
+async def _admit_model(
+    body: AgentJobCreate,
+    user: dict[str, Any],
+    *,
+    connections: ModelConnectionRepository,
+) -> tuple[str, str | None]:
+    """The model a new job runs with, checked against the connection it names.
+
+    The connection's checks settle the effort too; a connection turn stores
+    none.
+    """
+    if body.model_connection_id is None:
+        raise model_connection_required()
+    await require_connection_source(
+        connections,
+        user_id=user["user_id"],
+        connection_id=body.model_connection_id,
+        runtime=body.runtime,
+        model=body.model,
+        reasoning_effort=body.reasoning_effort,
+    )
+    return body.model, None
 
 
 async def _resolve_mcp_bindings(
@@ -288,7 +340,7 @@ def _binding_alias(row: dict[str, Any]) -> str:
     return f"mcp{row['id']}"
 
 
-def _require_registered_runtime(runtime: str) -> None:
+def require_registered_runtime(runtime: str) -> None:
     """400 unless ``runtime`` names a registered harness.
 
     The registry is the trust boundary: what may run is what this
@@ -310,71 +362,7 @@ def _require_registered_runtime(runtime: str) -> None:
         )
 
 
-async def _require_offered_effort(
-    effort: str | None,
-    *,
-    runtime: str,
-    model: str,
-    gateway: Any,
-    user: dict[str, Any],
-) -> str | None:
-    """400 unless ``effort`` is one this runtime *and* this model both accept.
-
-    The offered set is the intersection, and it is checked rather than clamped.
-    Clamping looks kinder and is worse: glm-5.3 has no ``medium``, so a
-    ``medium`` quietly served as ``high`` would bill and behave as a depth
-    nobody chose while reporting the one they did — the same lie as a flag that
-    resolves to nothing, which is what this whole control exists to end.
-
-    Args:
-        effort: The requested level, or ``None`` for Auto.
-        runtime: The harness this turn will run on.
-        model: The canonical model id, already resolved.
-        gateway: Client for the gateway's internal contracts.
-        user: The authenticated owner.
-
-    Returns:
-        The value to store: ``None`` for Auto, else the validated level.
-
-    Raises:
-        HTTPException: 400 when the pair does not offer this value.
-    """
-    if effort is None or effort == RESET_REASONING_EFFORT:
-        # The sentinel means unset wherever it appears. On a follow-up it also
-        # has to be told apart from "inherit" (that caller checks it before
-        # getting here); on a create there is nothing to inherit, so the two
-        # spellings are the same answer and neither is a 400.
-        return None
-    runtime_levels = runtime_reasoning_efforts().get(runtime, [])
-    # The model's entry is read as a yes/no — does it take the parameter at
-    # all — and not for its contents. Per-model domains were tried and
-    # withdrawn: the providers' documented lists disagreed with what their
-    # APIs accept, so the levels are this platform's and the same everywhere.
-    takes_effort = bool(
-        (await agent_model_reasoning_efforts(gateway, user_id=user["user_id"])).get(model)
-    )
-    offered = (
-        [level for level in PLATFORM_REASONING_EFFORTS if level in runtime_levels]
-        if takes_effort
-        else []
-    )
-    if effort in offered:
-        return effort
-    raise HTTPException(
-        status_code=400,
-        detail={
-            "error": {
-                "type": "reasoning_effort_not_available",
-                "message": (
-                    f"Reasoning effort {effort!r} is not available for {runtime!r} "
-                    f"with {model!r}. Available: {', '.join(offered) or 'none'}."
-                ),
-            }
-        },
-    )
-
-
-async def _resolve_skill_selection(
+async def resolve_skill_selection(
     store: SkillRepository, *, user_id: str, skill_ids: list[int] | None
 ) -> list[dict[str, Any]] | None:
     """Resolve owned instruction snapshots before persisting a submission."""
@@ -395,7 +383,7 @@ def _attachment_selection_error(exc: AttachmentError) -> HTTPException:
     )
 
 
-async def _resolve_attachment_selection(
+async def resolve_attachment_selection(
     store: AttachmentRepository, *, user_id: str, attachment_ids: list[int] | None
 ) -> list[dict[str, Any]] | None:
     """Resolve staged uploads into the manifest a submission retains."""
@@ -470,8 +458,7 @@ async def _admit_repository(
         ) from exc
     # A branch is resolved to the commit it points at *now*. The job stores the
     # sha: a branch moves, so a job that recorded "dev" would silently mean a
-    # different tree by the time it ran, and the publisher applies its patch
-    # onto a pinned commit.
+    # different tree by the time it ran.
     base_sha = body.base_sha
     if base_sha is None and body.base_ref and app_credentials is not None:
         try:
@@ -486,13 +473,13 @@ async def _admit_repository(
                     }
                 },
             ) from exc
-    # The publisher fetches the base by hash and pushes a branch built on it.
-    # GitHub serves any object of the repository's network by hash, a fork's
+    # The runner fetches the base by hash. GitHub serves any object of the
+    # repository's network by hash, a fork's
     # pull request head included, and a ref resolves to whatever commit it
     # names — so neither a named commit nor a resolved ref is, by itself, part
     # of the repository's history. Checked once here: a job's base is fixed at
     # creation (a host fills only an absent one, from its own checkout), and a
-    # follow-up builds on the branch the platform published.
+    # follow-up starts from the same base.
     if base_sha is not None and app_credentials is not None:
         await _require_base_on_branch(
             app_credentials, repo=repo, base_sha=base_sha, base_ref=body.base_ref
@@ -500,24 +487,18 @@ async def _admit_repository(
     return base_sha
 
 
-async def _create_job_as(
+async def create_job_as(
     body: AgentJobCreate,
     user: dict[str, Any],
     *,
     job_store: _JobCreationStorage,
     app_credentials: Any | None,
-    gateway: Any,
-    reserved_metadata: dict[str, Any] | None = None,
     client_request_id: str | None = None,
 ) -> dict[str, Any]:
-    """Create one job for ``user``, shared by the owner and service doors.
+    """Create one job for ``user``: the model connection, repository entitlement, ref pinning.
 
-    Extracted so the on-call service surface (``api/service_jobs.py``) creates
-    jobs through exactly the checks the owner route runs — model resolution,
-    repo entitlement, ref pinning — rather than through a parallel path that
-    drifts. ``reserved_metadata`` is stamped *after* caller metadata for the
-    same reason ``BASE_REF_METADATA_KEY`` is popped first: a display fact the
-    platform asserts must not be spoofable by the request body.
+    A display fact the platform asserts (``BASE_REF_METADATA_KEY``) is popped
+    from caller metadata first, so the request body cannot spoof it.
     """
     # A resend is answered before the checks below, every one of which can
     # change between two sends of one submission: a model can be retired, an
@@ -547,16 +528,13 @@ async def _create_job_as(
         )
         if replayed is not None:
             if replayed.get("error") == "client_request_conflict":
-                raise _idempotency_conflict()
+                raise idempotency_conflict()
             return replayed
     # Fail here, not at claim time. An unregistered runtime used to travel all
     # the way into a queued row and burn a claim before anything noticed —
     # the composer only offers registered ids, so an arbitrary string can only
     # arrive from a direct API caller, and it deserves a 400, not a dead job.
-    # The check lives in the helper rather than in the owner route because the
-    # service door creates jobs through here too: a check only one door runs
-    # is precisely the drift this extraction exists to prevent.
-    _require_registered_runtime(body.runtime)
+    require_registered_runtime(body.runtime)
     try:
         plugins = validate_sandbox_plugins(body.runtime, body.plugins or [])
     except ValueError as exc:
@@ -569,14 +547,8 @@ async def _create_job_as(
                 }
             },
         ) from exc
-    # Canonical from here on. The grant the gateway mints names canonical
-    # ids, so a job that stored the alias would carry a scope matching
-    # nothing — created successfully, dead at its first inference call.
-    model = await _require_resolvable_model(body.model, gateway=gateway, user=user)
-    # Checked against the *resolved* model, not the requested spelling: the
-    # domain belongs to the model the turn will actually call.
-    reasoning_effort = await _require_offered_effort(
-        body.reasoning_effort, runtime=body.runtime, model=model, gateway=gateway, user=user
+    model, reasoning_effort = await _admit_model(
+        body, user, connections=job_store.model_connections
     )
     if body.repo is None:
         # A temporary workspace: there is no repository to be entitled to and no
@@ -597,9 +569,8 @@ async def _create_job_as(
     # Reserved display fact: caller metadata must not be able to claim the
     # job was pinned from a different branch than the one the API resolved.
     metadata.pop(BASE_REF_METADATA_KEY, None)
-    # Reserved provenance mark: only the on-call door stamps it, below through
-    # ``reserved_metadata``. An owner's copy would let their job pass for one
-    # the platform dispatched to whatever reads the mark.
+    # The retired on-call door's provenance mark, which archived jobs carry. An
+    # owner's copy would let their job pass for one the platform dispatched.
     metadata.pop(ONCALL_METADATA_KEY, None)
     # Execution policy and its evidence are server-owned facts. Opaque
     # metadata must not be able to manufacture a contradictory audit trail.
@@ -607,8 +578,6 @@ async def _create_job_as(
         metadata.pop(key, None)
     if body.base_ref:
         metadata[BASE_REF_METADATA_KEY] = body.base_ref
-    for key, value in (reserved_metadata or {}).items():
-        metadata[key] = value
     # Shared-live is enforced globally at claim time, not represented as an
     # optional per-job requirement. Job metadata therefore remains caller data
     # plus server-owned execution facts, without a hidden rollout switch.
@@ -622,10 +591,10 @@ async def _create_job_as(
             status_code=503,
             detail={"error": {"type": "invalid_configuration", "message": str(exc)}},
         ) from exc
-    skills = await _resolve_skill_selection(
+    skills = await resolve_skill_selection(
         job_store.skills, user_id=user["user_id"], skill_ids=body.skill_ids
     )
-    attachments = await _resolve_attachment_selection(
+    attachments = await resolve_attachment_selection(
         job_store.attachments, user_id=user["user_id"], attachment_ids=body.attachment_ids
     )
     try:
@@ -635,6 +604,7 @@ async def _create_job_as(
             task_prompt=body.task_prompt,
             runtime=body.runtime,
             model=model,
+            model_connection_id=body.model_connection_id,
             execution_profile=execution_profile,
             reasoning_effort=reasoning_effort,
             base_sha=base_sha,
@@ -686,7 +656,7 @@ async def _create_job_as(
         # written, and the owner can attach the file again.
         raise _attachment_selection_error(exc) from exc
     if job.get("error") == "client_request_conflict":
-        raise _idempotency_conflict()
+        raise idempotency_conflict()
     logger.info(
         "agent_job_created",
         extra={"event": "agent_job_created", "job_id": job["id"], "runtime": body.runtime},
@@ -694,7 +664,8 @@ async def _create_job_as(
     return job
 
 
-def _idempotency_conflict() -> HTTPException:
+def idempotency_conflict() -> HTTPException:
+    """The 409 for an Idempotency-Key reused with a different submission."""
     return HTTPException(
         status_code=409,
         detail={

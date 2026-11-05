@@ -301,10 +301,6 @@ class McpConnectionRepository(Protocol):
         """
         ...
 
-    async def delete_mcp_capabilities(self, *, connection_id: int) -> None:
-        """Drop a snapshot, used when discovery proves the target changed."""
-        ...
-
     async def create_mcp_oauth_flow(
         self,
         *,
@@ -353,10 +349,6 @@ class McpConnectionRepository(Protocol):
         The owner is part of the match: a flow presented by a browser signed in
         as another account matches nothing and is left for its owner.
         """
-        ...
-
-    async def delete_mcp_oauth_flows(self, *, connection_id: int) -> int:
-        """Drop every unconsumed flow for one connection."""
         ...
 
     async def list_mcp_bindings(self, *, thread_id: str) -> list[dict[str, Any]]:
@@ -558,99 +550,8 @@ class McpConnectionRepository(Protocol):
         """
         ...
 
-    async def list_mcp_transport_sessions(self, *, connection_id: int) -> list[dict[str, Any]]:
-        """Every recorded session for one connection, newest first."""
-        ...
-
-    async def touch_mcp_transport_session(self, *, handle: str) -> bool:
-        """Move a session's last-used timestamp, so a diagnosis can see it live."""
-        ...
-
-    async def create_mcp_connector(
-        self, *, user_id: str, name: str, registration_hash: str
-    ) -> dict[str, Any]:
-        """Register a user-run connector in the pending state."""
-        ...
-
     async def list_mcp_connectors(self, *, user_id: str) -> list[dict[str, Any]]:
         """Every connector this user registered."""
-        ...
-
-    async def set_mcp_connector_status(self, *, connector_id: int, status: str) -> bool:
-        """Record a heartbeat or a status change for one connector."""
-        ...
-
-    async def update_mcp_connector(
-        self,
-        *,
-        connector_id: int,
-        user_id: str,
-        name: str | None = None,
-        mounts: list[str] | None = None,
-    ) -> dict[str, Any] | None:
-        """Rename a connector or change the resources it may reach.
-
-        Neither edit moves the connections' versions on its own: ``mounts`` is
-        what the connector is allowed to see on the user's machine, and widening
-        it is a decision the connector makes locally, while the platform's
-        record of it is advisory. Binding a *connection* to the connector is the
-        security-relevant edit, and that is where the versions move.
-        """
-        ...
-
-    async def bind_mcp_connection_connector(
-        self, *, connection_id: int, user_id: str, connector_id: int
-    ) -> dict[str, Any] | None:
-        """Route one connection through one connector, moving both versions.
-
-        ``connector`` is on the design's list of security-relevant configuration:
-        it decides *where* a local process runs, so choosing it is as much a
-        change of target as editing the command. Both revisions move, which
-        invalidates every session binding approved against the previous answer,
-        and the connector's authorized set is written in the same transaction so
-        the two cannot disagree about what it may serve. Every previous
-        authorization row for the connection is removed in that transaction
-        before the new pair is inserted.
-        """
-        ...
-
-    async def unbind_mcp_connection_connector(
-        self, *, connection_id: int, user_id: str, connector_id: int
-    ) -> dict[str, Any] | None:
-        """Stop routing one connection through the connector the caller named.
-
-        ``connector_id`` is matched in the same statement that clears the
-        route. A request that names connector A must not detach a connection
-        currently bound to B, and only that pair's authorization row is removed.
-        The same version movement as binding applies when the pair matches: a
-        connection that has moved back to "nowhere to run" is not the one a
-        session was approved against.
-        """
-        ...
-
-    async def revoke_mcp_connector(self, *, connector_id: int, user_id: str) -> bool:
-        """Revoke a connector and detach everything that routed through it.
-
-        One transaction, because the two halves are the same decision: a
-        connector marked revoked while its connections still name it would leave
-        jobs resolving to a target the owner has withdrawn, and each detached
-        connection has its versions moved so the sessions approved against it
-        stop working rather than quietly pointing somewhere else.
-        """
-        ...
-
-    async def list_mcp_connector_connections(self, *, connector_id: int) -> list[int]:
-        """The connection ids one connector may serve."""
-        ...
-
-    async def set_mcp_launch_spec(
-        self,
-        *,
-        connection_id: int,
-        expected_authorization_epoch: int,
-        launch_spec: dict[str, Any],
-    ) -> bool:
-        """Store encrypted launch secrets only while the connection identity is current."""
         ...
 
     async def expire_mcp_invocation(self, *, invocation_id: int) -> bool:

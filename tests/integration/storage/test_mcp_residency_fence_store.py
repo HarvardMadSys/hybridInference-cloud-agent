@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi import FastAPI
@@ -170,7 +170,7 @@ async def _approved(store, job, attempt, sandbox):
         capability_name="get_issue",
         arguments_digest="residency-call",
         arguments_ciphertext=None,
-        expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
     )
     assert invocation["residency_generation"] == sandbox["residency_generation"]
     assert (

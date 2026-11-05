@@ -7,10 +7,12 @@ real turn (``cloud_agent_host.runtime_probe``), and reports its progress on the
 next heartbeat. Once every online host holds an update, new chats start using
 it.
 
-A runtime has at most two targets: the downloaded version new chats use now,
-and the one an update is moving them to. Both, because a host that joins while
-an update is still downloading, or after it failed, must still be able to run
-the version every other host runs.
+A runtime has at most two targets: the version an update is moving new chats
+to, and the downloaded version it replaced. Until the switch new chats still
+use that one, and a host that joins while an update is still downloading, or
+after it failed, must be able to run the version every other host runs. After
+the switch it is what Roll back returns to, kept on every host so that rolling
+back is instant.
 
 Both images ship this module, so both sides validate the same shapes: a host
 newer or older than its control plane drops what it cannot read rather than
@@ -34,7 +36,8 @@ DEFAULT_REGISTRY_URL = "https://registry.npmjs.org"
 EXACT_VERSION = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$")
 VERSION_MAX_CHARS = 64
 
-#: Targets per runtime: the version in use and the one being updated to.
+#: Targets per runtime: the version an update moves new chats to, and the one
+#: it replaced (in use until the switch, Roll back's after).
 MAX_TARGETS_PER_RUNTIME = 2
 #: The most reports one heartbeat may carry; more is not a host of this release.
 MAX_REPORTS = 32

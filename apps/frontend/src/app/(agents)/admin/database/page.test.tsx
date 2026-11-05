@@ -13,11 +13,12 @@ vi.mock('@/lib/api/adminSettings', () => ({
   }),
 }));
 
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentAccessApi } from '@/lib/api/session';
 import { APIError } from '@/lib/utils/errors';
+import { chooseOption, optionNames } from '@/components/ui/__tests__/select';
 
 const auth = vi.hoisted(() => ({ id: 'admin-a', access: undefined as AgentAccessApi | undefined }));
 vi.mock('@/components/providers', () => ({
@@ -120,20 +121,20 @@ describe('Admin Database', () => {
   it('inspects columns and queries with text filters, null operators, and sorting', async () => {
     render(<AdminDatabasePage />);
     await screen.findByLabelText('Table');
-    expect(screen.getByLabelText('Rows per page')).toHaveValue('50');
+    expect(screen.getByLabelText('Rows per page')).toHaveTextContent('50');
     expect(screen.getByText('bigint')).toBeInTheDocument();
     expect(query).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Add filter' }));
-    fireEvent.change(screen.getByLabelText('Column 1'), { target: { value: 'user_id' } });
+    chooseOption(screen.getByLabelText('Column 1'), 'user_id');
     fireEvent.change(screen.getByLabelText('Value 1'), {
       target: { value: '9223372036854775807' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Add filter' }));
-    fireEvent.change(screen.getByLabelText('Column 2'), { target: { value: 'title' } });
-    fireEvent.change(screen.getByLabelText('Operator 2'), { target: { value: 'is_null' } });
+    chooseOption(screen.getByLabelText('Column 2'), 'title');
+    chooseOption(screen.getByLabelText('Operator 2'), 'Is null');
     expect(screen.queryByLabelText('Value 2')).not.toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('Sort by'), { target: { value: 'id' } });
-    fireEvent.change(screen.getByLabelText('Sort direction'), { target: { value: 'desc' } });
+    chooseOption(screen.getByLabelText('Sort by'), 'id');
+    chooseOption(screen.getByLabelText('Sort direction'), 'Descending');
     fireEvent.click(screen.getByRole('button', { name: 'Run query' }));
     await screen.findByRole('table', { name: 'Query results for jobs' });
     expect(query).toHaveBeenCalledWith(
@@ -163,8 +164,8 @@ describe('Admin Database', () => {
     render(<AdminDatabasePage />);
     await screen.findByLabelText('Table');
     fireEvent.click(screen.getByRole('button', { name: 'Add filter' }));
-    fireEvent.change(screen.getByLabelText('Column 1'), { target: { value: 'title' } });
-    fireEvent.change(screen.getByLabelText('Operator 1'), { target: { value: 'contains' } });
+    chooseOption(screen.getByLabelText('Column 1'), 'title');
+    chooseOption(screen.getByLabelText('Operator 1'), 'Contains');
     fireEvent.change(screen.getByLabelText('Value 1'), { target: { value: 'worker%_one' } });
     fireEvent.click(screen.getByRole('button', { name: 'Run query' }));
     await screen.findByRole('table', { name: 'Query results for jobs' });
@@ -183,22 +184,18 @@ describe('Admin Database', () => {
     await screen.findByLabelText('Table');
     fireEvent.click(screen.getByRole('button', { name: 'Add filter' }));
     const operator = screen.getByLabelText('Operator 1');
-    expect(within(operator).queryByRole('option', { name: 'Contains' })).not.toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('Column 1'), { target: { value: 'title' } });
-    expect(within(operator).getByRole('option', { name: 'Contains' })).toBeInTheDocument();
-    expect(
-      within(operator).queryByRole('option', { name: 'Greater than' }),
-    ).not.toBeInTheDocument();
-    fireEvent.change(operator, { target: { value: 'contains' } });
-    fireEvent.change(screen.getByLabelText('Column 1'), { target: { value: 'user_id' } });
-    expect(operator).toHaveValue('eq');
-    expect(within(operator).getByRole('option', { name: 'Greater than' })).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('Column 1'), { target: { value: 'enabled' } });
+    expect(optionNames(operator)).not.toContain('Contains');
+    chooseOption(screen.getByLabelText('Column 1'), 'title');
+    expect(optionNames(operator)).toContain('Contains');
+    expect(optionNames(operator)).not.toContain('Greater than');
+    chooseOption(operator, 'Contains');
+    chooseOption(screen.getByLabelText('Column 1'), 'user_id');
+    expect(operator).toHaveTextContent('Equals');
+    expect(optionNames(operator)).toContain('Greater than');
+    chooseOption(screen.getByLabelText('Column 1'), 'enabled');
     expect(screen.getByText('Use true or false.')).toBeInTheDocument();
-    expect(
-      within(operator).queryByRole('option', { name: 'Greater than' }),
-    ).not.toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('Column 1'), { target: { value: 'created_at' } });
+    expect(optionNames(operator)).not.toContain('Greater than');
+    chooseOption(screen.getByLabelText('Column 1'), 'created_at');
     expect(screen.getByText(/Use an ISO timestamp with a timezone/)).toBeInTheDocument();
   });
 
@@ -251,13 +248,49 @@ describe('Admin Database', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Run query' }));
     expect(query).toHaveBeenCalledTimes(1);
     const oldSignal = query.mock.calls[0][1];
-    fireEvent.change(screen.getByLabelText('Table'), { target: { value: 'hosts' } });
+    chooseOption(screen.getByLabelText('Table'), 'hosts');
     expect(oldSignal?.aborted).toBe(true);
     expect(screen.getByRole('button', { name: 'Run query' })).toBeEnabled();
     await act(async () => resolveOld(result));
     expect(screen.queryByText('job-one')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Run query' }));
     expect(query.mock.calls[1][0]).toMatchObject({ table: 'hosts', filters: [], offset: 0 });
+  });
+
+  it('finds a table in a long catalog by searching its menu and queries it as chosen', async () => {
+    const many = Array.from({ length: 14 }, (_, index) => ({
+      ...tables[1],
+      name: `audit_${String(index).padStart(2, '0')}`,
+    }));
+    loadTables.mockResolvedValue({ tables: [...tables, ...many] });
+    render(<AdminDatabasePage />);
+    const table = await screen.findByLabelText('Table');
+    fireEvent.click(table);
+    const search = screen.getByRole('combobox', { name: 'Search…' });
+    expect(search).toHaveFocus();
+    fireEvent.change(search, { target: { value: 'audit_1' } });
+    expect(optionNames(table)).toEqual(['audit_10', 'audit_11', 'audit_12', 'audit_13']);
+    fireEvent.click(table);
+    fireEvent.change(screen.getByRole('combobox', { name: 'Search…' }), {
+      target: { value: 'AUDIT_12' },
+    });
+    fireEvent.keyDown(screen.getByRole('combobox', { name: 'Search…' }), { key: 'Enter' });
+    expect(table).toHaveTextContent('audit_12');
+    expect(table).toHaveFocus();
+    chooseOption(screen.getByLabelText('Sort by'), 'id');
+    chooseOption(screen.getByLabelText('Rows per page'), '25');
+    fireEvent.click(screen.getByRole('button', { name: 'Run query' }));
+    expect(query).toHaveBeenCalledWith(
+      {
+        table: 'audit_12',
+        filters: [],
+        order_by: 'id',
+        order_direction: 'asc',
+        limit: 25,
+        offset: 0,
+      },
+      expect.any(AbortSignal),
+    );
   });
 
   it('clears results on filter or page-size changes and resets pagination', async () => {
@@ -267,7 +300,7 @@ describe('Admin Database', () => {
     await screen.findByText('job-one');
     fireEvent.click(screen.getByRole('button', { name: 'Add filter' }));
     expect(screen.queryByText('job-one')).not.toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('Rows per page'), { target: { value: '200' } });
+    chooseOption(screen.getByLabelText('Rows per page'), '200');
     fireEvent.click(screen.getByRole('button', { name: 'Run query' }));
     expect(query.mock.calls[1][0]).toMatchObject({ limit: 200, offset: 0 });
   });

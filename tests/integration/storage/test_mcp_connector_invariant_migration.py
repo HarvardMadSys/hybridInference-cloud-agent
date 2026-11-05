@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import asyncpg
 import pytest
@@ -10,6 +10,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from tests.integration.storage.test_agent_job_store import pool as pool
 from tests.integration.storage.test_schema_upgrade import _db_config
+from tests.support.mcp_connectors import insert_connector
 from tests.support.migrations import REPO, apply_migrations, downgrade_to
 
 from cloud_agent.storage.assembly import Storage
@@ -19,16 +20,15 @@ pytestmark = pytest.mark.dbtest
 _BEFORE = "0057_admin_sandbox_trajectory"
 _THIS = "0058_mcp_connector_invariant"
 _NEXT = "0059_counter_constraints"
-_HEAD = "0083_host_move_out"
+_HEAD = "0113_sandbox_incidents"
 _OWNER = "user-owner"
 _OTHER = "user-other"
-_PRESERVED_AUTHORIZED_AT = datetime(2001, 2, 3, 4, 5, 6, tzinfo=timezone.utc)
+_PRESERVED_AUTHORIZED_AT = datetime(2001, 2, 3, 4, 5, 6, tzinfo=UTC)
 
 
 def test_mcp_connector_invariant_revision_follows_trajectory_merge() -> None:
     """The repair extends the one post-merge migration line."""
-    config = Config(str(REPO / "alembic.ini"))
-    config.set_main_option("script_location", str(REPO / "migrations"))
+    config = Config(toml_file=str(REPO / "pyproject.toml"))
     script = ScriptDirectory.from_config(config)
 
     assert script.get_revision(_THIS).down_revision == _BEFORE
@@ -81,7 +81,91 @@ def test_mcp_connector_invariant_revision_follows_trajectory_merge() -> None:
     assert (
         script.get_revision("0082_team_environments").down_revision == "0081_snapshot_pushed_commit"
     )
-    assert script.get_revision(_HEAD).down_revision == "0082_team_environments"
+    assert script.get_revision("0083_host_move_out").down_revision == "0082_team_environments"
+    assert script.get_revision("0084_host_removal_move_out").down_revision == "0083_host_move_out"
+    assert (
+        script.get_revision("0085_terminal_resume_index").down_revision
+        == "0084_host_removal_move_out"
+    )
+    assert script.get_revision("0086_conversation_read_receipts").down_revision == (
+        "0085_terminal_resume_index"
+    )
+    assert script.get_revision("0087_sandbox_deletion_attempts").down_revision == (
+        "0086_conversation_read_receipts"
+    )
+    assert script.get_revision("0088_sandbox_retry_budget").down_revision == (
+        "0087_sandbox_deletion_attempts"
+    )
+    assert (
+        script.get_revision("0110_host_late_settings").down_revision == "0109_local_account_parity"
+    )
+    assert (
+        script.get_revision("0111_mcp_sandbox_location").down_revision == "0110_host_late_settings"
+    )
+    assert (
+        script.get_revision("0112_thread_pull_requests").down_revision
+        == "0111_mcp_sandbox_location"
+    )
+    assert script.get_revision(_HEAD).down_revision == "0112_thread_pull_requests"
+    assert script.get_revision("0109_local_account_parity").down_revision == "0108_local_accounts"
+    assert script.get_revision("0108_local_accounts").down_revision == (
+        "0107_attempt_context_profiles"
+    )
+    assert script.get_revision("0107_attempt_context_profiles").down_revision == (
+        "0106_user_model_connections"
+    )
+    assert script.get_revision("0106_user_model_connections").down_revision == (
+        "0105_job_event_usage_summary"
+    )
+    assert script.get_revision("0105_job_event_usage_summary").down_revision == (
+        "0104_notification_change_keyset"
+    )
+    assert script.get_revision("0104_notification_change_keyset").down_revision == (
+        "0103_terminal_resume_keyset"
+    )
+    assert script.get_revision("0103_terminal_resume_keyset").down_revision == (
+        "0102_admin_sandbox_marker_order"
+    )
+    assert script.get_revision("0102_admin_sandbox_marker_order").down_revision == (
+        "0101_notification_state_deltas"
+    )
+    assert script.get_revision("0101_notification_state_deltas").down_revision == (
+        "0100_memory_archive_pages"
+    )
+    assert script.get_revision("0100_memory_archive_pages").down_revision == (
+        "0099_thread_stats_rollups"
+    )
+    assert (
+        script.get_revision("0099_thread_stats_rollups").down_revision == "0098_measurement_counts"
+    )
+    assert script.get_revision("0098_measurement_counts").down_revision == (
+        "0097_admin_sandbox_deltas"
+    )
+    assert (
+        script.get_revision("0097_admin_sandbox_deltas").down_revision
+        == "0096_snapshot_title_context"
+    )
+    assert (
+        script.get_revision("0096_snapshot_title_context").down_revision == "0095_memory_retention"
+    )
+    assert script.get_revision("0095_memory_retention").down_revision == "0094_thread_message_pages"
+    assert script.get_revision("0094_thread_message_pages").down_revision == "0093_recent_requests"
+    assert script.get_revision("0093_recent_requests").down_revision == "0092_targeted_work_wakes"
+    assert (
+        script.get_revision("0092_targeted_work_wakes").down_revision
+        == "0091_env_queued_runs_index"
+    )
+    assert (
+        script.get_revision("0091_env_queued_runs_index").down_revision
+        == "0090_user_model_preferences"
+    )
+    assert (
+        script.get_revision("0090_user_model_preferences").down_revision
+        == "0089_superseded_removals"
+    )
+    assert (
+        script.get_revision("0089_superseded_removals").down_revision == "0088_sandbox_retry_budget"
+    )
 
 
 async def _local_connection(
@@ -125,27 +209,10 @@ async def test_migration_repairs_routes_and_preserves_only_the_canonical_pair(po
     downgrade_to(config, _BEFORE)
     store = Storage(pool)
 
-    canonical = await store.mcp.create_mcp_connector(
-        user_id=_OWNER,
-        name="Canonical",
-        registration_hash="migration-canonical",
-    )
-    extra = await store.mcp.create_mcp_connector(
-        user_id=_OWNER,
-        name="Extra",
-        registration_hash="migration-extra",
-    )
-    wrong_owner = await store.mcp.create_mcp_connector(
-        user_id=_OTHER,
-        name="Other owner's",
-        registration_hash="migration-other-owner",
-    )
-    revoked = await store.mcp.create_mcp_connector(
-        user_id=_OWNER,
-        name="Revoked",
-        registration_hash="migration-revoked",
-    )
-    assert await store.mcp.revoke_mcp_connector(connector_id=int(revoked["id"]), user_id=_OWNER)
+    canonical = await insert_connector(pool, user_id=_OWNER, name="Canonical")
+    extra = await insert_connector(pool, user_id=_OWNER, name="Extra")
+    wrong_owner = await insert_connector(pool, user_id=_OTHER, name="Other owner's")
+    revoked = await insert_connector(pool, user_id=_OWNER, name="Revoked", revoked=True)
 
     valid = await _local_connection(
         store, label="Valid canonical", connector_id=int(canonical["id"])

@@ -12,7 +12,7 @@ verified enrollment, job creation and remote claim, sandbox manager workspace ac
 tool-calling execution, success, four grant renewals, and revocation after
 settlement. That record did not verify real PR publication, mid-run
 cancellation, or the full fail-closed sequence. See
-[MIGRATION.md](../../../MIGRATION.md),
+[MIGRATION.md](2026-08-09-repository-extraction-record.md),
 [cutover.md](../specs/cutover.md) and the partial run below. Newer local lifecycle
 checks do not fill those staging acceptance gaps.
 

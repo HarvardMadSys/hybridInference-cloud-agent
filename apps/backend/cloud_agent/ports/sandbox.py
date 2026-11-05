@@ -9,10 +9,49 @@ operations it needs rather than on the whole persistence surface.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
     from datetime import datetime
+
+
+@dataclass(frozen=True, slots=True)
+class DeletionFailureDecision:
+    """Database-authoritative result of a fenced deletion failure transition."""
+
+    recorded: bool
+    retry_scheduled: bool
+    retry_at: datetime | None
+    terminal_reason: str | None
+
+    def __bool__(self) -> bool:
+        """Keep existing truth tests aligned with whether the fence was recorded."""
+        return self.recorded
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalControlRoute:
+    """What an attached terminal's input, resize or kill needs, read at once.
+
+    The answers of the three reads the general workspace path makes for the
+    job's owner: the job itself, :meth:`SandboxRepository.thread_workspace_ready`,
+    and the host ``host_for_job`` names.
+    """
+
+    thread_id: str | None
+    #: Whether the chat's group lets its owner change the workspace now.
+    workspace_ready: bool
+    #: A settled turn's terminals still wait for the manager to resume them.
+    terminal_resume_pending: bool
+    #: The state of the chat's group; ``None`` when the chat has none.
+    group_state: str | None
+    #: Whether the group's host was removed from the pool.
+    host_revoked: bool
+    #: ``host`` and ``sandbox_manager_url``, as ``host_for_job`` returns them,
+    #: or ``None`` when the job names no host.
+    host: dict[str, Any] | None
 
 
 class SandboxRepository(Protocol):
@@ -50,6 +89,31 @@ class SandboxRepository(Protocol):
         """Lease one pending or archive-verified deletion without duplicate workers."""
         ...
 
+    async def update_admin_sandbox_deletion_attempt_stage(
+        self,
+        *,
+        correlation_id: str,
+        stage: str,
+        sandbox_manager_status: int | None = None,
+        cleanup_outcome: str | None = None,
+    ) -> bool:
+        """Record best-effort diagnostics without changing deletion fencing."""
+        ...
+
+    async def finish_admin_sandbox_deletion_attempt(
+        self,
+        *,
+        correlation_id: str,
+        outcome: str,
+        failure_code: str | None = None,
+        sandbox_manager_status: int | None = None,
+        retry_class: str | None = None,
+        retry_scheduled: bool | None = None,
+        cleanup_outcome: str = "not_required",
+    ) -> bool:
+        """Persist one attempt's sanitized result after its business decision."""
+        ...
+
     async def record_admin_sandbox_archive(
         self,
         *,
@@ -74,6 +138,7 @@ class SandboxRepository(Protocol):
         claim_token: str,
         generation: int,
         container_id: str,
+        attempt_correlation_id: str | None = None,
     ) -> bool:
         """Retain the archive and ledger after an exact host deletion acknowledgement."""
         ...
@@ -86,8 +151,28 @@ class SandboxRepository(Protocol):
         claim_token: str,
         generation: int,
         container_id: str,
+        attempt_correlation_id: str | None = None,
+        reclaimed_quiet_seconds: float | None = None,
     ) -> bool:
-        """Mark native context lost after the host removes a container with no archive."""
+        """Mark native context lost after the host removes a container with no archive.
+
+        With ``reclaimed_quiet_seconds``, finish without the host only when its
+        provider confirmed the machine terminated and the host has been silent
+        that long. ``attempt_correlation_id`` closes the external attempt in
+        the same fenced transition.
+        """
+        ...
+
+    async def recover_reclaimed_admin_sandbox_discard(
+        self, *, reclaimed_quiet_seconds: float
+    ) -> bool:
+        """Finalize one provider-confirmed discard without claiming another host attempt.
+
+        This recovery remains available after automatic retries stop, whether
+        the bounded budget is exhausted or the failure requires operator
+        action. Provider reclamation and the quiet-host interval fence the
+        state transition; no retry counter is consumed.
+        """
         ...
 
     async def fail_admin_sandbox_deletion(
@@ -100,8 +185,13 @@ class SandboxRepository(Protocol):
         container_id: str,
         error: str,
         retain_pending: bool = False,
-    ) -> bool:
-        """Release safe pre-archive failures but keep ambiguous deletion fenced."""
+        attempt_correlation_id: str | None = None,
+        failure_code: str | None = None,
+        sandbox_manager_status: int | None = None,
+        retry_class: str | None = None,
+        cleanup_outcome: str = "not_required",
+    ) -> DeletionFailureDecision:
+        """Apply a fenced failure transition and return its persisted retry decision."""
         ...
 
     async def renew_admin_sandbox_deletion_claim(
@@ -204,6 +294,18 @@ class SandboxRepository(Protocol):
         """
         ...
 
+    async def terminal_control_route(
+        self, *, job_id: str, user_id: str
+    ) -> TerminalControlRoute | None:
+        """Read what an attached terminal's control call needs, in one statement.
+
+        ``None`` unless the job is this owner's and its conversation is not
+        deleted, as ``owns_job`` answers it. A read only: input, a resize and
+        a kill cannot start the container, so none of them takes the start
+        fence.
+        """
+        ...
+
     async def fence_terminal_workspace(self, *, attempt_id: int, lease_generation: int) -> bool:
         """Revoke readiness only for the still-live fenced attempt."""
         ...
@@ -214,6 +316,12 @@ class SandboxRepository(Protocol):
 
     async def mark_terminal_resume_complete(self, *, job_id: str) -> bool:
         """Clear durable recovery state after the sandbox manager confirms a resume."""
+        ...
+
+    async def terminal_resume_page(
+        self, *, after: tuple[datetime, str] | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Page pending jobs' current routing and shared manifest after a stable cursor."""
         ...
 
     async def reserve_thread_sandbox(
@@ -344,6 +452,23 @@ class SandboxRepository(Protocol):
         """Reconcile one authenticated shared-group Docker observation."""
         ...
 
+    async def reconcile_thread_sandbox_observations(
+        self, *, host: str, observations: Sequence[Mapping[str, Any]]
+    ) -> list[str | None]:
+        """Reconcile every group one heartbeat reports, writing only what changed.
+
+        Each observation carries the arguments of
+        ``reconcile_thread_sandbox_observation`` but the host, and gets its
+        answer, in order. One unlocked read decides which would change
+        nothing; those take no lock and write nothing. A group the host did
+        not report is left alone.
+        """
+        ...
+
+    async def recorded_sandbox_checkpoints(self, *, checkpoint_ids: Sequence[str]) -> set[str]:
+        """Return which of these checkpoint receipts are already recorded, without locks."""
+        ...
+
     async def record_sandbox_checkpoint(
         self,
         *,
@@ -354,8 +479,13 @@ class SandboxRepository(Protocol):
         """Record one host-reported checkpoint receipt for its current group."""
         ...
 
-    async def fence_workspace_start(self, *, thread_id: str) -> str | None:
-        """Count a start a workspace request may cause; return the group's state."""
+    async def fence_workspace_start(self, *, thread_id: str) -> tuple[str, int | None] | None:
+        """Count a start a workspace request may cause; return state and fence.
+
+        The fence is the ``start_seq`` the request must carry. ``host_revoked``
+        with no fence when the group's host has left the pool: nothing may
+        start the group there, and it is not fenced.
+        """
         ...
 
     async def due_thread_sandbox_stop(

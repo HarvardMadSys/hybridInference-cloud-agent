@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from cloud_agent.domain.read_receipts import READ_RECEIPT_BATCH_SIZE
 from cloud_agent.schemas.jobs import (
     AgentJobResponse,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
@@ -18,7 +19,7 @@ from cloud_agent.schemas.messages import (
 AgentSessionState = Literal[
     "running", "queued", "idle", "needs_review", "done", "failed", "cancelled"
 ]
-AgentSessionDeleteBlockReason = Literal["fork_in_progress", "publication_pending"]
+AgentSessionDeleteBlockReason = Literal["fork_in_progress"]
 
 
 class AgentSessionResponse(BaseModel):
@@ -77,6 +78,45 @@ class AgentSessionDeleteResponse(BaseModel):
     thread_ids: list[str]
 
 
+class AgentNotificationJob(BaseModel):
+    """The small job state needed for completion and question notices."""
+
+    id: str
+    thread_id: str
+    title: str
+    thread_revision: int
+    repo: str | None
+    state: Literal["queued", "waiting", "running", "succeeded", "failed", "cancelled"]
+    current_attempt_id: int | None = None
+    turn_no: int
+    revision: int
+    cancel_requested: bool
+    finished_at: str | None = None
+    updated_at: str | None = None
+
+
+class AgentNotificationThread(BaseModel):
+    """A changed title for a conversation still visible to its owner."""
+
+    id: str
+    title: str
+    revision: int
+
+
+class AgentNotificationStateResponse(BaseModel):
+    """An active-job bootstrap page or durable owner-change page."""
+
+    mode: Literal["snapshot", "delta"]
+    jobs: list[AgentNotificationJob] = Field(default_factory=list)
+    threads: list[AgentNotificationThread] = Field(default_factory=list)
+    deleted_job_ids: list[str] = Field(default_factory=list)
+    deleted_thread_ids: list[str] = Field(default_factory=list)
+    observed_at: str
+    next_cursor: str | None = None
+    change_cursor: str | None = None
+    reset_required: bool = False
+
+
 class AgentConversation(BaseModel):
     """One conversation, with its canonical title and latest run."""
 
@@ -93,6 +133,39 @@ class AgentConversationListResponse(BaseModel):
     next_cursor: str | None = None
 
 
+class AgentReadReceiptInput(BaseModel):
+    """The exact completion displayed by a client, never an implicit latest turn."""
+
+    job_id: str = Field(..., min_length=1, max_length=128, pattern=r"^[^\x00]+$")
+    attempt_id: int | None = Field(..., ge=1, le=9007199254740991)
+
+
+class AgentReadReceipt(AgentReadReceiptInput):
+    """Canonical owner-scoped conversation and turn identity for a receipt."""
+
+    thread_id: str
+    turn_no: int
+
+
+class AgentReadReceiptsRequest(BaseModel):
+    """A bounded batch, also used to import existing browser receipts."""
+
+    receipts: list[AgentReadReceiptInput] = Field(
+        ..., min_length=1, max_length=READ_RECEIPT_BATCH_SIZE
+    )
+
+
+class AgentReadReceiptsResponse(BaseModel):
+    """Cloud progress and its owner, so a stale tab can detect account changes."""
+
+    user_id: str
+    receipts: list[AgentReadReceipt]
+    next_cursor: str | None = None
+    sync_cursor: str | None = Field(
+        default=None, description="GET checkpoint for the next incremental poll; null on POST."
+    )
+
+
 class AgentProject(BaseModel):
     """One repo the caller has run tasks in, summarized for the task tree."""
 
@@ -105,6 +178,9 @@ class AgentProject(BaseModel):
     last_activity_at: str | None = None
     pinned_count: int = 0
     pinned_at: str | None = None
+    # Opaque invalidation token, not a permission or pagination cursor.
+    refresh_token: str | None = None
+    membership_token: str | None = None
 
 
 class AgentProjectListResponse(BaseModel):
@@ -154,20 +230,6 @@ class AgentThreadPinResponse(BaseModel):
     pinned_at: str | None = None
 
 
-class AgentThreadPublicationResponse(BaseModel):
-    """The workspace snapshot an owner's publication request opened or found."""
-
-    thread_id: str
-    snapshot_id: int
-    state: Literal["pending", "capturing", "captured", "publishing"]
-    requested: bool = Field(
-        description=(
-            "True when this request opened the snapshot; false when a publication "
-            "of the workspace was already on its way and is returned instead."
-        )
-    )
-
-
 class AgentThreadResponse(BaseModel):
     """Conversation context and runs for the thread containing a job."""
 
@@ -177,6 +239,15 @@ class AgentThreadResponse(BaseModel):
     title: str
     messages: list[AgentThreadMessageResponse]
     jobs: list[AgentJobResponse]
+    history_version: int = 2
+    #: Latest turn identity does not depend on which history page is shown.
+    current_job_id: str | None = None
+    #: Continue in the requested direction (older by default, newer with after).
+    next_cursor: str | None = None
+    #: Reload only the mutable tail; retain already loaded older pages.
+    sync_cursor: str | None = None
+    #: False means use the existing /threads/{id}/messages endpoint for the queue.
+    pending_messages_complete: bool = True
     created_at: str | None = None
     updated_at: str | None = None
     archived_at: str | None = None
@@ -202,7 +273,10 @@ class AgentThreadStatsResponse(BaseModel):
     wall_seconds: float
     model_seconds: float
     tool_seconds: float
-    ttft_seconds: float | None = None
+    #: Mean time from a turn's first attempt starting to its first completed
+    #: output event, sandbox and CLI startup included. Not time to first token:
+    #: that is the gateway-measured ``/thread/model-ttft``.
+    first_output_seconds: float | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
     cache_read_tokens: int | None = None

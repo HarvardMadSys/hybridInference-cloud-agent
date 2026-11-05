@@ -150,8 +150,10 @@ class _Jobs:
     async def get_job(self, job_id: str) -> dict[str, Any]:
         return {"id": job_id, "user_id": "stream-slots-job-owner", "deleted_at": None}
 
-    async def get_job_stream_state(self, *, job_id: str, user_id: str) -> JobStreamState:
-        return JobStreamState("running", None)
+    async def job_stream_page(
+        self, *, job_id: str, user_id: str, after_id: int, limit: int
+    ) -> tuple[list[Any], JobStreamState]:
+        return [], JobStreamState("running", None)
 
     async def list_events_after(self, *, job_id: str, after_id: int, limit: int) -> list[Any]:
         return []

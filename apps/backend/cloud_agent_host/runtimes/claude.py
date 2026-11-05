@@ -3,16 +3,25 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent_shared.model_connections import anthropic_base_url
 from cloud_agent_shared.runtime_catalog import CLAUDE_CODE
 
 from .base import (
+    COMPAT_ORIGIN,
     EMPTY_RUNTIME_MCP_CONFIG,
     MCP_TOKEN_ENV,
     AgentRuntime,
+    ExactBaseUrl,
+    MessagesBaseUrl,
+    MessagesViaChatUrl,
     RuntimeCapabilities,
+    RuntimeConnectionUnsupportedError,
     RuntimeMCPConfig,
+    compat_cli_credential,
+    compat_launch,
 )
 from .events import (
     ERROR,
@@ -22,9 +31,12 @@ from .events import (
     THINKING,
     TOOL_RESULT,
     TOOL_USE,
+    USAGE,
     NormalizedEvent,
     _harness_inventory,
     _payload_text,
+    reported_compaction,
+    reported_context_windows,
 )
 from .preview import ReplyPreview
 
@@ -36,7 +48,9 @@ class ClaudeCodeRuntime(AgentRuntime):
     """Claude Code headless (``claude -p --output-format stream-json``).
 
     Speaks the Anthropic Messages surface to the gateway, so ``credential``
-    (the job's capability token) rides in ``ANTHROPIC_API_KEY``.
+    (the job's capability token) rides in ``ANTHROPIC_API_KEY``. On an owner
+    connection that offers Messages, ``credential`` is the owner's own key and
+    the URL is theirs (``inference_base_url``).
     """
 
     name = CLAUDE_CODE.name
@@ -51,12 +65,39 @@ class ClaudeCodeRuntime(AgentRuntime):
     # counter must not be able to flood the stream just because nobody had
     # heard of it yet.
     MILESTONE_SUBTYPES = frozenset({"init", "compact_boundary"})
+    #: System subtypes that are understood and deliberately not stored, so they
+    #: no longer arrive once per job as "unclassified" and bury a subtype that
+    #: really is new. Progress counters (``status``, ``thinking_tokens``,
+    #: ``task_progress``), and notices whose substance is already an event: a
+    #: task is a ``Bash``/``Agent`` tool call with its own result, and the
+    #: driver reads ``task_*`` and ``background_tasks_changed`` straight from
+    #: the stream to decide when a turn settles. Seen on the pinned 2.1.300.
+    SILENT_SUBTYPES = frozenset(
+        {
+            "status",
+            "thinking_tokens",
+            "task_started",
+            "task_progress",
+            "task_updated",
+            "task_notification",
+            "background_tasks_changed",
+            "session_title_changed",
+            "vcs_state_changed",
+        }
+    )
+    #: Top-level types likewise. ``tool_progress`` is a running tool's heartbeat
+    #: (one every few seconds, hundreds a job); the ``control_*`` lines are the
+    #: driver's own exchange with the CLI (questions, plan approval,
+    #: interrupts), which it reads from the stream and records itself.
+    SILENT_TYPES = frozenset(
+        {"tool_progress", "control_request", "control_response", "control_cancel_request"}
+    )
 
     def __init__(self, *, clock: Callable[[], float] | None = None) -> None:
-        """Track which unclassified subtypes this run has already reported."""
+        """Track which unclassified lines this run has already reported."""
         # One adapter instance per job (see get_runtime), so this is per-run
         # state — the suppression below cannot leak across jobs.
-        self._reported_subtypes: set[str] = set()
+        self._reported: set[str] = set()
         #: The CLI's own session id, captured from the ``init`` event. The
         #: retained container resumes this native locator directly; ``None``
         #: until the CLI has announced itself.
@@ -65,14 +106,20 @@ class ClaudeCodeRuntime(AgentRuntime):
         # The text block being written: ``<message id>:<block index>``.
         self._message_id: str | None = None
         self._text_block: str | None = None
+        #: The synthetic user message a ``compact_boundary`` names as its
+        #: summary (``preserved_segment.anchor_uuid``), until it arrives.
+        self._summary_anchor: str | None = None
+        #: When the main agent's current content block started streaming.
+        self._block_started: float | None = None
+        #: The output the main agent's current model call has reported so far.
+        self._call_output = 0
 
-    def prepare(
+    def prepare_live(
         self,
         *,
         workdir: str,
-        task_prompt: str,
         model: str,
-        gateway_base_url: str,
+        model_base_url: str,
         credential: str,
         provides_isolation: bool = False,
         mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
@@ -80,18 +127,28 @@ class ClaudeCodeRuntime(AgentRuntime):
         config_dir: str | None = None,
         resume_session_id: str | None = None,
     ) -> tuple[list[str], dict[str, str]]:
-        """Build the headless invocation and its environment.
+        """The resident invocation (HOT): prompts arrive on stdin, not argv.
+
+        ``--input-format stream-json`` keeps the process alive between turns,
+        reading user messages from stdin — the terminal-never-closed shape the
+        design's HOT tier is. ``--replay-user-messages`` echoes each one back
+        on stdout at the moment the CLI reads it into the conversation, which
+        is how a message sent into a running turn is known to have landed in
+        it.
 
         ``config_dir`` relocates the CLI's config/session storage inside the
         retained container's writable layer; ``resume_session_id`` continues
-        an earlier native session with only the new prompt after the resident
-        process was replaced. Both are Claude-specific and passed only by the
-        Claude driver; the generic session never sets them.
+        an earlier native session after the resident process was replaced.
         """
+        del workdir, provides_isolation
+        anthropic_url = self.inference_base_url(model_base_url)
+        translated = isinstance(model_base_url, MessagesViaChatUrl)
         argv = [
             self.binary,
             "-p",
-            task_prompt,
+            "--input-format",
+            "stream-json",
+            "--replay-user-messages",
         ]
         if resume_session_id:
             argv += ["--resume", resume_session_id]
@@ -138,12 +195,24 @@ class ClaudeCodeRuntime(AgentRuntime):
             # Passed even when empty, so the pairing has no gap.
             "--mcp-config",
             json.dumps(
-                {"mcpServers": self._mcp_endpoints(mcp_config, gateway_base_url=gateway_base_url)}
+                {"mcpServers": self._mcp_endpoints(mcp_config, model_base_url=model_base_url)}
             ),
+            # AskUserQuestion and ExitPlanMode require owner interaction even in
+            # bypassPermissions. The pinned CLI sends its can_use_tool request
+            # over this control channel, and the live turn answers it with the
+            # owner's choices.
+            "--permission-prompt-tool",
+            "stdio",
+            # Web search is an Anthropic server tool; a Chat Completions upstream
+            # behind the helper has none, and the helper refuses the request.
+            *(("--disallowedTools", "WebSearch") if translated else ()),
         ]
         env = {
-            "ANTHROPIC_BASE_URL": gateway_base_url.rstrip("/").removesuffix("/v1"),
-            "ANTHROPIC_API_KEY": credential,
+            "ANTHROPIC_BASE_URL": anthropic_url,
+            # The SDK sends this as ``x-api-key``, which is what the check
+            # authenticates with too; never ``ANTHROPIC_AUTH_TOKEN``. Behind the
+            # helper it is the member's loopback token, not the provider key.
+            "ANTHROPIC_API_KEY": compat_cli_credential(credential) if translated else credential,
             "MCP_TOOL_TIMEOUT": "1560000",
             # Remote MCP has a separate five-minute idle timer. The relay can
             # wait ten minutes for owner approval without sending progress;
@@ -178,52 +247,31 @@ class ClaudeCodeRuntime(AgentRuntime):
             # Session files land in the retained container layer instead of a
             # process-private HOME, so docker stop/start can resume them.
             env["CLAUDE_CONFIG_DIR"] = config_dir
+        if isinstance(model_base_url, MessagesViaChatUrl):
+            # The model is pinned later through ``--model``; the helper locks to it.
+            return compat_launch(argv, env, model_base_url, credential, model=model)
         return argv, env
 
-    def prepare_live(
-        self,
-        *,
-        workdir: str,
-        model: str,
-        gateway_base_url: str,
-        credential: str,
-        provides_isolation: bool = False,
-        mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
-        reasoning_effort: str | None = None,
-        config_dir: str | None = None,
-        resume_session_id: str | None = None,
-    ) -> tuple[list[str], dict[str, str]]:
-        """The resident invocation (HOT): prompts arrive on stdin, not argv.
+    @staticmethod
+    def inference_base_url(model_base_url: str) -> str:
+        """``ANTHROPIC_BASE_URL``: the Gateway relay's, or an owner connection's.
 
-        ``--input-format stream-json`` keeps the process alive between turns,
-        reading user messages from stdin — the terminal-never-closed shape the
-        design's HOT tier is. ``--replay-user-messages`` echoes each one back
-        on stdout at the moment the CLI reads it into the conversation, which
-        is how a message sent into a running turn is known to have landed in
-        it. The common argv/env builder stays shared with runtime conformance
-        tests so auth, model, and MCP flags cannot drift.
+        The SDK appends ``/v1/messages``, so both drop one trailing ``/v1``.
+        A connection's path is otherwise kept exactly (a gateway's
+        ``/anthropic`` prefix stays), and only a Messages connection is
+        accepted: the control plane refuses any other pairing, and this is
+        the last stop before a key reached a protocol it is not for.
         """
-        argv, env = self.prepare(
-            workdir=workdir,
-            task_prompt="",
-            model=model,
-            gateway_base_url=gateway_base_url,
-            credential=credential,
-            provides_isolation=provides_isolation,
-            mcp_config=mcp_config,
-            reasoning_effort=reasoning_effort,
-            config_dir=config_dir,
-            resume_session_id=resume_session_id,
-        )
-        # Drop the empty positional prompt (`-p ""`), add the input format.
-        prompt_at = argv.index("-p")
-        del argv[prompt_at : prompt_at + 2]
-        argv[1:1] = ["-p", "--input-format", "stream-json", "--replay-user-messages"]
-        # AskUserQuestion and ExitPlanMode require owner interaction even in bypassPermissions.
-        # The pinned CLI sends its can_use_tool request over this control
-        # channel, and the live turn answers it with the owner's choices.
-        argv += ["--permission-prompt-tool", "stdio"]
-        return argv, env
+        if isinstance(model_base_url, MessagesBaseUrl):
+            return anthropic_base_url(str(model_base_url))
+        if isinstance(model_base_url, MessagesViaChatUrl):
+            # The member's compatibility helper, at the origin its launcher binds.
+            return COMPAT_ORIGIN
+        if isinstance(model_base_url, ExactBaseUrl):
+            raise RuntimeConnectionUnsupportedError(
+                "Claude Code speaks Anthropic Messages, which this connection does not offer"
+            )
+        return model_base_url.rstrip("/").removesuffix("/v1")
 
     @staticmethod
     def user_message_line(text: str) -> str:
@@ -258,48 +306,7 @@ class ClaudeCodeRuntime(AgentRuntime):
 
         kind = event.get("type")
         if kind == "system":
-            subtype = str(event.get("subtype") or "system").strip() or "system"
-            if subtype == "api_retry":
-                # Each notice describes a new request attempt and its wait;
-                # suppressing repeated subtypes would hide the retry progress.
-                return NormalizedEvent(
-                    LIFECYCLE,
-                    {
-                        "phase": "api_retry",
-                        "attempt": event.get("attempt"),
-                        "max_retries": event.get("max_retries"),
-                        "retry_delay_ms": event.get("retry_delay_ms"),
-                        "error_status": event.get("error_status"),
-                    },
-                )
-            if subtype not in self.MILESTONE_SUBTYPES:
-                # Not discarded outright: the first occurrence is kept as a raw
-                # diagnostic so a subtype nobody has classified yet is still
-                # discoverable in the event log. Repeats are dropped, which is
-                # what turns 408 rows into 1.
-                if subtype in self._reported_subtypes:
-                    return None
-                self._reported_subtypes.add(subtype)
-                return self._raw(line, f"unclassified system subtype {subtype!r}")
-            # Only the session's own init is republished as its inventory. A
-            # subagent emits the same subtype for a narrower menu, and the
-            # normalized event carries no marker saying which one it was, so
-            # attaching the inventory there would read as the session's.
-            harness: dict[str, Any] | None = None
-            if subtype == "init" and not event.get("parent_tool_use_id"):
-                captured = str(event.get("session_id") or "").strip()
-                if captured:
-                    self.session_id = captured
-                harness = _harness_inventory(event)
-            payload: dict[str, Any] = {
-                "phase": subtype,
-                "model": event.get("model"),
-                "runtime_version": event.get("claude_code_version"),
-                "session_id": self.session_id,
-            }
-            if harness is not None:
-                payload["harness"] = harness
-            return NormalizedEvent(LIFECYCLE, payload)
+            return self._from_system(line, event)
         if kind == "stream_event":
             return self._from_stream(event)
         if kind == "assistant":
@@ -314,7 +321,64 @@ class ClaudeCodeRuntime(AgentRuntime):
             self._preview.clear()
             self._message_id = self._text_block = None
             return self._from_result(event)
-        return self._raw(line, f"unknown type {kind!r}")
+        if kind in self.SILENT_TYPES:
+            return None
+        return self._report_once(line, f"unknown type {kind!r}")
+
+    def _report_once(self, line: str, reason: str) -> NormalizedEvent | None:
+        """A raw diagnostic for the first line of its kind this run, then nothing.
+
+        Not discarded outright, so a line nobody has classified yet is still
+        discoverable in the event log. Repeats are dropped: an unclassified
+        counter or heartbeat would otherwise be stored once per emission, which
+        is what once turned 408 ``thinking_tokens`` lines into 408 rows.
+        """
+        if reason in self._reported:
+            return None
+        self._reported.add(reason)
+        return self._raw(line, reason)
+
+    def _from_system(self, line: str, event: dict[str, Any]) -> NormalizedEvent | None:
+        """A ``type: "system"`` line: a milestone, a retry notice, or telemetry."""
+        subtype = str(event.get("subtype") or "system").strip() or "system"
+        if subtype == "api_retry":
+            # Each notice describes a new request attempt and its wait;
+            # suppressing repeated subtypes would hide the retry progress.
+            return NormalizedEvent(
+                LIFECYCLE,
+                {
+                    "phase": "api_retry",
+                    "attempt": event.get("attempt"),
+                    "max_retries": event.get("max_retries"),
+                    "retry_delay_ms": event.get("retry_delay_ms"),
+                    "error_status": event.get("error_status"),
+                },
+            )
+        if subtype in self.SILENT_SUBTYPES:
+            return None
+        if subtype not in self.MILESTONE_SUBTYPES:
+            return self._report_once(line, f"unclassified system subtype {subtype!r}")
+        # Only the session's own init is republished as its inventory. A
+        # subagent emits the same subtype for a narrower menu, and the
+        # normalized event carries no marker saying which one it was, so
+        # attaching the inventory there would read as the session's.
+        harness: dict[str, Any] | None = None
+        if subtype == "init" and not event.get("parent_tool_use_id"):
+            captured = str(event.get("session_id") or "").strip()
+            if captured:
+                self.session_id = captured
+            harness = _harness_inventory(event)
+        payload: dict[str, Any] = {
+            "phase": subtype,
+            "model": event.get("model"),
+            "runtime_version": event.get("claude_code_version"),
+            "session_id": self.session_id,
+        }
+        if harness is not None:
+            payload["harness"] = harness
+        payload.update(_compaction_fields(subtype, event))
+        self._summary_anchor = _summary_anchor(subtype, event) or self._summary_anchor
+        return NormalizedEvent(LIFECYCLE, payload)
 
     def _from_stream(self, event: dict[str, Any]) -> NormalizedEvent | None:
         """Preview the answer text the model is writing.
@@ -324,12 +388,11 @@ class ClaudeCodeRuntime(AgentRuntime):
         model writes would otherwise arrive as thousands of fragments. A
         subagent's text is not the conversation's answer, so it is left out
         too. Every other line is consumed here and stored nowhere, which is
-        safe because the CLI repeats the complete content in ``assistant`` lines.
+        safe because the CLI repeats the complete content in ``assistant`` lines,
+        except a model call's output count (see :meth:`_call_usage`).
         """
-        if event.get("parent_tool_use_id"):
-            return None
         stream = event.get("event")
-        if not isinstance(stream, dict):
+        if not isinstance(stream, dict) or event.get("parent_tool_use_id"):
             return None
         kind = stream.get("type")
         index = stream.get("index")
@@ -338,8 +401,13 @@ class ClaudeCodeRuntime(AgentRuntime):
             message_id = message.get("id") if isinstance(message, dict) else None
             self._message_id = str(message_id) if message_id else None
             self._text_block = None
+            self._call_output = 0
             return None
+        if kind == "message_delta":
+            return self._call_usage(stream)
         if kind == "content_block_start":
+            # When the block began streaming, for its duration (``block_ms``).
+            self._block_started = time.monotonic()
             block = stream.get("content_block")
             is_text = isinstance(block, dict) and block.get("type") == "text"
             self._text_block = (
@@ -360,6 +428,34 @@ class ClaudeCodeRuntime(AgentRuntime):
         piece = self._preview.add(self._text_block, str(delta.get("text") or ""))
         return NormalizedEvent(RAW, piece) if piece else None
 
+    def _call_usage(self, stream: dict[str, Any]) -> NormalizedEvent | None:
+        """A ``usage`` event carrying the main agent's call's output so far.
+
+        The ``assistant`` lines repeat the usage the call reported as it began,
+        when it had written nothing: its output is ``0`` (``1`` from Anthropic)
+        however long it runs. The real count arrives in the call's
+        ``message_delta`` lines, after its blocks; the count is cumulative and
+        a call may send more than one, so each rise is reported. Under the
+        same ``usage_id`` as those blocks, it raises that call's output in the
+        running thread stats (which keep each call's largest count) as soon as
+        it is known, rather than when the turn's ``result`` reports the total.
+        Only the output count: a gateway's delta may also restate the input,
+        and the stats keep the larger of the estimate and the exact value.
+
+        A subagent's calls are not counted here: the CLI does not forward a
+        subagent's stream, and its ``assistant`` lines carry only the
+        start-of-call usage too, so its output arrives with the turn's
+        ``result``.
+        """
+        usage = stream.get("usage")
+        output = usage.get("output_tokens") if isinstance(usage, dict) else None
+        if self._message_id is None or type(output) is not int or output <= self._call_output:
+            return None
+        self._call_output = output
+        return NormalizedEvent(
+            USAGE, {"usage": {"output_tokens": output}, "usage_id": self._message_id}
+        )
+
     def _from_assistant(self, event: dict[str, Any]) -> NormalizedEvent:
         """Map an assistant turn to its most significant block."""
         message = event.get("message") or {}
@@ -374,6 +470,12 @@ class ClaudeCodeRuntime(AgentRuntime):
             # recorded relationship so the UI can distinguish a child agent's
             # activity and reply from the conversation's own answer.
             usage_fields["parent_tool_use_id"] = parent_tool_use_id
+        elif self._block_started is not None:
+            # The pinned 2.1.220 writes a block's complete line as the block
+            # ends: the time since its start is how long it streamed to this
+            # host. Passive (no request of its own), one number per block.
+            usage_fields["block_ms"] = int((time.monotonic() - self._block_started) * 1000)
+            self._block_started = None
         for block in blocks:
             if not isinstance(block, dict):
                 continue
@@ -416,6 +518,9 @@ class ClaudeCodeRuntime(AgentRuntime):
             # A user message the CLI read from stdin, echoed back: the driver
             # accounts for it, and it is nothing new to report.
             return None
+        summary = self._compaction_summary(event)
+        if summary is not None:
+            return summary
         blocks = (event.get("message") or {}).get("content") or []
         parent_tool_use_id = event.get("parent_tool_use_id")
         parent_fields = (
@@ -444,7 +549,48 @@ class ClaudeCodeRuntime(AgentRuntime):
                         **result_fields,
                     },
                 )
+        injected = _record_content_text(blocks)
+        if injected.strip():
+            # Not the owner's message (those come back as replays) and not a
+            # tool result: text the CLI itself added to the conversation, such
+            # as a skill's body or an interrupt marker. Kept, bounded, as an
+            # injection the Context view lists.
+            flags = [name for name in ("isSynthetic", "isMeta") if event.get(name)]
+            return NormalizedEvent(
+                LIFECYCLE,
+                {
+                    "phase": "context_injection",
+                    "source": "claude_user_line",
+                    "label": ",".join(flags) or "user_line",
+                    "text": injected[:SUMMARY_TEXT_CHARS],
+                    "chars": len(injected),
+                    **({"truncated": True} if len(injected) > SUMMARY_TEXT_CHARS else {}),
+                    **parent_fields,
+                },
+            )
         return NormalizedEvent(RAW, {"text": "user turn without a tool result"})
+
+    def _compaction_summary(self, event: dict[str, Any]) -> NormalizedEvent | None:
+        """The summary a compaction carries forward, from the message it names.
+
+        After ``compact_boundary`` the pinned 2.1.220 writes the summary as a
+        synthetic user message whose uuid is the boundary's anchor. It is what
+        the next request carries in place of the compacted history.
+        """
+        anchor = self._summary_anchor
+        if not anchor or event.get("uuid") != anchor or not event.get("isSynthetic"):
+            return None
+        self._summary_anchor = None
+        text = _record_content_text((event.get("message") or {}).get("content"))
+        return NormalizedEvent(
+            LIFECYCLE,
+            {
+                "phase": "compaction_summary",
+                "text": text[:SUMMARY_TEXT_CHARS],
+                "chars": len(text),
+                **({"truncated": True} if len(text) > SUMMARY_TEXT_CHARS else {}),
+            },
+        )
 
     def _from_result(self, event: dict[str, Any]) -> NormalizedEvent:
         """Map the terminal result line."""
@@ -470,6 +616,7 @@ class ClaudeCodeRuntime(AgentRuntime):
                     "api_error_status": event.get("api_error_status"),
                     "text": text[:2000],
                     **usage_fields,
+                    **_context_window_fields(event),
                 },
             )
         return NormalizedEvent(
@@ -483,6 +630,7 @@ class ClaudeCodeRuntime(AgentRuntime):
                 # api_logs.agent_job_id — the platform never trusts a number
                 # the agent computed about itself.
                 "reported_cost_usd": event.get("total_cost_usd"),
+                **_context_window_fields(event),
             },
         )
 
@@ -506,11 +654,59 @@ class ClaudeCodeRuntime(AgentRuntime):
         return ["--effort", str(effort)]
 
     def capabilities(self) -> RuntimeCapabilities:
-        """Claude Code is Tier 1: normalized events, a cost report, and MCP."""
-        return RuntimeCapabilities(
-            cost_report=True,
-            normalized_events=True,
-            tier=1,
-            mcp=CLAUDE_CODE.mcp,
-            reasoning_efforts=self.EFFORT_LEVELS,
+        """Claude Code takes the platform's MCP relay and an effort level."""
+        return RuntimeCapabilities(mcp=CLAUDE_CODE.mcp, reasoning_efforts=self.EFFORT_LEVELS)
+
+
+def _compaction_fields(subtype: str, event: dict[str, Any]) -> dict[str, Any]:
+    """A ``compact_boundary``'s own account of the compaction.
+
+    Pinned 2.1.220 sends ``compact_metadata`` with the trigger (``auto`` or
+    ``manual``), the tokens before, and from later releases the tokens after.
+    Stored so a reader can show what the CLI said it reclaimed rather than
+    guess it from the next request's size.
+    """
+    if subtype != "compact_boundary":
+        return {}
+    metadata = event.get("compact_metadata")
+    if not isinstance(metadata, dict):
+        return {}
+    report = reported_compaction(
+        trigger=metadata.get("trigger"),
+        pre_tokens=metadata.get("pre_tokens"),
+        post_tokens=metadata.get("post_tokens"),
+    )
+    return {"compaction": report} if report else {}
+
+
+def _context_window_fields(event: dict[str, Any]) -> dict[str, Any]:
+    """The context window each model of this query ran under, when reported."""
+    windows = reported_context_windows(event.get("modelUsage"))
+    return {"context_windows": windows} if windows else {}
+
+
+#: Characters of a compaction summary kept on its event.
+SUMMARY_TEXT_CHARS = 4000
+
+
+def _summary_anchor(subtype: str, event: dict[str, Any]) -> str | None:
+    """The uuid of the message a compaction boundary names as its summary."""
+    if subtype != "compact_boundary":
+        return None
+    metadata = event.get("compact_metadata")
+    segment = metadata.get("preserved_segment") if isinstance(metadata, dict) else None
+    anchor = segment.get("anchor_uuid") if isinstance(segment, dict) else None
+    return anchor if isinstance(anchor, str) and anchor else None
+
+
+def _record_content_text(content: Any) -> str:
+    """A message's text, whether the CLI sent a string or text blocks."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            str(block.get("text") or "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
         )
+    return ""

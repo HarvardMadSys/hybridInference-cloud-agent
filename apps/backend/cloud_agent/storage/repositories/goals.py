@@ -18,9 +18,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.goals.models import (
-    ARM_AFTER_S,
     MAX_REASON_CHARS,
-    STALLED_AFTER_S,
     GoalConflict,
 )
 from cloud_agent.settings import number_setting
@@ -34,7 +32,6 @@ from cloud_agent.storage._sql.goals import (
     SPENT_ROUNDS_SQL,
 )
 from cloud_agent.storage._sql.rows import thread_goal
-from cloud_agent.storage.repositories.goal_wakeups import _insert as _insert_wakeup
 
 if TYPE_CHECKING:
     import asyncpg
@@ -43,8 +40,7 @@ if TYPE_CHECKING:
     from cloud_agent.goals.models import GoalInput, GoalPauseReason
 
 #: The goal's own columns, read back after every write so the caller always
-#: sees what the row now says rather than what it asked for. Written once as
-#: names because there are two projections of them and they must not drift.
+#: sees what the row now says rather than what it asked for.
 _GOAL_COLUMN_NAMES = (
     "goal_id",
     "goal_objective",
@@ -66,16 +62,9 @@ _GOAL_COLUMN_NAMES = (
 #: not introduce.
 _GOAL_COLUMNS = ", ".join(_GOAL_COLUMN_NAMES)
 
-#: For reads that join. ``0019`` put ``goal_revision`` on ``agent_jobs`` as well
-#: — the revision *that turn* was created for — so an unqualified name is
-#: ambiguous there, and Postgres refuses the whole statement (42702) rather than
-#: picking one.
-_GOAL_COLUMNS_QUALIFIED = ", ".join(f"t.{name}" for name in _GOAL_COLUMN_NAMES)
-
 #: Everything a caller needs to decide what a write means, with the two derived
 #: counters, formatted for a read that has ``agent_threads t`` in scope.
 _GOAL_READ_COLUMNS = f"{_GOAL_COLUMNS}, {ROUNDS_USED_SQL}, {REPAIRS_USED_SQL}"
-_GOAL_READ_COLUMNS_QUALIFIED = f"{_GOAL_COLUMNS_QUALIFIED}, {ROUNDS_USED_SQL}, {REPAIRS_USED_SQL}"
 
 #: The columns a caller needs to decide whether the objective changed, and
 #: whether the goal being set is one that was already complete.
@@ -142,20 +131,6 @@ class PostgresGoalRepository:
             return await conn.fetchval(sql, thread_id)
         async with self._pool.acquire() as acquired:
             return await acquired.fetchval(sql, thread_id)
-
-    async def get_goal_for_job(self, *, job_id: str) -> dict[str, Any] | None:
-        """The goal of the conversation the job belongs to, or ``None``."""
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                f"""
-                SELECT {_GOAL_READ_COLUMNS_QUALIFIED}
-                FROM agent_threads t
-                JOIN agent_jobs j ON j.thread_id = t.id
-                WHERE j.id = $1
-                """,
-                job_id,
-            )
-        return None if row is None else goal_row_to_dict(row)
 
     async def get_thread_goal_state(self, *, user_id: str, thread_id: str) -> dict[str, Any] | None:
         """A conversation's goal *and* its control version, owner-checked.
@@ -325,8 +300,9 @@ class PostgresGoalRepository:
         """``paused`` → ``active``, and record the obligation to schedule.
 
         Returns the goal as written, or ``None`` when the revision moved under
-        the caller. The owner's authorization is the trigger: no model report is
-        needed to start working again.
+        the caller or the conversation has been deleted. The owner's
+        authorization is the trigger: no model report is needed to start
+        working again.
 
         **Resuming releases a bound that has been spent.** A goal is only ever
         bounded because the owner stated a number, and a goal sitting at that
@@ -343,6 +319,11 @@ class PostgresGoalRepository:
         at three still gets fifty.
         """
         async with self._pool.acquire() as conn, conn.transaction():
+            # The tombstone is checked here, in the write, and not only by the
+            # caller's read before it. A delete that commits in between pauses
+            # only an active goal, so a paused one keeps the revision this
+            # resume carries, and a goal restarted in a deleted chat would
+            # queue rounds nobody can see.
             written = await conn.fetchrow(
                 """
                 UPDATE agent_threads t
@@ -360,7 +341,7 @@ class PostgresGoalRepository:
                     goal_revision = goal_revision + 1,
                     goal_updated_at = NOW(), updated_at = NOW()
                 WHERE t.id = $1 AND t.user_id = $2 AND t.goal_revision = $3
-                  AND t.goal_state = 'paused'
+                  AND t.goal_state = 'paused' AND t.deleted_at IS NULL
                 RETURNING t.id, t.goal_id, t.goal_revision
                 """,
                 thread_id,
@@ -391,9 +372,28 @@ class PostgresGoalRepository:
             )
         return goal_row_to_dict(row)
 
-    async def clear_goal(self, *, thread_id: str, user_id: str) -> bool:
-        """Remove the goal entirely, cancelling any queued automatic round."""
+    async def clear_goal(
+        self, *, thread_id: str, user_id: str, expected_revision: int | None = None
+    ) -> bool:
+        """Remove the goal entirely, cancelling any queued automatic round.
+
+        Raises ``GoalConflict`` when ``expected_revision`` no longer matches, so a
+        clear confirmed against one goal never removes a newer one.
+        """
         async with self._pool.acquire() as conn, conn.transaction():
+            if expected_revision is not None:
+                current = await conn.fetchrow(
+                    """
+                    SELECT goal_revision
+                    FROM agent_threads
+                    WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+                    FOR UPDATE
+                    """,
+                    thread_id,
+                    user_id,
+                )
+                if current is not None and expected_revision != int(current["goal_revision"] or 0):
+                    raise GoalConflict("This goal changed since you read it. Reload and try again.")
             cleared = await conn.fetchval(
                 """
                 UPDATE agent_threads
@@ -528,8 +528,8 @@ class PostgresGoalRepository:
           waiting on anything, or whose conversation has gone idle with no
           wakeup at all. The decision is made again.
         * ``stalled`` — an ``active`` goal with nothing queued, running or
-          pending for longer than :data:`STALLED_AFTER_S`. No path can explain
-          it, so it is paused and said so.
+          pending for longer than the ``goals.stalled_after_seconds`` setting.
+          No path can explain it, so it is paused and said so.
 
         Returns the thread ids by shape, for the caller's log line.
         """
@@ -569,7 +569,7 @@ class PostgresGoalRepository:
                 ORDER BY t.goal_updated_at
                 LIMIT 200
                 """,
-                number_setting("goals.arm_after_seconds", ARM_AFTER_S),
+                number_setting("goals.arm_after_seconds"),
             )
             # The ids of wakeups this pass made due again. Populated before the
             # arming loop below, which appends the goals it newly armed.
@@ -642,7 +642,7 @@ class PostgresGoalRepository:
                 LIMIT 200
                 FOR UPDATE OF t SKIP LOCKED
                 """,
-                number_setting("goals.stalled_after_seconds", STALLED_AFTER_S),
+                number_setting("goals.stalled_after_seconds"),
             )
             stalled_ids = [str(row["id"]) for row in stalled]
             if stalled_ids:
@@ -709,6 +709,20 @@ def _action_columns(
     return None, None, None, None, None
 
 
+#: One obligation, inserted once. The partial unique index is what makes a
+#: retried owner write find the row it already made; a *processed* row does not
+#: block a genuinely new event with the same name, because the index only covers
+#: ``pending``.
+_ARM_SQL = """
+INSERT INTO agent_goal_wakeups
+    (id, thread_id, goal_id, revision, trigger, trigger_ref, waiting_job_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (thread_id, trigger, trigger_ref) WHERE state = 'pending'
+DO NOTHING
+RETURNING id
+"""
+
+
 async def _arm(
     conn: Any,
     *,
@@ -719,11 +733,14 @@ async def _arm(
     trigger_ref: str,
     waiting_job_id: str | None = None,
 ) -> str | None:
-    """Insert one scheduling obligation, or nothing when it already exists.
-
-    Through the wakeup queue's own INSERT, so the obligation a goal write arms
-    and the one the queue arms cannot drift apart.
-    """
-    return await _insert_wakeup(
-        conn, thread_id, goal_id, revision, trigger, trigger_ref, waiting_job_id
+    """Insert one scheduling obligation, or nothing when it already exists."""
+    return await conn.fetchval(
+        _ARM_SQL,
+        uuid.uuid4().hex,
+        thread_id,
+        goal_id,
+        revision,
+        trigger,
+        trigger_ref,
+        waiting_job_id,
     )

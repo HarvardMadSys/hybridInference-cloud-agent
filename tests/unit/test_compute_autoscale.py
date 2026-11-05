@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from cloud_agent.ports.compute_resources import ComputeResourceRepository
     from cloud_agent.ports.host_pool import HostPoolRepository
 
-NOW = datetime(2026, 10, 11, 16, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 11, 16, 0, tzinfo=UTC)
 GIB = 1024**3
 
 
@@ -222,6 +222,7 @@ class HostPool:
         *,
         hosts: list[dict[str, Any]] | None = None,
         runnable: int = 0,
+        backoff: int = 0,
         free: int = 0,
         unmatched: int | None = None,
         templates: list[str] | None = None,
@@ -229,6 +230,7 @@ class HostPool:
     ) -> None:
         self.hosts = hosts or []
         self.runnable = runnable
+        self.backoff = backoff
         self.free = free
         self.unmatched = unmatched
         self.templates = (
@@ -243,6 +245,7 @@ class HostPool:
             "observed_at": NOW,
             "active_host": self.active_host,
             "runnable_new_group_jobs": self.runnable,
+            "backoff_new_group_jobs": self.backoff,
             "fresh_effective_free_slots": self.free,
             "autoscaling_template_hosts": list(self.templates),
             "hosts": deepcopy(self.hosts),
@@ -431,6 +434,23 @@ async def test_sustained_pressure_scales_one_at_a_time() -> None:
 
     assert len(repository.scale_ups) == 1
     assert repository.scale_ups[0]["decision"] == {"action": "scale_up_pressure"}
+
+
+@pytest.mark.asyncio
+async def test_a_turn_in_claim_backoff_is_no_demand_for_a_new_host() -> None:
+    """No claim would hand it out yet, so a full pool does not grow for it."""
+    repository = Repository(
+        configured_policy=policy(scale_up_sustain_seconds=120),
+        configured_runtime=runtime(pressure_since=NOW - timedelta(seconds=121)),
+        members=[member("a")],
+    )
+    pool = HostPool(hosts=[host("a", slots_used=6)], backoff=1, free=0)
+
+    await autoscaler(repository, pool).reconcile()
+
+    assert repository.scale_ups == []
+    assert repository.state["runtime"]["queue_pressure"] == 0
+    assert repository.state["runtime"]["pressure_since"] is None
 
 
 @pytest.mark.asyncio
@@ -843,6 +863,53 @@ async def test_busy_or_retained_capacity_resets_the_idle_window() -> None:
 
     assert repository.scale_downs == []
     assert repository.state["runtime"]["idle_since"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_turn_in_claim_backoff_keeps_the_idle_window_from_starting() -> None:
+    """It still waits for a Host; no claim hands it out until its backoff ends."""
+    repository = Repository(
+        configured_policy=policy(
+            min_hosts=1,
+            scale_down_enabled=True,
+            scale_down_idle_seconds=600,
+        ),
+        configured_runtime=runtime(),
+        members=[member("a"), member("b")],
+    )
+    pool = HostPool(hosts=[host("a"), host("b")], backoff=1)
+
+    await autoscaler(repository, pool).reconcile()
+
+    assert repository.state["runtime"]["idle_since"] is None
+    assert repository.state["runtime"]["queue_pressure"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_turn_in_claim_backoff_blocks_scale_down() -> None:
+    """No member is retired under a turn that is waiting out a claim backoff.
+
+    Through an outage each claim is given back with a backoff, so the turn is
+    claimable for only seconds at a time.
+    """
+    old = member("old", created_at=NOW - timedelta(days=2))
+    newest = member("new", created_at=NOW - timedelta(days=1))
+    repository = Repository(
+        configured_policy=policy(
+            min_hosts=1,
+            scale_down_enabled=True,
+            scale_down_idle_seconds=600,
+        ),
+        configured_runtime=runtime(idle_since=NOW - timedelta(seconds=601)),
+        members=[old, newest],
+    )
+    pool = HostPool(hosts=[host("old"), host("new")], backoff=1)
+
+    await autoscaler(repository, pool).reconcile()
+
+    assert repository.scale_downs == []
+    assert repository.state["runtime"]["idle_since"] is None
+    assert repository.state["runtime"]["queue_pressure"] == 0
 
 
 @pytest.mark.asyncio

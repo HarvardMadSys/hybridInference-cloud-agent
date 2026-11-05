@@ -2,8 +2,8 @@
 
 An artifact deployment has no checkout. It has images pinned by digest, a
 manifest that names them, and this archive — so the archive has to carry the
-Compose files, the two deploy scripts, the protocol file and the two helpers
-that turn a manifest into a rendered Compose file and an environment fragment.
+Compose files, the deploy scripts, the protocol file, the release renderers,
+and the host's standalone storage-attestation executable.
 What it must not carry is source: the Dockerfiles are absent on purpose, because
 an image that can be built on the host is an image that can disagree with the
 digest the manifest pinned.
@@ -52,8 +52,7 @@ RECIPE_FORMAT_VERSION = 1
 #:
 #: No Dockerfiles: images are pulled by digest. No `deploy/local/`: that is the
 #: developer stack, and it builds from source by design. No `deploy/preflight/`:
-#: it needs httpx and a gateway, and it is a pre-cutover check rather than part
-#: of installing a release.
+#: it is a pre-cutover check rather than part of installing a release.
 RECIPE_FILES: tuple[str, ...] = (
     "deploy/DEPLOY_PROTOCOL",
     "deploy/watch_peer.py",
@@ -66,14 +65,15 @@ RECIPE_FILES: tuple[str, ...] = (
     "deploy/control-plane/.env.example",
     "deploy/control-plane/pgadmin-servers.json",
     "deploy/control-plane/pgadmin-entrypoint.py",
+    "deploy/control-plane/site-content/README.md",
     "deploy/host/deploy.sh",
     "deploy/host/sandbox_host.sh",
+    "deploy/host/storage_attestation.py",
     "deploy/host/docker-compose.sandbox.yml",
-    "deploy/host/agent-gateway-tunnel.sh",
+    "deploy/host/agent-ssh-tunnel.sh",
     "deploy/host/setup_kata_runtime.sh",
     "deploy/host/kata_runtime_epoch.py",
     "deploy/host/.env.example",
-    "deploy/reverse-proxy/agents-under-gateway.conf",
     "deploy/release/artifact_compose.py",
     "deploy/release/artifact_env.sh",
     "deploy/release/release_env.py",

@@ -45,6 +45,14 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
+// Where CloudLab's small-lan profile, and deploy/cloudlab/cloud-agent-node.py,
+// mount a new experiment's data disk unless told otherwise.
+const CLOUDLAB_DATA_MOUNT = '/mydata';
+
+function defaultSandboxStoragePath(providerId: string, mode: 'attach' | 'provision'): string {
+  return providerId === 'cloudlab' && mode === 'provision' ? CLOUDLAB_DATA_MOUNT : '';
+}
+
 function parseSandboxStoragePath(value: string): string {
   const path = value.trim();
   const invalid = (message: string): never => {
@@ -127,7 +135,10 @@ export default function AddComputeServer({
   const provider = catalog.providers.find((item) => item.id === providerId);
   const [mode, setMode] = useState<'attach' | 'provision'>(provider?.modes[0] ?? 'attach');
   const [name, setName] = useState('');
-  const [sandboxStoragePath, setSandboxStoragePath] = useState('');
+  // Null until the administrator types one: a new CloudLab experiment's disk
+  // is where small-lan mounts it, and that follows the server type until then.
+  const [sandboxStorageInput, setSandboxStorageInput] = useState<string | null>(null);
+  const sandboxStoragePath = sandboxStorageInput ?? defaultSandboxStoragePath(providerId, mode);
   const storageId = useId();
   const [account, setAccount] = useState(() => initialCredential(provider, connections));
   const sshProvider = catalog.providers.find((item) => item.id === 'existing_ssh');
@@ -151,7 +162,6 @@ export default function AddComputeServer({
   const [accountError, setAccountError] = useState<string | null>(null);
   const [sshError, setSshError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
-  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [observeOnly, setObserveOnly] = useState(false);
   // Retained after an ambiguous network result; repeated submits use the same intent.
   const requestIds = useRef<Partial<Record<'deploy' | 'import', string>>>({});
@@ -266,7 +276,6 @@ export default function AddComputeServer({
       const message = getErrorMessage(error);
       if (stage === 'fields' && error instanceof ProviderFieldError) {
         setFieldErrors({ [error.field]: message });
-        if (advancedFields.some((field) => field.key === error.field)) setAdvancedOpen(true);
       } else if (stage === 'account') setAccountError(message);
       else if (stage === 'ssh') setSshError(message);
       else setError(message);
@@ -280,14 +289,6 @@ export default function AddComputeServer({
       ref={form}
       className="space-y-5"
       onChange={changed}
-      onInvalidCapture={(event) => {
-        const details = (event.target as HTMLElement).closest('details');
-        if (details) {
-          // Reveal native-validation failures before the browser focuses them.
-          details.open = true;
-          setAdvancedOpen(true);
-        }
-      }}
       onSubmit={(event) => {
         event.preventDefault();
         void submit();
@@ -309,7 +310,6 @@ export default function AddComputeServer({
                     setProviderId(item.id);
                     setMode(item.modes.includes('provision') ? 'provision' : 'attach');
                     setObserveOnly(false);
-                    setAdvancedOpen(false);
                     setValues(initialFields(item.fields));
                     setAccount(initialCredential(item, availableConnections));
                     setSsh(initialCredential(sshProvider, availableConnections));
@@ -341,7 +341,6 @@ export default function AddComputeServer({
                   onChange={() => {
                     setMode(item);
                     setObserveOnly(false);
-                    setAdvancedOpen(false);
                   }}
                 />
                 {item === 'attach' ? 'Connect existing' : 'Create new'}
@@ -420,12 +419,15 @@ export default function AddComputeServer({
                   ]
                     .filter(Boolean)
                     .join(' ')}
-                  onChange={(event) => setSandboxStoragePath(event.target.value)}
+                  onChange={(event) => setSandboxStorageInput(event.target.value)}
                 />
               </Field>
               <p id={`${storageId}-help`} className="mt-1 text-xs text-gray-500 dark:text-gray-400">
                 Absolute path to an existing mounted data disk on this server. Sandboxes,
                 workspaces, and session data are stored there.
+                {providerId === 'cloudlab' &&
+                  mode === 'provision' &&
+                  ` CloudLab's small-lan profile mounts its data disk at ${CLOUDLAB_DATA_MOUNT}; change this if your template mounts it elsewhere.`}
               </p>
               {fieldErrors.sandbox_storage_path && (
                 <p
@@ -484,14 +486,8 @@ export default function AddComputeServer({
           </Section>
         )}
         {(advancedFields.length > 0 || canObserve) && (
-          <details
-            open={advancedOpen}
-            onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}
-          >
-            <summary className="cursor-pointer text-sm text-gray-600 dark:text-gray-300">
-              Advanced options
-            </summary>
-            <div className="mt-3 space-y-4">
+          <Section title="Additional options">
+            <div className="space-y-4">
               <ProviderFields
                 fields={advancedFields}
                 values={values}
@@ -509,7 +505,7 @@ export default function AddComputeServer({
                 </label>
               )}
             </div>
-          </details>
+          </Section>
         )}
         {!deploymentConfigured && !observeOnly && (
           <div

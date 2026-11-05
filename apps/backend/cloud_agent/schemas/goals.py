@@ -29,7 +29,8 @@ class GoalRevisionRequest(BaseModel):
     Omitted means "act on whatever the goal currently is", which is what the
     pause and resume buttons send: they are idempotent by nature, and refusing
     to press one because a round advanced a counter would be a worse answer than
-    doing what was asked.
+    doing what was asked. Clear sends it: the owner confirmed removing the goal
+    they saw, not whatever replaced it since.
     """
 
     revision: int | None = Field(None, ge=0)

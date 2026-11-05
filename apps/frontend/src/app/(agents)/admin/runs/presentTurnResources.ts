@@ -305,13 +305,6 @@ export function completenessOf(state: TurnResourceState | 'interrupted'): Resour
   return 'complete';
 }
 
-/** The word the detail panel shows for each metric status. */
-export function metricStatusLabel(status: ResourceMetricStatus): string {
-  if (status === 'available') return 'complete';
-  if (status === 'partial') return 'partial';
-  return 'unavailable';
-}
-
 /**
  * The coarse state word for the Runs list.
  *
@@ -433,32 +426,6 @@ export function runResourceCells(
     memory: memoryCell(summary.memory_peak_bytes, summary.memory, summary.state),
     state: stateCell(summary),
   };
-}
-
-/**
- * The per-metric completeness sentence for the detail panel.
- *
- * Every metric is stated on its own, with its own reasons. A reader must be
- * able to see that the CPU number is complete and the I/O number does not
- * exist without either fact hiding the other.
- */
-export function metricCompletenessSentence(label: string, metric: ResourceMetricBriefApi): string {
-  const reasons = reasonSentences(metric.reason_codes);
-  const head = `${label} ${metricStatusLabel(metric.status)}.`;
-  return reasons.length ? `${head} ${reasons.join(' ')}` : head;
-}
-
-/** The one-line completeness summary of the whole turn, per metric. */
-export function completenessSentence(summary: {
-  cpu: ResourceMetricBriefApi;
-  memory: ResourceMetricBriefApi;
-  storage_io: ResourceMetricBriefApi;
-}): string {
-  return [
-    metricCompletenessSentence('CPU', summary.cpu),
-    metricCompletenessSentence('memory sampling', summary.memory),
-    metricCompletenessSentence('I/O', summary.storage_io),
-  ].join(' ');
 }
 
 /** What a peak is, so a sampled maximum is never mistaken for a physical total. */

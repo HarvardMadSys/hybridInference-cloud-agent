@@ -4,8 +4,8 @@ import { APIError, ERROR_MESSAGES, getErrorMessage, httpStatusToErrorCode } from
 
 describe('getErrorMessage', () => {
   it('maps APIError codes to product copy', () => {
-    expect(getErrorMessage(new APIError('EMAIL_NOT_VERIFIED', 'raw backend message', 403))).toBe(
-      ERROR_MESSAGES.EMAIL_NOT_VERIFIED,
+    expect(getErrorMessage(new APIError('RATE_LIMIT_EXCEEDED', 'raw backend message', 429))).toBe(
+      ERROR_MESSAGES.RATE_LIMIT_EXCEEDED,
     );
   });
 
@@ -33,6 +33,13 @@ describe('getErrorMessage', () => {
     const err = new Error('boom from backend') as Error & { code?: string };
     err.code = 'UNKNOWN_ERROR';
     expect(getErrorMessage(err)).toBe('boom from backend');
+  });
+
+  it('falls back to the message for a code that is not its own entry, even `__proto__`', () => {
+    // It used to return Object.prototype, which callers render as the message.
+    expect(getErrorMessage(new APIError('__proto__', 'The server refused', 409))).toBe(
+      'The server refused',
+    );
   });
 });
 

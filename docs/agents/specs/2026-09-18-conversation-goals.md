@@ -57,7 +57,9 @@ is not a stop the platform reaches on its own any more.
 
 A person's own queued turn makes the goal yield. Nothing is queued behind a
 message they are waiting on; the goal is judged again when that message's turn
-ends. A completion claim made in that turn waits for the same moment.
+ends. A completion claim made in that turn waits for the same moment. Withdrawing
+a queued round — an edit, a pause or a clear — is not the owner pressing Stop: a
+message they left waiting behind that round is the next turn.
 
 ## Reaching the model
 

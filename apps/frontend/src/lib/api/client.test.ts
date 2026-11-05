@@ -159,6 +159,34 @@ describe('jsonOrThrow', () => {
     expect(getErrorMessage(error)).toBe('Sign in again to continue.');
   });
 
+  // The control plane's plain-detail refusals, as api/session.py and deps.py
+  // raise them. Their wording mentions expiry or tokens; the sign-in flow they
+  // belong to is carried by the status, and the wording is shown as sent.
+  it.each([
+    [400, 'This sign-in has expired. Please start again.'],
+    [401, 'Token has expired. Please refresh your token or login again.'],
+    [401, 'Invalid identity token.'],
+  ])('shows a %i plain detail verbatim instead of a gateway code', async (status, detail) => {
+    const error = await jsonOrThrow(jsonResponse(status, { detail })).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toMatchObject({ code: 'UNKNOWN_ERROR', message: detail, statusCode: status });
+    expect(getErrorMessage(error)).toBe(detail);
+  });
+
+  it('shows gateway-era wording verbatim instead of a wrong sign-in code', async () => {
+    // The gateway's reset flow could answer this; this service's endpoints
+    // never send it. Whatever arrives, the server's own wording is what shows.
+    const reset = 'This password reset link has expired. Please request a new one';
+    const error = await jsonOrThrow(jsonResponse(400, { detail: reset })).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toMatchObject({ code: 'UNKNOWN_ERROR', message: reset });
+    expect(getErrorMessage(error)).toBe(reset);
+  });
+
   it('throws an APIError, so callers can narrow on it', async () => {
     await expect(
       jsonOrThrow(jsonResponse(500, { error: { message: 'boom' } })),

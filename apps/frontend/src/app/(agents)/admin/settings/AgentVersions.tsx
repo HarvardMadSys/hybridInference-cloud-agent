@@ -3,6 +3,7 @@
 import { useState } from 'react';
 
 import type { RuntimeUpgradeItem, RuntimeVersions } from '@/lib/api/adminRuntimeUpgrades';
+import { Select, type SelectItem } from '@/components/ui/Select';
 
 import DinoProgress from './DinoProgress';
 import { SettingsSection } from '../SettingsSection';
@@ -39,6 +40,19 @@ function defaultLabel(servers: NamedHost[], runtime: string): string {
   if (versions.size === 1) return `Server default (${[...versions][0]})`;
   if (versions.size > 1) return 'Server default (varies by server)';
   return 'Server default';
+}
+
+function versionOptions(versions: string[]) {
+  return versions.map((version) => ({ value: version, label: version }));
+}
+
+/** Versions on servers, grouped apart from npm releases when there are any to download. */
+function versionChoices(versions: string[], fromNpm: string[]): SelectItem[] {
+  if (fromNpm.length === 0) return versionOptions(versions);
+  return [
+    { label: 'On servers', options: versionOptions(versions) },
+    { label: 'Download from npm', options: versionOptions(fromNpm) },
+  ];
 }
 
 /**
@@ -83,6 +97,34 @@ function LackingNote({
   );
 }
 
+/**
+ * Servers an update waits for, named before anyone presses Update.
+ *
+ * A version listed from the saved registry might not download from another,
+ * so the server refuses an update until every online server reports the one
+ * saved under "Where agent versions come from".
+ */
+function RegistryWaitingNote({
+  waitingOn,
+  servers,
+}: {
+  waitingOn: string[];
+  servers: NamedHost[];
+}) {
+  if (waitingOn.length === 0) return null;
+  const names = new Map(servers.map(({ name, host }) => [host.host, name]));
+  const who =
+    waitingOn.length > NAMED_SERVERS
+      ? `${waitingOn.length} servers`
+      : waitingOn.map((host) => names.get(host) ?? host).join(' and ');
+  return (
+    <p className="mt-4 break-words text-sm leading-6 text-status-warning">
+      Updates wait until every online server downloads from the saved agent package registry. Not
+      yet: {who}.
+    </p>
+  );
+}
+
 /** What a rollback returns to, in words. */
 function previousLabel(previous: string | null): string {
   return previous ?? 'the server default';
@@ -98,11 +140,14 @@ function previousLabel(previous: string | null): string {
 export function UpdateControls({
   item,
   busy,
+  waiting = false,
   onUpdate,
   onRollback,
 }: {
   item: RuntimeUpgradeItem;
   busy: boolean;
+  /** A server is not yet on the saved package registry: nothing can download. */
+  waiting?: boolean;
   onUpdate: (runtime: string, version: string) => void;
   onRollback: (runtime: string, version: string | null) => void;
 }) {
@@ -137,7 +182,7 @@ export function UpdateControls({
         <div className="flex flex-wrap gap-2">
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || waiting}
             onClick={() => onUpdate(item.runtime, upgrade.version)}
             className="ui-button ui-button-primary min-h-11"
           >
@@ -160,7 +205,7 @@ export function UpdateControls({
         <div className="flex flex-wrap gap-2">
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || waiting}
             onClick={() => onUpdate(item.runtime, upgrade.version)}
             className="ui-button ui-button-primary min-h-11"
           >
@@ -184,7 +229,7 @@ export function UpdateControls({
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            disabled={busy}
+            disabled={busy || waiting}
             onClick={() => onUpdate(item.runtime, item.latest_version as string)}
             className="ui-button ui-button-primary min-h-11"
           >
@@ -239,6 +284,7 @@ function VersionRow({
   onUpdate,
   onRollback,
   releases,
+  waiting,
 }: {
   runtime: string;
   versions: string[];
@@ -252,6 +298,7 @@ function VersionRow({
   onRollback: (runtime: string, version: string | null) => void;
   /** npm's releases, for an agent the page can update. */
   releases?: RuntimeVersions;
+  waiting: boolean;
 }) {
   const [draft, setDraft] = useState(saved);
   const unavailable = saved !== '' && !versions.includes(saved);
@@ -309,47 +356,23 @@ function VersionRow({
       </div>
       <div className="min-w-0">
         <div className="flex items-center gap-2">
-          <select
+          <Select
             id={`agent-version-${runtime}`}
             disabled={busy}
             value={draft}
-            onChange={(event) => setDraft(event.target.value)}
+            onValueChange={setDraft}
             className="ui-input min-h-11 min-w-0 flex-1 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <option value="">{defaultLabel(servers, runtime)}</option>
-            {unavailable && (
-              <option value={saved} disabled>
-                {saved} (unavailable)
-              </option>
-            )}
-            {fromNpm.length === 0 ? (
-              versions.map((version) => (
-                <option key={version} value={version}>
-                  {version}
-                </option>
-              ))
-            ) : (
-              <>
-                <optgroup label="On servers">
-                  {versions.map((version) => (
-                    <option key={version} value={version}>
-                      {version}
-                    </option>
-                  ))}
-                </optgroup>
-                <optgroup label="Download from npm">
-                  {fromNpm.map((version) => (
-                    <option key={version} value={version}>
-                      {version}
-                    </option>
-                  ))}
-                </optgroup>
-              </>
-            )}
-          </select>
+            options={[
+              { value: '', label: defaultLabel(servers, runtime) },
+              ...(unavailable
+                ? [{ value: saved, label: `${saved} (unavailable)`, disabled: true }]
+                : []),
+              ...versionChoices(versions, fromNpm),
+            ]}
+          />
           <button
             type="submit"
-            disabled={busy || (downloads && updateBusy) || draft === saved}
+            disabled={busy || (downloads && (updateBusy || waiting)) || draft === saved}
             className="ui-button ui-button-primary min-h-11 min-w-16 shrink-0"
           >
             {downloads ? 'Download and switch' : 'Save'}
@@ -362,6 +385,7 @@ function VersionRow({
           <UpdateControls
             item={update}
             busy={busy || updateBusy}
+            waiting={waiting}
             onUpdate={onUpdate}
             onRollback={onRollback}
           />
@@ -378,6 +402,7 @@ export default function AgentVersions({
   busy,
   onChange,
   updates = null,
+  registryWaitingOn = [],
   updateBusy = false,
   updateError = null,
   onUpdate = () => {},
@@ -390,6 +415,8 @@ export default function AgentVersions({
   busy: boolean;
   onChange: (runtime: string, version: string) => void;
   updates?: RuntimeUpgradeItem[] | null;
+  /** Host names of online servers not yet on the saved agent package registry. */
+  registryWaitingOn?: string[];
   updateBusy?: boolean;
   updateError?: string | null;
   onUpdate?: (runtime: string, version: string) => void;
@@ -414,7 +441,7 @@ export default function AgentVersions({
         Default versions for new sandboxes. Existing sessions and their forks keep their version.
       </p>
       <SettingsSection
-        title="Important"
+        title="Default versions"
         description="Update an agent, or pick any release for new sandboxes."
       >
         {updateError && (
@@ -422,6 +449,7 @@ export default function AgentVersions({
             {updateError}
           </p>
         )}
+        <RegistryWaitingNote waitingOn={registryWaitingOn} servers={servers} />
         {entries.size === 0 ? (
           <p className="mt-5 rounded-xl bg-surface-muted p-4 text-sm text-muted">
             No server has reported available versions yet.
@@ -444,12 +472,16 @@ export default function AgentVersions({
                   onUpdate={onUpdate}
                   onRollback={onRollback}
                   releases={releases[runtime]}
+                  waiting={registryWaitingOn.length > 0}
                 />
               ))}
           </div>
         )}
       </SettingsSection>
-      <SettingsSection title="Advanced" description="Review the versions installed on each server.">
+      <SettingsSection
+        title="Installed versions"
+        description="Review the versions installed on each server."
+      >
         {servers.length === 0 ? (
           <p className="py-4 text-sm text-muted">No active servers have reported versions yet.</p>
         ) : (

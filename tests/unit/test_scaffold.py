@@ -19,7 +19,7 @@ _PACKAGE_ROOTS = (
     # Shipped in both images, so a gateway import here reaches the control
     # plane and every host alike.
     _REPO_ROOT / "apps" / "backend" / "cloud_agent_shared",
-    _REPO_ROOT / "migrations",
+    _REPO_ROOT / "apps" / "backend" / "migrations",
 )
 
 # Matches `import serving...` and `from serving... import ...`, which would mean

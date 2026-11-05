@@ -3,15 +3,17 @@
 The sandbox manager is the trust boundary for this module.  It may export an
 already-built ``tar.gz`` stream, but a sandbox never receives the S3 client or
 its workload credentials.  Object names are generated here instead of being
-accepted from a caller.  The API has no object-body read, restore, list, or
-delete operation; its only read is an exact-key metadata check after an
-immutable initial write loses an ``If-None-Match`` race.
+accepted from a caller, and a key read back or deleted is checked against
+them.  Nothing lists the bucket.  Object bodies are read only to restore a
+checkpoint or load an environment snapshot, at the version their record
+names, and the only delete removes an environment snapshot's object.
 
 ``boto3`` is imported only when an upload needs a default client.  Tests and
 other callers can inject the small protocol below.  A deployed sandbox manager uses a
 saved access key when the policy has one, and otherwise the SDK's ordinary
 workload-identity/default credential chain.  There is still no custom endpoint
-option: archive bytes go to the fixed AWS bucket.
+option: archive bytes go to the AWS bucket the policy names, under the fixed
+prefix.
 """
 
 from __future__ import annotations
@@ -20,37 +22,35 @@ import base64
 import hashlib
 import importlib
 import math
+import os
+import queue
 import re
 import threading
 import time
-from dataclasses import dataclass, field
+from concurrent.futures import FIRST_COMPLETED, FIRST_EXCEPTION, ThreadPoolExecutor, wait
+from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, BinaryIO, Final, Literal, Protocol, cast
 
+from cloud_agent_host.sandbox_archive_ranges import (
+    RANGED_DOWNLOAD_MIN_BYTES,
+    RangeMismatch,
+    RangeTruncated,
+    download_ranges,
+    empty_file,
+)
 from cloud_agent_shared.environment_snapshots import snapshot_object_key
 from cloud_agent_shared.sandbox_archive_settings import (
-    DEFAULT_MAX_ARCHIVE_BYTES,
     DEFAULT_MULTIPART_PART_BYTES,
-    DEFAULT_MULTIPART_THRESHOLD_BYTES,
-    MAX_ARCHIVE_BYTES,
-    MAX_MULTIPART_PART_BYTES,
-    MAX_SINGLE_UPLOAD_BYTES,
-    MIN_MULTIPART_PART_BYTES,
-    SANDBOX_ARCHIVE_BUCKET,
+    MAX_MULTIPART_PARTS,
     SANDBOX_ARCHIVE_PREFIX,
-    SANDBOX_ARCHIVE_S3_URI,
     SandboxArchivePolicy,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+    from concurrent.futures import Future
 
-TIB: Final = 1024 * 1024 * 1024 * 1024
-# Archive construction temporarily holds both the raw Docker tar streams and
-# the compressed outer object. Keep the default modest enough for an ordinary
-# host and cap operator tuning so one hostile workspace cannot consume an
-# unbounded amount of sandbox manager scratch space.
-MAX_S3_OBJECT_BYTES: Final = 5 * TIB
-MAX_MULTIPART_PARTS: Final = 10_000
 S3_CONNECT_TIMEOUT_S: Final = 5
 S3_READ_TIMEOUT_S: Final = 30
 S3_TOTAL_MAX_ATTEMPTS: Final = 2
@@ -65,16 +65,14 @@ _CHECKPOINT_KEY_RE: Final = re.compile(
     re.escape(SANDBOX_ARCHIVE_PREFIX) + r"/v2/([0-9a-f]{64})/g[1-9][0-9]*/[0-9a-f]{32}\.oci\.tar"
 )
 _DOWNLOAD_CHUNK_BYTES: Final = 1024 * 1024
+# Parts of one multipart upload in flight at once. Each stays in memory until
+# S3 answers it, so an upload holds at most eight parts: 64 MiB at the default
+# part size, 512 MiB at the largest. Eight connections also fit botocore's
+# default pool of ten.
+_PART_UPLOAD_WORKERS: Final = 8
 CHECKPOINT_FORMAT: Final = "oci-layer-archive-v1"
-_ACCOUNT_ID_RE: Final = re.compile(r"[0-9]{12}")
-_ACCESS_KEY_ID_RE: Final = re.compile(r"[A-Z0-9]{20}")
-_SECRET_ACCESS_KEY_RE: Final = re.compile(r"[A-Za-z0-9/+=]{40}")
 _SHA256_RE: Final = re.compile(r"[0-9a-f]{64}")
 _MAX_IDENTITY_BYTES: Final = 1024
-_KMS_KEY_ARN_RE: Final = re.compile(
-    r"arn:(?P<partition>[^:]+):kms:(?P<region>[a-z0-9-]+):"
-    r"(?P<account>[0-9]{12}):key/(?P<key>[A-Za-z0-9-]+)"
-)
 
 
 class SandboxArchiveConfigError(ValueError):
@@ -106,7 +104,7 @@ class S3ArchiveClient(Protocol):
     """The narrow subset of the boto3 S3 client used by the uploader."""
 
     def get_bucket_versioning(self, **kwargs: Any) -> Mapping[str, Any]:
-        """Read versioning state for the one fixed archive bucket."""
+        """Read versioning state for the policy's archive bucket."""
 
     def head_object(self, **kwargs: Any) -> Mapping[str, Any]:
         """Read metadata for one exact immutable-initial key."""
@@ -135,117 +133,104 @@ class S3ArchiveClient(Protocol):
 
 @dataclass(frozen=True)
 class SandboxArchiveS3Config:
-    """Validated server-owned configuration for the one archive prefix."""
+    """An enabled archive policy, and the credentials its uploads use.
 
-    region: str
-    kms_key_arn: str
-    expected_bucket_owner: str
-    aws_access_key_id: str = field(default="", repr=False)
-    aws_secret_access_key: str = field(default="", repr=False)
-    uri: str = SANDBOX_ARCHIVE_S3_URI
-    max_archive_bytes: int = DEFAULT_MAX_ARCHIVE_BYTES
-    multipart_threshold_bytes: int = DEFAULT_MULTIPART_THRESHOLD_BYTES
-    multipart_part_bytes: int = DEFAULT_MULTIPART_PART_BYTES
-    revision: int = 0
-    # Not an S3 setting: carried so ``as_policy`` reproduces the exact policy
-    # a revision pinned, and marker comparisons keep matching it.
-    checkpoints_enabled: bool = True
+    The policy was validated when it was parsed, so the only rule here is the
+    one the resolved credentials add: without an access key, uploads use the
+    host's workload identity, which needs the KMS key and the bucket owner.
+    ``policy`` is kept with those credentials, as markers record it.
+    """
+
+    policy: SandboxArchivePolicy
+    # A credential left as None is the policy's own.
+    aws_access_key_id: str | None = field(default=None, repr=False)
+    aws_secret_access_key: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        """Reject unsafe direct construction as strictly as database policy parsing."""
-        if self.uri != SANDBOX_ARCHIVE_S3_URI:
-            raise SandboxArchiveConfigError(
-                f"sandbox archive S3 URI must be exactly {SANDBOX_ARCHIVE_S3_URI}"
-            )
-        if not self.region or self.region.strip() != self.region:
-            raise SandboxArchiveConfigError("sandbox archive region must be non-empty")
-        if bool(self.aws_access_key_id) != bool(self.aws_secret_access_key):
-            raise SandboxArchiveConfigError(
-                "sandbox archive access key id and secret must both be set"
-            )
-        if self.aws_access_key_id and (_ACCESS_KEY_ID_RE.fullmatch(self.aws_access_key_id) is None):
-            raise SandboxArchiveConfigError(
-                "sandbox archive access key id must be a 20-character AWS access key id"
-            )
-        if self.aws_secret_access_key and (
-            _SECRET_ACCESS_KEY_RE.fullmatch(self.aws_secret_access_key) is None
-        ):
-            raise SandboxArchiveConfigError(
-                "sandbox archive secret access key must be a 40-character secret"
-            )
-        uses_access_key = bool(self.aws_access_key_id)
-        if self.expected_bucket_owner and not _ACCOUNT_ID_RE.fullmatch(self.expected_bucket_owner):
+        """Refuse a disabled policy, or workload identity without its KMS key and owner."""
+        if not isinstance(self.policy, SandboxArchivePolicy) or not self.policy.enabled:
+            raise SandboxArchiveConfigError("sandbox archive policy is disabled")
+        key_id = (
+            self.policy.aws_access_key_id
+            if self.aws_access_key_id is None
+            else self.aws_access_key_id
+        )
+        secret = (
+            self.policy.aws_secret_access_key
+            if self.aws_secret_access_key is None
+            else self.aws_secret_access_key
+        )
+        if not key_id and not self.policy.expected_bucket_owner:
             raise SandboxArchiveConfigError(
                 "sandbox archive expected bucket owner must be a 12-digit AWS account id"
             )
-        if not uses_access_key and not self.expected_bucket_owner:
-            raise SandboxArchiveConfigError(
-                "sandbox archive expected bucket owner must be a 12-digit AWS account id"
-            )
-        kms_match = _KMS_KEY_ARN_RE.fullmatch(self.kms_key_arn) if self.kms_key_arn else None
-        if self.kms_key_arn and kms_match is None:
+        if not key_id and not self.policy.kms_key_arn:
             raise SandboxArchiveConfigError(
                 "sandbox archive KMS key must be a key ARN, not an alias"
             )
-        if not uses_access_key and kms_match is None:
-            raise SandboxArchiveConfigError(
-                "sandbox archive KMS key must be a key ARN, not an alias"
-            )
-        if kms_match is not None and kms_match.group("region") != self.region:
-            raise SandboxArchiveConfigError("the KMS key ARN and archive region must match")
-        if (
-            kms_match is not None
-            and self.expected_bucket_owner
-            and kms_match.group("account") != self.expected_bucket_owner
-        ):
-            raise SandboxArchiveConfigError(
-                "the KMS key ARN account and expected bucket owner must match"
-            )
+        object.__setattr__(self, "aws_access_key_id", key_id)
+        object.__setattr__(self, "aws_secret_access_key", secret)
+        # Validated by the policy's own rules, and compared with the config.
+        object.__setattr__(
+            self,
+            "policy",
+            replace(
+                self.policy,
+                access_key_auth=False,
+                aws_access_key_id=key_id,
+                aws_secret_access_key=secret,
+            ),
+        )
 
-        _validate_bounded_int(
-            "sandbox archive max bytes",
-            self.max_archive_bytes,
-            minimum=1,
-            maximum=min(MAX_ARCHIVE_BYTES, MAX_S3_OBJECT_BYTES),
-        )
-        _validate_bounded_int(
-            "sandbox archive multipart threshold bytes",
-            self.multipart_threshold_bytes,
-            minimum=1,
-            maximum=min(self.max_archive_bytes, MAX_SINGLE_UPLOAD_BYTES),
-        )
-        _validate_bounded_int(
-            "sandbox archive multipart part bytes",
-            self.multipart_part_bytes,
-            minimum=MIN_MULTIPART_PART_BYTES,
-            maximum=MAX_MULTIPART_PART_BYTES,
-        )
-        maximum_parts = (
-            self.max_archive_bytes + self.multipart_part_bytes - 1
-        ) // self.multipart_part_bytes
-        if maximum_parts > MAX_MULTIPART_PARTS:
-            raise SandboxArchiveConfigError(
-                "archive max bytes and multipart part bytes could require more than "
-                f"{MAX_MULTIPART_PARTS} S3 parts"
-            )
-        if isinstance(self.revision, bool) or not isinstance(self.revision, int):
-            raise SandboxArchiveConfigError(
-                "sandbox archive policy revision must be a non-negative integer"
-            )
-        if self.revision < 0:
-            raise SandboxArchiveConfigError(
-                "sandbox archive policy revision must be a non-negative integer"
-            )
+    @property
+    def uri(self) -> str:
+        """Return the policy's destination; it is never caller-selected."""
+        return self.policy.s3_uri
 
     @property
     def bucket(self) -> str:
-        """Return the fixed bucket; it is never caller-selected."""
-        return SANDBOX_ARCHIVE_BUCKET
+        """Return the policy's bucket; it is never caller-selected."""
+        return self.policy.bucket
 
     @property
     def prefix(self) -> str:
         """Return the fixed object prefix; it is never caller-selected."""
         return SANDBOX_ARCHIVE_PREFIX
+
+    @property
+    def region(self) -> str:
+        """Return the archive bucket's region."""
+        return self.policy.region
+
+    @property
+    def kms_key_arn(self) -> str:
+        """Return the KMS key new objects are encrypted with, if any."""
+        return self.policy.kms_key_arn
+
+    @property
+    def expected_bucket_owner(self) -> str:
+        """Return the account every request requires to own the bucket, if any."""
+        return self.policy.expected_bucket_owner
+
+    @property
+    def max_archive_bytes(self) -> int:
+        """Return the largest object this policy stores."""
+        return self.policy.max_archive_bytes
+
+    @property
+    def multipart_threshold_bytes(self) -> int:
+        """Return the size above which an upload is multipart."""
+        return self.policy.multipart_threshold_bytes
+
+    @property
+    def multipart_part_bytes(self) -> int:
+        """Return the size of each multipart part."""
+        return self.policy.multipart_part_bytes
+
+    @property
+    def revision(self) -> int:
+        """Return the policy revision this config was built from."""
+        return self.policy.revision
 
     @classmethod
     def from_policy(
@@ -255,44 +240,16 @@ class SandboxArchiveS3Config:
         aws_access_key_id: str | None = None,
         aws_secret_access_key: str | None = None,
     ) -> SandboxArchiveS3Config:
-        """Build the sandbox manager's S3 client configuration from one validated DB policy."""
-        if not policy.enabled:
-            raise SandboxArchiveConfigError("sandbox archive policy is disabled")
+        """Build the config for one enabled policy, with its own or the given credentials."""
         return cls(
-            uri=SANDBOX_ARCHIVE_S3_URI,
-            region=policy.region,
-            kms_key_arn=policy.kms_key_arn,
-            expected_bucket_owner=policy.expected_bucket_owner,
-            aws_access_key_id=(
-                policy.aws_access_key_id if aws_access_key_id is None else aws_access_key_id
-            ),
-            aws_secret_access_key=(
-                policy.aws_secret_access_key
-                if aws_secret_access_key is None
-                else aws_secret_access_key
-            ),
-            max_archive_bytes=policy.max_archive_bytes,
-            multipart_threshold_bytes=policy.multipart_threshold_bytes,
-            multipart_part_bytes=policy.multipart_part_bytes,
-            revision=policy.revision,
-            checkpoints_enabled=policy.checkpoints_enabled,
+            policy=policy,
+            aws_access_key_id=aws_access_key_id,
+            aws_secret_access_key=aws_secret_access_key,
         )
 
     def as_policy(self) -> SandboxArchivePolicy:
-        """Reconstruct the exact enabled policy carried by this immutable config."""
-        return SandboxArchivePolicy(
-            enabled=True,
-            region=self.region,
-            kms_key_arn=self.kms_key_arn,
-            expected_bucket_owner=self.expected_bucket_owner,
-            aws_access_key_id=self.aws_access_key_id,
-            aws_secret_access_key=self.aws_secret_access_key,
-            max_archive_bytes=self.max_archive_bytes,
-            multipart_threshold_bytes=self.multipart_threshold_bytes,
-            multipart_part_bytes=self.multipart_part_bytes,
-            revision=self.revision,
-            checkpoints_enabled=self.checkpoints_enabled,
-        )
+        """Return the policy with this config's credentials, as markers record it."""
+        return self.policy
 
 
 @dataclass(frozen=True)
@@ -358,10 +315,11 @@ class SandboxArchiveS3Uploader:
         """Upload exactly ``size`` bytes with transfer and application checksums.
 
         Streams at or below the configured threshold use one ``PutObject``.
-        Larger streams use consecutive multipart chunks.  Any failure after a
-        multipart upload is created attempts an abort before the original
-        exception is re-raised, unless the operation deadline already elapsed
-        and another synchronous network request would extend it.
+        Larger streams use consecutively numbered multipart chunks, several
+        sent at once.  Any failure after a multipart upload is created
+        attempts an abort before the original exception is re-raised, unless
+        the operation deadline already elapsed and another synchronous network
+        request would extend it.
         """
         _validate_deadline(deadline)
         self._check_deadline(deadline)
@@ -370,9 +328,9 @@ class SandboxArchiveS3Uploader:
         sandbox_hash = _identity_hash("sandbox id", sandbox_id)
         _validate_generation(generation)
         _validate_upload_size(size, maximum=self.config.max_archive_bytes)
-        key = self._object_key(
-            namespace_hash=namespace_hash,
-            sandbox_hash=sandbox_hash,
+        key = lifecycle_object_key(
+            namespace_sha256=namespace_hash,
+            sandbox_sha256=sandbox_hash,
             generation=generation,
             phase=checked_phase,
         )
@@ -411,40 +369,14 @@ class SandboxArchiveS3Uploader:
             generation=generation,
             checkpoint_id=checkpoint_id,
         )
-        try:
-            return self._upload_object(
-                key=key,
-                phase="checkpoint",
-                body=body,
-                size=size,
-                sha256=digest,
-                deadline=deadline,
-            )
-        except SandboxArchiveAlreadyExists:
-            self._check_deadline(deadline)
-            existing = self._get_client().head_object(
-                Bucket=self.config.bucket,
-                Key=key,
-                **self._owner_arguments(),
-            )
-            self._check_deadline(deadline)
-            if not self._matching_initial_head(
-                existing, size=size, digest=digest, phase="checkpoint"
-            ):
-                raise SandboxArchiveUploadError(
-                    "existing sandbox checkpoint does not match this retry"
-                ) from None
-            return SandboxArchiveReceipt(
-                phase="checkpoint",
-                bucket=self.config.bucket,
-                key=key,
-                size=size,
-                sha256=digest,
-                etag=_required_response_string(existing, "ETag"),
-                version_id=_required_version_id(existing),
-                s3_checksum_sha256=_optional_response_string(existing, "ChecksumSHA256"),
-                multipart=False,
-            )
+        return self._put_once(
+            key=key,
+            body=body,
+            size=size,
+            sha256=digest,
+            deadline=deadline,
+            what="sandbox checkpoint",
+        )
 
     def download_checkpoint(
         self,
@@ -500,7 +432,24 @@ class SandboxArchiveS3Uploader:
         arguments: dict[str, Any] = {"Bucket": self.config.bucket, "Key": key}
         if version_id:
             arguments["VersionId"] = version_id
-        response = self._get_client().get_object(**arguments, **self._owner_arguments())
+        arguments.update(self._owner_arguments())
+        client = self._get_client()
+        fd = empty_file(output)
+        if fd is not None and size >= RANGED_DOWNLOAD_MIN_BYTES:
+            try:
+                download_ranges(
+                    partial(client.get_object, **arguments),
+                    fd=fd,
+                    size=size,
+                    sha256=digest,
+                    pinned=bool(version_id),
+                    check_deadline=partial(self._check_deadline, deadline),
+                    what=what,
+                )
+            except (RangeMismatch, RangeTruncated) as exc:
+                raise SandboxArchiveDownloadError(str(exc)) from None
+            return
+        response = client.get_object(**arguments)
         body = response.get("Body")
         if body is None or response.get("ContentLength") not in (None, size):
             raise SandboxArchiveDownloadError(f"{what} object has the wrong size")
@@ -549,37 +498,14 @@ class SandboxArchiveS3Uploader:
             key = snapshot_object_key(owner, snapshot_id)
         except ValueError as exc:
             raise SandboxArchiveUploadError(str(exc)) from None
-        try:
-            return self._upload_object(
-                key=key,
-                phase="checkpoint",
-                body=body,
-                size=size,
-                sha256=digest,
-                deadline=deadline,
-            )
-        except SandboxArchiveAlreadyExists:
-            self._check_deadline(deadline)
-            existing = self._get_client().head_object(
-                Bucket=self.config.bucket, Key=key, **self._owner_arguments()
-            )
-            if not self._matching_initial_head(
-                existing, size=size, digest=digest, phase="checkpoint"
-            ):
-                raise SandboxArchiveUploadError(
-                    "existing environment snapshot does not match this retry"
-                ) from None
-            return SandboxArchiveReceipt(
-                phase="checkpoint",
-                bucket=self.config.bucket,
-                key=key,
-                size=size,
-                sha256=digest,
-                etag=_required_response_string(existing, "ETag"),
-                version_id=_required_version_id(existing),
-                s3_checksum_sha256=_optional_response_string(existing, "ChecksumSHA256"),
-                multipart=False,
-            )
+        return self._put_once(
+            key=key,
+            body=body,
+            size=size,
+            sha256=digest,
+            deadline=deadline,
+            what="environment snapshot",
+        )
 
     def download_environment_snapshot(
         self,
@@ -624,6 +550,57 @@ class SandboxArchiveS3Uploader:
         if version_id:
             arguments["VersionId"] = version_id
         self._get_client().delete_object(**arguments, **self._owner_arguments())
+
+    def _put_once(
+        self,
+        *,
+        key: str,
+        body: BinaryIO,
+        size: int,
+        sha256: str,
+        deadline: float | None,
+        what: str,
+    ) -> SandboxArchiveReceipt:
+        """Write an object whose key names a fresh id, treating an identical retry as success.
+
+        An existing object under such a key can only be this capture's own
+        earlier write whose response was lost. Its bytes must match exactly;
+        the receipt then comes from that object's metadata.
+        """
+        try:
+            return self._upload_object(
+                key=key,
+                phase="checkpoint",
+                body=body,
+                size=size,
+                sha256=sha256,
+                deadline=deadline,
+            )
+        except SandboxArchiveAlreadyExists:
+            self._check_deadline(deadline)
+            existing = self._get_client().head_object(
+                Bucket=self.config.bucket,
+                Key=key,
+                **self._owner_arguments(),
+            )
+            self._check_deadline(deadline)
+            if not self._matching_initial_head(
+                existing, size=size, digest=sha256, phase="checkpoint"
+            ):
+                raise SandboxArchiveUploadError(
+                    f"existing {what} does not match this retry"
+                ) from None
+            return SandboxArchiveReceipt(
+                phase="checkpoint",
+                bucket=self.config.bucket,
+                key=key,
+                size=size,
+                sha256=sha256,
+                etag=_required_response_string(existing, "ETag"),
+                version_id=_required_version_id(existing),
+                s3_checksum_sha256=_optional_response_string(existing, "ChecksumSHA256"),
+                multipart=False,
+            )
 
     def _upload_object(
         self,
@@ -718,9 +695,9 @@ class SandboxArchiveS3Uploader:
         _validate_generation(generation)
         _validate_upload_size(size, maximum=self.config.max_archive_bytes)
         digest = _validate_sha256(sha256)
-        key = self._object_key(
-            namespace_hash=namespace_hash,
-            sandbox_hash=sandbox_hash,
+        key = lifecycle_object_key(
+            namespace_sha256=namespace_hash,
+            sandbox_sha256=sandbox_hash,
             generation=generation,
             phase="initial",
         )
@@ -743,19 +720,6 @@ class SandboxArchiveS3Uploader:
             )
         return True
 
-    @staticmethod
-    def _object_key(
-        *,
-        namespace_hash: str,
-        sandbox_hash: str,
-        generation: int,
-        phase: ArchivePhase,
-    ) -> str:
-        return (
-            f"{SANDBOX_ARCHIVE_PREFIX}/v1/{namespace_hash}/{sandbox_hash}/"
-            f"g{generation}/{phase}.tar.gz"
-        )
-
     def _check_deadline(self, deadline: float | None) -> None:
         _check_deadline(deadline, self._clock)
 
@@ -777,8 +741,8 @@ class SandboxArchiveS3Uploader:
             if self._client is None:
                 self._client = _default_s3_client(
                     self.config.region,
-                    aws_access_key_id=self.config.aws_access_key_id,
-                    aws_secret_access_key=self.config.aws_secret_access_key,
+                    aws_access_key_id=self.config.policy.aws_access_key_id,
+                    aws_secret_access_key=self.config.policy.aws_secret_access_key,
                 )
             return self._client
 
@@ -900,48 +864,9 @@ class SandboxArchiveS3Uploader:
         completed = False
         try:
             self._check_deadline(deadline)
-            digest = hashlib.sha256()
-            parts: list[dict[str, object]] = []
-            remaining = size
-            part_number = 1
-            while remaining:
-                self._check_deadline(deadline)
-                chunk = _read_exact(
-                    body,
-                    min(remaining, self.config.multipart_part_bytes),
-                    deadline=deadline,
-                    clock=self._clock,
-                )
-                remaining -= len(chunk)
-                digest.update(chunk)
-                part_checksum = base64.b64encode(hashlib.sha256(chunk).digest()).decode("ascii")
-                uploaded = client.upload_part(
-                    Bucket=self.config.bucket,
-                    Key=key,
-                    UploadId=upload_id,
-                    PartNumber=part_number,
-                    Body=chunk,
-                    ContentLength=len(chunk),
-                    ChecksumAlgorithm="SHA256",
-                    ChecksumSHA256=part_checksum,
-                    **self._owner_arguments(),
-                )
-                self._check_deadline(deadline)
-                returned_checksum = _optional_response_string(uploaded, "ChecksumSHA256")
-                if returned_checksum is not None and returned_checksum != part_checksum:
-                    raise SandboxArchiveUploadError(
-                        f"S3 returned a different SHA-256 checksum for part {part_number}"
-                    )
-                parts.append(
-                    {
-                        "ETag": _required_response_string(uploaded, "ETag"),
-                        "PartNumber": part_number,
-                        "ChecksumSHA256": part_checksum,
-                    }
-                )
-                part_number += 1
-            _require_eof(body, deadline=deadline, clock=self._clock)
-            completed_digest = digest.digest()
+            parts, completed_digest = self._upload_parts(
+                client, key=key, upload_id=upload_id, body=body, size=size, deadline=deadline
+            )
             if completed_digest.hex() != expected_digest:
                 raise SandboxArchiveUploadError("sandbox archive SHA-256 changed before upload")
             try:
@@ -993,6 +918,115 @@ class SandboxArchiveS3Uploader:
                     # A bucket lifecycle rule should also reap abandoned MPUs.
                     pass
             raise
+
+    def _upload_parts(
+        self,
+        client: S3ArchiveClient,
+        *,
+        key: str,
+        upload_id: str,
+        body: BinaryIO,
+        size: int,
+        deadline: float | None,
+    ) -> tuple[list[dict[str, object]], bytes]:
+        """Send ``body`` as numbered parts, several at once; return them in order.
+
+        Each worker reads its own part by offset, then checksums and sends it.
+        This thread hashes every part as it is read, in order, so the object's
+        SHA-256 is of exactly the bytes sent. A part starts only while fewer
+        than ``_PART_UPLOAD_WORKERS`` are in flight. After a failure no further
+        part starts, and the ones in flight finish before this raises, so an
+        abort never races a part upload.
+        """
+        source = _PartReader(body)
+        part_bytes = self.config.multipart_part_bytes
+        digest = hashlib.sha256()
+        handoff: queue.SimpleQueue[bytes | BaseException] = queue.SimpleQueue()
+        stop = threading.Event()
+        uploaded: dict[int, dict[str, object]] = {}
+        in_flight: set[Future[tuple[int, dict[str, object]]]] = set()
+
+        def settle(until: str) -> None:
+            nonlocal in_flight
+            done, in_flight = wait(in_flight, return_when=until)
+            for future in done:
+                number, part = future.result()
+                uploaded[number] = part
+
+        with ThreadPoolExecutor(
+            max_workers=_PART_UPLOAD_WORKERS, thread_name_prefix="sandbox-archive-part"
+        ) as pool:
+            try:
+                for number, offset in enumerate(range(0, size, part_bytes), start=1):
+                    if len(in_flight) >= _PART_UPLOAD_WORKERS:
+                        settle(FIRST_COMPLETED)
+                    self._check_deadline(deadline)
+                    sending = pool.submit(
+                        self._send_part,
+                        client,
+                        key=key,
+                        upload_id=upload_id,
+                        number=number,
+                        read=partial(source.read, offset, min(part_bytes, size - offset)),
+                        handoff=handoff.put,
+                        deadline=deadline,
+                        stop=stop,
+                    )
+                    in_flight.add(sending)
+                    digest.update(_handed_over(handoff.get()))
+                source.require_end(size)
+                while in_flight:
+                    settle(FIRST_EXCEPTION)
+            except BaseException:
+                stop.set()
+                raise
+        return [uploaded[number] for number in sorted(uploaded)], digest.digest()
+
+    def _send_part(
+        self,
+        client: S3ArchiveClient,
+        *,
+        key: str,
+        upload_id: str,
+        number: int,
+        read: Callable[[], bytes],
+        handoff: Callable[[bytes | BaseException], None],
+        deadline: float | None,
+        stop: threading.Event,
+    ) -> tuple[int, dict[str, object]]:
+        """Read one part, hand it over to be hashed, then checksum and send it."""
+        try:
+            chunk = read()
+        except BaseException as exc:
+            handoff(exc)
+            raise
+        handoff(chunk)
+        part_checksum = base64.b64encode(hashlib.sha256(chunk).digest()).decode("ascii")
+        if stop.is_set():
+            raise SandboxArchiveUploadError("sandbox archive multipart upload already failed")
+        self._check_deadline(deadline)
+        uploaded = client.upload_part(
+            Bucket=self.config.bucket,
+            Key=key,
+            UploadId=upload_id,
+            PartNumber=number,
+            Body=chunk,
+            ContentLength=len(chunk),
+            ChecksumAlgorithm="SHA256",
+            ChecksumSHA256=part_checksum,
+            **self._owner_arguments(),
+        )
+        self._check_deadline(deadline)
+        returned_checksum = _optional_response_string(uploaded, "ChecksumSHA256")
+        if returned_checksum is not None and returned_checksum != part_checksum:
+            raise SandboxArchiveUploadError(
+                f"S3 returned a different SHA-256 checksum for part {number}"
+            )
+        return number, {
+            "ETag": _required_response_string(uploaded, "ETag"),
+            "PartNumber": number,
+            "ChecksumSHA256": part_checksum,
+        }
 
     def _raise_if_matching_initial(
         self,
@@ -1112,13 +1146,6 @@ def _default_s3_client(
     return cast("S3ArchiveClient", boto3.client("s3", **client_kwargs))
 
 
-def _validate_bounded_int(name: str, value: int, *, minimum: int, maximum: int) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
-        raise SandboxArchiveConfigError(
-            f"{name} must be an integer between {minimum} and {maximum}"
-        )
-
-
 def _validate_phase(phase: str) -> ArchivePhase:
     if phase not in _ARCHIVE_PHASES:
         raise SandboxArchiveUploadError("sandbox archive phase must be 'initial' or 'final'")
@@ -1192,6 +1219,16 @@ def _object_format(phase: ArchivePhase) -> tuple[str, str]:
     if phase == "checkpoint":
         return "application/x-tar", CHECKPOINT_FORMAT
     return "application/gzip", "tar-gzip-v1"
+
+
+def lifecycle_object_key(
+    *, namespace_sha256: str, sandbox_sha256: str, generation: int, phase: str
+) -> str:
+    """Return the key of one lifecycle point's archive: a host's sandbox, at one generation."""
+    return (
+        f"{SANDBOX_ARCHIVE_PREFIX}/v1/{namespace_sha256}/{sandbox_sha256}/"
+        f"g{generation}/{phase}.tar.gz"
+    )
 
 
 def checkpoint_object_key(*, sandbox_id: str, generation: int, checkpoint_id: str) -> str:
@@ -1292,10 +1329,12 @@ def _read_exact(
     deadline: float | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> bytes:
-    payload = bytearray()
-    while len(payload) < size:
+    """Read exactly ``size`` bytes, without copying a read that returns them all."""
+    pieces: list[bytes | bytearray | memoryview] = []
+    received = 0
+    while received < size:
         _check_deadline(deadline, clock)
-        chunk = body.read(size - len(payload))
+        chunk = body.read(size - received)
         _check_deadline(deadline, clock)
         if chunk is None:
             raise SandboxArchiveUploadError("sandbox archive stream returned no bytes")
@@ -1303,10 +1342,13 @@ def _read_exact(
             raise SandboxArchiveUploadError("sandbox archive stream must return bytes")
         if len(chunk) == 0:
             raise SandboxArchiveUploadError("sandbox archive stream ended before its declared size")
-        if len(chunk) > size - len(payload):
+        if len(chunk) > size - received:
             raise SandboxArchiveUploadError("sandbox archive stream exceeded its requested read")
-        payload.extend(chunk)
-    return bytes(payload)
+        pieces.append(chunk)
+        received += len(chunk)
+    if len(pieces) == 1 and isinstance(pieces[0], bytes):
+        return pieces[0]
+    return b"".join(pieces)
 
 
 def _require_eof(
@@ -1324,6 +1366,59 @@ def _require_eof(
         raise SandboxArchiveUploadError("sandbox archive stream must return bytes")
     if trailing:
         raise SandboxArchiveUploadError("sandbox archive stream exceeds its declared size")
+
+
+class _PartReader:
+    """Read a body's parts by offset, from several threads at once.
+
+    A file is read with ``os.pread``, which leaves its shared position alone,
+    so a part is one read and no copy. Any other stream is read under a lock.
+    """
+
+    def __init__(self, body: BinaryIO) -> None:
+        self._body = body
+        self._lock = threading.Lock()
+        self._start = body.tell()
+        try:
+            # Bytes still in a writer's buffer are not yet in the file.
+            body.flush()
+            self._fd: int | None = body.fileno()
+        except (AttributeError, OSError):
+            self._fd = None
+
+    def read(self, offset: int, length: int) -> bytes:
+        """Return the ``length`` bytes at ``offset`` past where the body started."""
+        if self._fd is None:
+            with self._lock:
+                self._body.seek(self._start + offset)
+                return _read_exact(self._body, length)
+        pieces: list[bytes] = []
+        while length:
+            piece = os.pread(self._fd, length, self._start + offset)
+            if not piece:
+                raise SandboxArchiveUploadError(
+                    "sandbox archive stream ended before its declared size"
+                )
+            pieces.append(piece)
+            offset += len(piece)
+            length -= len(piece)
+        return pieces[0] if len(pieces) == 1 else b"".join(pieces)
+
+    def require_end(self, size: int) -> None:
+        """Refuse a body that has bytes past its declared ``size``."""
+        if self._fd is None:
+            with self._lock:
+                self._body.seek(self._start + size)
+                _require_eof(self._body)
+        elif os.pread(self._fd, 1, self._start + size):
+            raise SandboxArchiveUploadError("sandbox archive stream exceeds its declared size")
+
+
+def _handed_over(read: bytes | BaseException) -> bytes:
+    """Return a part a worker read, or raise what stopped it reading."""
+    if isinstance(read, BaseException):
+        raise read
+    return read
 
 
 def _required_response_string(response: Mapping[str, Any], name: str) -> str:
@@ -1360,4 +1455,5 @@ __all__ = [
     "SandboxArchiveS3Uploader",
     "SandboxArchiveUploadError",
     "is_sandbox_archive_conditional_conflict",
+    "lifecycle_object_key",
 ]

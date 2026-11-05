@@ -1,6 +1,6 @@
 """The Usage page's state names, limits, sample intervals and windows."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 
 import pytest
 
@@ -11,9 +11,11 @@ from cloud_agent.owner_usage import (
     history_window,
     measured_interval,
     memory_limit_bytes,
+    utc_day_shares,
 )
 
 NOW = datetime(2026, 10, 15, 13, 30, tzinfo=UTC)
+MIDNIGHT = datetime(2026, 10, 15, tzinfo=UTC)
 
 
 @pytest.mark.parametrize(
@@ -98,6 +100,37 @@ def test_a_sample_without_a_usable_gap_stands_for_its_own_window(previous, windo
         measured_interval(sampled_at=NOW, previous_sampled_at=previous, cpu_window_seconds=window)
         == expected
     )
+
+
+@pytest.mark.parametrize(
+    ("ended_at", "seconds", "expected"),
+    [
+        (NOW, 30.0, [(date(2026, 10, 15), 30.0)]),
+        # Ten seconds after midnight: the other twenty were used the day before.
+        (
+            MIDNIGHT + timedelta(seconds=10),
+            30.0,
+            [(date(2026, 10, 14), 20.0), (date(2026, 10, 15), 10.0)],
+        ),
+        # The same moment on another clock is split at the same UTC midnight.
+        (
+            datetime(2026, 10, 15, 8, 0, 10, tzinfo=timezone(timedelta(hours=8))),
+            30.0,
+            [(date(2026, 10, 14), 20.0), (date(2026, 10, 15), 10.0)],
+        ),
+        # Taken exactly at midnight, it stands for the end of the day before.
+        (MIDNIGHT, 30.0, [(date(2026, 10, 14), 30.0)]),
+        # Beginning exactly at midnight, it is all the new day's.
+        (
+            MIDNIGHT + timedelta(seconds=MAX_SAMPLE_GAP_SECONDS),
+            MAX_SAMPLE_GAP_SECONDS,
+            [(date(2026, 10, 15), MAX_SAMPLE_GAP_SECONDS)],
+        ),
+        (NOW, 0.0, []),
+    ],
+)
+def test_the_time_a_sample_stands_for_is_split_at_utc_midnight(ended_at, seconds, expected):
+    assert utc_day_shares(ended_at=ended_at, seconds=seconds) == expected
 
 
 def test_a_history_window_is_whole_utc_days_up_to_now():

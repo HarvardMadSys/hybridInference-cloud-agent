@@ -9,20 +9,27 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Protocol
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from cloud_agent.api._job_views import _iso, _job_response
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api._project_filter import TemporaryFilter, require_single_project_filter
-from cloud_agent.api.deps import get_grant_client, get_storage, require_store
+from cloud_agent.api.deps import get_storage, require_store
 from cloud_agent.application.residency import close_released_residencies
+from cloud_agent.domain.read_receipts import READ_RECEIPT_BATCH_SIZE
 from cloud_agent.entitlement import REPO_PATTERN
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import (
     AgentConversation,
     AgentConversationListResponse,
+    AgentNotificationJob,
+    AgentNotificationStateResponse,
+    AgentNotificationThread,
     AgentProject,
     AgentProjectListResponse,
+    AgentReadReceipt,
+    AgentReadReceiptsRequest,
+    AgentReadReceiptsResponse,
     AgentSessionArchiveRequest,
     AgentSessionArchiveResponse,
     AgentSessionDeleteResponse,
@@ -117,7 +124,6 @@ def _raise_session_mutation_error(result: dict[str, Any]) -> None:
     messages = {
         "not_found": "One or more selected sessions are no longer available.",
         "fork_in_progress": "A selected session is being forked. Wait for the fork to finish.",
-        "publication_pending": "A selected session has unfinished publication. Wait for it to finish.",
     }
     raise HTTPException(
         status_code=404 if error == "not_found" else 409,
@@ -153,23 +159,93 @@ async def delete_agent_sessions(
     body: AgentSessionSelection,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _CatalogStorage | None = Depends(get_storage),
-    grants: Any = Depends(get_grant_client),
 ) -> AgentSessionDeleteResponse:
     """Permanently hide sessions from their owner, retaining audit data.
 
     Archived or not, idle or working: the delete cancels each chat's turns and
-    releases its residency, then revokes the released grants and closes the
-    member processes on their hosts.
+    releases its residency, then closes the member processes on their hosts.
     """
     job_store = _require_store(store)
     result = await job_store.conversation_commands.delete_sessions(
         thread_ids=body.thread_ids, user_id=user["user_id"]
     )
     _raise_session_mutation_error(result)
-    await close_released_residencies(
-        job_store.host_pool, grants, result.get("released_residencies") or []
-    )
+    await close_released_residencies(job_store.host_pool, result.get("released_residencies") or [])
     return AgentSessionDeleteResponse(thread_ids=result["thread_ids"])
+
+
+@router.get("/conversations/read-receipts", response_model=AgentReadReceiptsResponse)
+async def list_agent_read_receipts(
+    response: Response,
+    cursor: int | None = Query(None, ge=0, le=9223372036854775807),
+    limit: int = Query(READ_RECEIPT_BATCH_SIZE, ge=1, le=READ_RECEIPT_BATCH_SIZE),
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _CatalogStorage | None = Depends(get_storage),
+) -> AgentReadReceiptsResponse:
+    """Restore account read progress, including chats outside the sidebar page."""
+    response.headers["Cache-Control"] = "no-store"
+    page = await _require_store(store).conversation_queries.list_read_receipts(
+        user_id=user["user_id"], after=cursor, limit=limit
+    )
+    return AgentReadReceiptsResponse(user_id=user["user_id"], **page)
+
+
+@router.post("/conversations/read-receipts", response_model=AgentReadReceiptsResponse)
+async def merge_agent_read_receipts(
+    body: AgentReadReceiptsRequest,
+    response: Response,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _CatalogStorage | None = Depends(get_storage),
+) -> AgentReadReceiptsResponse:
+    """Persist explicit completed attempts without ever marking later results read."""
+    response.headers["Cache-Control"] = "no-store"
+    receipts = await _require_store(store).conversation_commands.merge_read_receipts(
+        user_id=user["user_id"], receipts=[receipt.model_dump() for receipt in body.receipts]
+    )
+    return AgentReadReceiptsResponse(
+        user_id=user["user_id"], receipts=[AgentReadReceipt.model_validate(row) for row in receipts]
+    )
+
+
+@router.get("/notifications/state", response_model=AgentNotificationStateResponse)
+async def get_agent_notification_state(
+    response: Response,
+    limit: int = Query(200, ge=1, le=200),
+    cursor: str | None = Query(None, min_length=1, max_length=32768),
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _CatalogStorage | None = Depends(get_storage),
+) -> AgentNotificationStateResponse:
+    """Bootstrap live turns, then page only durable owner changes."""
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        page = await _require_store(store).conversation_queries.notification_state(
+            user_id=user["user_id"], cursor=cursor, limit=limit
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    observed_at = _iso(page["observed_at"])
+    if observed_at is None:
+        raise RuntimeError("Notification-state read omitted its observation time.")
+    return AgentNotificationStateResponse(
+        mode=page["mode"],
+        jobs=[
+            AgentNotificationJob.model_validate(
+                {
+                    **job,
+                    "finished_at": _iso(job.get("finished_at")),
+                    "updated_at": _iso(job.get("updated_at")),
+                }
+            )
+            for job in page["jobs"]
+        ],
+        threads=[AgentNotificationThread.model_validate(thread) for thread in page["threads"]],
+        deleted_job_ids=page["deleted_job_ids"],
+        deleted_thread_ids=page["deleted_thread_ids"],
+        observed_at=observed_at,
+        next_cursor=page["next_cursor"],
+        change_cursor=page["change_cursor"],
+        reset_required=page["reset_required"],
+    )
 
 
 @router.get("/conversations", response_model=AgentConversationListResponse)
@@ -234,6 +310,8 @@ async def list_agent_projects(
                 last_activity_at=_iso(project["last_activity_at"]),
                 pinned_count=project.get("pinned_count", 0),
                 pinned_at=_iso(project.get("pinned_at")),
+                refresh_token=project.get("refresh_token"),
+                membership_token=project.get("membership_token"),
             )
             for project in projects
         ]

@@ -32,6 +32,14 @@
 #   KATA_EXTRACT_ROOT  filesystem root to unpack into (default /) — tests use this
 #   KATA_LINK_DIR      where the shim is linked (default /usr/local/bin)
 #   KATA_CONFIG_PATH   default runtime config to point at the packaged eBPF kernel
+#
+# Faster VM boot, off until qualified on a Kata host (#1054). The install writes
+# these to one Kata drop-in beside the runtime config, and removes it when run
+# without them. `--check` reads them back from that drop-in; given one of them,
+# it also requires the drop-in to agree:
+#   KATA_STATIC_SANDBOX_RESOURCES  true sizes each VM at boot from its container's
+#                                  CPU and memory limits, instead of hot-plugging
+#   KATA_DEFAULT_MEMORY_MIB        the guest's base memory, at least 256 MiB
 
 set -Eeuo pipefail
 
@@ -80,6 +88,17 @@ RUNTIME_BINARY="${PREFIX}/bin/kata-runtime"
 # and distro packages, but are never a switch that disables the check.
 KATA_CONFIG_PATH="${KATA_CONFIG_PATH:-${PREFIX}/share/defaults/kata-containers/configuration.toml}"
 KATA_DEBUG_KERNEL_PATH="${KATA_DEBUG_KERNEL_PATH:-${PREFIX}/share/kata-containers/vmlinuz-debug.container}"
+# Faster VM boot settings, each off unless asked for (#1054). They live in a
+# drop-in of their own rather than in the release's config, so an install
+# without them restores Kata's defaults exactly, and the drop-in itself is the
+# record a later `--check` reads: deployment never has to pass them again.
+KATA_STATIC_SANDBOX_RESOURCES="${KATA_STATIC_SANDBOX_RESOURCES:-}"
+KATA_DEFAULT_MEMORY_MIB="${KATA_DEFAULT_MEMORY_MIB:-}"
+BOOT_OPTIONS_NAME="cloud-agent-vm-boot.toml"
+# Kata's own floor (MinHypervisorMemory in 3.32.0). The runtime boots its
+# 2048 MiB default for anything smaller, so a smaller value would pass the
+# check while changing nothing.
+KATA_MIN_DEFAULT_MEMORY_MIB=256
 # Symlinked rather than added to PATH: containerd is started by systemd, and a
 # symlink into a directory already on the unit's default PATH means its unit
 # file never has to be edited. Upstream recommends this for the same reason.
@@ -203,6 +222,98 @@ guest_seccomp_is_configured() {
   ' "$KATA_CONFIG_PATH"
 }
 
+# Kata 3.32 applies every file in the config.d directory beside the config it
+# resolved, in name order, over that config.
+boot_options_dir() {
+  printf '%s/config.d' "$(dirname "$(readlink -f "$KATA_CONFIG_PATH")")"
+}
+
+valid_default_memory() {
+  # No leading zero, which bash arithmetic reads as octal, and at most seven
+  # digits, so the comparison cannot overflow.
+  [[ "$1" =~ ^[1-9][0-9]{0,6}$ ]] && (("$1" >= KATA_MIN_DEFAULT_MEMORY_MIB))
+}
+
+require_valid_boot_options() {
+  # A typo must not quietly mean "off". Refused before anything is downloaded
+  # or the runtime generation is invalidated.
+  case "$KATA_STATIC_SANDBOX_RESOURCES" in
+    '' | true | false) ;;
+    *) die "KATA_STATIC_SANDBOX_RESOURCES must be true or false, not '${KATA_STATIC_SANDBOX_RESOURCES}'." ;;
+  esac
+  if [[ -n "$KATA_DEFAULT_MEMORY_MIB" ]] && ! valid_default_memory "$KATA_DEFAULT_MEMORY_MIB"; then
+    die "KATA_DEFAULT_MEMORY_MIB must be a whole number of MiB from ${KATA_MIN_DEFAULT_MEMORY_MIB}, not '${KATA_DEFAULT_MEMORY_MIB}': Kata boots 2048 MiB for anything less."
+  fi
+  if [[ -n "$KATA_DEFAULT_MEMORY_MIB" && -e "$KATA_CONFIG_PATH" ]]; then
+    require_qemu_config
+  fi
+}
+
+# default_memory goes in a [hypervisor.qemu] table, which over another
+# hypervisor's config would give the runtime two hypervisors.
+require_qemu_config() {
+  grep -qx '\[hypervisor\.qemu\]' "$(readlink -f "$KATA_CONFIG_PATH")" || die \
+    "${KATA_CONFIG_PATH} does not configure QEMU, whose default_memory KATA_DEFAULT_MEMORY_MIB sets."
+}
+
+# The drop-in exactly as the install writes it for one set of opt-ins, and
+# nothing for none. `--check` holds the file on the host to this.
+render_boot_options() {
+  local static="$1" memory="$2"
+  [[ "$static" == true || -n "$memory" ]] || return 0
+  printf '# Written by setup_kata_runtime.sh; re-run it to change this file.\n'
+  if [[ -n "$memory" ]]; then
+    printf '[hypervisor.qemu]\ndefault_memory = %s\n' "$memory"
+  fi
+  if [[ "$static" == true ]]; then
+    printf '[runtime]\nstatic_sandbox_resource_mgmt = true\n'
+  fi
+}
+
+verify_boot_options() {
+  local directory dropin foreign static="" memory="" in_effect=""
+  directory="$(boot_options_dir)"
+  dropin="${directory}/${BOOT_OPTIONS_NAME}"
+  if [[ -e "$directory" || -L "$directory" ]]; then
+    [[ -d "$directory" && ! -L "$directory" ]] || die \
+      "${directory} is not a plain directory, and Kata reads drop-ins from it. Remove it, then re-run: sudo ${0}"
+    # Kata would apply anything else here over what this check verifies, the
+    # guest kernel and seccomp included.
+    foreign="$(find "$directory" -mindepth 1 -maxdepth 1 ! -name "$BOOT_OPTIONS_NAME" -print -quit)"
+    [[ -z "$foreign" ]] || die \
+      "${foreign} was not written by this script, and Kata applies it over ${KATA_CONFIG_PATH}. Remove it, then re-run: sudo ${0}"
+  fi
+  if [[ -e "$dropin" || -L "$dropin" ]]; then
+    [[ -f "$dropin" && ! -L "$dropin" ]] || die "${dropin} is not a regular file. Remove it, then re-run: sudo ${0}"
+    if grep -qx 'static_sandbox_resource_mgmt = true' "$dropin"; then
+      static=true
+    fi
+    memory="$(sed -n 's/^default_memory = //p' "$dropin")"
+    if [[ ! -s "$dropin" ]] \
+      || { [[ -n "$memory" ]] && ! valid_default_memory "$memory"; } \
+      || ! render_boot_options "$static" "$memory" | cmp -s - "$dropin"; then
+      die "${dropin} is not what this script writes for any opt-in. Re-run the install with every opt-in this host should have: sudo ${0}"
+    fi
+  fi
+  # Given an opt-in, the check confirms this host has it, rather than reading
+  # back whatever the drop-in holds.
+  if [[ -n "$KATA_STATIC_SANDBOX_RESOURCES" && "$KATA_STATIC_SANDBOX_RESOURCES" != "${static:-false}" ]]; then
+    die "static sandbox sizing is ${static:-false} on this host, not ${KATA_STATIC_SANDBOX_RESOURCES}. Re-run the install with every opt-in this host should have: sudo ${0}"
+  fi
+  if [[ -n "$KATA_DEFAULT_MEMORY_MIB" && "$KATA_DEFAULT_MEMORY_MIB" != "$memory" ]]; then
+    die "default_memory is ${memory:-the release default} on this host, not ${KATA_DEFAULT_MEMORY_MIB}. Re-run the install with every opt-in this host should have: sudo ${0}"
+  fi
+  if [[ "$static" == true ]]; then
+    in_effect="static sandbox sizing"
+  fi
+  if [[ -n "$memory" ]]; then
+    in_effect="${in_effect:+${in_effect}, }default_memory ${memory} MiB"
+  fi
+  if [[ -n "$in_effect" ]]; then
+    log "VM boot opt-ins in effect: ${in_effect}"
+  fi
+}
+
 # ── Install ──────────────────────────────────────────────────────────────
 
 resolve_sha256() {
@@ -293,6 +404,49 @@ configure_ebpf_kernel() {
   log "configured the Kata eBPF/BTF guest kernel: ${KATA_DEBUG_KERNEL_PATH}"
 }
 
+configure_boot_options() {
+  local config_target directory dropin temporary static=""
+  config_target="$(readlink -f "$KATA_CONFIG_PATH")"
+  directory="$(boot_options_dir)"
+  dropin="${directory}/${BOOT_OPTIONS_NAME}"
+  [[ ! -L "$directory" ]] || die "${directory} is a symlink; Kata's drop-ins belong in a plain directory."
+  if [[ "$KATA_STATIC_SANDBOX_RESOURCES" == true ]]; then
+    static=true
+  fi
+  if [[ -z "$static" && -z "$KATA_DEFAULT_MEMORY_MIB" ]]; then
+    # Back to Kata's defaults. The directory goes too when nothing else is in
+    # it, so the host looks like one that never opted in.
+    if [[ -e "$dropin" || -L "$dropin" ]]; then
+      rm -f "$dropin"
+      # Said out loud: any install run without them reverts them, the
+      # control plane's automated deploy included.
+      warn "removed the VM boot opt-ins in ${dropin}; this host's VMs boot with the release defaults again."
+    fi
+    rmdir "$directory" 2>/dev/null || true
+    return 0
+  fi
+  # A config already on the host was checked before the runtime generation
+  # was invalidated. One that only arrived in this install's archive can only
+  # be checked now.
+  if [[ -n "$KATA_DEFAULT_MEMORY_MIB" ]]; then
+    require_qemu_config
+  fi
+  # Readable by the user deployment runs `--check` as, whatever umask sudo
+  # passed on.
+  mkdir -p "$directory"
+  chmod 0755 "$directory"
+  # Written beside config.d and renamed into it: the runtime reads every file
+  # there, a half-written one included.
+  temporary="$(mktemp "${config_target}.boot.XXXXXX")"
+  if ! render_boot_options "$static" "$KATA_DEFAULT_MEMORY_MIB" >"$temporary"; then
+    rm -f "$temporary"
+    die "could not write ${dropin}."
+  fi
+  chmod 0644 "$temporary"
+  mv -f "$temporary" "$dropin"
+  log "configured the VM boot opt-ins in ${dropin}"
+}
+
 verify_install() {
   # `kata-runtime check` is upstream's own hardware verdict. It is advisory here
   # rather than fatal: it warns about things (a missing kernel module for one
@@ -310,6 +464,7 @@ cmd_install() {
   require_linux_x86_64
   require_virtualization
   require_tools
+  require_valid_boot_options
 
   if runtime_is_installed; then
     # Invalidate before a possible config repair, even when no download is
@@ -318,6 +473,7 @@ cmd_install() {
     if ! debug_kernel_is_configured || ! guest_seccomp_is_configured; then
       configure_ebpf_kernel
     fi
+    configure_boot_options
     log "Kata ${KATA_VERSION} is already installed, linked, and observer-ready; nothing to download."
     verify_install
     return 0
@@ -349,6 +505,7 @@ cmd_install() {
   extract "$archive"
   link_binaries
   configure_ebpf_kernel
+  configure_boot_options
   verify_install
 
   log "done. Kata ${KATA_VERSION} is installed; '${0} --check' now passes."
@@ -358,6 +515,7 @@ cmd_install() {
 cmd_check() {
   local current
   require_linux_x86_64
+  require_valid_boot_options
 
   if ! current="$(installed_version 2>/dev/null)" || [[ -z "$current" ]]; then
     die "Kata is not installed on this host (${PREFIX} has no VERSION). Install it with: sudo ${0}"
@@ -375,6 +533,7 @@ cmd_check() {
     "${KATA_RUNTIME} is not configured to boot the packaged eBPF/BTF kernel. Re-run: sudo ${0}"
   guest_seccomp_is_configured || die \
     "${KATA_RUNTIME} does not enforce guest seccomp. Re-run: sudo ${0}"
+  verify_boot_options
   require_virtualization
 
   log "Kata ${current} is installed, observer-ready, and this host can start VMs."
@@ -382,9 +541,9 @@ cmd_check() {
 
 case "${1:-install}" in
   --check | check) cmd_check ;;
-  # 32 is the last header line; 33 onwards is `set -Eeuo pipefail` and the
+  # 42 is the last header line; 43 onwards is `set -Eeuo pipefail` and the
   # version-pin rationale, which is not usage text.
-  --help | -h) sed -n '2,32p' "$0" ;;
+  --help | -h) sed -n '2,42p' "$0" ;;
   install)
     # One lock across extraction, symlinks, configuration and the final check.
     # A failed mutation leaves `updating`; only this parent publishes `ready`.

@@ -9,7 +9,7 @@ Three properties the R3 split established and nothing would notice breaking:
   §6.4), so a new pattern that could match a sibling's URL has to fail here
   rather than change which handler answers;
 * the OpenAPI document the app produces is the one committed as
-  `gateway_contracts/agent-control-plane.openapi.json`, so that a change to
+  `apps/backend/openapi.json`, so that a change to
   the published shape is a diff somebody chose rather than a drift.
 
 What this file deliberately does **not** pin: absolute route positions, the
@@ -31,7 +31,7 @@ from cloud_agent.api import routes
 from cloud_agent.app import create_app
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CONTRACT_FILE = REPO_ROOT / "gateway_contracts" / "agent-control-plane.openapi.json"
+CONTRACT_FILE = REPO_ROOT / "apps" / "backend" / "openapi.json"
 
 #: The prefix every surface router carries, and this test's scope.
 AGENT_PREFIX = "/v1/agent"
@@ -169,9 +169,8 @@ def test_no_two_surfaces_shadow_each_other() -> None:
     comparing prefixes — and every surface carries ``/v1/agent``, so every
     pair was skipped and the loop below compared nothing.
 
-    The overlaps between the *other* routers the app mounts (`mcp/catalog`
-    against `mcp/{server_name}`, for one) predate this split and are not this
-    test's subject — the surfaces in ``SURFACE_ROUTERS`` are.
+    The overlaps between the *other* routers the app mounts predate this split
+    and are not this test's subject — the surfaces in ``SURFACE_ROUTERS`` are.
     """
     overlapping = _shadowing_pairs(_surface_routes())
 

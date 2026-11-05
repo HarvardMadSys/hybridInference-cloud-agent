@@ -55,9 +55,11 @@ from .profiling.measurement import (
     to_record as to_record,
 )
 from .profiling.models import (
+    AdmissionInstance as AdmissionInstance,
     ControlState as ControlState,
     Measurement as Measurement,
     ProfilingRun as ProfilingRun,
+    RunManifest as RunManifest,
 )
 from .profiling.policy import (
     PolicyProvider as PolicyProvider,
@@ -123,6 +125,12 @@ from .profiling.schema import (
     STOP_REASON_STOPPED as STOP_REASON_STOPPED,
     STOP_REASON_UNAVAILABLE as STOP_REASON_UNAVAILABLE,
     TARGET_KEYS as TARGET_KEYS,
+    V3_MILESTONE_FIELDS as V3_MILESTONE_FIELDS,
+    V3_OPERATIONS as V3_OPERATIONS,
+    V3_OUTCOMES as V3_OUTCOMES,
+    V3_RECORD_FIELDS as V3_RECORD_FIELDS,
+    V3_SPAN_FIELDS as V3_SPAN_FIELDS,
+    V3_STAGE_FIELDS as V3_STAGE_FIELDS,
 )
 from .profiling.stages import (
     StageObserver as StageObserver,
@@ -158,7 +166,7 @@ def finish(
     measurement.reserved = False
     if not measurement.selected:
         return
-    if measurement.run_target and not measurement.bound:
+    if measurement.run_manifest.target and not measurement.bound:
         # A scoped run reports only attempts whose scope was proved; emitting
         # an unbound measurement would claim a sample the run never selected.
         logger.warning(
@@ -222,10 +230,18 @@ __all__ = [
     "STOP_REASON_STOPPED",
     "STOP_REASON_UNAVAILABLE",
     "TARGET_KEYS",
+    "V3_MILESTONE_FIELDS",
+    "V3_OPERATIONS",
+    "V3_OUTCOMES",
+    "V3_RECORD_FIELDS",
+    "V3_SPAN_FIELDS",
+    "V3_STAGE_FIELDS",
+    "AdmissionInstance",
     "ControlState",
     "Measurement",
     "PolicyProvider",
     "ProfilingRun",
+    "RunManifest",
     "RuntimePolicyStore",
     "StageObserver",
     "StageRecorder",

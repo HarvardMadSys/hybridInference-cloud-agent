@@ -249,6 +249,34 @@ class TestNetPolicy:
         with pytest.raises(net_policy.EndpointRejected, match="never dials"):
             net_policy.check_addresses("bridge.internal", ["93.184.216.34", address], policy)
 
+    @pytest.mark.parametrize(
+        "address",
+        [
+            "168.63.129.16",
+            "::ffff:168.63.129.16",
+            "64:ff9b::a83f:8110",
+            "2002:a83f:8110::1",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "policy",
+        [
+            net_policy.EgressPolicy(),
+            net_policy.EgressPolicy(allow_private=True, allow_plain_http=True),
+            net_policy.EgressPolicy(allowed_hosts=frozenset({"bridge.internal"})),
+        ],
+    )
+    def test_the_platform_address_the_sandbox_never_reaches_is_never_dialled(
+        self, address: str, policy: net_policy.EgressPolicy
+    ) -> None:
+        """Azure's WireServer sits on a public address but is the VM's own platform service.
+
+        The sandbox rules protect it on every host; a connection dialled from
+        the control plane, which runs on such a VM too, must not reach it either.
+        """
+        with pytest.raises(net_policy.EndpointRejected, match="never dials"):
+            net_policy.check_addresses("bridge.internal", [address], policy)
+
     @pytest.mark.parametrize("address", ["fd00:ec2::1", "fd20:ce::1"])
     @pytest.mark.parametrize(
         "policy",
@@ -352,8 +380,8 @@ class TestConfigImport:
         shown = result.drafts[0].summary()["secrets"][0]["value"]
         assert "supersecrettoken" not in shown
 
-    def test_a_stdio_entry_defaults_to_the_users_own_machine(self) -> None:
-        """A pasted command is the user's, not the control plane's."""
+    def test_a_stdio_entry_defaults_to_the_chats_sandbox(self) -> None:
+        """A pasted command is a program, and a program runs where the agent does."""
         result = config_import.parse_import(
             """
             {"mcpServers": {"fs": {
@@ -364,10 +392,13 @@ class TestConfigImport:
         )
         draft = result.drafts[0]
         assert draft.transport is Transport.STDIO
-        assert draft.location == "user-connector"
+        assert draft.location == "sandbox"
+        assert draft.auth_kind == "none"
         assert draft.launch is not None
         assert draft.launch.argv()[0] == "npx"
+        # A path on the user's computer is pointed out: a chat cannot reach it.
         assert draft.paths == ("/home/me/docs",)
+        assert any("a chat cannot reach" in warning for warning in draft.warnings)
         # The value is replaced by a reference; the literal stays in `secrets`
         # so it can be encrypted rather than copied into a config document.
         assert draft.launch.env["API_KEY"] == "secret://API_KEY"

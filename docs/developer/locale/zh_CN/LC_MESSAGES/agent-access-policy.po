@@ -1,0 +1,178 @@
+# Simplified Chinese translation of the Cloud Agent developer documentation.
+# See docs/developer/translations.md.
+msgid ""
+msgstr ""
+"Project-Id-Version: HybridInference Cloud Agent \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-10-30 22:23-0400\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: The HybridInference contributors\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: ../developer/agent-access-policy.md:1
+msgid "Agent admission policy"
+msgstr "Agent 准入策略"
+
+#: ../developer/agent-access-policy.md:3
+msgid ""
+"Cloud Agent decides who may use it from its own accounts. Each protected "
+"owner or administration request, and `/v1/session/me`, reads the account "
+"as it is now from this database, through the account directory "
+"(`cloud_agent/accounts/directory.py`). Nothing is cached, and no other "
+"service is asked. [Accounts and the waiting list](local-accounts.md) "
+"describes how an account is created, approved and administered."
+msgstr "Cloud Agent 依据自己的账号决定谁可以使用它。每个受保护的所有者或管理请求，以及 `/v1/session/me`，都通过账号目录（`cloud_agent/accounts/directory.py`）从本数据库读取账号的当前状态。不做任何缓存，也不询问任何其他服务。[账号与等候名单](local-accounts.md)说明账号如何创建、批准和管理。"
+
+#: ../developer/agent-access-policy.md:10
+msgid "Permissions and request checks"
+msgstr "权限与请求检查"
+
+#: ../developer/agent-access-policy.md
+msgid "Permission"
+msgstr "权限"
+
+#: ../developer/agent-access-policy.md
+msgid "Granted when"
+msgstr "何时授予"
+
+#: ../developer/agent-access-policy.md
+msgid "Access"
+msgstr "允许访问的范围"
+
+#: ../developer/agent-access-policy.md
+msgid "`agent.use`"
+msgstr ""
+
+#: ../developer/agent-access-policy.md
+msgid "The account's waiting-list application is approved"
+msgstr "账号的等候名单申请被批准"
+
+#: ../developer/agent-access-policy.md
+msgid "Owner APIs, subject to per-resource ownership checks"
+msgstr "所有者 API，每个资源仍要单独检查所有权"
+
+#: ../developer/agent-access-policy.md
+msgid "`agent.admin`"
+msgstr ""
+
+#: ../developer/agent-access-policy.md
+msgid "The account is approved and an administrator"
+msgstr "账号已获批准并且是管理员"
+
+#: ../developer/agent-access-policy.md
+msgid "Administration, including runner-host APIs; requires `agent.use`"
+msgstr "管理功能，包括 runner 主机 API；需要 `agent.use`"
+
+#: ../developer/agent-access-policy.md:17
+#, python-brace-format
+msgid ""
+"An account that is unknown, unverified, suspended or deleted is refused "
+"with `subject_unavailable`, which every caller treats as a denial. An "
+"account that can sign in but holds no permission sees the waiting-list "
+"page. Permissions must be unique, use recognized values and include "
+"`agent.use` whenever `agent.admin` is present; a decision for another "
+"account, or a malformed or contradictory one, cannot grant access. "
+"Account roles and profile fields are not authorization inputs. The "
+"session response exposes `agent_access: {allowed, permissions}`, and the "
+"web app denies access if that field is missing."
+msgstr "未知、未验证、已停用或已删除的账号会以 `subject_unavailable` 被拒绝，所有调用方都把它当作拒绝处理。能够登录但没有任何权限的账号会看到等候名单页面。权限必须唯一、使用可识别的取值，并且只要有 `agent.admin` 就必须同时有 `agent.use`；针对其他账号的决定，或格式错误、自相矛盾的决定，都不能授予访问权。账号角色和资料字段不是授权依据。会话响应提供 `agent_access: {allowed, permissions}`，缺少该字段时 Web 应用会拒绝访问。"
+
+#: ../developer/agent-access-policy.md:27
+msgid ""
+"Checks govern admission of each request. A permission withdrawn by an "
+"administrator also stops the account's work (see [stopping an account's "
+"work](local-accounts.md#stopping-an-accounts-work)). An owner stream (a "
+"job's events, the account's change feed, a terminal's output) is admitted"
+" when it opens and ends after about 15 minutes; the client reconnects "
+"from where it left off and is admitted again, so a withdrawn permission "
+"or an ended session stops a stream within that bound. An MCP OAuth "
+"callback that returns after the account lost `agent.use` is refused "
+"without consuming the authorization or exchanging its code."
+msgstr "检查决定每个请求能否准入。管理员撤销某项权限时，也会停止该账号正在进行的工作（见[停止账号的工作](local-accounts.md#stopping-an-accounts-work)）。所有者的数据流（任务事件、账号的变更推送、终端输出）在打开时准入，大约 15 分钟后结束；客户端会从中断处重新连接并再次准入，因此被撤销的权限或已结束的会话最迟在这个时限内停止数据流。账号失去 `agent.use` 之后才返回的 MCP OAuth 回调会被拒绝，既不消耗该授权，也不交换其授权码。"
+
+#: ../developer/agent-access-policy.md:37
+msgid "Failure behavior"
+msgstr "出错时的表现"
+
+#: ../developer/agent-access-policy.md
+msgid "Condition"
+msgstr "情况"
+
+#: ../developer/agent-access-policy.md
+msgid "Result"
+msgstr "结果"
+
+#: ../developer/agent-access-policy.md
+msgid "No session, or a session that was revoked or expired"
+msgstr "没有会话，或会话已被撤销或过期"
+
+#: ../developer/agent-access-policy.md
+msgid "HTTP 401; the web app returns to sign-in"
+msgstr "HTTP 401；Web 应用返回登录页"
+
+#: ../developer/agent-access-policy.md
+msgid "An account without `agent.use`"
+msgstr "没有 `agent.use` 的账号"
+
+#: ../developer/agent-access-policy.md
+msgid "Protected APIs answer 403; the web app shows the waiting list"
+msgstr "受保护的 API 返回 403；Web 应用显示等候名单"
+
+#: ../developer/agent-access-policy.md
+msgid "An unavailable account (`subject_unavailable`)"
+msgstr "不可用的账号（`subject_unavailable`）"
+
+#: ../developer/agent-access-policy.md
+msgid "Sign-in is refused, and existing sessions receive a denied decision"
+msgstr "拒绝登录，已有会话收到拒绝的决定"
+
+#: ../developer/agent-access-policy.md
+msgid "The account store cannot be read"
+msgstr "无法读取账号存储"
+
+#: ../developer/agent-access-policy.md
+msgid "HTTP 503; retry once the database recovers"
+msgstr "HTTP 503；数据库恢复后重试"
+
+#: ../developer/agent-access-policy.md
+msgid ""
+"Missing account configuration (`AGENT_LOCAL_SESSION_SECRET`, "
+"`AGENT_SOURCE_CONTROL_ENCRYPTION_KEY`) or a retired Gateway variable"
+msgstr "缺少账号配置（`AGENT_LOCAL_SESSION_SECRET`、`AGENT_SOURCE_CONTROL_ENCRYPTION_KEY`）或仍设置了已退役的 Gateway 变量"
+
+#: ../developer/agent-access-policy.md
+msgid "The control plane does not start, and names what to set or remove"
+msgstr "控制平面不启动，并指出需要设置或删除的项"
+
+#: ../developer/agent-access-policy.md:47
+msgid ""
+"When `/me` cannot confirm current access, the web app hides protected "
+"content and offers a retry without forcing another sign-in."
+msgstr "当 `/me` 无法确认当前访问权时，Web 应用会隐藏受保护的内容，并提供重试，而不强制重新登录。"
+
+#: ../developer/agent-access-policy.md:50
+msgid "Infrastructure credentials"
+msgstr "基础设施凭据"
+
+#: ../developer/agent-access-policy.md:52
+msgid ""
+"`ADMIN_TOKEN` independently authorizes infrastructure administration and "
+"the recovery settings page, even before any administrator account exists."
+" Host/worker credentials, attempt lease fences and owner checks are "
+"separate controls."
+msgstr "`ADMIN_TOKEN` 独立授权基础设施管理和恢复设置页面，即使还没有任何管理员账号也是如此。主机/worker 凭据、attempt 租约栅栏和所有者检查是彼此独立的控制。"
+
+#: ../developer/agent-access-policy.md:57
+msgid ""
+"The implementation is in "
+"[`agent_access.py`](../../apps/backend/cloud_agent/agent_access.py), "
+"[`accounts/directory.py`](../../apps/backend/cloud_agent/accounts/directory.py),"
+" [`deps.py`](../../apps/backend/cloud_agent/api/deps.py) and "
+"[`session.py`](../../apps/backend/cloud_agent/api/session.py)."
+msgstr "实现位于 [`agent_access.py`](../../apps/backend/cloud_agent/agent_access.py)、[`accounts/directory.py`](../../apps/backend/cloud_agent/accounts/directory.py)、[`deps.py`](../../apps/backend/cloud_agent/api/deps.py) 和 [`session.py`](../../apps/backend/cloud_agent/api/session.py)。"

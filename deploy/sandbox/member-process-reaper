@@ -1,9 +1,14 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -I
 """Capture or reap one sandbox member UID's Linux processes.
 
 This file is copied into the sandbox image as a root-owned executable. Agent
 code runs as the member UID and may inspect this process, but cannot rewrite
 the implementation or the baseline held in this process's memory.
+
+It runs isolated (``-I``), from its own first line and when the host starts
+it: a member's home outlives the member that last used its slot, and nothing
+found there, a ``.pth`` file or ``usercustomize`` in its site-packages
+included, may load into the process that reaps that member's leftovers.
 """
 
 from __future__ import annotations

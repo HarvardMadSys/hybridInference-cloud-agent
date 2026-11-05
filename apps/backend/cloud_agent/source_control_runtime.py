@@ -23,9 +23,9 @@ So a provider here is in one of three states, and they are kept apart:
 in place — a ``chown``, a remount — and a restart should not be the only way
 to find out. There is no retry task: whatever needs the credentials asks for
 them, and an ask that finds the App unavailable, with the last attempt at
-least :data:`RETRY_INTERVAL_S` ago, reads the key again first. The publisher
-asks every 15 seconds and the reaper every 30, so a repaired key is picked up
-within a minute whether or not anybody is using the site.
+least ``github_reload_interval_s`` ago, reads the key again first. The goal
+wakeup and pending-message sweeps ask every 30 seconds, so a repaired key is
+picked up within a minute whether or not anybody is using the site.
 
 Admin settings are checked when each provider is requested. Saving a changed
 configuration replaces the credentials on the next operation. Explicitly
@@ -39,6 +39,7 @@ import threading
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
+from weakref import WeakSet
 
 from cloud_agent.github_app import AppConfig, GitHubAppCredentials, GitHubAppError, build_app_jwt
 from cloud_agent.logging_utils import get_logger
@@ -61,9 +62,6 @@ logger = get_logger("cloud_agent.app")
 
 LoadStatus = Literal["unconfigured", "unavailable", "ready"]
 
-#: Seconds between attempts to load an App that failed. Also the ``Retry-After``
-#: a caller refused in the meantime is given.
-RETRY_INTERVAL_S = 30.0
 
 #: The one variable that says a deployment uses a GitHub App. Not the key path:
 #: the control-plane compose file always sets that one, and mounts
@@ -168,9 +166,11 @@ class GitHubAppProvider:
         self._attempted_at: float | None = None
         self._unavailable_since: float | None = None
         self._closed = False
-        self._retired: list[GitHubAppCredentials] = []
+        # In-flight calls and scheduled pool closure own their generation.
+        # Track surviving consumers for shutdown without retaining old caches.
+        self._retired: WeakSet[GitHubAppCredentials] = WeakSet()
         # Requests resolve their dependencies on a thread pool, while the
-        # publisher and the reaper ask from the event loop. One attempt at a
+        # maintenance loops ask from the event loop. One attempt at a
         # time; a caller that finds one in progress does not wait for it.
         self._lock = threading.Lock()
         if self._configured:
@@ -180,7 +180,7 @@ class GitHubAppProvider:
     def _retry_interval_s(self) -> float:
         if self._retry_interval_override is not None:
             return self._retry_interval_override
-        return number_setting("github_reload_interval_s", RETRY_INTERVAL_S)
+        return number_setting("github_reload_interval_s")
 
     @property
     def load_status(self) -> LoadStatus:
@@ -227,7 +227,7 @@ class GitHubAppProvider:
             previous, self._credentials = self._credentials, None
             if previous is not None:
                 previous.retire()
-                self._retired.append(previous)
+                self._retired.add(previous)
             self._env = env
             self._configured = bool((env.get(ENV_GITHUB_APP_ID) or "").strip())
             self._attempted_at = None
@@ -258,7 +258,7 @@ class GitHubAppProvider:
         credentials, self._credentials = self._credentials, None
         if credentials is not None:
             await credentials.aclose()
-        retired, self._retired = self._retired, []
+        retired, self._retired = list(self._retired), WeakSet()
         for previous in retired:
             await previous.aclose()
 
@@ -421,7 +421,6 @@ class SourceControlRuntime:
 
 __all__ = [
     "ENV_GITHUB_APP_ID",
-    "RETRY_INTERVAL_S",
     "GitHubAppProvider",
     "GitHubAppSource",
     "GitHubAppState",

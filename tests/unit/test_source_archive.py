@@ -11,7 +11,8 @@ import tempfile
 import pytest
 
 from cloud_agent_host.sandbox import SandboxError
-from cloud_agent_host.source_archive import build_base_bundle, build_source_archive
+from cloud_agent_shared.git import source_archive as source_archive_module
+from cloud_agent_shared.git.source_archive import build_base_bundle, build_source_archive
 
 
 def _archive(root, **kwargs) -> bytes:
@@ -19,6 +20,12 @@ def _archive(root, **kwargs) -> bytes:
     written = build_source_archive(str(root), out, uid=10001, gid=10001, **kwargs)
     assert written == out.tell()
     return out.getvalue()
+
+
+def _base_bundle(root, **kwargs) -> bytes:
+    with build_base_bundle(str(root), **kwargs) as bundle:
+        assert bundle.seekable()
+        return bundle.read()
 
 
 def _checkout(tmp_path):
@@ -98,6 +105,47 @@ def test_source_archive_refuses_tar_overhead_past_the_limit(tmp_path):
         _archive(root, max_bytes=file_bytes + 1)
 
 
+def test_source_archive_stops_streaming_at_the_entry_limit(tmp_path, monkeypatch):
+    root = _checkout(tmp_path)
+    paths = [str(root / ".git"), str(root / ".git" / "config"), str(root / "src")]
+
+    def entries(_root):
+        yield from paths
+        raise AssertionError("the tree walk continued after the entry limit")
+
+    monkeypatch.setattr(source_archive_module, "_entries", entries)
+
+    with pytest.raises(SandboxError, match="more than 2 entries"):
+        _archive(root, max_entries=2)
+
+
+def test_source_archive_bounds_the_disk_manifest(tmp_path):
+    root = _checkout(tmp_path)
+
+    with pytest.raises(SandboxError, match=r"manifest exceeds .* metadata limit"):
+        _archive(root, max_manifest_bytes=4)
+
+
+def test_source_archive_does_not_retain_written_tar_members(tmp_path, monkeypatch):
+    root = _checkout(tmp_path)
+    for index in range(100):
+        (root / f"file-{index:03}.txt").write_text("content")
+    retained = 0
+    addfile = tarfile.TarFile.addfile
+
+    def tracked_addfile(archive, *args, **kwargs):
+        nonlocal retained
+        result = addfile(archive, *args, **kwargs)
+        retained = max(retained, len(archive.members))
+        return result
+
+    monkeypatch.setattr(tarfile.TarFile, "addfile", tracked_addfile)
+
+    _archive(root)
+
+    assert retained == 1
+
+
 def test_source_archive_streams_into_a_real_file(tmp_path):
     root = _checkout(tmp_path)
 
@@ -138,7 +186,7 @@ def test_base_bundle_contains_exact_commit_and_is_bounded(tmp_path):
         text=True,
     ).stdout.strip()
 
-    payload = build_base_bundle(str(root), commit=commit)
+    payload = _base_bundle(root, commit=commit)
     bundle = tmp_path / "base.bundle"
     bundle.write_bytes(payload)
     listed = subprocess.run(
@@ -202,8 +250,8 @@ def test_base_bundle_after_a_prerequisite_carries_only_what_the_commit_adds(tmp_
     _git("commit", "--quiet", "-am", "change", cwd=root)
     commit = _git("rev-parse", "HEAD", cwd=root)
 
-    whole = build_base_bundle(str(root), commit=commit)
-    thin = build_base_bundle(str(root), commit=commit, prerequisite=base)
+    whole = _base_bundle(root, commit=commit)
+    thin = _base_bundle(root, commit=commit, prerequisite=base)
 
     assert len(whole) > 512 * 1024
     assert len(thin) < 4096

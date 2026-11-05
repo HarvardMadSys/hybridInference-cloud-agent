@@ -2,7 +2,7 @@
 
 Requests are strict and closed: an unknown field, a boolean where a revision
 belongs, or a control character in a name is a 422, never a silent coercion.
-Responses carry display data only. A member's email comes from the Gateway at
+Responses carry display data only. A member's email comes from their account at
 read time and is ``None`` when it cannot be read; no response ever carries an
 invitation token except the one that created it.
 """
@@ -16,12 +16,33 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from cloud_agent.domain.teams import (
+    LISTING_LIMIT,
     MAX_TEAM_NAME_CHARS,
     InvitationStatus,
     JoinRequestState,
     MemberRole,
+    MembershipState,
     TeamRole,
+    TeamState,
 )
+
+TeamAuditAction = Literal[
+    "team_created",
+    "team_renamed",
+    "team_deleted",
+    "invitation_created",
+    "invitation_revoked",
+    "join_requested",
+    "join_approved",
+    "join_declined",
+    "member_left",
+    "member_removed",
+    "member_role_changed",
+    "ownership_transferred",
+    "environment_created",
+    "environment_updated",
+    "environment_archived",
+]
 
 #: Characters a link token can contain: ``secrets.token_urlsafe(32)`` output.
 INVITATION_TOKEN_PATTERN = r"^[A-Za-z0-9_-]{43}$"
@@ -207,23 +228,7 @@ class TeamAuditEventResponse(BaseModel):
 
     id: int
     actor_user_id: str
-    action: Literal[
-        "team_created",
-        "team_renamed",
-        "team_deleted",
-        "invitation_created",
-        "invitation_revoked",
-        "join_requested",
-        "join_approved",
-        "join_declined",
-        "member_left",
-        "member_removed",
-        "member_role_changed",
-        "ownership_transferred",
-        "environment_created",
-        "environment_updated",
-        "environment_archived",
-    ]
+    action: TeamAuditAction
     target_user_id: str | None
     target_id: str | None
     created_at: datetime
@@ -233,4 +238,82 @@ class TeamAuditEventListResponse(BaseModel):
     """A page of audit events, newest first; pass ``next_before`` for the next."""
 
     events: list[TeamAuditEventResponse]
+    next_before: int | None
+
+
+# ── The platform administrator's read-only view ─────────────────────────────
+
+
+class AdminTeamSummary(BaseModel):
+    """One team in the administrator's list; deleted teams included."""
+
+    id: str
+    name: str
+    state: TeamState
+    owner: TeamPerson
+    member_count: int
+    admin_count: int = Field(description="Active admins, not counting the owner.")
+    pending_request_count: int = Field(description="Join requests waiting for a decision.")
+    created_at: datetime
+    deleted_at: datetime | None
+
+
+class AdminTeamListResponse(BaseModel):
+    """A page of teams, newest first; pass ``next_before`` as ``before`` for the next."""
+
+    teams: list[AdminTeamSummary]
+    next_before: str | None = Field(
+        description="The last team on this page, or null when no more follow."
+    )
+
+
+class AdminTeamMember(TeamPerson):
+    """A membership in any state: who is in the team, and who left or was removed."""
+
+    role: TeamRole
+    state: MembershipState
+    joined_at: datetime
+    departed_at: datetime | None
+
+
+class AdminTeamInvitationCounts(BaseModel):
+    """How many of the team's invitation links are in each state."""
+
+    open: int
+    expired: int
+    claimed: int
+    revoked: int
+
+
+class AdminTeamDetailResponse(BaseModel):
+    """One team as the administrator sees it."""
+
+    team: AdminTeamSummary
+    members: list[AdminTeamMember] = Field(
+        description=(
+            f"Every active member, and the {LISTING_LIMIT} who left or were removed most recently."
+        )
+    )
+    join_requests: list[JoinRequestResponse]
+    invitations: AdminTeamInvitationCounts
+    departed_member_count: int = Field(
+        description="Everyone who left or was removed, including those not listed."
+    )
+
+
+class AdminTeamAuditEvent(BaseModel):
+    """One audit event with the people it names."""
+
+    id: int
+    action: TeamAuditAction
+    actor: TeamPerson
+    target_user: TeamPerson | None
+    target_id: str | None
+    created_at: datetime
+
+
+class AdminTeamAuditListResponse(BaseModel):
+    """A page of audit events, newest first; pass ``next_before`` for the next."""
+
+    events: list[AdminTeamAuditEvent]
     next_before: int | None

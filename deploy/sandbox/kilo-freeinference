@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -I
 """Point Kilo Code at this deployment's gateway, then run it.
 
 Kilo's CLI is an OpenCode fork and inherits its two gaps: it does not honour
@@ -171,6 +171,17 @@ def main() -> None:
             }
         }
     }
+    # The platform's instructions (how git and gh reach GitHub here), as the
+    # config's instruction-file list. A file of their own beside the config,
+    # written every run: absent, a previous run's must not linger.
+    instructions_path = os.path.join(os.path.dirname(config_path), "freeinference-instructions.md")
+    instructions = os.environ.get("KILO_FREEINFERENCE_INSTRUCTIONS", "")
+    if instructions:
+        with open(instructions_path, "w", encoding="utf-8") as handle:
+            handle.write(instructions)
+        config["instructions"] = [instructions_path]
+    elif os.path.exists(instructions_path):
+        os.remove(instructions_path)
     with open(config_path, "w", encoding="utf-8") as handle:
         json.dump(config, handle)
 

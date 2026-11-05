@@ -60,10 +60,16 @@ function pendingSubmissionId(scope: string): string {
   return created;
 }
 
-function clearPendingSubmission(scope: string): void {
+function clearPendingSubmission(scope: string, requestId: string): void {
+  // An older response may arrive after a different submission has rotated
+  // this scope's key. It can retire only the request it acknowledges.
+  if (pendingSubmissionIds.get(scope) !== requestId) return;
   pendingSubmissionIds.delete(scope);
   try {
-    globalThis.sessionStorage?.removeItem(submissionStorageKey(scope));
+    const key = submissionStorageKey(scope);
+    if (globalThis.sessionStorage?.getItem(key) === requestId) {
+      globalThis.sessionStorage.removeItem(key);
+    }
   } catch {
     // A definitive response is already authoritative; cleanup is best effort.
   }
@@ -73,12 +79,14 @@ export async function submitOnce(
   scope: string,
   send: (requestId: string) => Promise<Response>,
 ): Promise<AgentJobApi> {
-  let resp = await send(pendingSubmissionId(scope));
+  let requestId = pendingSubmissionId(scope);
+  let resp = await send(requestId);
   if (resp.status === 409 && (await responseErrorType(resp)) === 'idempotency_conflict') {
     // Same key, different content: the earlier send was a different action
     // and is not what the user is submitting now.
-    clearPendingSubmission(scope);
-    resp = await send(pendingSubmissionId(scope));
+    clearPendingSubmission(scope, requestId);
+    requestId = pendingSubmissionId(scope);
+    resp = await send(requestId);
   }
   if (!resp.ok) {
     // Every other failure keeps the key: a lost or ambiguous response may
@@ -86,6 +94,6 @@ export async function submitOnce(
     return jsonOrThrow<AgentJobApi>(resp);
   }
   const job = await jsonOrThrow<AgentJobApi>(resp);
-  clearPendingSubmission(scope);
+  clearPendingSubmission(scope, requestId);
   return job;
 }

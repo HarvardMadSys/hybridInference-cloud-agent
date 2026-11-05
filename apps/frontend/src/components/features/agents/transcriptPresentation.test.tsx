@@ -50,6 +50,10 @@ describe('activity display menu', () => {
     const trigger = screen.getByRole('button', { name: 'Activity: Standard' });
     fireEvent.keyDown(trigger, { key: 'ArrowDown' });
     const menu = screen.getByRole('menu');
+    // The shared trigger contract opens ArrowDown on the first row.
+    expect(screen.getByRole('menuitemradio', { name: 'Compact' })).toHaveFocus();
+    fireEvent.keyDown(menu, { key: 'ArrowDown' });
+    expect(screen.getByRole('menuitemradio', { name: 'Standard' })).toHaveFocus();
     fireEvent.keyDown(menu, { key: 'ArrowDown' });
     expect(screen.getByRole('menuitemradio', { name: 'Detailed' })).toHaveFocus();
     fireEvent.keyDown(menu, { key: 'ArrowDown' });

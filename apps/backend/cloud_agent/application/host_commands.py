@@ -10,6 +10,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.host_pool import hash_secret, new_enroll_token
+from cloud_agent.sandbox_manager_routing import retire_sandbox_manager_hosts
+from cloud_agent_shared.runtime_catalog import downloadable_runtimes
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -21,9 +23,10 @@ if TYPE_CHECKING:
 class HostCommandError(Exception):
     """A public administrative refusal with the existing response semantics."""
 
-    def __init__(self, status: int, message: str) -> None:
+    def __init__(self, status: int, message: str, *, code: str | None = None) -> None:
         super().__init__(message)
         self.status = status
+        self.code = code
 
 
 class SandboxPlacement:
@@ -70,12 +73,17 @@ class HostCommands:
         """Select only an installed runtime and return previous selections for audit."""
         _, _, previous, _ = await self.repository.runner_pool()
         if not await self.repository.set_runtime_version(runtime=runtime, version=version):
-            raise HostCommandError(
-                404,
-                f"No host in the pool offers {runtime} {version!r}. "
-                "A version has to be built into the sandbox image before it can be "
-                "selected — add it to that host's *_EXTRA_VERSIONS and redeploy.",
-            )
+            if runtime in downloadable_runtimes():
+                how = (
+                    "Update to it from Settings → Agent versions: every host downloads "
+                    "and checks it, then new chats switch to it."
+                )
+            else:
+                how = (
+                    "A version has to be built into the sandbox image before it can be "
+                    "selected — add it to that host's *_EXTRA_VERSIONS and redeploy."
+                )
+            raise HostCommandError(404, f"No host in the pool offers {runtime} {version!r}. {how}")
         return previous
 
     async def forget(self, host: str) -> None:
@@ -98,6 +106,7 @@ class HostCommands:
                 409,
                 f"{host!r} still has {outcome.replace('_', ' ')}; clear those dependencies before forgetting it.",
             )
+        retire_sandbox_manager_hosts([host])
 
     async def set_status(self, *, host: str, status: str, force: bool = False) -> None:
         """Apply the existing drain/undrain transition table."""
@@ -171,15 +180,36 @@ class HostCommands:
             raise HostCommandError(409, f"The deployment drain epoch for {host!r} is invalid.")
         return drain_fence_epoch
 
-    async def remove(self, *, host: str, force: bool = False) -> bool:
+    async def remove(self, *, host: str, force: bool = False, allow_unmoved: bool = False) -> bool:
         """Revoke Host access without releasing any underlying machine.
 
-        Returns whether the removal was deferred: a busy Host stops taking
-        work now and is revoked once its running attempts end.
+        Returns whether the removal was deferred: the Host stops taking work
+        now, moves its sandboxes to other Hosts when they can move, and is
+        revoked once they have and its running attempts end.
         """
-        outcome = await self.repository.remove_host(host=host, force=force)
+        outcome = await self.repository.remove_host(
+            host=host, force=force, allow_unmoved=allow_unmoved
+        )
         if outcome == "unknown":
             raise HostCommandError(404, f"Unknown runner host: {host}")
+        if outcome == "no_move_target":
+            raise HostCommandError(
+                409,
+                f"No other server can take the sandboxes on {host!r} now, or checkpoints are "
+                "off. Removing it anyway leaves them on it, and their chats cannot continue "
+                "until it returns. Repeat with allow_unmoved=true to remove it anyway.",
+                code="no_move_target",
+            )
+        if outcome == "cannot_move":
+            raise HostCommandError(
+                409,
+                f"Some sandboxes on {host!r} have no checkpoint another server can restore, "
+                "for example because a checkpoint failed, so they cannot move. Removing it "
+                "leaves them on it, and their chats cannot continue until it returns. Repeat "
+                "with allow_unmoved=true to remove it anyway; the other sandboxes still move "
+                "first.",
+                code="cannot_move",
+            )
         if outcome == "busy":
             raise HostCommandError(
                 409,
@@ -191,7 +221,10 @@ class HostCommands:
                 409,
                 f"{host!r} is held by an automated deployment drain; release it first or repeat with force=true.",
             )
-        return outcome == "draining"
+        deferred = outcome in {"draining", "moving_out"}
+        if not deferred:
+            retire_sandbox_manager_hosts([host])
+        return deferred
 
     async def global_settings(self, changes: Mapping[str, int | None]) -> dict[str, Any]:
         """Change runtime settings for every server; return the old values for audit."""

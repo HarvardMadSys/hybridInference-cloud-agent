@@ -16,9 +16,19 @@ class SessionLeaseLost(SandboxError):
     """A local operation carried a stale or unknown activation lease."""
 
 
+class StaleStartFence(SessionLeaseLost):
+    """A request would start a stopped group under a start fence already sealed.
+
+    A checkpoint of the group's last stop may already be the one it moves
+    with, and it names that fence: a start under it would change the group
+    after its checkpoint was taken. The control plane fences again and retries.
+    """
+
+
 __all__ = [
     "DEFAULT_CHAT_IDLE_TIMEOUT_S",
     "DEFAULT_SWEEP_INTERVAL_S",
     "SessionBusy",
     "SessionLeaseLost",
+    "StaleStartFence",
 ]

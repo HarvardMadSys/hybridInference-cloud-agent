@@ -4,9 +4,14 @@ import { useState } from 'react';
 
 import { forgetAgentRunnerHost } from '@/lib/api/admin';
 import { removeComputeServer, type ComputeAllocation } from '@/lib/api/compute';
-import { getErrorMessage } from '@/lib/utils/errors';
+import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
-import { buttonClass, ErrorNotice } from './compute-ui';
+import { buttonClass, dangerClass, ErrorNotice } from './compute-ui';
+
+// Refusals whose way out is elsewhere on this server: an operation to settle
+// in its activity, or a resource to release first.
+const SETTLE_OPERATION = new Set(['external_operation_unresolved']);
+const RELEASE_FIRST = new Set(['resource_release_required', 'autoscaling_member_active']);
 
 export default function RemoveComputeServer({
   name,
@@ -15,6 +20,8 @@ export default function RemoveComputeServer({
   onRemoved,
   onPartialRemoval,
   onCancel,
+  onShowActivity,
+  release,
 }: {
   name: string;
   allocation?: ComputeAllocation;
@@ -22,16 +29,20 @@ export default function RemoveComputeServer({
   onRemoved: () => void;
   onPartialRemoval: () => void;
   onCancel: () => void;
+  onShowActivity?: () => void;
+  release?: { label: string; onSelect: () => void };
 }) {
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [refusal, setRefusal] = useState<string | null>(null);
   const [remainingHosts, setRemainingHosts] = useState([...new Set(hosts)]);
 
   async function remove() {
     if (busy || !confirmed) return;
     setBusy(true);
     setError(null);
+    setRefusal(null);
     let removedHosts = 0;
     try {
       if (allocation) {
@@ -51,6 +62,7 @@ export default function RemoveComputeServer({
       setError(
         `${removedHosts > 0 ? `${removedHosts} Host record(s) removed. Remaining records: ` : ''}${getErrorMessage(error)}`,
       );
+      setRefusal(error instanceof APIError ? error.code : null);
     } finally {
       setBusy(false);
     }
@@ -93,12 +105,18 @@ export default function RemoveComputeServer({
         I confirm permanent removal of this server and its management records.
       </label>
       <ErrorNotice error={error} />
+      {refusal !== null && SETTLE_OPERATION.has(refusal) && onShowActivity && (
+        <button type="button" className={buttonClass} onClick={onShowActivity}>
+          Open activity
+        </button>
+      )}
+      {refusal !== null && RELEASE_FIRST.has(refusal) && release && (
+        <button type="button" className={buttonClass} onClick={release.onSelect}>
+          {release.label}
+        </button>
+      )}
       <div className="flex flex-wrap gap-2">
-        <button
-          type="submit"
-          disabled={!confirmed || busy}
-          className="ui-button min-h-11 border border-status-error/25 bg-status-error/10 text-status-error hover:bg-status-error/20"
-        >
+        <button type="submit" disabled={!confirmed || busy} className={dangerClass}>
           {busy ? 'Removing server…' : 'Permanently remove server'}
         </button>
         <button type="button" className={buttonClass} disabled={busy} onClick={onCancel}>

@@ -65,6 +65,13 @@ class RuntimeUpgradesResponse(BaseModel):
     """Every agent the Settings page can update."""
 
     runtimes: list[RuntimeUpgradeItem]
+    registry_waiting_on: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Online servers, by host name, that do not yet report downloading from the "
+            "saved agent package registry. No update starts until this is empty."
+        ),
+    )
 
 
 class RuntimeVersionsResponse(BaseModel):

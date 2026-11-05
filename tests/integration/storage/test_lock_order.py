@@ -5,8 +5,8 @@ The order every transaction takes shared rows in is written down once, in
 a connection of its own, taking the rows in the order that writer's code does,
 or by pausing the real call -- runs another real repository call into it, and
 then lets the held writer go on: two orders over the same rows is a deadlock,
-and Postgres says so. The capture and attempt reapers are here too, for what a
-writer that ran in between leaves them to find, and so is the event append that
+and Postgres says so. The attempt reaper is here too, for what a writer that
+ran in between leaves it to find, and so is the event append that
 is tried again when Postgres picks it as a deadlock's victim: a rival closes a
 real cycle against it.
 """
@@ -16,7 +16,6 @@ from __future__ import annotations
 # Imported pytest fixtures are intentionally named by test parameters.
 # ruff: noqa: F811
 import asyncio
-import hashlib
 from typing import TYPE_CHECKING
 
 import asyncpg
@@ -25,7 +24,6 @@ from tests.integration.storage.test_agent_job_store import (
     _claim,
     _create_job,
     _expire_attempt,
-    _reserve_retained_chat,
     _reserve_shared_chat,
     pool,  # noqa: F401 - pytest fixture
     store,  # noqa: F401 - pytest fixture
@@ -35,10 +33,17 @@ from tests.integration.storage.test_environment_snapshot_store import (
     _ready_snapshot,
     _receipt,
 )
+from tests.integration.storage.test_environment_store import _save as _save_environment
+from tests.integration.storage.test_sandbox_restore_store import (
+    _covered,
+    _state as _restore_state,
+)
+from tests.support.follow_ups import append_follow_up
 
+from cloud_agent.storage._sql.sandbox import fence_sandbox_start
 from cloud_agent.storage.repositories import (
     attempt_commands as attempt_module,
-    snapshot as snapshot_module,
+    session_fork as session_fork_module,
 )
 
 if TYPE_CHECKING:
@@ -91,10 +96,10 @@ async def _run_turn(
     )
 
 
-async def _run_next_turn(store: Storage, parent: dict, sandbox: dict) -> dict:
+async def _run_next_turn(pool, store: Storage, parent: dict, sandbox: dict) -> dict:
     """Send a follow-up into the same workspace and run it to the end."""
-    follow = await store.conversation_commands.create_follow_up(
-        parent_job_id=parent["id"], user_id=parent["user_id"], prompt="and update the docs"
+    follow = await append_follow_up(
+        pool, parent_job_id=parent["id"], user_id=parent["user_id"], prompt="and update the docs"
     )
     assert follow is not None and follow.get("error") is None
     claim = await _claim(
@@ -151,430 +156,6 @@ async def _settle(task: asyncio.Task | None) -> None:
 async def _first_try_only(write: str, transaction):
     """Run a write once: the lock order alone has to keep it out of a cycle."""
     return await transaction()
-
-
-async def _request(store: Storage, job: dict) -> int:
-    """The owner's publication request: a turn boundary publishes nothing."""
-    requested = await store.snapshot.request_snapshot_publication(
-        thread_id=job["thread_id"], user_id=job["user_id"]
-    )
-    assert requested.get("requested") is True, requested
-    return int(requested["snapshot_id"])
-
-
-async def _legacy_turn_snapshot(pool, sandbox_id: str, job: dict) -> None:
-    """The pending snapshot turn settlement opened before publication was a request.
-
-    Settlement used to open one for each turn, even while an earlier snapshot of
-    the group was being captured. A deployment upgraded during such a capture
-    still holds it, and a capture handed back must fold into it.
-    """
-    async with pool.acquire() as conn, conn.transaction():
-        snapshot_id = await conn.fetchval(
-            """
-            INSERT INTO agent_sandbox_snapshots (sandbox_id, workspace_epoch, anchor_job_id, base_sha)
-            SELECT id, workspace_epoch, $2, published_base_sha FROM agent_sandboxes WHERE id = $1
-            RETURNING id
-            """,
-            sandbox_id,
-            job["id"],
-        )
-        await conn.execute(
-            "INSERT INTO agent_snapshot_jobs (snapshot_id, job_id) VALUES ($1, $2)",
-            snapshot_id,
-            job["id"],
-        )
-
-
-async def _snapshots(pool, sandbox_id: str) -> list[dict]:
-    """Every snapshot of a group, oldest first, with the turns it includes."""
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT s.id, s.state, s.workspace_epoch, s.anchor_job_id,
-                   ARRAY(
-                       SELECT included.job_id FROM agent_snapshot_jobs included
-                       WHERE included.snapshot_id = s.id
-                       ORDER BY included.created_at, included.job_id
-                   ) AS included
-            FROM agent_sandbox_snapshots s
-            WHERE s.sandbox_id = $1
-            ORDER BY s.id
-            """,
-            sandbox_id,
-        )
-    return [dict(row) for row in rows]
-
-
-@pytest.mark.parametrize("recovery", ["deferred", "reaped"])
-async def test_a_capture_handed_back_folds_into_the_snapshot_a_turn_settled_meanwhile(
-    pool, store: Storage, recovery: str
-):
-    """A capture handed back joins the pending snapshot of a turn settled while it was out.
-
-    A turn is not refused while its workspace is captured, and settlement used
-    to open a second, pending snapshot behind the capturing one; a deployment
-    upgraded mid-capture still holds one. The capture handed back by a busy
-    host, or by the stall reaper, used to become pending beside it, which the
-    one-pending-snapshot index refuses. The claim then stayed ``capturing`` and
-    its group ``snapshotting`` for good, and the reaper's single statement
-    failed for every workspace in the deployment.
-    """
-    first, first_claim, sandbox = await _reserve_shared_chat(store)
-    await _run_turn(store, first, first_claim, sandbox)
-    await _request(store, first)
-    capture = await store.snapshot.claim_due_sandbox_snapshot()
-    assert capture is not None and capture["anchor_job_id"] == first["id"]
-
-    second = await _run_next_turn(store, first, sandbox)
-    await _legacy_turn_snapshot(pool, sandbox["sandbox_id"], second)
-    opened = [
-        row
-        for row in await _snapshots(pool, sandbox["sandbox_id"])
-        if row["id"] != capture["snapshot_id"]
-    ]
-    assert [(row["state"], row["included"]) for row in opened] == [("pending", [second["id"]])]
-
-    if recovery == "deferred":
-        assert await store.snapshot.defer_sandbox_snapshot_capture(
-            snapshot_id=capture["snapshot_id"],
-            sandbox_id=capture["sandbox_id"],
-            sandbox_generation=capture["generation"],
-            container_id=capture["container_id"],
-            detail="the host is busy",
-        )
-    else:
-        assert await store.snapshot.reap_stalled_sandbox_snapshot_captures(stall_seconds=0) == [
-            capture["snapshot_id"]
-        ]
-
-    # One pending snapshot: the second turn's, at its boundary, carrying both
-    # turns. The capture's own row is gone, so its receipt is a stale one.
-    assert await _snapshots(pool, sandbox["sandbox_id"]) == [
-        {
-            "id": opened[0]["id"],
-            "state": "pending",
-            "workspace_epoch": opened[0]["workspace_epoch"],
-            "anchor_job_id": second["id"],
-            "included": [first["id"], second["id"]],
-        }
-    ]
-    late = "diff --git a/answer.txt b/answer.txt\nnew file mode 100644\n"
-    assert (
-        await store.snapshot.record_sandbox_snapshot_capture(
-            snapshot_id=capture["snapshot_id"],
-            sandbox_id=capture["sandbox_id"],
-            sandbox_generation=capture["generation"],
-            container_id=capture["container_id"],
-            workspace_epoch=capture["workspace_epoch"],
-            base_sha=capture["base_sha"],
-            patch=late,
-            content_sha256=hashlib.sha256(late.encode()).hexdigest(),
-        )
-        is None
-    )
-    async with pool.acquire() as conn:
-        assert (
-            await conn.fetchval(
-                "SELECT snapshot_state FROM agent_sandboxes WHERE id = $1", sandbox["sandbox_id"]
-            )
-            == "pending"
-        )
-        if recovery == "deferred":
-            assert await store.snapshot.claim_due_sandbox_snapshot() is None, "not before its retry"
-            await conn.execute(
-                "UPDATE agent_sandbox_snapshots SET retry_at = NOW() WHERE id = $1",
-                opened[0]["id"],
-            )
-
-    again = await store.snapshot.claim_due_sandbox_snapshot()
-    assert again is not None
-    assert again["snapshot_id"] == opened[0]["id"]
-    assert again["anchor_job_id"] == second["id"]
-    patch = "diff --git a/docs.md b/docs.md\nnew file mode 100644\n"
-    assert (
-        await store.snapshot.record_sandbox_snapshot_capture(
-            snapshot_id=again["snapshot_id"],
-            sandbox_id=again["sandbox_id"],
-            sandbox_generation=again["generation"],
-            container_id=again["container_id"],
-            workspace_epoch=again["workspace_epoch"],
-            base_sha=again["base_sha"],
-            patch=patch,
-            content_sha256=hashlib.sha256(patch.encode()).hexdigest(),
-        )
-        == "captured"
-    )
-    publication = await store.snapshot.claim_for_publish()
-    assert publication is not None
-    assert publication["included_job_ids"] == [first["id"], second["id"]]
-
-
-@pytest.mark.parametrize("recovery", ["deferred", "reaped"])
-async def test_a_capture_handed_back_does_not_wait_for_a_turn_a_follow_up_holds(
-    pool, store: Storage, recovery: str
-):
-    """Folding a capture into the pending snapshot locks none of their turns.
-
-    A follow-up takes the conversation's newest turn and then the group. A
-    capture is handed back with its group locked, so a fold that locked a turn
-    it moved -- inserting a turn's row into another snapshot, or naming a new
-    anchor, share-locks that turn through its foreign key -- waited for the
-    follow-up while holding the group the follow-up waits for next.
-    """
-    first, first_claim, sandbox = await _reserve_shared_chat(store)
-    await _run_turn(store, first, first_claim, sandbox)
-    await _request(store, first)
-    capture = await store.snapshot.claim_due_sandbox_snapshot()
-    assert capture is not None
-    second = await _run_next_turn(store, first, sandbox)
-    await _legacy_turn_snapshot(pool, sandbox["sandbox_id"], second)
-    recover = None
-    async with pool.acquire() as follow_up:
-        try:
-            async with follow_up.transaction():
-                # A follow-up's first two locks, in ``insert_follow_up``'s order:
-                # the newest turn is the one the settled pending snapshot holds.
-                await follow_up.execute(
-                    "SELECT id FROM agent_threads WHERE id = $1 FOR UPDATE", first["thread_id"]
-                )
-                newest = await follow_up.fetchval(
-                    "SELECT id FROM agent_jobs WHERE thread_id = $1 "
-                    "ORDER BY turn_no DESC LIMIT 1 FOR UPDATE",
-                    first["thread_id"],
-                )
-                assert newest == second["id"]
-                if recovery == "deferred":
-                    recover = asyncio.create_task(
-                        store.snapshot.defer_sandbox_snapshot_capture(
-                            snapshot_id=capture["snapshot_id"],
-                            sandbox_id=capture["sandbox_id"],
-                            sandbox_generation=capture["generation"],
-                            container_id=capture["container_id"],
-                            detail="the host is busy",
-                        )
-                    )
-                else:
-                    recover = asyncio.create_task(
-                        store.snapshot.reap_stalled_sandbox_snapshot_captures(stall_seconds=0)
-                    )
-                # Handed back while the follow-up holds the turn...
-                assert await asyncio.wait_for(recover, timeout=10)
-                # ...so the follow-up's next two locks are free.
-                await follow_up.execute(
-                    "SELECT thread_id FROM agent_thread_sandbox_memberships "
-                    "WHERE thread_id = $1 FOR UPDATE",
-                    first["thread_id"],
-                )
-                await follow_up.execute(
-                    "SELECT id FROM agent_sandboxes WHERE id = $1 FOR UPDATE NOWAIT",
-                    sandbox["sandbox_id"],
-                )
-        finally:
-            await _settle(recover)
-    assert [
-        (row["state"], row["included"]) for row in await _snapshots(pool, sandbox["sandbox_id"])
-    ] == [("pending", [first["id"], second["id"]])]
-
-
-async def test_a_stalled_capture_the_reaper_cannot_hand_back_does_not_hold_back_the_others(
-    pool, store: Storage, monkeypatch
-):
-    """Each stalled capture is handed back in a transaction of its own.
-
-    The reaper handed back every stalled capture of the deployment in one
-    statement, so a capture the database refused kept every workspace's
-    capture stuck with it. That one is left for the next pass now, and the
-    others go back to the queue.
-    """
-    first, first_claim, first_sandbox = await _reserve_shared_chat(store)
-    await _run_turn(store, first, first_claim, first_sandbox)
-    await _request(store, first)
-    other, other_claim, other_sandbox = await _reserve_retained_chat(store)
-    await _run_turn(store, other, other_claim, other_sandbox, container_id="container-lock-other")
-    await _request(store, other)
-    captures = [await store.snapshot.claim_due_sandbox_snapshot() for _ in range(2)]
-    assert [capture["sandbox_id"] for capture in captures if capture is not None] == [
-        first_sandbox["sandbox_id"],
-        other_sandbox["sandbox_id"],
-    ]
-    stuck, freed = (int(capture["snapshot_id"]) for capture in captures if capture is not None)
-    original = snapshot_module._fold_into_pending_snapshot
-
-    async def refuse_one(conn, *, snapshot_id, sandbox_id):
-        if snapshot_id == stuck:
-            raise asyncpg.exceptions.DeadlockDetectedError("deadlock detected")
-        return await original(conn, snapshot_id=snapshot_id, sandbox_id=sandbox_id)
-
-    monkeypatch.setattr(snapshot_module, "_fold_into_pending_snapshot", refuse_one)
-    assert await store.snapshot.reap_stalled_sandbox_snapshot_captures(stall_seconds=0) == [freed]
-    async with pool.acquire() as conn:
-        states = await conn.fetch(
-            "SELECT id, state FROM agent_sandbox_snapshots WHERE id = ANY($1::bigint[]) "
-            "ORDER BY id",
-            [stuck, freed],
-        )
-    assert [(row["id"], row["state"]) for row in states] == [
-        (stuck, "capturing"),
-        (freed, "pending"),
-    ]
-
-    monkeypatch.undo()
-    assert await store.snapshot.reap_stalled_sandbox_snapshot_captures(stall_seconds=0) == [stuck]
-
-
-async def _claimed_for_publication(store: Storage) -> tuple[dict, dict, dict]:
-    """A finished retained turn whose captured snapshot a publisher has claimed."""
-    job, claim, sandbox = await _reserve_shared_chat(store)
-    await _run_turn(store, job, claim, sandbox)
-    await _request(store, job)
-    capture = await store.snapshot.claim_due_sandbox_snapshot()
-    assert capture is not None
-    patch = "diff --git a/answer.txt b/answer.txt\nnew file mode 100644\n"
-    assert (
-        await store.snapshot.record_sandbox_snapshot_capture(
-            snapshot_id=capture["snapshot_id"],
-            sandbox_id=capture["sandbox_id"],
-            sandbox_generation=capture["generation"],
-            container_id=capture["container_id"],
-            workspace_epoch=capture["workspace_epoch"],
-            base_sha=capture["base_sha"],
-            patch=patch,
-            content_sha256=hashlib.sha256(patch.encode()).hexdigest(),
-        )
-        == "captured"
-    )
-    publication = await store.snapshot.claim_for_publish()
-    assert publication is not None and publication["included_job_ids"] == [job["id"]]
-    return job, sandbox, publication
-
-
-async def test_a_publication_record_takes_its_turns_before_their_group(pool, store: Storage):
-    """Recording a publication waits behind a follow-up instead of crossing it.
-
-    A follow-up, a settlement and a Fork take the conversation's newest turn,
-    then its membership, then the group. Recording a publication wrote the
-    group first and the included turns after it, so a message sent while a
-    chat's snapshot was being recorded deadlocked with it -- and a record that
-    lost left the pull request it was recording open and unrecorded.
-    """
-    job, sandbox, publication = await _claimed_for_publication(store)
-    pr_url = "https://github.com/example-org/example-repo/pull/1"
-    publish = None
-    async with pool.acquire() as follow_up:
-        try:
-            async with follow_up.transaction():
-                # A follow-up's first two locks, in ``insert_follow_up``'s order.
-                await follow_up.execute(
-                    "SELECT id FROM agent_threads WHERE id = $1 FOR UPDATE", job["thread_id"]
-                )
-                await follow_up.execute(
-                    "SELECT id FROM agent_jobs WHERE thread_id = $1 "
-                    "ORDER BY turn_no DESC LIMIT 1 FOR UPDATE",
-                    job["thread_id"],
-                )
-                follow_up_pid = await follow_up.fetchval("SELECT pg_backend_pid()")
-                publish = asyncio.create_task(
-                    store.snapshot.record_snapshot_publish(
-                        snapshot_id=publication["snapshot_id"],
-                        expected_publish_attempt_count=publication["publish_attempt_count"],
-                        pr_url=pr_url,
-                        commit_sha="b" * 40,
-                    )
-                )
-                await _blocked_by(pool, follow_up_pid)
-                # Its next two, which the waiting record must not be holding.
-                await follow_up.execute(
-                    "SELECT thread_id FROM agent_thread_sandbox_memberships "
-                    "WHERE thread_id = $1 FOR UPDATE",
-                    job["thread_id"],
-                )
-                await follow_up.execute(
-                    "SELECT id FROM agent_sandboxes WHERE id = $1 FOR UPDATE NOWAIT",
-                    sandbox["sandbox_id"],
-                )
-            assert await asyncio.wait_for(publish, timeout=10)
-        finally:
-            await _settle(publish)
-    published = await store.conversation_queries.get_job(job["id"])
-    assert published is not None and published["published_pr_url"] == pr_url
-
-
-async def test_an_idle_only_message_refuses_while_a_publication_holds_its_newest_turn(
-    pool, store: Storage
-):
-    """An idle-only message does not wait under the group for a turn a publication holds.
-
-    A publication records its included turns before their group, and the
-    idle-only submit locks the group before the newest turn. That is safe only
-    because the submit locks the turn once the group's newest snapshot reads
-    published, which a publication still in flight has not committed.
-    """
-    job, sandbox, publication = await _claimed_for_publication(store)
-    async with pool.acquire() as publisher, publisher.transaction():
-        # ``record_snapshot_publish`` up to its group: the snapshot, then its turns.
-        await publisher.execute(
-            "UPDATE agent_sandbox_snapshots SET state = 'published', published_pr_url = $2, "
-            "published_commit_sha = $3, published_at = NOW() WHERE id = $1",
-            publication["snapshot_id"],
-            "https://github.com/example-org/example-repo/pull/3",
-            "d" * 40,
-        )
-        await publisher.fetch(
-            "SELECT id FROM agent_jobs WHERE id IN ("
-            "SELECT job_id FROM agent_snapshot_jobs WHERE snapshot_id = $1) "
-            "ORDER BY id FOR NO KEY UPDATE",
-            publication["snapshot_id"],
-        )
-        refused = await asyncio.wait_for(
-            store.pending_messages.submit_message(
-                thread_id=job["thread_id"],
-                user_id=job["user_id"],
-                prompt="Watch the PR and merge",
-                skill_ids=None,
-                attachment_ids=None,
-                model=None,
-                reasoning_effort=None,
-                require_idle=True,
-                expected_latest_job_id=job["id"],
-            ),
-            timeout=10,
-        )
-        assert refused == {"error": "conversation_changed"}
-        # The submit gave the group back, so the publication goes on.
-        await publisher.execute(
-            "SELECT id FROM agent_sandboxes WHERE id = $1 FOR UPDATE NOWAIT",
-            sandbox["sandbox_id"],
-        )
-
-
-async def test_a_publication_request_does_not_wait_under_the_group_for_a_held_turn(
-    pool, store: Storage
-):
-    """A request share-locks its turns after their group, so it never waits for them.
-
-    A follow-up holds its conversation's newest turn while it waits for the
-    group. A request that waited for that turn while holding the group would
-    close the cycle; it gives the group back and says the workspace is busy.
-    """
-    job, claim, sandbox = await _reserve_shared_chat(store)
-    await _run_turn(store, job, claim, sandbox)
-    async with pool.acquire() as holder, holder.transaction():
-        await holder.execute("SELECT id FROM agent_jobs WHERE id = $1 FOR UPDATE", job["id"])
-        refused = await asyncio.wait_for(
-            store.snapshot.request_snapshot_publication(
-                thread_id=job["thread_id"], user_id=job["user_id"]
-            ),
-            timeout=10,
-        )
-        assert refused == {"error": "workspace_busy"}
-        # The request gave the group back, and opened nothing.
-        await holder.execute(
-            "SELECT id FROM agent_sandboxes WHERE id = $1 FOR UPDATE NOWAIT",
-            sandbox["sandbox_id"],
-        )
-    assert await _snapshots(pool, sandbox["sandbox_id"]) == []
-    assert await _request(store, job)
 
 
 async def _close_a_cycle(rival, statement: str, *args) -> None:
@@ -743,62 +324,6 @@ async def test_cancelling_a_first_turn_does_not_deadlock_with_its_reservation(
     assert reserved is not None and reserved["sandbox_id"] == "asbx_lock_order"
 
 
-async def test_titling_a_thread_does_not_deadlock_with_its_streaming_reply(
-    pool, store: Storage, monkeypatch
-):
-    """Title generation takes the attempt before the conversation, as an append does.
-
-    It took the conversation first and then checked the attempt it was asked
-    for under a share lock, the reverse of every reply its turn appends.
-    """
-    job = await _create_job(store)
-    claim = await _claim(store, worker_id="w1", lease_ttl_seconds=60)
-    assert claim is not None and claim["title_generation_pending"]
-    held, release = asyncio.Event(), asyncio.Event()
-    append_pid: list[int] = []
-    original = attempt_module.insert_event
-
-    async def hold_the_attempt(conn, **fields):
-        if fields["event_type"] == "message":
-            append_pid.append(await conn.fetchval("SELECT pg_backend_pid()"))
-            held.set()
-            await release.wait()
-        return await original(conn, **fields)
-
-    monkeypatch.setattr(attempt_module, "insert_event", hold_the_attempt)
-    # A deadlock the append lost would otherwise be retried out of sight.
-    monkeypatch.setattr(attempt_module, "retry_deadlock_victim", _first_try_only)
-    append = title = None
-    try:
-        append = asyncio.create_task(
-            store.attempt_commands.append_event(
-                attempt_id=claim["attempt_id"],
-                lease_generation=claim["lease_generation"],
-                event_type="message",
-                payload={"text": "Reading the failing test."},
-            )
-        )
-        await asyncio.wait_for(held.wait(), timeout=10)
-        title = asyncio.create_task(
-            store.conversation_commands.set_generated_thread_title(
-                job_id=job["id"],
-                attempt_id=claim["attempt_id"],
-                lease_generation=claim["lease_generation"],
-                title="Flaky test fix",
-            )
-        )
-        await _blocked_by(pool, append_pid[0])
-        release.set()
-        assert await asyncio.wait_for(append, timeout=10) is not None
-        assert await asyncio.wait_for(title, timeout=10)
-    finally:
-        release.set()
-        await _settle(append)
-        await _settle(title)
-    saved = await store.conversation_queries.get_job(job["id"])
-    assert saved is not None and saved["title"] == "Flaky test fix"
-
-
 async def test_abandoning_an_activation_takes_its_attempt_before_its_membership(
     pool, store: Storage
 ):
@@ -867,8 +392,8 @@ async def test_losing_an_activation_waits_for_a_deletion_that_holds_its_queued_t
     conversation after its attempt, where deletion starts.
     """
     job, claim, sandbox = await _reserve_shared_chat(store)
-    queued = await store.conversation_commands.create_follow_up(
-        parent_job_id=job["id"], user_id=job["user_id"], prompt="and update the docs"
+    queued = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id=job["user_id"], prompt="and update the docs"
     )
     assert queued is not None and queued.get("error") is None
     abandon = None
@@ -908,6 +433,154 @@ async def test_losing_an_activation_waits_for_a_deletion_that_holds_its_queued_t
         finally:
             await _settle(abandon)
     assert abandoned is not None and abandoned["context_status"] == "lost"
+
+
+async def test_a_claim_takes_its_turns_group_before_the_host_row(pool, store: Storage):
+    """A claim waiting for a group holds no host row that a finishing member needs.
+
+    Finishing a turn writes its group and then gives its slot back, and a Fork
+    sibling's next turn is claimed on the same host. The claim locked the host
+    row before it chose the turn, then waited for the turn's group: a finish
+    in between deadlocked with it, and when Postgres picked the finish, a turn
+    that had settled was failed once its lease ran out.
+    """
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    await _run_turn(store, job, claim, sandbox)
+    follow = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id=job["user_id"], prompt="and update the docs"
+    )
+    assert follow is not None and follow.get("error") is None
+    claiming = None
+    async with pool.acquire() as member:
+        try:
+            async with member.transaction():
+                # A member's finish, up to its slot: it has written the group.
+                await member.execute(
+                    "UPDATE agent_sandboxes SET last_activity_at = NOW() WHERE id = $1",
+                    sandbox["sandbox_id"],
+                )
+                claiming = asyncio.create_task(
+                    _claim(
+                        store,
+                        worker_id="next-turn",
+                        lease_ttl_seconds=60,
+                        host=_HOST,
+                        host_credential_hash=_HOST_CREDENTIAL,
+                    )
+                )
+                await _blocked_by(pool, await member.fetchval("SELECT pg_backend_pid()"))
+                # The finish's slot next, which the waiting claim must not hold.
+                await member.execute(
+                    "SELECT host FROM agent_runner_hosts WHERE host = $1 FOR UPDATE NOWAIT",
+                    _HOST,
+                )
+            claimed = await asyncio.wait_for(claiming, timeout=10)
+        finally:
+            await _settle(claiming)
+    assert claimed is not None and claimed["id"] == follow["id"]
+
+
+async def test_a_claim_counts_an_environment_run_started_while_it_waited(
+    pool, store: Storage, monkeypatch
+):
+    """Taken after the group, the host row is still locked before the slots are counted.
+
+    An environment run takes a slot of its host without writing the host row:
+    its claim locks the row, counts the slots in use and starts the run. A
+    turn's claim counts those runs in its slot UPDATE as they were when that
+    statement began, so it locks the row first, in a statement of its own.
+    """
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "environment-test-key")
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    await _run_turn(store, job, claim, sandbox)
+    follow = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id=job["user_id"], prompt="and update the docs"
+    )
+    assert follow is not None and follow.get("error") is None
+    environment = await _save_environment(store)
+    run = await store.environments.create_environment_run(
+        "alice",
+        repo="org/repo",
+        base_sha="a" * 40,
+        selection={"environment_id": environment["id"], "environment_id_provided": True},
+        key="test",
+    )
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE agent_runner_hosts SET slots_total = 1 WHERE host = $1", _HOST)
+    claiming = None
+    async with pool.acquire() as environment_claim:
+        try:
+            async with environment_claim.transaction():
+                # ``claim_environment_run`` up to its commit: the host row, then the run.
+                await environment_claim.execute(
+                    "SELECT host FROM agent_runner_hosts WHERE host = $1 FOR UPDATE", _HOST
+                )
+                await environment_claim.execute(
+                    "UPDATE agent_environment_runs SET state = 'running', host = $2, "
+                    "lease_generation = lease_generation + 1, "
+                    "lease_expires_at = NOW() + INTERVAL '120 seconds', started_at = NOW() "
+                    "WHERE id = $1",
+                    run["id"],
+                    _HOST,
+                )
+                claiming = asyncio.create_task(
+                    _claim(
+                        store,
+                        worker_id="next-turn",
+                        lease_ttl_seconds=60,
+                        host=_HOST,
+                        host_credential_hash=_HOST_CREDENTIAL,
+                    )
+                )
+                await _blocked_by(pool, await environment_claim.fetchval("SELECT pg_backend_pid()"))
+            # The run holds the host's only slot.
+            assert await asyncio.wait_for(claiming, timeout=10) is None
+        finally:
+            await _settle(claiming)
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_environment_runs SET cleanup_complete = TRUE WHERE id = $1", run["id"]
+        )
+    claimed = await _claim(
+        store,
+        worker_id="next-turn",
+        lease_ttl_seconds=60,
+        host=_HOST,
+        host_credential_hash=_HOST_CREDENTIAL,
+    )
+    assert claimed is not None and claimed["id"] == follow["id"]
+
+
+async def test_a_removal_counts_a_hosts_groups_under_their_locks(pool, store: Storage):
+    """A workspace start fenced while a removal decides cannot strand its group.
+
+    Revoking an idle host hands each stopped group its checkpoint covers to
+    another host. A workspace request fences the group before it is
+    forwarded, which ends that cover: the container may start. The removal
+    counted the groups without locks, so a fence landing between the count
+    and the hand-over took the group out of the hand-over, and the host was
+    revoked with the group left on it, uncovered, its container about to
+    start where nothing could report it.
+    """
+    _job, group = await _covered(pool, store)
+    removing = None
+    async with pool.acquire() as request:
+        try:
+            async with request.transaction():
+                # The request's fence, held until it is forwarded to the host.
+                fenced = await fence_sandbox_start(request, group["sandbox_id"])
+                assert fenced is not None and fenced[0] == "stopped"
+                removing = asyncio.create_task(store.host_pool.remove_host(host="runner-a"))
+                await _blocked_by(pool, await request.fetchval("SELECT pg_backend_pid()"))
+            removed = await asyncio.wait_for(removing, timeout=10)
+        finally:
+            await _settle(removing)
+    # The fence came first, so the group no longer moves: the administrator is
+    # asked, and the host is not revoked under it.
+    assert removed == "cannot_move"
+    assert (await _restore_state(pool, group["sandbox_id"]))["state"] == "stopped"
+    kept = await store.host_pool.get_host(host="runner-a")
+    assert kept is not None and kept["status"] == "online"
 
 
 @pytest.mark.parametrize("sibling", ["claim", "finish"])
@@ -999,6 +672,126 @@ async def test_an_attempt_the_reaper_cannot_close_does_not_undo_the_others(
     ]
 
 
+async def test_the_attempt_reaper_ends_a_turn_by_the_membership_it_wrote(pool, store: Storage):
+    """A release between the reaper's read and its write leaves the context intact.
+
+    The reaper reads an expired attempt's membership without locking it. A
+    writer that released the activation before admission in between left the
+    reaper's write matching nothing, and the reaper still marked the attempt's
+    context lost, failed the turn queued behind it and failed its job as
+    context lost, though the membership said the context was intact.
+    """
+    job, claim, _sandbox = await _reserve_shared_chat(store)
+    queued = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id=job["user_id"], prompt="and update the docs"
+    )
+    assert queued is not None and queued.get("error") is None
+    await _expire_attempt(pool, store, claim["attempt_id"])
+    reap = None
+    async with pool.acquire() as releaser:
+        try:
+            async with releaser.transaction():
+                # The membership, as a release takes it: the reaper reads it
+                # and then waits to write it.
+                await releaser.execute(
+                    "SELECT thread_id FROM agent_thread_sandbox_memberships "
+                    "WHERE thread_id = $1 FOR UPDATE",
+                    job["thread_id"],
+                )
+                reap = asyncio.create_task(store.attempt_commands.reap_expired(max_attempts=3))
+                await _blocked_by(pool, await releaser.fetchval("SELECT pg_backend_pid()"))
+                # What releasing the activation before admission leaves.
+                await releaser.execute(
+                    "UPDATE agent_thread_sandbox_memberships "
+                    "SET active_attempt_id = NULL, resident_state = 'stopped' "
+                    "WHERE thread_id = $1",
+                    job["thread_id"],
+                )
+            actions = await asyncio.wait_for(reap, timeout=10)
+        finally:
+            await _settle(reap)
+    # An ordinary expiry: the turn waits in the queue for its next attempt.
+    assert actions == [{"job_id": job["id"], "attempt_id": claim["attempt_id"], "action": "queued"}]
+    member = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
+    assert member is not None and member["context_status"] == "new"
+    still_queued = await store.conversation_queries.get_job(queued["id"])
+    assert still_queued is not None and still_queued["state"] == "queued"
+    async with pool.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT context_status FROM agent_attempts WHERE id = $1", claim["attempt_id"]
+            )
+            != "lost"
+        )
+
+
+async def test_releasing_an_activation_waits_for_the_reaper_holding_its_attempt(
+    pool, store: Storage, monkeypatch
+):
+    """The reaper and a release cannot both decide what an activation left.
+
+    Releasing an activation before admission took no lock on its attempt and
+    asked it for nothing but its generation. It committed while the reaper
+    held the expired attempt between reading the membership and writing it,
+    so the membership said the context was intact while the reaper failed
+    the job and the turn queued behind it as context lost. The release takes
+    the attempt first now: it waits, and the reaper's answer stands alone.
+    """
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    queued = await append_follow_up(
+        pool, parent_job_id=job["id"], user_id=job["user_id"], prompt="and update the docs"
+    )
+    assert queued is not None and queued.get("error") is None
+    await _expire_attempt(pool, store, claim["attempt_id"])
+    original = attempt_module.insert_event
+    reaper_pid: list[int] = []
+    resume = asyncio.Event()
+
+    async def pause_after_the_read(conn, **fields):
+        # The reaper's control event: after it read the membership, before it
+        # writes the membership.
+        if fields["attempt_id"] == claim["attempt_id"]:
+            reaper_pid.append(await conn.fetchval("SELECT pg_backend_pid()"))
+            await resume.wait()
+        return await original(conn, **fields)
+
+    monkeypatch.setattr(attempt_module, "insert_event", pause_after_the_read)
+    reap = asyncio.create_task(store.attempt_commands.reap_expired(max_attempts=3))
+    abandon = None
+    try:
+        async with asyncio.timeout(10):
+            while not reaper_pid:
+                await asyncio.sleep(0.01)
+        abandon = asyncio.create_task(
+            store.sandbox.abandon_thread_sandbox(
+                thread_id=job["thread_id"],
+                attempt_id=claim["attempt_id"],
+                lease_generation=claim["lease_generation"],
+                sandbox_generation=sandbox["generation"],
+                activation_generation=sandbox["activation_generation"],
+                lost=False,
+                detail="checkout failed",
+                idle_timeout_seconds=1800,
+            )
+        )
+        await _blocked_by(pool, reaper_pid[0])
+        resume.set()
+        actions = await asyncio.wait_for(reap, timeout=10)
+        abandoned = await asyncio.wait_for(abandon, timeout=10)
+    finally:
+        resume.set()
+        await _settle(abandon)
+        await _settle(reap)
+    assert abandoned is None
+    assert [(action["attempt_id"], action["action"]) for action in actions] == [
+        (claim["attempt_id"], "failed")
+    ]
+    member = await store.sandbox.thread_sandbox(thread_id=job["thread_id"])
+    assert member is not None and member["context_status"] == "lost"
+    failed = await store.conversation_queries.get_job(queued["id"])
+    assert failed is not None and failed["state"] == "failed"
+
+
 async def test_deleting_snapshots_does_not_deadlock_with_a_build_receipt(
     pool, store: Storage, monkeypatch
 ):
@@ -1065,3 +858,214 @@ async def test_deleting_snapshots_does_not_deadlock_with_a_build_receipt(
             )
         )
     assert states == {older: "deleting", newer: "deleting"}
+
+
+_LOCK_MEMBER = (
+    "SELECT thread_id FROM agent_thread_sandbox_memberships WHERE thread_id = $1 FOR UPDATE"
+)
+
+
+async def _forked(store: Storage, monkeypatch, *, target_sorts_first: bool) -> tuple[dict, dict]:
+    """A Fork of a settled chat, its coordinator claimed and both residencies established.
+
+    A new chat's id is random, so a Fork's target sorts before its source half
+    the time; this one's sorts first, or last, as asked.
+    """
+    job, claim, sandbox = await _reserve_shared_chat(store)
+    await _run_turn(store, job, claim, sandbox)
+    target = "athr_" + ("0" if target_sorts_first else "f") * 16
+    monkeypatch.setattr(session_fork_module, "new_thread_id", lambda: target)
+    operation = await store.session_fork.prepare_session_fork(
+        source_job_id=job["id"], user_id=job["user_id"], idempotency_key="lock-order-fork"
+    )
+    assert operation is not None and operation.get("error") is None, operation
+    assert (operation["target_thread_id"] < job["thread_id"]) is target_sorts_first
+    assert await store.session_fork.claim_session_fork_materialization(
+        operation_id=operation["id"], coordinator_token="coordinator", lease_seconds=990
+    )
+    residencies = await store.session_fork.establish_session_fork_residencies(
+        operation_id=operation["id"], coordinator_token="coordinator", ttl_seconds=120
+    )
+    assert residencies is not None
+    return {**operation, "residencies": residencies}, job
+
+
+async def _materialized(store: Storage, operation: dict) -> None:
+    """Record the host's receipt for the Fork, as its coordinator does."""
+    residencies = operation["residencies"]
+    receipt = {
+        key: operation[key]
+        for key in (
+            "sandbox_id",
+            "sandbox_generation",
+            "container_id",
+            "runtime_id",
+            "runtime_version",
+            "source_thread_id",
+            "source_native_session_id",
+            "target_thread_id",
+            "target_resident_slot_id",
+        )
+    }
+    recorded = await store.session_fork.record_session_fork_materialized(
+        operation_id=operation["id"],
+        coordinator_token="coordinator",
+        receipt={
+            **receipt,
+            "operation_id": operation["id"],
+            "target_native_session_id": "native-child",
+            "source_residency_generation": residencies["source"]["generation"],
+            "target_residency_generation": residencies["target"]["generation"],
+            "source_process_generation": 2,
+            "target_process_generation": 1,
+        },
+    )
+    assert recorded is not None and recorded["state"] == "materialized"
+
+
+@pytest.mark.parametrize("target_sorts_first", [True, False], ids=["target-first", "source-first"])
+@pytest.mark.parametrize("writer", ["establish", "finalize", "reap", "delete"])
+async def test_a_write_to_both_fork_members_takes_them_in_a_heartbeats_order(
+    pool, store: Storage, monkeypatch, writer: str, target_sorts_first: bool
+):
+    """A write to both members of a Fork takes them in thread order, as a heartbeat does.
+
+    A heartbeat extending both residencies locks the two members in thread
+    order. Fork's writers took the source's and then the target's, and the
+    target's random id sorts first half the time: a beat holding the target
+    then waited for the source while the Fork held the source and waited for
+    the target. Owner deletion of both chats updated their members in
+    whatever order its plan met them. The heartbeat retries as a deadlock's
+    victim; the owner's Fork and deletion do not, and failed with a 500. The
+    rival here is the beat part-way through its lock: it holds the member
+    first in thread order and then asks for the other one, which the writer
+    must not be holding while it waits.
+    """
+    operation, job = await _forked(store, monkeypatch, target_sorts_first=target_sorts_first)
+    if writer in {"finalize", "delete"}:
+        await _materialized(store, operation)
+    if writer == "delete":
+        assert await store.session_fork.finalize_session_fork(operation_id=operation["id"])
+    if writer == "reap":
+        # Its coordinator stopped before the host's receipt was recorded.
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE agent_session_forks "
+                "SET coordinator_lease_expires_at = NOW() - INTERVAL '1 second' WHERE id = $1",
+                operation["id"],
+            )
+    members = (job["thread_id"], operation["target_thread_id"])
+    writes = {
+        "establish": lambda: store.session_fork.establish_session_fork_residencies(
+            operation_id=operation["id"], coordinator_token="coordinator", ttl_seconds=120
+        ),
+        "finalize": lambda: store.session_fork.finalize_session_fork(operation_id=operation["id"]),
+        "reap": lambda: store.session_fork.reap_stalled_session_forks(stall_seconds=0),
+        "delete": lambda: store.conversation_commands.delete_sessions(
+            thread_ids=list(members), user_id=job["user_id"]
+        ),
+    }
+    first, second = sorted(members)
+    write = None
+    async with pool.acquire() as beat:
+        try:
+            async with beat.transaction():
+                await beat.execute(_LOCK_MEMBER, first)
+                write = asyncio.create_task(writes[writer]())
+                await _blocked_by(pool, await beat.fetchval("SELECT pg_backend_pid()"))
+                await _close_a_cycle(beat, _LOCK_MEMBER, second)
+            written = await asyncio.wait_for(write, timeout=10)
+        finally:
+            await _settle(write)
+    assert written
+    if writer == "delete":
+        assert sorted(written["thread_ids"]) == sorted(members)
+        assert len(written["released_residencies"]) == 2
+
+
+_LOCK_CONVERSATION = "SELECT id FROM agent_threads WHERE id = $1 FOR UPDATE"
+
+
+@pytest.mark.parametrize("target_sorts_first", [True, False], ids=["target-first", "source-first"])
+async def test_fork_finalization_takes_both_conversations_in_id_order(
+    pool, store: Storage, monkeypatch, target_sorts_first: bool
+):
+    """Finalizing a Fork takes its two conversations in id order, as an archive does.
+
+    An owner archiving or deleting several chats locks their conversations in
+    id order. Finalization locked the source's and then the target's, and the
+    target's random id sorts first half the time: an archive holding the
+    target then waited for the source while finalization held the source and
+    waited for the target, and Postgres aborted one of them. The rival here is
+    that archive part-way through its lock: it holds the conversation first
+    in id order and then asks for the other one, which finalization must not
+    be holding while it waits.
+    """
+    operation, job = await _forked(store, monkeypatch, target_sorts_first=target_sorts_first)
+    await _materialized(store, operation)
+    first, second = sorted((job["thread_id"], operation["target_thread_id"]))
+    finalize = None
+    async with pool.acquire() as owner:
+        try:
+            async with owner.transaction():
+                await owner.execute(_LOCK_CONVERSATION, first)
+                finalize = asyncio.create_task(
+                    store.session_fork.finalize_session_fork(operation_id=operation["id"])
+                )
+                await _blocked_by(pool, await owner.fetchval("SELECT pg_backend_pid()"))
+                await _close_a_cycle(owner, _LOCK_CONVERSATION, second)
+            anchor = await asyncio.wait_for(finalize, timeout=10)
+        finally:
+            await _settle(finalize)
+    assert anchor is not None and anchor["thread_id"] == operation["target_thread_id"]
+
+
+@pytest.mark.parametrize("in_fork_order", [False, True], ids=["reversed", "in-order"])
+async def test_the_fork_reaper_takes_the_targets_it_fails_in_id_order(
+    pool, store: Storage, monkeypatch, in_fork_order: bool
+):
+    """A reaper pass that fails several Forks takes their targets in id order.
+
+    A Fork left preparing with no live coordinator is failed, and its hidden
+    target tombstoned. The reaper tombstoned each target as it reached its
+    Fork, in Fork id order, which the targets' random ids need not share:
+    holding one target, it waited for the other while an owner archiving or
+    deleting both held that one and waited for the first. The rival here is
+    that archive part-way through its lock.
+    """
+    # A finalized Fork is a chat of its own, which can be forked in turn.
+    operation, job = await _forked(store, monkeypatch, target_sorts_first=False)
+    await _materialized(store, operation)
+    child = await store.session_fork.finalize_session_fork(operation_id=operation["id"])
+    assert child is not None
+    # The reaper meets the Fork of the origin first. Its target sorts first,
+    # as the Forks do, or last.
+    targets = ["athr_" + "1" * 16, "athr_" + "2" * 16]
+    fork_ids = iter(["asfork_" + "1" * 32, "asfork_" + "2" * 32])
+    target_ids = iter(targets if in_fork_order else reversed(targets))
+    monkeypatch.setattr(session_fork_module, "new_session_fork_id", lambda: next(fork_ids))
+    monkeypatch.setattr(session_fork_module, "new_thread_id", lambda: next(target_ids))
+    stalled = []
+    for source in (job, child):
+        fork = await store.session_fork.prepare_session_fork(
+            source_job_id=source["id"], user_id=job["user_id"], idempotency_key=source["id"]
+        )
+        assert fork is not None and fork.get("error") is None, fork
+        stalled.append(fork)
+    first, second = sorted(fork["target_thread_id"] for fork in stalled)
+    reap = None
+    async with pool.acquire() as owner:
+        try:
+            async with owner.transaction():
+                await owner.execute(_LOCK_CONVERSATION, first)
+                reap = asyncio.create_task(
+                    store.session_fork.reap_stalled_session_forks(stall_seconds=0)
+                )
+                await _blocked_by(pool, await owner.fetchval("SELECT pg_backend_pid()"))
+                await _close_a_cycle(owner, _LOCK_CONVERSATION, second)
+            reaped = await asyncio.wait_for(reap, timeout=10)
+        finally:
+            await _settle(reap)
+    assert [(action["id"], action["recovery_action"]) for action in reaped] == [
+        (fork["id"], "cleanup") for fork in stalled
+    ]

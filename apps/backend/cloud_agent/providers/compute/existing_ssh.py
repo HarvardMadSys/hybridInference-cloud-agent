@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.ports.external.compute_provider import (
@@ -76,7 +76,18 @@ class ExistingSSHProvider(ComputeProvider):
         """Observe the exact resource identity and its full known node scope."""
         config = ExistingSSHConfig.model_validate(ref.config)
         connection = self.connection(config)
-        machine = (await self._transport.run(connection, "cat /etc/machine-id")).strip()
+        try:
+            machine = (await self._transport.run(connection, "cat /etc/machine-id")).strip()
+        except ProviderError as exc:
+            if exc.code != "result_unknown":
+                raise
+            # Reading the identity changes nothing on the machine, so a timeout
+            # leaves no outcome to verify: the observation is simply tried again.
+            raise ProviderError(
+                "temporarily_unavailable",
+                "The machine did not answer over SSH in time",
+                retryable=True,
+            ) from None
         if not re.fullmatch(r"[a-fA-F0-9]{32}", machine):
             raise ProviderError(
                 "machine_identity_unavailable", "Machine identity could not be verified"
@@ -94,7 +105,7 @@ class ExistingSSHProvider(ComputeProvider):
             ref=observed_ref,
             state="ready",
             raw_state="ssh_verified",
-            observed_at=datetime.now(timezone.utc),
+            observed_at=datetime.now(UTC),
             lease_known=False,
             scope_complete=True,
             nodes=(

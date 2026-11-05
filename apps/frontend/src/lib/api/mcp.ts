@@ -24,7 +24,8 @@ const API_BASE = config.apiBase;
 export type McpTransport = 'streamable-http' | 'http-sse' | 'stdio';
 
 /** Where a stdio server actually runs. */
-export type McpLocation = 'remote' | 'managed-worker' | 'user-connector';
+/** `sandbox`: inside each chat's own sandbox, next to the agent (pinned packages, no secrets). */
+export type McpLocation = 'remote' | 'managed-worker' | 'user-connector' | 'sandbox';
 
 /** How a connection authenticates to its server. */
 export type McpAuthKind = 'none' | 'static' | 'oauth';
@@ -76,6 +77,9 @@ export interface McpTemplateApi {
   notes: string[];
   documentation_url?: string;
   browser_sign_in_available?: boolean;
+  /** A sandbox preset: a pinned stdio server run in each chat's sandbox, no URL. */
+  location?: McpLocation;
+  launch?: { command: string; args: string[] };
 }
 
 /** Public metadata from the official MCP Registry, never an installed connection. */
@@ -253,6 +257,8 @@ export function validateMcpAuthorizationUrl(value: string): string {
 /** One session's selection for one connection. */
 export interface McpBindingApi {
   connection_id: number;
+  /** `sandbox`: a program that runs with the agent; its calls are not held for approval. */
+  location?: McpLocation;
   connection_label: string;
   alias: string;
   enabled: boolean;
@@ -413,9 +419,8 @@ export async function previewMcpImport(
 /**
  * Save a paste the user has already seen.
  *
- * `locations` overrides the run location per draft, which is the one decision
- * the paste cannot make for the user: a colleague's snippet says nothing about
- * whether this deployment may run a local process for it.
+ * `locations` names where each draft runs, as its preview placed it, so the
+ * save stores what the user confirmed.
  */
 export async function saveMcpImport(
   text: string,
@@ -537,29 +542,6 @@ export async function getMcpThreadBindings(threadId: string): Promise<McpBinding
   return jsonOrThrow(
     await fetchWithAuth(API_BASE, `/v1/agent/mcp/threads/${encodeURIComponent(threadId)}/bindings`),
   );
-}
-
-/**
- * Replace a conversation's selection wholesale.
- *
- * Wholesale rather than per-capability because the backend validates the
- * selection against the connections' current revisions as one write: a partial
- * update could leave a binding that already fails its own fence.
- */
-export async function replaceMcpThreadBindings(
-  threadId: string,
-  bindings: McpBindingRequest[],
-): Promise<McpBindingsApi> {
-  const resp = await fetchWithAuth(
-    API_BASE,
-    `/v1/agent/mcp/threads/${encodeURIComponent(threadId)}/bindings`,
-    {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bindings }),
-    },
-  );
-  return jsonOrThrow(resp);
 }
 
 /** Save one server's conversation override without changing other servers. */

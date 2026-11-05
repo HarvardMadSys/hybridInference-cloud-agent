@@ -10,7 +10,7 @@ from tests.unit.test_retained_deploy import _add_required_host_paths, _host, _ru
 from cloud_agent_host import candidate_check
 from cloud_agent_host.candidate_check import check_candidate
 from cloud_agent_host.sandbox import ContainerBackend, SandboxError
-from cloud_agent_host.shared_protocol import (
+from cloud_agent_shared.shared_protocol import (
     SHARED_SANDBOX_HELPER_PINS,
     SHARED_SANDBOX_RUNTIME_PINS,
 )

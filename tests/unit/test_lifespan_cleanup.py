@@ -18,6 +18,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from cloud_agent.accounts.config import RETIRED_GATEWAY_VARIABLES
 from cloud_agent.app import lifespan
 from cloud_agent.bootstrap import lifespan as lifespan_module
 from cloud_agent.measurement_writer import MeasurementWriter, reset_writer
@@ -29,17 +30,21 @@ _EXPECTED_SHUTDOWN_TASKS = (
     "mcp_maintenance_task",
     "mcp_catalog_task",
     "reaper_task",
-    "snapshot_task",
+    "environment_maintenance_task",
+    "notification_maintenance_task",
+    "queued_follow_up_maintenance_task",
+    "goal_wakeup_maintenance_task",
+    "goal_scheduling_maintenance_task",
+    "pending_message_maintenance_task",
     "sandbox_deletion_task",
     "sandbox_move_out_task",
-    "ledger_task",
     "capacity_task",
     "agent_memory_task",
     "queue_monitor_task",
-    "publish_task",
-    "pr_archive_task",
     "profiling_policy_task",
     "compute_resource_task",
+    "account_access_task",
+    "account_broadcast_task",
     "notification_listener_task",
 )
 
@@ -47,7 +52,7 @@ _BEFORE_SETTINGS_TASK = frozenset(
     {
         "storage",
         "initialize_settings",
-        "ensure_gateway_namespace",
+        "bind_identity_source",
         "synchronize_settings",
     }
 )
@@ -55,17 +60,12 @@ _BEFORE_SETTINGS_TASK = frozenset(
 _BEFORE_SOURCE = _BEFORE_SETTINGS_TASK | frozenset(
     {
         "async_client",
-        "gateway_client",
-        "grant_client",
         "source_control",
     }
 )
 
 _QUIET_ENV = (
-    "GATEWAY_BASE_URL",
-    "GATEWAY_ISSUER",
-    "GATEWAY_GRANT_DISPATCH_TOKEN",
-    "AGENT_GITHUB_TOKEN",
+    *RETIRED_GATEWAY_VARIABLES,
     "AGENT_GITHUB_APP_ID",
     "AGENT_GITHUB_APP_PRIVATE_KEY",
     "AGENT_GITHUB_APP_PRIVATE_KEY_PATH",
@@ -107,11 +107,9 @@ _STAGES = [
     *_shared(
         ("storage", False, False),
         ("initialize_settings", False, False),
-        ("ensure_gateway_namespace", False, False),
+        ("bind_identity_source", False, False),
         ("synchronize_settings", False, False),
         ("async_client", False, False),
-        ("gateway_client", True, False),
-        ("grant_client", True, False),
         ("listen", True, False),
         ("mcp_maintenance", True, True),
         ("measurement_writer", True, True),
@@ -126,10 +124,12 @@ _STAGES = [
         ("mcp_catalog", True, False),
         ("mcp_catalog_run", True, False),
         ("reaper", True, False),
-        ("background_wake", True, False),
-        ("snapshots", True, False),
+        ("environment_maintenance", True, False),
+        ("queued_follow_up_maintenance", True, False),
+        ("goal_wakeup_maintenance", True, False),
+        ("goal_scheduling_maintenance", True, False),
+        ("pending_message_maintenance", True, False),
         ("sandbox_deletions", True, False),
-        ("ledger", True, False),
         ("capacity", True, False),
         ("agent_memory", True, False),
         ("profiling_deployment", True, False),
@@ -140,8 +140,6 @@ _STAGES = [
         ("work_signal", True, False),
         ("job_event_signal", True, False),
         ("owner_change_signal", True, False),
-        ("publisher", True, False),
-        ("pr_archiver", True, False),
     ),
     *_only(False, ("mcp_decision_signal", True, False)),
 ]
@@ -263,7 +261,7 @@ def _prepare(
     monkeypatch.setattr(asyncpg, "create_pool", AsyncMock(return_value=pool))
     monkeypatch.setattr("cloud_agent.settings.initialize_settings", AsyncMock())
     monkeypatch.setattr(
-        "cloud_agent.identity_namespace.ensure_gateway_namespace",
+        "cloud_agent.bootstrap.identity.bind_identity_source",
         AsyncMock(return_value=None),
     )
 
@@ -329,16 +327,41 @@ def _prepare(
     for target, label in (
         ("cloud_agent.settings.synchronize_settings", "settings_task"),
         ("cloud_agent.bootstrap.lifespan.reap_expired_attempts", "reaper_task"),
-        ("cloud_agent.bootstrap.lifespan.coordinate_shared_snapshots", "snapshot_task"),
+        (
+            "cloud_agent.bootstrap.lifespan.run_environment_maintenance",
+            "environment_maintenance_task",
+        ),
+        (
+            "cloud_agent.bootstrap.lifespan.run_notification_maintenance",
+            "notification_maintenance_task",
+        ),
+        (
+            "cloud_agent.bootstrap.lifespan.run_queued_follow_up_maintenance",
+            "queued_follow_up_maintenance_task",
+        ),
+        (
+            "cloud_agent.bootstrap.lifespan.run_goal_wakeup_maintenance",
+            "goal_wakeup_maintenance_task",
+        ),
+        (
+            "cloud_agent.bootstrap.lifespan.run_goal_scheduling_maintenance",
+            "goal_scheduling_maintenance_task",
+        ),
+        (
+            "cloud_agent.bootstrap.lifespan.run_pending_message_maintenance",
+            "pending_message_maintenance_task",
+        ),
         ("cloud_agent.bootstrap.lifespan.coordinate_sandbox_deletions", "sandbox_deletion_task"),
         ("cloud_agent.bootstrap.lifespan.coordinate_move_out", "sandbox_move_out_task"),
         ("cloud_agent.bootstrap.lifespan.maintain_agent_memories", "agent_memory_task"),
         ("cloud_agent.bootstrap.lifespan.listen", "notification_listener_task"),
-        ("cloud_agent.ledger.collect_usage_snapshots", "ledger_task"),
+        (
+            "cloud_agent.workers.account_access.run_account_access_enforcement",
+            "account_access_task",
+        ),
+        ("cloud_agent.workers.account_broadcasts.run_account_broadcasts", "account_broadcast_task"),
         ("cloud_agent.capacity_history.prune_host_capacity_history", "capacity_task"),
         ("cloud_agent.operational_health.monitor_queue", "queue_monitor_task"),
-        ("cloud_agent.publish_worker.publish_loop", "publish_task"),
-        ("cloud_agent.workers.pr_archive.pr_archive_loop", "pr_archive_task"),
         ("cloud_agent.mcp.runtime.maintain_host_sessions", "mcp_maintenance_task"),
     ):
         monkeypatch.setattr(target, _idle(events, label))
@@ -372,13 +395,11 @@ def _inject(monkeypatch: pytest.MonkeyPatch, stage: str | None) -> None:
     injections: dict[str, tuple[str, Any]] = {
         "storage": ("cloud_agent.storage.assembly.Storage", _boom(stage)),
         "initialize_settings": ("cloud_agent.settings.initialize_settings", _boom(stage)),
-        "ensure_gateway_namespace": (
-            "cloud_agent.identity_namespace.ensure_gateway_namespace",
+        "bind_identity_source": (
+            "cloud_agent.bootstrap.identity.bind_identity_source",
             _boom(stage),
         ),
         "synchronize_settings": ("cloud_agent.settings.synchronize_settings", _boom(stage)),
-        "gateway_client": ("cloud_agent.gateway.GatewayClient", _boom(stage)),
-        "grant_client": ("cloud_agent.grants.GrantClient", _boom(stage)),
         "source_control": (
             "cloud_agent.source_control_runtime.SourceControlRuntime.from_env",
             _boom(stage),
@@ -391,13 +412,30 @@ def _inject(monkeypatch: pytest.MonkeyPatch, stage: str | None) -> None:
         "mcp_catalog": ("cloud_agent.mcp.catalog.McpCatalog", _boom(stage)),
         "mcp_catalog_run": ("cloud_agent.mcp.catalog.McpCatalog.run", _boom(stage)),
         "reaper": ("cloud_agent.bootstrap.lifespan.reap_expired_attempts", _boom(stage)),
-        "background_wake": ("cloud_agent.bootstrap.lifespan.BackgroundWake", _boom(stage)),
-        "snapshots": ("cloud_agent.bootstrap.lifespan.coordinate_shared_snapshots", _boom(stage)),
+        "environment_maintenance": (
+            "cloud_agent.bootstrap.lifespan.run_environment_maintenance",
+            _boom(stage),
+        ),
+        "queued_follow_up_maintenance": (
+            "cloud_agent.bootstrap.lifespan.run_queued_follow_up_maintenance",
+            _boom(stage),
+        ),
+        "goal_wakeup_maintenance": (
+            "cloud_agent.bootstrap.lifespan.run_goal_wakeup_maintenance",
+            _boom(stage),
+        ),
+        "goal_scheduling_maintenance": (
+            "cloud_agent.bootstrap.lifespan.run_goal_scheduling_maintenance",
+            _boom(stage),
+        ),
+        "pending_message_maintenance": (
+            "cloud_agent.bootstrap.lifespan.run_pending_message_maintenance",
+            _boom(stage),
+        ),
         "sandbox_deletions": (
             "cloud_agent.bootstrap.lifespan.coordinate_sandbox_deletions",
             _boom(stage),
         ),
-        "ledger": ("cloud_agent.ledger.collect_usage_snapshots", _boom(stage)),
         "capacity": ("cloud_agent.capacity_history.prune_host_capacity_history", _boom(stage)),
         "agent_memory": ("cloud_agent.bootstrap.lifespan.maintain_agent_memories", _boom(stage)),
         "profiling_deployment": (
@@ -421,8 +459,6 @@ def _inject(monkeypatch: pytest.MonkeyPatch, stage: str | None) -> None:
         "job_event_signal": ("cloud_agent.bootstrap.lifespan.JobEventSignal", _boom(stage)),
         "owner_change_signal": ("cloud_agent.bootstrap.lifespan.OwnerChangeSignal", _boom(stage)),
         "listen": ("cloud_agent.bootstrap.lifespan.listen", _boom(stage)),
-        "publisher": ("cloud_agent.publish_worker.publish_loop", _boom(stage)),
-        "pr_archiver": ("cloud_agent.workers.pr_archive.pr_archive_loop", _boom(stage)),
         "mcp_maintenance": ("cloud_agent.mcp.runtime.maintain_host_sessions", _boom(stage)),
         "mcp_decision_signal": ("cloud_agent.bootstrap.lifespan.McpDecisionSignal", _boom(stage)),
         "measurement_writer": ("cloud_agent.measurement_writer.MeasurementWriter", _boom(stage)),
@@ -496,6 +532,8 @@ async def test_successful_shutdown_keeps_its_order(
         for name in expected_tasks:
             task = getattr(prepared.app.state, name)
             assert task is not None and not task.done()
+            # Held, so the event loop cannot collect a running loop.
+            assert task in lifespan_module._BACKGROUND_TASKS
         absent = [name for name in _EXPECTED_SHUTDOWN_TASKS if name not in expected_tasks]
         assert all(getattr(prepared.app.state, name) is None for name in absent)
 
@@ -803,10 +841,10 @@ async def test_primary_error_survives_owner_cancellation_during_cleanup() -> Non
 @pytest.mark.parametrize(
     ("background", "attribute", "target"),
     [
-        (True, "publish_task", "cloud_agent.publish_worker.publish_loop"),
+        (True, "reaper_task", "cloud_agent.bootstrap.lifespan.reap_expired_attempts"),
         (False, "mcp_maintenance_task", "cloud_agent.mcp.runtime.maintain_host_sessions"),
     ],
-    ids=["publisher", "mcp-maintenance"],
+    ids=["reaper", "mcp-maintenance"],
 )
 async def test_a_background_task_that_dies_is_reported_when_it_dies(
     monkeypatch: pytest.MonkeyPatch,
@@ -818,7 +856,7 @@ async def test_a_background_task_that_dies_is_reported_when_it_dies(
     """A loop that stops with an error says so then, not first at shutdown.
 
     Until shutdown re-raises it, nothing else would: the process goes on
-    serving with no publisher, or no reaper, and nothing in its log says why.
+    serving with no reaper, or no session maintenance, and nothing in its log says why.
     """
     caplog.set_level("INFO", logger="cloud_agent.app")
     prepared = _prepare(monkeypatch)
@@ -843,3 +881,43 @@ async def test_a_background_task_that_dies_is_reported_when_it_dies(
             assert f"{attribute} crashed" in str(died[0].exc_info[1])
 
     assert prepared.pool.closes == 1
+
+
+async def test_the_lifespan_installs_the_account_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Identity and admission are answered from this database; nothing else is wired."""
+    from cloud_agent.accounts.directory import LocalOwnerDirectory
+
+    prepared = _prepare(monkeypatch)
+    async with lifespan(prepared.app, background=True):
+        assert isinstance(prepared.app.state.owners, LocalOwnerDirectory)
+        for removed in ("gateway", "grants", "renewal_schedule"):
+            assert not hasattr(prepared.app.state, removed)
+
+
+@pytest.mark.parametrize("variable", ["GATEWAY_ISSUER", "AGENT_AUTH_MODE"])
+async def test_retired_configuration_stops_startup_before_the_database(
+    monkeypatch: pytest.MonkeyPatch, variable: str
+) -> None:
+    """Refused before a pool is opened, so a stale deployment touches nothing."""
+    from cloud_agent.accounts.config import RetiredConfiguration
+
+    prepared = _prepare(monkeypatch)
+    monkeypatch.setenv(variable, "local")
+    with pytest.raises(RetiredConfiguration, match=variable):
+        async with lifespan(prepared.app, background=True):
+            pass
+    asyncpg.create_pool.assert_not_awaited()
+
+
+async def test_a_task_shutdown_would_not_stop_is_never_started() -> None:
+    """Every background task has a place in the shutdown order, or it does not start."""
+    app = FastAPI()
+
+    async def loop() -> None:
+        await asyncio.Event().wait()
+
+    work = loop()
+    with pytest.raises(ValueError, match="shutdown order"):
+        lifespan_module._spawn(app, "unlisted_task", work)
+    assert work.cr_frame is None
+    assert not hasattr(app.state, "unlisted_task")

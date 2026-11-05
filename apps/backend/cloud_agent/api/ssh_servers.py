@@ -31,6 +31,7 @@ from cloud_agent.application.ssh_servers import (
     scan_host_keys,
     ssh_key_cipher,
 )
+from cloud_agent.credential_cipher import CredentialCipherError
 from cloud_agent.domain.ssh_servers import (
     CHECKS_PER_HOUR,
     MAX_ADDRESS_CHARS,
@@ -38,7 +39,6 @@ from cloud_agent.domain.ssh_servers import (
     SshServerConflict,
     SshServerUnavailable,
 )
-from cloud_agent.source_control import SourceControlError
 from cloud_agent_shared.ssh_access import (
     host_key_fingerprint,
     require_server_name,
@@ -282,7 +282,7 @@ def _view(row: dict[str, Any]) -> SshServerView:
 def _cipher() -> Any:
     try:
         return ssh_key_cipher()
-    except SourceControlError:
+    except CredentialCipherError:
         raise _refused(
             503,
             "ssh_unconfigured",
@@ -401,7 +401,7 @@ async def list_servers(
     try:
         ssh_key_cipher()
         configured = True
-    except SourceControlError:
+    except CredentialCipherError:
         configured = False
     return SshServerList(configured=configured, servers=[_view(row) for row in rows])
 

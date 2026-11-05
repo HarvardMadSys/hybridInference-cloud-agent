@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 
 import httpx
 import pytest
 
 from cloud_agent import sandbox_manager_client
-from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
+from cloud_agent.sandbox_manager_client import (
+    SandboxManagerClient,
+    SandboxManagerError,
+    identity_from_row,
+)
+from cloud_agent_shared.sandbox_restore import START_FENCE_HEADER
 
 
 @pytest.mark.asyncio
@@ -222,39 +226,6 @@ async def test_cancelled_terminal_connect_closes_its_dedicated_http_client(monke
 
 
 @pytest.mark.asyncio
-async def test_shared_snapshot_client_forwards_only_the_reviewed_identity(monkeypatch):
-    sandbox_manager = SandboxManagerClient("http://sandbox_manager", "secret")
-    calls: list[tuple] = []
-
-    async def request(method, thread_id, action, *, json=None, timeout=None):
-        calls.append((method, thread_id, action, json, timeout))
-        return {"ok": True}
-
-    monkeypatch.setattr(sandbox_manager, "_shared_sandbox_request", request)
-    snapshot = _shared_snapshot()
-
-    assert await sandbox_manager.capture_shared_snapshot(snapshot) == {"ok": True}
-    assert await sandbox_manager.import_shared_base(
-        snapshot,
-        commit_sha="b" * 40,
-        bundle=b"bundle",
-    ) == {"ok": True}
-
-    capture = calls[0]
-    assert capture[:3] == ("POST", "athr_origin", "snapshot")
-    assert capture[3]["workspace_epoch"] == 4
-    assert capture[3]["base_sha"] == "a" * 40
-    assert capture[3]["expected_container_id"] == "container-shared"
-    assert capture[3]["disk_limit_mib"] == 16384
-    assert "user_id" not in capture[3] and "repo" not in capture[3]
-    imported = calls[1]
-    assert imported[:3] == ("POST", "athr_origin", "import-base")
-    assert imported[3]["commit_sha"] == "b" * 40
-    assert imported[3]["disk_limit_mib"] == 16384
-    assert imported[3]["bundle_b64"] == base64.b64encode(b"bundle").decode()
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("plugins, timeout", [([], 180), ([{"plugin": "example"}], 960)])
 async def test_shared_fork_client_forwards_the_group_origin(monkeypatch, plugins, timeout):
     sandbox_manager = SandboxManagerClient("http://sandbox_manager", "secret")
@@ -268,19 +239,23 @@ async def test_shared_fork_client_forwards_the_group_origin(monkeypatch, plugins
 
     result = await sandbox_manager.fork_shared_session(
         "athr_source",
-        sandbox_id="asbx_shared",
-        generation=2,
-        origin_thread_id="athr_origin",
-        runtime_id="codex",
-        runtime_version="0.145.0",
-        sandbox_image_digest="sha256:image",
-        expected_container_id="container-shared",
-        resident_slot_capacity=8,
-        memory_limit="4g",
-        cpu_limit="2",
-        disk_limit_mib=16384,
-        stop_timeout_s=10,
-        members=[],
+        identity=identity_from_row(
+            {
+                "sandbox_id": "asbx_shared",
+                "generation": 2,
+                "origin_thread_id": "athr_origin",
+                "runtime_id": "codex",
+                "runtime_version": "0.145.0",
+                "sandbox_image_digest": "sha256:image",
+                "container_id": "container-shared",
+                "resident_slot_capacity": 8,
+                "memory_limit": "4g",
+                "cpu_limit": "2",
+                "disk_limit_mib": 16384,
+                "stop_timeout_seconds": 10,
+            },
+            members=[],
+        ),
         operation_id="asfo_test",
         source_native_session_id="native-source",
         source_native_turn_no=2,
@@ -394,10 +369,7 @@ def _broker(handler) -> SandboxManagerClient:
     [
         (lambda broker: broker.files("athr_one", "src"), "MAX_SANDBOX_MANAGER_CONTENT_BYTES"),
         (lambda broker: broker.list_terminals("athr_one"), "MAX_SANDBOX_MANAGER_CONTROL_BYTES"),
-        (
-            lambda broker: broker.capture_shared_snapshot(_shared_snapshot()),
-            "MAX_SANDBOX_MANAGER_CONTENT_BYTES",
-        ),
+        (lambda broker: broker.git("athr_one"), "MAX_SANDBOX_MANAGER_CONTENT_BYTES"),
         (
             lambda broker: broker.shared_chat_sandbox_status("athr_origin"),
             "MAX_SANDBOX_MANAGER_CONTROL_BYTES",
@@ -451,6 +423,36 @@ async def test_an_oversized_error_reply_keeps_its_status_and_drops_its_detail(mo
 
 
 @pytest.mark.asyncio
+async def test_an_oversized_capability_answer_is_refused_before_it_is_buffered(monkeypatch):
+    """The capability probe reads the host's /health answer under the same ceiling."""
+    monkeypatch.setattr(sandbox_manager_client, "MAX_SANDBOX_MANAGER_CONTROL_BYTES", 1024 * 1024)
+    body, pulled = _counting_body(64)
+    broker = _broker(lambda request: httpx.Response(200, content=body()))
+
+    with pytest.raises(SandboxManagerError) as refused:
+        await broker.require_environment_capability()
+    assert refused.value.status_code == 503
+    assert pulled[0] == 17
+
+
+@pytest.mark.asyncio
+async def test_a_capability_answer_is_still_read_and_checked():
+    def respond(request):
+        assert request.url.path == "/health"
+        assert request.headers["X-Agent-Workspace-Token"] == "secret"
+        return httpx.Response(200, json={"capabilities": ["environment-v1", "ssh-access-v1"]})
+
+    assert await _broker(respond).require_environment_capability() == [
+        "environment-v1",
+        "ssh-access-v1",
+    ]
+    with pytest.raises(SandboxManagerError, match="must be upgraded"):
+        await _broker(
+            lambda request: httpx.Response(200, json={"capabilities": ["ssh-access-v1"]})
+        ).require_environment_capability()
+
+
+@pytest.mark.asyncio
 async def test_a_health_probe_never_reads_a_success_body():
     body, pulled = _counting_body(64)
     broker = _broker(lambda request: httpx.Response(200, content=body()))
@@ -484,3 +486,38 @@ async def test_a_bounded_reply_still_decodes_and_errors_keep_their_detail():
     with pytest.raises(SandboxManagerError) as missing:
         await broker.list_terminals("athr_one")
     assert (missing.value.status_code, missing.value.message) == (404, "terminal not found")
+
+
+@pytest.mark.asyncio
+async def test_git_metadata_uses_the_bounded_private_git_route() -> None:
+    requests: list[httpx.Request] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"available": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(answer)) as http:
+        client = SandboxManagerClient("http://manager.test", "token", client=http)
+        await client.git_metadata("athr_one", base_sha="a" * 40)
+
+    assert requests[0].url.path == "/workspaces/athr_one/git"
+    assert dict(requests[0].url.params) == {"metadata": "true", "base_sha": "a" * 40}
+
+
+@pytest.mark.asyncio
+async def test_a_fenced_client_names_its_fence_on_every_workspace_request() -> None:
+    seen: list[str | None] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get(START_FENCE_HEADER))
+        return httpx.Response(200, json={"ok": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(answer)) as http:
+        client = SandboxManagerClient("http://manager.test", "token", client=http)
+
+        await client.with_start_seq(27).git("athr_one")
+        await client.git("athr_one")
+
+    # The shared client is left as it was: the fence belongs to one request.
+    assert seen == ["27", None]
+    assert client.with_start_seq(None) is client

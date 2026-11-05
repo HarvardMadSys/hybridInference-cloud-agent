@@ -18,14 +18,12 @@ function job(overrides: Partial<AgentJob> = {}): AgentJob {
     branch: 'agent/job',
     runtime: 'codex',
     model: 'model',
-    spentUsd: 0,
     timeoutLabel: '',
     sandbox: '',
     attempts: [],
     events: [],
     diffFiles: [],
     gates: [],
-    usage: { tokensIn: '0', tokensOut: '0', cachePct: 0, turns: 0 },
     liveNote: 'Waiting for LLM response',
     liveNoteStartedAt: '2026-10-10T12:00:00Z',
     ...overrides,
@@ -75,7 +73,7 @@ describe('LiveAgentStatus', () => {
     const current = job();
     const { rerender, unmount } = render(<LiveAgentStatus job={current} />);
     act(() => vi.advanceTimersByTime(2000));
-    rerender(<LiveAgentStatus job={{ ...current, spentUsd: 0.1 }} />);
+    rerender(<LiveAgentStatus job={{ ...current, title: 'Renamed' }} />);
     expect(screen.getByRole('timer')).toHaveTextContent(/^1m 0s$/);
 
     unmount();
@@ -106,7 +104,7 @@ describe('LiveAgentStatus', () => {
     const { rerender } = render(<LiveAgentStatus job={current} />);
     expect(screen.getByRole('timer')).toHaveTextContent(/^0s$/);
     act(() => vi.advanceTimersByTime(2000));
-    rerender(<LiveAgentStatus job={{ ...current, spentUsd: 0.1 }} />);
+    rerender(<LiveAgentStatus job={{ ...current, title: 'Renamed' }} />);
     expect(screen.getByRole('timer')).toHaveTextContent(/^2s$/);
 
     rerender(<LiveAgentStatus job={{ ...current, currentAttemptId: 3 }} />);

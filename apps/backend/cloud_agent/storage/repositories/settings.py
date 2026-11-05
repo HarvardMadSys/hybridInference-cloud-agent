@@ -29,11 +29,12 @@ class PostgresSettingsRepository:
         """Use the control plane's existing connection pool."""
         self._pool = pool
 
-    async def read_settings(self) -> tuple[int, dict[str, Any]]:
-        """Return the revision and encoded values, or revision minus one before initialization."""
+    async def read_settings(self, *, after_revision: int = -1) -> tuple[int, dict[str, Any]]:
+        """Read a newer snapshot, or ``(-1, {})`` when none is available."""
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                'SELECT revision, "values" FROM agent_settings WHERE id = TRUE'
+                'SELECT revision, "values" FROM agent_settings WHERE id = TRUE AND revision > $1',
+                after_revision,
             )
         return _snapshot(row)
 
@@ -41,16 +42,6 @@ class PostgresSettingsRepository:
         """Initialize or import new fields once, preserving every saved value."""
         async with self._pool.acquire() as conn, conn.transaction():
             imported = dict(values)
-            if "gateway_issuer" in imported:
-                from cloud_agent.identity_namespace import IdentityNamespaceError
-
-                issuer = await conn.fetchval("SELECT gateway_issuer FROM agent_identity_namespace")
-                if issuer:
-                    if imported["gateway_issuer"] and imported["gateway_issuer"] != issuer:
-                        raise IdentityNamespaceError(
-                            "GATEWAY_ISSUER does not match this Agent database's identity issuer."
-                        )
-                    imported["gateway_issuer"] = issuer
             await conn.execute(
                 """
                 INSERT INTO agent_settings (id, revision, "values")
@@ -90,10 +81,6 @@ class PostgresSettingsRepository:
             settings.validate_settings_update(previous, values)
             if values == previous:
                 return revision, values, previous
-            if "gateway_issuer" in changes:
-                from cloud_agent.identity_namespace import check_gateway_namespace
-
-                await check_gateway_namespace(conn, str(values["gateway_issuer"]) or None)
             updated = await conn.fetchrow(
                 """
                 UPDATE agent_settings

@@ -9,10 +9,22 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent.storage._sql.accounts import local_access_ended
 from cloud_agent.storage._sql.hosts import LIVE_ATTEMPT_HOST
+from cloud_agent.storage._sql.mcp_residency import mint_residency_sql
+from cloud_agent.storage.deadlocks import retry_deadlock_victim
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     import asyncpg
+
+
+#: A beat extends nothing for a local owner whose access has ended; the host
+#: then closes the member, whether or not the termination pass reached it.
+_OWNER_ACCESS_ENDED = local_access_ended(
+    "(SELECT t.user_id FROM agent_threads t WHERE t.id = m.thread_id)"
+)
 
 
 class PostgresResidencyRepository:
@@ -69,7 +81,8 @@ class PostgresResidencyRepository:
                 return None
             earns = await conn.fetchrow(
                 """
-                SELECT j.id AS job_id, j.user_id, j.model
+                SELECT j.id AS job_id, j.user_id, j.model, j.runtime, j.reasoning_effort,
+                       j.model_connection_id
                 FROM agent_jobs j
                 WHERE j.id = $1 AND j.thread_id = $2
                   AND j.current_attempt_id = $3
@@ -109,17 +122,13 @@ class PostgresResidencyRepository:
             # releasing the membership, so either it committed before the
             # job lock above was granted and this fresh snapshot sees the
             # tombstone, or it waits for this commit and its release then
-            # takes the generation minted here as well.
+            # takes the generation minted here as well. A local account whose
+            # access ended earns nothing either, by the same argument: its
+            # termination updates the running job before releasing.
             row = await conn.fetchrow(
                 f"""
                 UPDATE agent_thread_sandbox_memberships AS m
-                SET residency_generation = residency_generation + 1,
-                    residency_status = 'hot',
-                    residency_lease_expires_at = clock_timestamp() + make_interval(secs => $2),
-                    residency_grant_id = NULL,
-                    residency_binding_id = NULL,
-                    residency_established_at = NOW(),
-                    residency_last_active_at = NOW(),
+                SET {mint_residency_sql("$2")},
                     updated_at = NOW()
                 FROM agent_jobs j, agent_attempts a, agent_sandboxes g, agent_threads t
                 WHERE m.thread_id = $1 AND m.active_attempt_id = $3
@@ -133,6 +142,7 @@ class PostgresResidencyRepository:
                   AND a.status = 'running'
                   AND a.lease_expires_at > clock_timestamp()
                   AND {LIVE_ATTEMPT_HOST}
+                  AND NOT {local_access_ended("j.user_id")}
                 RETURNING m.thread_id, m.sandbox_id,
                           m.residency_generation AS generation,
                           m.residency_status AS status,
@@ -160,6 +170,11 @@ class PostgresResidencyRepository:
         result["establishing_attempt_id"] = attempt["id"]
         result["user_id"] = earns["user_id"]
         result["model"] = earns["model"]
+        # What the establishing turn runs on, so the caller hands this
+        # residency the owner connection's key instead of minting a grant.
+        result["runtime"] = earns["runtime"]
+        result["reasoning_effort"] = earns["reasoning_effort"]
+        result["model_connection_id"] = earns["model_connection_id"]
         return result
 
     async def heartbeat_residency(
@@ -175,33 +190,86 @@ class PostgresResidencyRepository:
         Expiry is equally final: a hot row waiting for the reaper cannot use a
         late beat to regain authority.
         """
-        async with self._pool.acquire() as conn, conn.transaction():
-            locked = await conn.fetchval(
-                "SELECT thread_id FROM agent_thread_sandbox_memberships "
-                "WHERE thread_id = $1 AND residency_generation = $2 "
-                "AND residency_status = 'hot' FOR UPDATE",
-                thread_id,
-                generation,
-            )
-            if locked is None:
-                return None
-            return await conn.fetchval(
-                """
-                UPDATE agent_thread_sandbox_memberships m
-                SET residency_lease_expires_at = clock_timestamp() + make_interval(secs => $3),
-                    residency_last_active_at = NOW()
-                FROM agent_sandboxes g
-                WHERE m.thread_id = $1 AND m.residency_generation = $2
-                  AND m.residency_status = 'hot'
-                  AND m.residency_lease_expires_at > clock_timestamp()
-                  AND g.id = m.sandbox_id AND ($4::text IS NULL OR g.host = $4)
-                RETURNING COALESCE(m.residency_grant_id, '')
-                """,
-                thread_id,
-                generation,
-                ttl_seconds,
-                host,
-            )
+        extended = await self.heartbeat_residencies(
+            residencies=[(thread_id, generation)], ttl_seconds=ttl_seconds, host=host
+        )
+        return extended.get((thread_id, generation))
+
+    async def heartbeat_residencies(
+        self,
+        *,
+        residencies: Sequence[tuple[str, int]],
+        ttl_seconds: float,
+        host: str | None = None,
+    ) -> dict[tuple[str, int], str]:
+        """Extend several residencies' leases at once, each as :meth:`heartbeat_residency` does.
+
+        Returns the grant id of every residency extended, by ``(thread_id,
+        generation)``; one missing from the answer was not extended. One
+        transaction for the whole beat: it locks the rows in thread order
+        first, the order the storage lock order sets for several memberships.
+        Every writer that takes several takes them so, before writing any:
+        host revocation, the writes to all of a group's members, Fork and
+        owner deletion. The beat runs again if Postgres picks it as a
+        deadlock's victim. Any other error is raised and never answered as
+        "not extended": a host tears a sandbox down on that answer.
+
+        Lapsed rows are locked too, though the update extends none: one a
+        concurrent beat extended just before it lapsed reads as lapsed to the
+        lock and as live to the update, which would then take it out of
+        order. The residency reaper skips locked rows, so it never waits here.
+        """
+        beats = list(
+            dict.fromkeys((str(thread), int(generation)) for thread, generation in residencies)
+        )
+        if not beats:
+            return {}
+        threads = [thread for thread, _ in beats]
+        generations = [generation for _, generation in beats]
+
+        async def extend() -> dict[tuple[str, int], str]:
+            async with self._pool.acquire() as conn, conn.transaction():
+                await conn.execute(
+                    """
+                    SELECT m.thread_id FROM agent_thread_sandbox_memberships m
+                    JOIN unnest($1::text[], $2::bigint[]) AS beat(thread_id, generation)
+                      ON beat.thread_id = m.thread_id
+                     AND beat.generation = m.residency_generation
+                    WHERE m.residency_status = 'hot'
+                    ORDER BY m.thread_id
+                    FOR UPDATE OF m
+                    """,
+                    threads,
+                    generations,
+                )
+                rows = await conn.fetch(
+                    f"""
+                    UPDATE agent_thread_sandbox_memberships m
+                    SET residency_lease_expires_at =
+                            clock_timestamp() + make_interval(secs => $3),
+                        residency_last_active_at = NOW()
+                    FROM unnest($1::text[], $2::bigint[]) AS beat(thread_id, generation),
+                         agent_sandboxes g
+                    WHERE m.thread_id = beat.thread_id
+                      AND m.residency_generation = beat.generation
+                      AND m.residency_status = 'hot'
+                      AND m.residency_lease_expires_at > clock_timestamp()
+                      AND g.id = m.sandbox_id AND ($4::text IS NULL OR g.host = $4)
+                      AND NOT {_OWNER_ACCESS_ENDED}
+                    RETURNING m.thread_id, m.residency_generation,
+                              COALESCE(m.residency_grant_id, '') AS grant_id
+                    """,
+                    threads,
+                    generations,
+                    ttl_seconds,
+                    host,
+                )
+            return {
+                (row["thread_id"], int(row["residency_generation"])): row["grant_id"]
+                for row in rows
+            }
+
+        return await retry_deadlock_victim("heartbeat_residencies", extend)
 
     async def release_residency(
         self, *, thread_id: str, generation: int, host: str | None = None
@@ -260,7 +328,6 @@ class PostgresResidencyRepository:
                   AND m.resident_state IN ('stopped', 'lost')
                   AND m.active_attempt_id IS NULL
                   AND g.active_operation_count = 0
-                  AND g.snapshot_state <> 'snapshotting'
                 RETURNING COALESCE(m.residency_grant_id, '')
                 """,
                 thread_id,
@@ -270,33 +337,41 @@ class PostgresResidencyRepository:
                 process_generation,
             )
 
-    async def resident_host(self, *, thread_id: str) -> dict[str, Any] | None:
-        """The live hot residency for a thread, or ``None``.
+    async def open_shared_residencies(
+        self, *, residencies: Sequence[tuple[str, str, int]]
+    ) -> set[tuple[str, str, int]]:
+        """Return which ``(sandbox_id, thread_id, generation)`` residencies are still open.
 
-        Live means unexpired: the reaper marks expiry on its own schedule,
-        and scheduling decisions between passes must not trust a lease the
-        clock has already taken away.
+        Open is the generation its member still holds, not yet released. Read
+        without locks, and enough to rule a release out: a member never
+        changes group, its generation only grows, and a released generation
+        is never held again, so one this read finds closed stays closed.
+        Whether an open one may be released is
+        :meth:`release_shared_residency_if_quiescent`'s to decide.
         """
+        if not residencies:
+            return set()
         async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
+            rows = await conn.fetch(
                 """
-                SELECT m.thread_id, m.sandbox_id, g.host, g.runtime_id, g.runtime_version,
-                       m.residency_generation AS generation,
-                       m.residency_status AS status,
-                       m.residency_lease_expires_at AS lease_expires_at,
-                       m.residency_grant_id AS grant_id,
-                       m.residency_binding_id AS ledger_binding_id
+                SELECT m.sandbox_id, m.thread_id, m.residency_generation
                 FROM agent_thread_sandbox_memberships m
-                JOIN agent_sandboxes g ON g.id = m.sandbox_id
-                WHERE m.thread_id = $1 AND m.residency_status = 'hot'
-                  AND m.residency_lease_expires_at > clock_timestamp()
+                JOIN unnest($1::text[], $2::text[], $3::bigint[])
+                    AS asked(sandbox_id, thread_id, generation)
+                  ON asked.thread_id = m.thread_id AND asked.sandbox_id = m.sandbox_id
+                 AND asked.generation = m.residency_generation
+                WHERE m.residency_status <> 'none'
                 """,
-                thread_id,
+                [sandbox_id for sandbox_id, _, _ in residencies],
+                [thread_id for _, thread_id, _ in residencies],
+                [int(generation) for _, _, generation in residencies],
             )
-        return None if row is None else dict(row)
+        return {
+            (row["sandbox_id"], row["thread_id"], int(row["residency_generation"])) for row in rows
+        }
 
-    async def reap_expired_residencies(self) -> list[dict[str, Any]]:
-        """Mark every hot residency whose lease lapsed as ``none``.
+    async def reap_expired_residencies(self, *, limit: int = 200) -> list[dict[str, Any]]:
+        """Mark a bounded page of expired hot residencies as ``none``.
 
         The control plane's unilateral half of the fence: the host may still
         be running the sandbox, but its generation no longer opens anything —
@@ -305,14 +380,23 @@ class PostgresResidencyRepository:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
+                WITH expired AS (
+                    SELECT m.thread_id, g.host
+                    FROM agent_thread_sandbox_memberships m
+                    JOIN agent_sandboxes g ON g.id = m.sandbox_id
+                    WHERE m.residency_status = 'hot'
+                      AND m.residency_lease_expires_at <= clock_timestamp()
+                    ORDER BY m.residency_lease_expires_at, m.thread_id
+                    LIMIT $1
+                    FOR UPDATE OF m SKIP LOCKED
+                )
                 UPDATE agent_thread_sandbox_memberships m
                 SET residency_status = 'none'
-                FROM agent_sandboxes g
-                WHERE m.residency_status = 'hot'
-                  AND m.residency_lease_expires_at <= clock_timestamp()
-                  AND g.id = m.sandbox_id
-                RETURNING m.thread_id, m.residency_generation AS generation, g.host,
+                FROM expired
+                WHERE m.thread_id = expired.thread_id
+                RETURNING m.thread_id, m.residency_generation AS generation, expired.host,
                           m.residency_grant_id AS grant_id
-                """
+                """,
+                limit,
             )
         return [dict(row) for row in rows]

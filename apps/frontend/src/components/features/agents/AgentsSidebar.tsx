@@ -3,7 +3,10 @@ import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAuth, useT } from '@/components/providers';
-import { useKeyboardShortcuts } from '@/components/features/settings/keyboardShortcutPreferences';
+import {
+  useApplePlatform,
+  useKeyboardShortcuts,
+} from '@/components/features/settings/keyboardShortcutPreferences';
 import { matchesShortcut, shortcutAriaLabel, shortcutLabel } from '@/lib/keyboardShortcuts';
 import { SettingsSidebar } from '@/components/features/settings/SettingsSidebar';
 import { useSidebarScroll } from './useSidebarScroll';
@@ -12,14 +15,17 @@ import { archiveAgentJob, deleteAgentSessions, pinAgentJob, unpinAgentJob } from
 import { APIError } from '@/lib/utils/errors';
 import { useAgentReads } from './AgentReadProvider';
 import { ArchiveDeleteDialog, SESSION_ERROR_KEYS } from './ArchiveControls';
-import { CONVERSATION_RESTORED_EVENT, type ConversationRestoredDetail } from './conversationEvents';
-import { latestJob } from './conversationJob';
+import { createProjectRefreshTracker } from './sidebarProjectRefresh';
+import { createSidebarReadQueue } from './sidebarReadQueue';
+import { sidebarFolders } from './sidebarFolders';
+import { readConversationSelection } from './threadHistory';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { onAgentRecordsChanged, PUSH_FALLBACK_POLL_MS, useAgentPushLive } from './agentPush';
 import { changesSidebarRows, SIDEBAR_ACTIVITY_REFRESH_MS } from './sidebarRecordChanges';
 import { GettingStarted } from './GettingStarted';
 import { PaneResizer } from './PaneResizer';
 import { useAgentProjects } from './useAgentJobs';
+import { useSidebarBackgroundRefresh } from './useSidebarBackgroundRefresh';
 import { announcePaneResize, useResizablePane } from './useResizablePane';
 import { useSidebarPreferences, manualOrder, moveBefore } from './sidebarPreferences';
 import { SidebarViewMenu } from './SidebarViewMenu';
@@ -62,10 +68,11 @@ export function AgentsSidebar({
   const { state } = useAuth();
   const userId = state.user?.id;
   const [shortcuts] = useKeyboardShortcuts(userId);
+  const apple = useApplePlatform();
   const scrollRef = useSidebarScroll(active && !collapsed, userId);
   const reads = useAgentReads();
   const [preferences, updatePreferences] = useSidebarPreferences(userId);
-  const { isUnread, markRead } = useConversationReadState(userId);
+  const { isUnread, markRead, isReady } = useConversationReadState(userId);
   const knownRows = useMemo(
     () => ({ userId, rows: new Map<string, SidebarConversation>() }),
     [userId],
@@ -91,25 +98,11 @@ export function AgentsSidebar({
     error: projectsError,
     reload: reloadProjects,
   } = useAgentProjects(false, active);
-  const backgroundRefreshPending = useRef(false);
-  const refreshInBackground = useCallback(() => {
-    if (!active || document.visibilityState === 'hidden') {
-      backgroundRefreshPending.current = true;
-      return;
-    }
-    backgroundRefreshPending.current = false;
-    reload();
-    reloadProjects();
-  }, [active, reload, reloadProjects]);
-
-  useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState !== 'hidden' && backgroundRefreshPending.current)
-        refreshInBackground();
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
-  }, [refreshInBackground]);
+  const { refreshInBackground, reorderInBackground, activityMoved } = useSidebarBackgroundRefresh(
+    active,
+    reload,
+    reloadProjects,
+  );
 
   const [selected, setSelected] = useState<{
     path: string;
@@ -135,15 +128,22 @@ export function AgentsSidebar({
   const list = useConversationList({
     userId,
     refresh,
+    reorder: activityMoved,
     pinned: false,
     enabled: active && !searching && preferences.group === 'flat',
   });
   const pinnedList = useConversationList({
     userId,
     refresh,
+    reorder: activityMoved,
     pinned: true,
     enabled: active && !searching,
   });
+  const { tracker: projectRefresh, read: readProjectPage } = useMemo(
+    () => ({ userId, tracker: createProjectRefreshTracker(), read: createSidebarReadQueue() }),
+    [userId],
+  );
+  projectRefresh.observe(projects, refresh, activityMoved);
   const [pinnedShown, setPinnedShown] = useState(15);
   const searchInput = useRef<HTMLInputElement>(null);
   const searchButton = useRef<HTMLButtonElement>(null);
@@ -174,6 +174,7 @@ export function AgentsSidebar({
     enabled: active && searching && debounced === query.trim(),
     userId,
     refresh,
+    reorder: activityMoved,
   });
   useEffect(() => {
     const timer = setTimeout(() => setDebounced(query.trim()), 250);
@@ -211,24 +212,6 @@ export function AgentsSidebar({
     [knownRows, pinUpdates, reload],
   );
   useEffect(() => {
-    const restored = (event: Event) => {
-      const detail = (event as CustomEvent<ConversationRestoredDetail>).detail;
-      if (!detail || detail.userId !== userId || typeof detail.threadId !== 'string') return;
-      setHiddenThreads((old) => {
-        const next = new Set(old);
-        next.delete(detail.threadId);
-        return next;
-      });
-      setSelected((old) =>
-        old?.row.key === detail.threadId ? { ...old, row: { ...old.row, archived: false } } : old,
-      );
-      reload();
-      reloadProjects();
-    };
-    window.addEventListener(CONVERSATION_RESTORED_EVENT, restored);
-    return () => window.removeEventListener(CONVERSATION_RESTORED_EVENT, restored);
-  }, [userId, reload, reloadProjects]);
-  useEffect(() => {
     let cancelled = false;
     const detailRefresh = refreshRef.current;
     const generation = sessionGeneration.current;
@@ -249,10 +232,9 @@ export function AgentsSidebar({
       ].includes(id)
     )
       return;
-    Promise.all([reads.getAgentJob(id), reads.getAgentJobThread(id)])
-      .then(([job, thread]) => {
+    readConversationSelection(reads, id)
+      .then(({ job, thread, latest }) => {
         if (cancelled || generation !== sessionGeneration.current) return;
-        const latest = latestJob([job, ...(thread?.jobs ?? [])]) ?? job;
         const row = conversationRow({
           job: latest,
           title: thread?.title ?? job.title ?? job.task_prompt.split('\n')[0],
@@ -287,7 +269,7 @@ export function AgentsSidebar({
   useEffect(() => {
     if (!active) return;
     const unsubscribe = onAgentRecordsChanged((change) => {
-      // Tool approvals, usage, queues and publication hints belong to detail
+      // Tool approvals, usage and queue hints belong to detail
       // panes. Only changed records or a stream gap can affect these lists.
       if (!change.resync && change.jobs.length === 0 && change.threads.length === 0) return;
       if (changesSidebarRows(change, pushedRecords)) {
@@ -300,7 +282,7 @@ export function AgentsSidebar({
       // once per window, however many replies land in it.
       activityRefresh.current ??= setTimeout(() => {
         activityRefresh.current = null;
-        refreshInBackground();
+        reorderInBackground();
       }, SIDEBAR_ACTIVITY_REFRESH_MS);
     });
     return () => {
@@ -308,7 +290,7 @@ export function AgentsSidebar({
       if (activityRefresh.current) clearTimeout(activityRefresh.current);
       activityRefresh.current = null;
     };
-  }, [active, pushedRecords, refreshInBackground]);
+  }, [active, pushedRecords, refreshInBackground, reorderInBackground]);
   const pushLive = useAgentPushLive();
   const hasActiveProjects = projects.some((project) => project.active_count > 0);
   useEffect(() => {
@@ -390,32 +372,16 @@ export function AgentsSidebar({
   useEffect(() => {
     registerRows(pinnedList.rows, pinnedList.loadedRefresh);
   }, [pinnedList.rows, pinnedList.loadedRefresh, registerRows]);
-  const baseFolders = useMemo(() => {
-    const repos = new Map(projects.map((project) => [project.repo, project]));
-    for (const repo of preferences.addedProjects)
-      if (!repos.has(repo))
-        repos.set(repo, { repo, task_count: 0, active_count: 0, last_activity_at: null });
-    for (const row of preferences.group === 'flat' ? list.rows : [])
-      if (!repos.has(row.job.repo))
-        repos.set(row.job.repo, {
-          repo: row.job.repo,
-          task_count: 1,
-          active_count: 0,
-          last_activity_at: row.lastActivityAt,
-        });
-    if (activeRepo && !repos.has(activeRepo))
-      repos.set(activeRepo, {
-        repo: activeRepo,
-        task_count: 0,
-        active_count: 0,
-        last_activity_at: null,
-      });
-    return [...repos.values()].sort(
-      (a, b) =>
-        (Date.parse(b.pinned_at ?? '') || 0) - (Date.parse(a.pinned_at ?? '') || 0) ||
-        (Date.parse(b.last_activity_at ?? '') || 0) - (Date.parse(a.last_activity_at ?? '') || 0),
-    );
-  }, [projects, list.rows, activeRepo, preferences.group, preferences.addedProjects]);
+  const baseFolders = useMemo(
+    () =>
+      sidebarFolders(
+        projects,
+        preferences.addedProjects,
+        preferences.group === 'flat' ? list.rows : [],
+        activeRepo,
+      ),
+    [projects, list.rows, activeRepo, preferences.group, preferences.addedProjects],
+  );
   useEffect(() => {
     updatePreferences((old) => {
       if (!old.manualInitialized && old.order !== 'manual') return old;
@@ -586,7 +552,11 @@ export function AgentsSidebar({
       if (activeKey === key) router.replace('/');
     } catch (cause) {
       const code = cause instanceof APIError ? cause.code : undefined;
-      const reason = SESSION_ERROR_KEYS[code as keyof typeof SESSION_ERROR_KEYS];
+      // Own entries only: a code of `__proto__` must not find Object.prototype's.
+      const reason =
+        code && Object.hasOwn(SESSION_ERROR_KEYS, code)
+          ? SESSION_ERROR_KEYS[code as keyof typeof SESSION_ERROR_KEYS]
+          : undefined;
       setDeleteError(
         reason ? t(reason) : cause instanceof Error ? cause.message : t('archive.deleteFailed'),
       );
@@ -623,7 +593,7 @@ export function AgentsSidebar({
   }
   const actions: RowActions = {
     activeKey,
-    isUnread,
+    isUnread: (row) => isReady(row) && isUnread(row),
     onRead: markRead,
     archiving,
     pinning,
@@ -757,8 +727,8 @@ export function AgentsSidebar({
                 ref={searchButton}
                 type="button"
                 aria-label={t('sidebar.search')}
-                title={`${t('sidebar.search')}${shortcuts.search ? ` (${shortcutLabel(shortcuts.search)})` : ''}`}
-                aria-keyshortcuts={shortcutAriaLabel(shortcuts.search)}
+                title={`${t('sidebar.search')}${shortcuts.search ? ` (${shortcutLabel(shortcuts.search, apple)})` : ''}`}
+                aria-keyshortcuts={shortcutAriaLabel(shortcuts.search, apple)}
                 aria-expanded={searchOpen}
                 className="ui-focus-ring flex h-8 w-8 items-center justify-center rounded-lg text-muted transition-colors hover:bg-surface-hover hover:text-foreground [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
                 onClick={() => {
@@ -941,7 +911,8 @@ export function AgentsSidebar({
                   enabled={active}
                   selected={current?.job.repo === folder.repo ? current : undefined}
                   userId={userId}
-                  refresh={refresh}
+                  {...projectRefresh.forRepo(folder.repo)}
+                  readPage={readProjectPage}
                   {...actions}
                   hiddenThreads={hiddenThreads}
                   pinUpdates={pinUpdates}

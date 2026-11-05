@@ -11,17 +11,20 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import hmac
 import math
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
-from cryptography.fernet import Fernet, InvalidToken
 
+from cloud_agent.credential_cipher import (
+    USER_CREDENTIAL_ENCRYPTION_KEY,
+    CredentialCipher,
+    CredentialCipherError,
+)
 from cloud_agent.settings import number_setting, settings_environment
 
 if TYPE_CHECKING:
@@ -48,10 +51,10 @@ def _refresh_lease_seconds(request_timeout_s: float) -> int:
 #: read under this one, so migrating them (task H1) is a decrypt-with-old,
 #: encrypt-with-new step rather than a copy. Copying the ciphertext produces a
 #: connection that looks present and fails at first use.
-ENV_ENCRYPTION_KEY = "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY"
+ENV_ENCRYPTION_KEY = USER_CREDENTIAL_ENCRYPTION_KEY
 
 
-class SourceControlError(Exception):
+class SourceControlError(CredentialCipherError):
     """A safe-to-display source-control integration failure."""
 
 
@@ -66,7 +69,7 @@ class OAuthStateError(SourceControlError):
 SOURCE_CONTROL_DOMAIN = b"hybridinference/source-control/v1"
 
 
-class SourceControlCipher:
+class SourceControlCipher(CredentialCipher):
     """Encrypt provider secrets with a domain-separated server key."""
 
     def __init__(self, secret: str | None = None, *, domain: bytes = SOURCE_CONTROL_DOMAIN) -> None:
@@ -77,23 +80,13 @@ class SourceControlCipher:
             raise SourceControlError(
                 f"{ENV_ENCRYPTION_KEY} must be set before source-control credentials can be stored"
             )
-        digest = hashlib.sha256(domain + b"\0" + material.encode("utf-8")).digest()
-        self._fernet = Fernet(base64.urlsafe_b64encode(digest))
-        self._mac_key = hashlib.sha256(domain + b"\0mac\0" + material.encode("utf-8")).digest()
-
-    def encrypt(self, value: str) -> str:
-        """Return authenticated ciphertext; plaintext is never persisted."""
-        return self._fernet.encrypt(value.encode("utf-8")).decode("ascii")
-
-    def mac(self, value: bytes) -> str:
-        """Keyed SHA-256 of ``value``: equal inputs compare equal, and neither is kept."""
-        return hmac.new(self._mac_key, value, hashlib.sha256).hexdigest()
+        super().__init__(material, domain=domain)
 
     def decrypt(self, value: str) -> str:
         """Decrypt a persisted secret and fail closed on corruption."""
         try:
-            return self._fernet.decrypt(value.encode("ascii")).decode("utf-8")
-        except (InvalidToken, UnicodeError, ValueError) as exc:
+            return super().decrypt(value)
+        except CredentialCipherError as exc:
             raise SourceControlError(
                 "stored source-control credential could not be decrypted"
             ) from exc
@@ -122,7 +115,7 @@ async def issue_oauth_state(
         code_verifier_ciphertext=(
             cipher.encrypt(code_verifier) if code_verifier and cipher is not None else None
         ),
-        expires_at=datetime.now(timezone.utc) + OAUTH_STATE_TTL,
+        expires_at=datetime.now(UTC) + OAUTH_STATE_TTL,
     )
     return state
 
@@ -285,7 +278,7 @@ class GitLabOAuthClient:
         """Effective deadline used for the next provider request."""
         if self._timeout_override is not None:
             return self._timeout_override
-        return number_setting("gitlab_request_timeout_s", 20.0)
+        return number_setting("gitlab_request_timeout_s")
 
     @property
     def refresh_lease_seconds(self) -> int:
@@ -360,10 +353,10 @@ class GitLabOAuthClient:
         try:
             if created_at is None or expires_in is None:
                 raise ValueError("the token response carries no usable expiry")
-            issued = datetime.fromtimestamp(float(created_at), tz=timezone.utc)
+            issued = datetime.fromtimestamp(float(created_at), tz=UTC)
             lifetime = max(1, int(expires_in))
         except (TypeError, ValueError, OSError):
-            issued = datetime.now(timezone.utc)
+            issued = datetime.now(UTC)
             lifetime = 7200
         return issued + timedelta(seconds=lifetime)
 
@@ -460,8 +453,8 @@ class GitLabOAuthClient:
         """Decrypt a live token, rotating both tokens before expiry."""
         expires_at = connection["expires_at"]
         if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if expires_at > datetime.now(timezone.utc) + _TOKEN_REFRESH_MARGIN:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        if expires_at > datetime.now(UTC) + _TOKEN_REFRESH_MARGIN:
             return self.cipher.decrypt(connection["access_token_ciphertext"])
         connection_id = int(connection["id"])
         user_id = str(connection["user_id"])

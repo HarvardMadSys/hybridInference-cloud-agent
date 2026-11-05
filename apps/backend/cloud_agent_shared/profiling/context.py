@@ -7,13 +7,18 @@ import logging
 import math
 import uuid
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Any
 
 from .clock import clock
 from .measurement import _bounded
-from .models import Measurement, ProfilingRun, _SpanRecord
+from .models import Measurement, ProfilingRun, RunManifest, _SpanRecord
 from .policy import _load, profile_mode
+from .runs import (
+    inherited_admissions as _inherited_admissions,
+    inherited_manifest as _inherited_manifest,
+)
 from .schema import (
     BOUNDARIES_BY_OPERATION,
     CLOCK_DOMAIN_ID,
@@ -26,15 +31,13 @@ from .schema import (
     MAX_RUN_ID_CHARS,
     MAX_SPANS,
     MODE_ADMIN,
+    MODE_DISABLED,
     PRODUCER_INSTANCE_ID,
     PROFILING_ANSWER_CALL_ID_HEADER,
     PROFILING_ANSWER_OPERATION_HEADER,
     PROFILING_ANSWER_RECORDED_HEADER,
     PROFILING_ANSWER_STAGES_HEADER,
     PROFILING_ANSWER_TRUNCATED_HEADER,
-    RUN_ID_PATTERN,
-    SOURCE_ADMIN,
-    TARGET_KEYS,
 )
 from .stages import StageRecorder
 
@@ -97,7 +100,7 @@ def measurement_context(
         # *not* the experiment's manifest: a caller may narrow the candidates it
         # offers, and a sandbox manager must never let that claim override what its own
         # configuration selects. The manifest is the nested object below.
-        "operations": sorted(measurement.run_operations),
+        "operations": sorted(measurement.run_manifest.operations),
         # The immutable experiment, as one object. Its presence is what tells a
         # downstream process that this selection was already proved by a
         # producer that held the configuration, which is the only thing that
@@ -109,23 +112,9 @@ def measurement_context(
 
 def _context_run(measurement: Measurement) -> dict[str, Any]:
     """Return the immutable experiment a selection was made under."""
-    run: dict[str, Any] = {
-        "run_id": measurement.run_id,
-        "operations": sorted(measurement.run_operations),
-        "target": dict(measurement.run_target),
-        "config_version": measurement.run_config_version,
-        "max_operations": measurement.run_max_operations,
-        "control_revision": measurement.control_revision,
-        # Which control source rooted the experiment. It travels so a process
-        # that only continues the selection -- a child, a sandbox manager -- reports the
-        # same provenance its parent proved instead of inferring one.
-        "source": measurement.run_source,
-    }
-    if measurement.run_expires_at is not None:
-        run["expires_at"] = measurement.run_expires_at.isoformat()
-    elif measurement.run_continuous:
-        run.update(expires_at=None, continuous=True)
-    return run
+    return measurement.run_manifest.to_handoff_payload(
+        control_revision=measurement.control_revision
+    )
 
 
 def handoff_context(measurement: Measurement | None) -> dict[str, Any] | None:
@@ -133,7 +122,9 @@ def handoff_context(measurement: Measurement | None) -> dict[str, Any] | None:
     context = measurement_context(measurement)
     if context is None or measurement is None:
         return None
-    context["admission_instances"] = [dict(item) for item in measurement.run_admission_instances]
+    context["admission_instances"] = [
+        item.to_payload() for item in measurement.run_manifest.admission_instances
+    ]
     context["inherited_spans"] = [span.to_payload() for span in measurement.spans]
     context["inherited_marks"] = [
         {"name": name, "offset_us": offset} for name, offset in measurement.marks
@@ -195,74 +186,7 @@ def _restore_handoff_marks(value: Any) -> list[tuple[str, int]] | None:
     return restored
 
 
-def _inherited_manifest(context: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Return the immutable experiment a context states, if it states one.
-
-    Bounded and validated like every other value that crosses a process
-    boundary. ``None`` means the context did not state one, which is the case
-    for a caller written before this field existed -- and for a caller that
-    offers candidates without holding the experiment.
-
-    A context that states a *malformed* manifest is refused outright rather than
-    read leniently: half a manifest is how an attempt gets filed under an
-    experiment it does not belong to.
-    """
-    raw = context.get("run")
-    if not isinstance(raw, Mapping):
-        return None
-    run_id = str(raw.get("run_id") or "").strip()
-    if not run_id or len(run_id) > MAX_RUN_ID_CHARS or RUN_ID_PATTERN.fullmatch(run_id) is None:
-        return None
-    raw_operations = raw.get("operations")
-    if not isinstance(raw_operations, (list, tuple, set, frozenset)):
-        return None
-    operations = frozenset(str(item).strip() for item in raw_operations if str(item).strip())
-    if not operations:
-        return None
-    raw_target = raw.get("target")
-    target: dict[str, str] = {}
-    if isinstance(raw_target, Mapping):
-        for key, value in raw_target.items():
-            if str(key) not in TARGET_KEYS:
-                return None
-            target[str(key)] = str(value)
-    try:
-        config_version = int(raw.get("config_version") or 1)
-        max_operations = int(raw.get("max_operations") or 0)
-    except (TypeError, ValueError):
-        return None
-    if config_version <= 0 or max_operations < 0:
-        return None
-    continuous = raw.get("continuous") is True
-    expires_at = _parse_context_instant(raw.get("expires_at"))
-    if continuous:
-        if (
-            "expires_at" not in raw
-            or raw["expires_at"] is not None
-            or max_operations != 0
-            or raw.get("source") != SOURCE_ADMIN
-        ):
-            return None
-    elif expires_at is None:
-        return None
-    try:
-        control_revision = max(0, int(raw.get("control_revision") or 0))
-    except (TypeError, ValueError):
-        control_revision = 0
-    return {
-        "run_id": run_id,
-        "operations": operations,
-        "target": target,
-        "config_version": config_version,
-        "max_operations": max_operations,
-        "expires_at": expires_at,
-        "continuous": continuous,
-        "control_revision": control_revision,
-        "source": str(raw.get("source") or SOURCE_ADMIN),
-    }
-
-
-def _manifest_for_continuation(context: Mapping[str, Any]) -> dict[str, Any] | None:
+def _manifest_for_continuation(context: Mapping[str, Any]) -> RunManifest | None:
     """Return the manifest that lets this process continue a selection.
 
     The continuation arm exists because a selection may outlive the
@@ -288,7 +212,7 @@ def _manifest_for_continuation(context: Mapping[str, Any]) -> dict[str, Any] | N
     return _inherited_manifest(context)
 
 
-def _manifest_deadline(manifest: Mapping[str, Any]) -> float | None:
+def _manifest_deadline(manifest: RunManifest) -> float | None:
     """Return an inherited experiment's own end as a local monotonic deadline.
 
     ``None`` means the experiment is already over. The manifest states an
@@ -297,30 +221,15 @@ def _manifest_deadline(manifest: Mapping[str, Any]) -> float | None:
     outlive the experiment it names, and the earlier of the two always wins: a
     selection never buys time by travelling.
     """
-    expires_at = manifest.get("expires_at")
-    if manifest.get("continuous") is True and expires_at is None:
+    expires_at = manifest.expires_at
+    if manifest.continuous and expires_at is None:
         return math.inf
     if not isinstance(expires_at, datetime):
         return None
-    remaining = (expires_at - datetime.now(timezone.utc)).total_seconds()
+    remaining = (expires_at - datetime.now(UTC)).total_seconds()
     if remaining <= 0:
         return None
     return clock().monotonic() + remaining
-
-
-def _parse_context_instant(value: Any) -> datetime | None:
-    """Parse an ISO-8601 instant from an untrusted context, if it is one."""
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
-    try:
-        moment = datetime.fromisoformat(normalized)
-    except ValueError:
-        return None
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    return moment.astimezone(timezone.utc)
 
 
 def _context_control_revision(context: Mapping[str, Any]) -> int:
@@ -338,28 +247,13 @@ def _context_control_revision(context: Mapping[str, Any]) -> int:
         return 0
 
 
-def _context_expiry(context: Mapping[str, Any]) -> datetime | None:
-    """Return the configured expiry an inherited context states, if it parses.
-
-    Distinct from the context's own ``expires_at``, which is the instant the
-    run ends by this process's clock. This is the experiment's identity -- the
-    instant the administrator asked for -- and a record that stated the local
-    deadline instead would describe a different experiment on every hop.
-    """
-    raw = str(context.get("run_expires_at") or "").strip()
-    if not raw:
-        return None
-    normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
-    try:
-        moment = datetime.fromisoformat(normalized)
-    except ValueError:
-        return None
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    return moment.astimezone(timezone.utc)
+def _manifest_control_revision(context: Mapping[str, Any]) -> int:
+    """Return the hop-local control revision carried beside a run identity."""
+    raw = context.get("run")
+    return _context_control_revision(raw) if isinstance(raw, Mapping) else 0
 
 
-def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measurement | None:
+def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measurement | None:  # noqa: C901, PLR0912 complexity baseline, #771
     """Continue measuring a selection another process already made.
 
     This is for the one case where a root operation outlives the process that
@@ -396,43 +290,47 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
     """
     if not isinstance(context, Mapping):
         return None
-    manifest = _manifest_for_continuation(context)
+    mode = profile_mode()
+    if mode == MODE_DISABLED:
+        return None
+    carried = _inherited_manifest(context) if mode == MODE_ADMIN else None
+    if mode == MODE_ADMIN and "run" in context and carried is None:
+        # Admin continuations derive their authority from the carried identity.
+        # A malformed one is never reinterpreted as a legacy local selection.
+        return None
+    manifest = carried if mode == MODE_ADMIN else None
     local = _load().run
     if manifest is not None:
         # A child of a selection that states its experiment. The manifest is
         # that experiment's identity, so it is what this process reports --
         # there is no local configuration to consult, because a new process
         # under Admin control has none until its own sync loop runs.
-        run_id = manifest["run_id"]
-        allowed_operations = manifest["operations"]
-        source = manifest["source"]
-        run_config_version = manifest["config_version"]
-        run_target = dict(manifest["target"])
-        run_max_operations = manifest["max_operations"]
-        run_continuous = manifest["continuous"]
-        run_admission_instances: tuple[Mapping[str, Any], ...] = ()
-        run_expires_at: datetime | None = manifest["expires_at"]
+        run_manifest = manifest
     elif local is not None:
         # A caller written before the manifest travelled -- and the environment
         # path, where the descriptor really is this process's own
         # configuration. Nothing has been handed over, so the local run decides.
-        run_id = str(context.get("run_id") or "")
-        if run_id != local.run_id:
+        if str(context.get("run_id") or "") != local.run_id:
             return None
-        allowed_operations = local.operations
-        source = local.source
-        run_config_version = local.config_version
-        run_target = dict(local.target)
-        run_max_operations = local.max_operations
-        run_continuous = local.continuous
-        run_admission_instances = local.admission_instances
-        run_expires_at = _context_expiry(context) or local.expires_at_utc
+        admissions = _inherited_admissions(context, continuous=local.continuous)
+        if admissions is None:
+            return None
+        # A same-host handoff keeps the parent's admission owner. The local
+        # environment descriptor remains authoritative for every other field.
+        run_manifest = (
+            replace(
+                local.manifest,
+                admission_instances=admissions,
+            )
+            if admissions and admissions != local.manifest.admission_instances
+            else local.manifest
+        )
     else:
         return None
     operation = str(context.get("operation") or "").strip()
-    if not operation or operation not in allowed_operations:
+    if not operation or operation not in run_manifest.operations:
         return None
-    inherited = _context_deadline(context)
+    inherited = _context_deadline(context, manifest=carried)
     if inherited is None:
         return None
     # Every ceiling applies and the earliest wins. The transport's own bound,
@@ -447,7 +345,7 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
         if manifest_deadline is None:
             return None
         deadline = min(deadline, manifest_deadline)
-    if local is not None and local.run_id == run_id:
+    if local is not None and local.run_id == run_manifest.run_id:
         deadline = min(deadline, local.deadline_mono)
     if clock().monotonic() > deadline:
         return None
@@ -456,41 +354,13 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
         started_mono_ns = int(started) if started is not None else clock().monotonic_ns()
     except (TypeError, ValueError):
         started_mono_ns = clock().monotonic_ns()
-    admissions = context.get("admission_instances")
-    inherited_admissions: tuple[Mapping[str, Any], ...] = ()
-    if admissions is not None:
-        if not isinstance(admissions, list) or len(admissions) > MAX_REMOTE_STAGES:
-            return None
-        parsed_admissions: list[Mapping[str, Any]] = []
-        for item in admissions:
-            if not isinstance(item, Mapping):
-                return None
-            instance = str(item.get("instance") or "")
-            budget = item.get("max_operations")
-            if (
-                not instance
-                or not isinstance(budget, int)
-                or isinstance(budget, bool)
-                or budget < 0
-                or (budget == 0 and not run_continuous)
-            ):
-                return None
-            parsed_admissions.append({"instance": instance, "max_operations": budget})
-        inherited_admissions = tuple(parsed_admissions)
     spans = _restore_handoff_spans(context.get("inherited_spans", []))
     marks = _restore_handoff_marks(context.get("inherited_marks", []))
     if spans is None or marks is None:
         return None
-    # The configured expiry travels with the record, so a manifest rebuilt in
-    # this process states the experiment's identity rather than an instant
-    # re-derived from this process's own clock. A context from an Admin
-    # experiment that omits it cannot be filed under a run, so it is refused
-    # rather than given a deadline this process invented.
-    if run_expires_at is None and not run_continuous:
-        return None
     measurement = Measurement(
         operation=operation,
-        run_id=run_id,
+        run_manifest=run_manifest,
         # The same id the parent minted, so the child's record and the parent's
         # selection are one measurement rather than two that look related.
         measurement_id=str(context.get("measurement_id") or f"msm_{uuid.uuid4().hex[:16]}"),
@@ -499,24 +369,16 @@ def attach_selection(context: Any, *, producer: str = DEFAULT_PRODUCER) -> Measu
         started_mono_ns=started_mono_ns,
         deadline_mono=deadline,
         control_revision=(
-            manifest["control_revision"]
+            _manifest_control_revision(context)
             if manifest is not None
             else _context_control_revision(context)
         ),
-        run_operations=allowed_operations,
-        run_target=run_target,
-        run_max_operations=run_max_operations,
-        run_continuous=run_continuous,
-        run_config_version=run_config_version,
-        run_source=source,
         producer=str(context.get("producer") or producer),
         producer_instance_id=str(context.get("producer_instance_id") or PRODUCER_INSTANCE_ID),
         clock_domain_id=str(context.get("clock_domain_id") or CLOCK_DOMAIN_ID),
         coverage_scope=str(
             context.get("coverage_scope") or COVERAGE_BY_OPERATION.get(operation, "")
         ),
-        run_expires_at=run_expires_at,
-        run_admission_instances=inherited_admissions or run_admission_instances,
         facts={"operation": operation, "request_kind": operation},
         spans=spans,
         marks=marks,
@@ -593,19 +455,21 @@ def start_stage_recording(
     """
     if not isinstance(context, Mapping):
         return None
-    inherited = _context_deadline(context)
+    if profile_mode() == MODE_DISABLED:
+        return None
+    manifest = _manifest_for_continuation(context)
+    inherited = _context_deadline(context, manifest=manifest)
     if inherited is None:
         return None
     local = _load().run
     run_id = str(context.get("run_id") or "")
-    manifest = _manifest_for_continuation(context)
     if manifest is not None:
-        run_id = manifest["run_id"]
+        run_id = manifest.run_id
         candidates = _candidate_operations(context)
         allowed = (
-            frozenset(name for name in candidates if name in manifest["operations"])
+            frozenset(name for name in candidates if name in manifest.operations)
             if candidates
-            else manifest["operations"]
+            else manifest.operations
         )
         # The experiment's configured end is a ceiling of its own: a context
         # that states a later bound cannot extend it, and one that names an
@@ -621,6 +485,10 @@ def start_stage_recording(
             # The deployment moved on. The continuation is honoured anyway --
             # that is the point -- bounded by its own stated end.
             logger.debug("operation profiling continues a selection from a previous configuration")
+    elif profile_mode() == MODE_ADMIN and "run" in context:
+        # A stated but malformed identity is not a legacy selection. Failing
+        # soft means recording nothing, not falling back to a local run.
+        return None
     elif local is not None and run_id == local.run_id:
         allowed = _resolved_operations(local, context)
         deadline = min(local.deadline_mono, inherited)
@@ -660,11 +528,12 @@ def _resolved_operations(run: ProfilingRun, context: Mapping[str, Any]) -> froze
     return frozenset(name for name in candidates if name in run.operations)
 
 
-def _context_deadline(context: Mapping[str, Any]) -> float | None:
+def _context_deadline(
+    context: Mapping[str, Any], *, manifest: RunManifest | None = None
+) -> float | None:
     """Convert a caller's wall-clock expiry into this process's monotonic one."""
     if "expires_at" in context and context["expires_at"] is None:
-        manifest = _inherited_manifest(context)
-        return math.inf if manifest is not None and manifest["continuous"] else None
+        return math.inf if manifest is not None and manifest.continuous else None
     try:
         expires_at = float(str(context.get("expires_at")))
     except (TypeError, ValueError):
@@ -776,10 +645,15 @@ def _bounded_context_run(run: Mapping[str, Any]) -> dict[str, Any]:
         ]
     target = run.get("target")
     if isinstance(target, Mapping):
-        bounded["target"] = {
-            _bounded_context_str(key): _bounded_context_str(value)
-            for key, value in list(target.items())[:8]
-        }
+        bounded_target: dict[str, Any] = {}
+        for key, value in list(target.items())[:8]:
+            name = _bounded_context_str(key)
+            bounded_target[name] = (
+                _bounded_context_str(value)
+                if isinstance(value, (str, int)) and not isinstance(value, bool)
+                else None
+            )
+        bounded["target"] = bounded_target
     return bounded
 
 

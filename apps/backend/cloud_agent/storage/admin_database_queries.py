@@ -64,7 +64,7 @@ def _identifier(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def _typed_value(data_type: str, value: str) -> object:
+def _typed_value(data_type: str, value: str) -> object:  # noqa: PLR0912 complexity baseline, #771
     try:
         if data_type in TEXT_TYPES:
             return value

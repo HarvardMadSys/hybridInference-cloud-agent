@@ -1,24 +1,21 @@
 #!/usr/bin/env bash
 #
-# Stand up agent-job runners on a machine that is NOT the gateway's.
+# Stand up agent-job runners on a runner host.
 #
-# `agent_runner.sh` assumes the two are colocated: it layers the runner overlay
-# on the main compose file, whose `agent-runner` declares `depends_on: backend`.
-# Point that at a machine with no gateway and it does not fail — it starts one,
-# on a box that was only ever meant to run jobs. This script uses a standalone
-# compose file with no backend in it at all.
-#
-# Three narrow tunnel containers carry model, MCP, and control-plane traffic.
-# Sandboxes run on one routable bridge per group, created by the runner and
-# sandbox manager behind this deployment's host nftables table: public IPv4 on TCP
-# 80/443, the named resolver and the two relays, nothing else. Setup and the
-# agent share that bridge; there is no proxy and no network switch.
+# A standalone compose file with exactly what a runner host needs: the runner,
+# its sandbox manager and two narrow tunnel containers, one for MCP and one for
+# the control-plane API. Sandboxes run on one routable bridge per group,
+# created by the runner and sandbox manager behind this deployment's host
+# nftables table: public IPv4 on TCP 80/443 (which is how a member reaches its
+# owner's model connection), the named resolver and the MCP relay, nothing
+# else. Setup and the agent share that bridge; there is no proxy and no
+# network switch.
 #
 # Usage, from the repository root on the runner host:
 #
 #   deploy/host/sandbox_host.sh up       # build, start the tunnels, sandbox manager and runner
 #   deploy/host/sandbox_host.sh status   # what is running, and the log tails
-#   deploy/host/sandbox_host.sh check    # prove the tunnel reaches the gateway
+#   deploy/host/sandbox_host.sh check    # prove the tunnels and the stack are ready
 #   deploy/host/sandbox_host.sh down     # stop everything this file started
 #
 # `up` in its two halves, for a deployer that has to put something between them
@@ -33,7 +30,6 @@
 #
 #   COMPOSE_PROJECT                this stack's compose project, unique on this machine
 #   AGENT_SANDBOX_IMAGE            image the sandboxes run
-#   AGENT_TUNNEL_*                 inference tunnel destination/key/known_hosts
 #   AGENT_MCP_TUNNEL_*             MCP-only tunnel destination/key/known_hosts
 #   AGENT_CONTROL_PLANE_TUNNEL_*   control API tunnel destination/key/known_hosts
 #   AGENT_SANDBOX_MANAGER_REVERSE_*         the control plane's route back to this sandbox manager
@@ -44,9 +40,9 @@
 # Each tunnel key gets its own account on the far host, one authorized_keys
 # line there, and that account's Match block from
 # deploy/host/sshd-tunnels.conf.example; Admin → Servers → Server setup
-# generates all of it. The inference key needs one forwarded port and no shell:
+# generates all of it. The MCP key needs one forwarded port and no shell:
 #
-#   command="",restrict,port-forwarding,permitopen="127.0.0.1:8080" ssh-ed25519 AAAA... agent-tunnel
+#   command="",restrict,port-forwarding,permitopen="127.0.0.1:8001" ssh-ed25519 AAAA... agent-mcp
 #
 # The control-plane key also names the one reverse listener it may open:
 #
@@ -69,6 +65,7 @@ cd "$APP_DIR"
 export BUILDX_CONFIG="${APP_DIR}/.buildx"
 
 log() { printf '[sandbox-host] %s\n' "$*"; }
+warn() { printf '[sandbox-host] WARNING: %s\n' "$*" >&2; }
 die() { printf '[sandbox-host] ERROR: %s\n' "$*" >&2; exit 1; }
 
 case "$AGENT_DEPLOY_MODE" in
@@ -107,6 +104,8 @@ raw_env_or_dotenv() {
 
 # Accept existing host .env files while examples and new deployments use the
 # Sandbox Manager names. The compose wrapper also supplies the normalized token.
+# COMPAT(remove-after=2026-12-31): no host's .env or environment sets a former
+# name; check each deploy root's .env. A fallback below warns, naming it.
 env_or_dotenv() {
   local name="$1" value legacy
   value="$(raw_env_or_dotenv "$name")"
@@ -121,7 +120,10 @@ env_or_dotenv() {
     AGENT_SANDBOX_MANAGER_*) legacy="AGENT_BROKER_${name#AGENT_SANDBOX_MANAGER_}" ;;
     *) return 0 ;;
   esac
-  raw_env_or_dotenv "$legacy"
+  value="$(raw_env_or_dotenv "$legacy")"
+  # The name only: the value may be the sandbox manager's credential.
+  [[ -z "$value" ]] || warn "${legacy} is a former name for ${name}; set that instead"
+  printf '%s' "$value"
 }
 
 # Ask Compose itself to parse the interpolation environment used by the stack.
@@ -188,6 +190,16 @@ fi
 # exotic one. A default would be a value somebody forgets to override exactly
 # once.
 COMPOSE_PROJECT="$(env_or_dotenv COMPOSE_PROJECT)"
+# Configuration for the removed Gateway inference relay is refused rather than
+# ignored: a host that still names it expects a tunnel that no longer exists.
+for retired in AGENT_AUTH_MODE AGENT_GATEWAY_URL AGENT_GATEWAY_HOSTNAME \
+  AGENT_TUNNEL_SSH_DESTINATION AGENT_TUNNEL_SSH_PORT AGENT_TUNNEL_SSH_KEY \
+  AGENT_TUNNEL_SSH_KNOWN_HOSTS AGENT_TUNNEL_REMOTE_HOST AGENT_TUNNEL_REMOTE_PORT \
+  AGENT_TUNNEL_LISTEN_PORT; do
+  [[ -z "$(env_or_dotenv "$retired")" ]] \
+    || die "remove $retired from this host's environment and .env: hosts no longer use a Gateway inference relay or an account mode"
+done
+TUNNEL_PREFIXES=(AGENT_MCP_TUNNEL AGENT_CONTROL_PLANE_TUNNEL)
 
 # A function rather than an array, so the check happens when a compose command
 # actually runs. `preflight` and `check` answer questions about this machine and
@@ -197,7 +209,9 @@ COMPOSE_PROJECT="$(env_or_dotenv COMPOSE_PROJECT)"
 compose() {
   # Nested :? fallbacks are evaluated eagerly by Compose. Normalize the legacy
   # token here, then let the recipe require the canonical credential as before.
-  local manager_token
+  # COMPAT(remove-after=2026-12-31): as env_or_dotenv's; then Compose reads the
+  # token from .env itself, and this override goes.
+  local manager_token compose_file="$COMPOSE_FILE"
   manager_token="$(env_or_dotenv AGENT_SANDBOX_MANAGER_TOKEN)"
   if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
     case "$1" in
@@ -212,7 +226,7 @@ compose() {
     AGENT_SANDBOX_MANAGER_TOKEN="$manager_token" \
     docker compose \
       -p "$COMPOSE_PROJECT" \
-      -f "$COMPOSE_FILE" \
+      -f "$compose_file" \
       --env-file .env "$@"
   else
     # Compose already receives exported configuration from this process. Do not
@@ -222,7 +236,7 @@ compose() {
     AGENT_SANDBOX_MANAGER_TOKEN="$manager_token" \
     docker compose \
       -p "$COMPOSE_PROJECT" \
-      -f "$COMPOSE_FILE" "$@"
+      -f "$compose_file" "$@"
   fi
 }
 
@@ -237,17 +251,13 @@ case "${SANDBOX_IMAGE_PULL:-false}" in
   true|false) ;;
   *) die "AGENT_SANDBOX_IMAGE_PULL must be true or false" ;;
 esac
-GATEWAY_HOSTNAME="$(env_or_dotenv AGENT_GATEWAY_HOSTNAME)"
-GATEWAY_HOSTNAME="${GATEWAY_HOSTNAME:-agent-gateway}"
-TUNNEL_PORT="$(env_or_dotenv AGENT_TUNNEL_LISTEN_PORT)"
-TUNNEL_PORT="${TUNNEL_PORT:-8080}"
 MCP_HOSTNAME="$(env_or_dotenv AGENT_MCP_HOSTNAME)"
 MCP_HOSTNAME="${MCP_HOSTNAME:-agent-mcp}"
 MCP_TUNNEL_PORT="$(env_or_dotenv AGENT_MCP_TUNNEL_LISTEN_PORT)"
 MCP_TUNNEL_PORT="${MCP_TUNNEL_PORT:-8000}"
 CONTROL_PLANE_HOSTNAME="$(env_or_dotenv AGENT_CONTROL_PLANE_HOSTNAME)"
 CONTROL_PLANE_HOSTNAME="${CONTROL_PLANE_HOSTNAME:-agent-control-plane}"
-# Where the two relays are discovered: a route-less network no sandbox joins.
+# Where the MCP relay is discovered: a route-less network no sandbox joins.
 # Derived from the Compose project, so two stacks on one machine never find
 # each other's relays; an explicit value still wins. The runner creates group
 # bridges through the Docker API, outside Compose, so it must receive the exact
@@ -277,11 +287,9 @@ require_env() {
   # Named up front, because each of these fails much later and much less
   # legibly: a missing token as a 401 per claim, a missing key as a container
   # that restarts forever, a missing known_hosts as a refusal nobody reads.
-  local missing=() name
+  local missing=() name prefix
   for name in AGENT_SANDBOX_IMAGE \
               AGENT_SANDBOX_MANAGER_TOKEN \
-              AGENT_TUNNEL_SSH_DESTINATION AGENT_TUNNEL_SSH_KEY \
-              AGENT_TUNNEL_SSH_KNOWN_HOSTS \
               AGENT_MCP_TUNNEL_SSH_DESTINATION AGENT_MCP_TUNNEL_SSH_KEY \
               AGENT_MCP_TUNNEL_SSH_KNOWN_HOSTS \
               AGENT_CONTROL_PLANE_TUNNEL_SSH_DESTINATION \
@@ -324,8 +332,8 @@ require_env() {
     fi
   fi
 
-  local prefix key known
-  for prefix in AGENT_TUNNEL AGENT_MCP_TUNNEL AGENT_CONTROL_PLANE_TUNNEL; do
+  local key known
+  for prefix in "${TUNNEL_PREFIXES[@]}"; do
     key="$(env_or_dotenv "${prefix}_SSH_KEY")"
     known="$(env_or_dotenv "${prefix}_SSH_KNOWN_HOSTS")"
     [[ -r "$key" ]] || die "${prefix}_SSH_KEY=$key is not readable on this host"
@@ -413,7 +421,8 @@ validate_retained_config() {
   # says the metric is switched off. Refusing it here means neither side has to
   # guess what the other made of it.
   local storage_probe
-  storage_probe="$(storage_probe_name)"
+  storage_probe="$(env_or_dotenv AGENT_HOST_STORAGE_PROBE)"
+  storage_probe="${storage_probe:-overlay_root}"
   [[ "$storage_probe" == "overlay_root" || "$storage_probe" == "off" ]] \
     || die "AGENT_HOST_STORAGE_PROBE must be 'overlay_root' or 'off' (got '$storage_probe')"
 
@@ -450,15 +459,12 @@ validate_retained_config() {
     && (( 10#$source_import_max <= 65536 )) \
     || die "AGENT_SOURCE_IMPORT_MAX_MIB must be a whole number of MiB from 1 through 65536 (got '$source_import_max')"
 
-  # Docker DNS returns every container that claims an alias. If two relays use
+  # Docker DNS returns every container that claims an alias. If two tunnels use
   # one name, requests are round-robined to services that listen on different
   # ports: a readiness probe can win the lottery and a real job can lose it.
-  # All three aliases share the runner's internal network, and the first two
-  # also share the sandbox network, so pairwise uniqueness is mandatory.
-  if [[ "$GATEWAY_HOSTNAME" == "$MCP_HOSTNAME" \
-     || "$GATEWAY_HOSTNAME" == "$CONTROL_PLANE_HOSTNAME" \
-     || "$MCP_HOSTNAME" == "$CONTROL_PLANE_HOSTNAME" ]]; then
-    die "AGENT_GATEWAY_HOSTNAME ('$GATEWAY_HOSTNAME'), AGENT_MCP_HOSTNAME ('$MCP_HOSTNAME'), and AGENT_CONTROL_PLANE_HOSTNAME ('$CONTROL_PLANE_HOSTNAME') must be distinct Docker aliases"
+  # Both aliases share the runner's internal network, so they must differ.
+  if [[ "$MCP_HOSTNAME" == "$CONTROL_PLANE_HOSTNAME" ]]; then
+    die "AGENT_MCP_HOSTNAME ('$MCP_HOSTNAME') and AGENT_CONTROL_PLANE_HOSTNAME ('$CONTROL_PLANE_HOSTNAME') must be distinct Docker aliases"
   fi
   # Chat files live in Docker's writable layer. Verify the daemon whose socket
   # the sandbox manager receives is the daemon backed by the configured storage root;
@@ -539,752 +545,55 @@ complete_shared_live_marker() {
 
 # ── Storage probe attestation ─────────────────────────────────────────
 #
-# The admin page may say how full the filesystem holding sandbox writable
-# layers is, but only about the right filesystem. The runner reads its own root
-# filesystem — an overlay whose upper layer sits on that disk — and OverlayFS
-# makes `statvfs("/")` describe the upper layer's filesystem. What it cannot
-# tell is whether that filesystem is the disk or a project quota on it: Docker's
-# `overlay2.size` (and a container's `--storage-opt size=`) is implemented as
-# one, and a quota makes the container *and* `df <upperdir>` report the quota,
-# with the same device number, so comparing the two proves nothing.
-#
-# The comparison that does prove something is against the **mount root** of the
-# filesystem containing the upper directory, which no container directory's
-# project covers. This section runs that comparison per replica and writes the
-# result to a file the runner reads every sampling round.
-#
-# **Nothing here is fatal, and nothing here may hang.** A page that cannot say
-# how full a disk is must not be able to stop the work that fills it, and a
-# rollout waiting forever on a `docker exec` has stopped it just as effectively
-# as a failed check. Every call that leaves this process therefore runs under
-# `timeout`, with a bounded force-kill behind it, and each one may only spend
-# what is left of the attestation's budget: a call that cannot be afforded is
-# not made at all. When a call is cut short, or the budget runs out, the
-# affected replicas are left with no entry — which the runner reads as
-# `unverified` — and the deployment continues. The one exception is the verdict
-# file itself, which is a bind-mount source: without it the runner containers
-# cannot start at all, and failing there names the problem instead of letting
-# Compose's own error do it.
-#
-# The honest limit, and it is a narrow one: a process in uninterruptible I/O
-# cannot be killed by any signal, so `timeout` itself waits for it and no
-# budget here can end that wait. Everything else is bounded — a wedged
-# `docker exec`, a probe that ignores SIGTERM, a `df` on a dead mount that
-# still obeys signals — and each call is charged to what is left rather than
-# handed a fixed allowance.
-
-# The diagnostic band's floor. Occupancy moves between the two reads — builds
-# and cleanup interleave, and nothing pauses the world for monitoring — so
-# `used` and `available` are compared within a tolerance and only as a
-# diagnosis. `size` does not move under writes, and it is the actual test.
-STORAGE_DIAGNOSTIC_FLOOR_BYTES=$((1024 * 1024 * 1024))
-
-# Budgets. Each call here is local — a Python start-up in a sibling container,
-# or `df` on a path — and returns in well under a second when it works, so
-# these are orders of magnitude above the normal case. They exist for the case
-# that does not work: a stuck `docker exec`, a `df` blocked on a dead mount.
-#
-# `STORAGE_CALL_TIMEOUT_S` is the SIGTERM point of one call, and
-# `STORAGE_KILL_AFTER_S` the grace it then gets before SIGKILL. GNU `timeout`
-# waits forever for a process that ignores TERM unless `-k` is given, so the
-# pair is what makes "one call cannot outlive N seconds" true rather than
-# nearly true. Both are charged to the attestation's budget, which is itself
-# capped by whatever is left of the rollout's readiness fence — a host that
-# publishes its marker after that fence expired has failed a deployment over a
-# metric, so there is no point spending time on one.
-STORAGE_CALL_TIMEOUT_S=8
-STORAGE_KILL_AFTER_S=2
+# The shell owns invocation timing because rollout deadlines use Bash SECONDS.
+# Pass only the remaining duration: Python establishes its own monotonic
+# deadline from that duration, so the two processes never compare clock epochs.
+# All parsing, proofs, subprocess bounds and verdict persistence live in the
+# stdlib-only sibling executable shipped with both deployment packages.
 STORAGE_ATTEST_BUDGET_S=30
-
-storage_bounded() {
-  # Run one probe call under the smaller of the per-call bound and what is left
-  # of the attestation's budget — the grace reserved for the force-kill, so a
-  # call that has to be killed still fits inside the deadline. Returns 1
-  # without running anything when the budget cannot afford a call at all,
-  # which is how a caller skips work instead of starting it into a deadline it
-  # has already passed.
-  #
-  # `-k` is not decoration: GNU `timeout` sends SIGTERM and then waits, so a
-  # process that ignores it runs as long as it likes. The tests cover exactly
-  # that process.
-  local deadline="$1"
-  shift
-  local remaining=$(( deadline - SECONDS - STORAGE_KILL_AFTER_S ))
-  if (( remaining <= 0 )); then
-    return 1
-  fi
-  if (( remaining > STORAGE_CALL_TIMEOUT_S )); then
-    remaining="$STORAGE_CALL_TIMEOUT_S"
-  fi
-  timeout -k "$STORAGE_KILL_AFTER_S" "$remaining" "$@"
-}
+STORAGE_ATTESTATION_SCRIPT="${SCRIPT_DIR}/storage_attestation.py"
 
 storage_verdict_file() {
-  # The deployment owns this dedicated directory. Runners bind the directory
-  # read-only so they observe deletion/recreation of its verdict, without
-  # gaining a view of the checkout, credentials or other host state.
+  # Runners bind the directory, then open its current verdict each sample.
   printf '%s/.storage-probe/verdict.json' "${PWD%/}"
 }
 
-storage_host_path() {
-  # A mountinfo value escapes space, tab, newline, backslash and comma, and the
-  # runner keeps its upper directory in that escaped form on purpose: the
-  # string is the key its verdict is looked up by, so unescaping one side of
-  # that lookup would break it. Host tools want the real bytes — `findmnt -T`,
-  # `df` and `docker --mount src=` each stat the path they are handed, and a
-  # literal `\040` names nothing — so the translation happens here, at that
-  # boundary, and the key is never translated at all.
-  #
-  # Every backslash in such a value opens a three-digit octal escape, so
-  # turning each one into `\0NNN` is precisely what `%b` reads back.
-  local escaped="$1"
-  printf '%b' "${escaped//\\/\\0}"
-}
-
-storage_probe_name() {
-  # The deployment declares the topology; the collector never guesses it. An
-  # absent value takes the same default the compose file interpolates.
-  local probe
-  probe="$(env_or_dotenv AGENT_HOST_STORAGE_PROBE)"
-  printf '%s' "${probe:-overlay_root}"
-}
-
-write_storage_verdict() {
-  # Replace the verdict document with the entries listed in "$1".
-  #
-  # Written beside the document and renamed over it, never truncated in place.
-  # Runners bind the *directory* and open its current entry on every sample, so
-  # a rename is seen — while a truncating write leaves whoever samples during
-  # it holding an empty or half-written document. That reader has only one
-  # conclusion available, "unverified", which is a host that has just passed
-  # its attestation reported as unmeasured until its next cycle.
-  #
-  # Warns and returns non-zero rather than dying: both callers decide for
-  # themselves, because one of them is preparing a mount source and the other
-  # is refreshing a metric.
-  local entries_file="$1" verdict_file
-  verdict_file="$(storage_verdict_file)"
-  if ! mkdir -p "${verdict_file%/*}" || ! chmod 0755 "${verdict_file%/*}"; then
-    warn "could not prepare the storage-probe directory ${verdict_file%/*}; storage attestation not refreshed"
-    return 1
-  fi
-  if ! python3 - "$entries_file" "$verdict_file" "${AGENT_DEPLOYMENT_SHA:-}" <<'PY'
-import datetime
-import json
-import os
-import sys
-
-entries_file, verdict_file, deployment_sha = sys.argv[1:4]
-entries = {}
-with open(entries_file, encoding="utf-8") as handle:
-    for line in handle:
-        key, _, rest = line.rstrip("\n").partition("\t")
-        verdict, _, rest = rest.partition("\t")
-        mount_root, _, rest = rest.partition("\t")
-        fstype, _, rest = rest.partition("\t")
-        size, _, reason = rest.partition("\t")
-        if not key or not verdict:
-            continue
-        entries[key] = {
-            "verdict": verdict,
-            "mount_root": mount_root or None,
-            "fstype": fstype or None,
-            "size_bytes": int(size) if size.isdigit() else None,
-            "reason": reason or None,
-        }
-
-written_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-document = {
-    "schema_version": 1,
-    "written_at": written_at,
-    "deployment_sha": deployment_sha,
-    "entries": entries,
-}
-# Same directory, so the rename is atomic: a replica sampling at any instant
-# opens either the previous document or this one, and never a partial file.
-# The mode is set before the rename for the same reason -- the document must
-# not be readable-by-nobody for even the moment between the two.
-temporary = verdict_file + ".tmp"
-with open(temporary, "w", encoding="utf-8") as handle:
-    json.dump(document, handle, sort_keys=True)
-    handle.write("\n")
-os.chmod(temporary, 0o644)
-os.replace(temporary, verdict_file)
-PY
-  then
-    rm -f "${verdict_file}.tmp"
-    warn "could not write the storage verdict to ${verdict_file}; storage attestation not refreshed"
-    return 1
-  fi
-  log "storage verdict written to ${verdict_file} ($(wc -l <"$entries_file" | tr -d '[:space:]') entries)"
-}
-
 prepare_storage_verdict() {
-  # Keep the bound directory itself in place across up/check. The file inside
-  # it can be deleted or replaced: every sample opens its current directory
-  # entry, rather than an inode pinned by a file bind.
-  # Fail-closed on purpose — a runner that starts while the checks are still
-  # running reads "unverified", never the previous deployment's verdict. This
-  # one dies where the refresh only warns: the directory is a mount source, and
-  # without it the runner containers cannot start at all.
-  write_storage_verdict /dev/null \
+  # This is the one fatal storage path: the directory is a required bind source.
+  python3 "$STORAGE_ATTESTATION_SCRIPT" prepare \
+    --verdict-file "$(storage_verdict_file)" \
+    --deployment-sha "${AGENT_DEPLOYMENT_SHA:-}" \
     || die "could not write the storage-probe verdict to $(storage_verdict_file)"
 }
 
-storage_quota_configured() {
-  # Best effort, and known to be: `df` cannot distinguish a project quota on
-  # the mount root itself from the disk, so the configuration is checked as
-  # well. `overlay2.size` is the only quota this deployment can impose.
-  #
-  # The bracket in the pattern is load-bearing: `ps` snapshots the grep process
-  # too, and a pattern spelled with a literal dot would match its own command
-  # line and report a quota on every host.
-  #
-  # The file read is left unbounded on purpose — it is a local read with no
-  # process to signal — while `ps`, which is a process like any other, is not.
-  local deadline="${1:-$SECONDS}" daemon_json="${DOCKER_DAEMON_JSON:-/etc/docker/daemon.json}"
-  if [[ -r "$daemon_json" ]] && grep -q 'overlay2[.]size' "$daemon_json" 2>/dev/null; then
-    return 0
-  fi
-  if storage_bounded "$deadline" ps -eo args= 2>/dev/null | grep -q -- 'overlay2[.]size'; then
-    return 0
-  fi
-  return 1
-}
-
-storage_df_size() {
-  # Bytes of the filesystem containing the path in `$1`, as GNU df reports it.
-  # `-B1` with `--output=size` prints one exact integer: no human rounding, and
-  # no dependence on the terminal's idea of a block. Prints nothing when df
-  # cannot answer — including when it ran out of time or budget — so the caller
-  # can tell "no answer" from a real zero.
-  #
-  # Bounded rather than optional: this runs inside the rollout, and an
-  # unbounded `df` is how a monitoring check becomes a hung deployment.
-  local value
-  value="$(
-    storage_bounded "$2" df -B1 --output=size "$1" 2>/dev/null \
-      | tail -n1 | tr -d '[:space:]' || true
-  )"
-  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
-    return 0
-  fi
-  printf '%s' "$value"
-}
-
-storage_describe_fields() {
-  # One separator-delimited line for a describe document: ok, reason, upperdir,
-  # fstype, total, free, available.
-  #
-  # The separator is ASCII unit separator (0x1f), not a tab, and that is not
-  # decoration: a tab is IFS *whitespace*, so `read` collapses runs of it and
-  # an empty field — a null reason, say — would silently shift every field
-  # after it. A non-whitespace separator preserves empty fields, which matters
-  # because the reader below indexes them by position.
-  python3 - "$1" <<'PY'
-import json
-import sys
-
-try:
-    with open(sys.argv[1], encoding="utf-8", errors="replace") as handle:
-        document = json.load(handle)
-except (OSError, ValueError):
-    document = {}
-if not isinstance(document, dict):
-    document = {}
-
-
-def text(name):
-    value = document.get(name)
-    return "" if value is None else str(value)
-
-
-print(
-    "\x1f".join(
-        [
-            "1" if document.get("ok") else "0",
-            text("reason"),
-            text("upperdir"),
-            text("fstype"),
-            text("total_bytes") or "0",
-            text("free_bytes") or "0",
-            text("available_bytes") or "0",
-        ]
-    )
-)
-PY
-}
-
-storage_host_helper() {
-  # Docker can resolve source directories that the deployment user cannot
-  # traverse. Select a candidate mount from the *table*, without stat'ing the
-  # path; the helper must independently prove the two actual binds match it.
-  # Only those two directories are bound, non-recursively and read-only. No
-  # host proc tree, capabilities, socket, credentials or network are passed.
-  #
-  # `bind-recursive=disabled` is the only spelling that works, and the choice
-  # is not free. Both keys set the same field, but each is refused by half the
-  # versions: the CLI parses this one and added it in 25, while the older
-  # `bind-nonrecursive=true` is not merely deprecated on a current CLI — 29.2.1
-  # rejects the whole `--mount` with "use bind-recursive=disabled instead" and
-  # exits 125. Trying to reach older hosts with the old key therefore breaks
-  # every host that is not old, which is all of them; this deployment needs
-  # Docker 25 or newer for the helper path, and `docs/developer/operations.md` says so.
-  # A host below that gets `unverified` and a warning quoting the CLI's own
-  # complaint, which is the honest outcome. Nothing here requires root: the
-  # helper opens its two binds with `O_PATH`, which needs no permission on the
-  # object, and answers with `fstatvfs`, so it runs as `nobody` and cannot read
-  # a host file that merely happens to share the bound filesystem.
-  local id="$1" upperdir="$2" deadline="$3" image helper_name helper_seconds rc=0
-  local plan_file target fstype device fsroot upper_root
-  plan_file="$4/${id}.mount-plan.json"
-  if ! storage_bounded "$deadline" findmnt --kernel --list --json \
-      --output TARGET,FSTYPE,MAJ:MIN,FSROOT >"$plan_file" 2>/dev/null; then
-    rm -f "$plan_file"
-    return 1
-  fi
-  target=""; fstype=""; device=""; fsroot=""; upper_root=""
-  IFS=$'\037' read -r target fstype device fsroot upper_root < <(
-    python3 - "$plan_file" "$upperdir" <<'PY_PLAN'
-import json
-import posixpath
-import sys
-
-try:
-    with open(sys.argv[1], encoding="utf-8") as handle:
-        mounts = json.load(handle)["filesystems"]
-    path = sys.argv[2]
-    if not path.startswith("/") or posixpath.normpath(path) != path:
-        raise ValueError("non-canonical upperdir")
-    candidates = [m for m in mounts if path == m["target"] or path.startswith(m["target"].rstrip("/") + "/")]
-    # Later wins among equal-length targets: findmnt lists the mount table in
-    # creation order, so an over-mounted path appears twice and the second
-    # entry is the one a bind of that path actually resolves to. Taking the
-    # first would hand the helper a plan for the mount it cannot reach, and
-    # its identity check would then reject a sound host on every run.
-    mount = max(reversed(candidates), key=lambda m: len(m["target"]))
-    target, root = mount["target"], mount["fsroot"]
-    upper_root = posixpath.join(root, posixpath.relpath(path, target))
-    fields = [target, mount["fstype"], mount["maj:min"], root, posixpath.normpath(upper_root)]
-    if not all(isinstance(v, str) and v and not any(ord(c) < 32 or c == "," for c in v)
-               for v in [*fields, path]):
-        raise ValueError("unsafe mount path")
-except (OSError, ValueError, KeyError, TypeError):
-    raise SystemExit(0)
-print("\x1f".join(fields))
-PY_PLAN
-  ) || true
-  rm -f "$plan_file"
-  [[ -n "$target" && "$target" == /* && -n "$upper_root" ]] || return 1
-  image="$(storage_bounded "$deadline" docker inspect --format '{{.Image}}' "$id" 2>/dev/null)" || return 1
-  [[ "$image" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
-  helper_seconds=$(( deadline - SECONDS - STORAGE_KILL_AFTER_S - 1 ))
-  (( helper_seconds > 0 )) || return 1
-  if (( helper_seconds > 5 )); then helper_seconds=5; fi
-  helper_name="agent-storage-attest-${BASHPID:-$$}-${RANDOM}"
-  storage_bounded "$deadline" docker run --rm --pull=never --name "$helper_name" \
-    --label org.freeinference.storage-attestation=true \
-    --runtime runc --network none --read-only --user 65534:65534 \
-    --cap-drop ALL --security-opt no-new-privileges:true \
-    --pids-limit 16 --memory 64m --cpus 0.25 \
-    --mount "type=bind,src=${target},dst=/disk,readonly,bind-recursive=disabled,bind-propagation=rslave" \
-    --mount "type=bind,src=${upperdir},dst=/upper,readonly,bind-recursive=disabled,bind-propagation=rslave" \
-    --env PYTHONDONTWRITEBYTECODE=1 --entrypoint python "$image" \
-    -m cloud_agent_host.storage_attestation "$target" "$device" "$fsroot" "$upper_root" "$fstype" "$helper_seconds" || rc=$?
-  if (( rc != 0 )); then
-    # --rm handles completed helpers; explicit cleanup also covers create or
-    # start failures. It may only use the same remaining attestation budget.
-    storage_bounded "$deadline" docker rm -f "$helper_name" >/dev/null 2>&1 || true
-  fi
-  return "$rc"
-}
-
-storage_helper_fields() {
-  # A malformed/partial helper response is absence, never zero capacity.
-  python3 - "$1" <<'PY_HELPER'
-import json
-import sys
-
-try:
-    with open(sys.argv[1], encoding="utf-8") as handle:
-        value = json.load(handle)
-    fields = [value[name] for name in (
-        "mount_root", "fstype", "total_bytes", "upper_total_bytes", "used_bytes", "available_bytes"
-    )]
-    if not all(isinstance(item, str) and item and not any(ord(c) < 32 for c in item)
-               for item in fields[:2]) or not fields[0].startswith("/"):
-        raise ValueError("invalid mount")
-    if not all(type(item) is int and 0 <= item <= 2**53 - 1 for item in fields[2:]):
-        raise ValueError("invalid counters")
-    if fields[4] + fields[5] > fields[2]:
-        raise ValueError("invalid occupancy")
-except (OSError, ValueError, KeyError, TypeError):
-    raise SystemExit(0)
-print("\x1f".join(map(str, fields)))
-PY_HELPER
-}
-
-storage_occupancy_fields() {
-  # "used available" from a describe document, or nothing at all.
-  #
-  # Nothing rather than zeroes: a document that timed out, arrived empty or
-  # cannot be parsed must not read as a filesystem with nothing on it, which is
-  # a reading the comparison would happily accept.
-  python3 - "$1" <<'PY_OCCUPANCY'
-import json
-import sys
-
-try:
-    with open(sys.argv[1], encoding="utf-8") as handle:
-        reading = json.load(handle)
-except (OSError, ValueError):
-    raise SystemExit(0)
-if not isinstance(reading, dict):
-    raise SystemExit(0)
-size = reading.get("total_bytes")
-free = reading.get("free_bytes")
-available = reading.get("available_bytes")
-if not all(isinstance(value, int) and not isinstance(value, bool)
-           for value in (size, free, available)):
-    raise SystemExit(0)
-print(size - free, available)
-PY_OCCUPANCY
-}
-
-storage_usage_agrees() {
-  # Compare the container's occupancy figures with the host's, up to three
-  # times, and print a note describing the last discrepancy. Returns 0 when the
-  # two agree within max(1 GiB, 1% of the size).
-  #
-  # Used and available are diagnostics rather than a topology test: they move
-  # between the two reads because builds and cleanup interleave, so requiring
-  # equality would fail on any busy host. A monotonic assumption is not
-  # available either — nothing here pauses the world for monitoring.
-  #
-  # Both calls are bounded, and the whole loop stops at the caller's deadline
-  # instead of retrying into it: three attempts plus their pauses is the most
-  # this can add to a rollout.
-  local id="$1" mount_root="$2" size="$3" deadline="${4:-$SECONDS}" attempt tolerance pause
-  local container_used container_avail host_used host_avail delta_used delta_avail
-  local note="the reading could not be taken" container_line host_line
-  local helper_upper="${5:-}" helper_file="${6:-}" helper_root helper_type helper_size helper_upper_size
-  # The document the parallel phase already saved for this replica. Retries
-  # overwrite it, so it always holds the most recent describe for this runner.
-  local describe_file="$7"
-  tolerance=$(( size / 100 ))
-  if (( tolerance < STORAGE_DIAGNOSTIC_FLOOR_BYTES )); then
-    tolerance="$STORAGE_DIAGNOSTIC_FLOOR_BYTES"
-  fi
-  for attempt in 1 2 3; do
-    if (( deadline - SECONDS <= STORAGE_KILL_AFTER_S )); then
-      note="the attestation ran out of its budget before the occupancy could be compared"
-      break
-    fi
-    if (( attempt == 1 )) && [[ -s "$describe_file" ]]; then
-      # The parallel phase ran this exact command moments ago and kept what it
-      # said. Asking again costs a second interpreter start inside the
-      # container, charged to the same fence — and on a rollout with little
-      # left, that is the call that cannot be afforded, which leaves the host
-      # unverified over a reading already in hand. Seconds of drift are what
-      # the tolerance below exists for.
-      container_line="$(storage_occupancy_fields "$describe_file")"
-    else
-      storage_bounded "$deadline" docker exec "$id" \
-        python -m cloud_agent_host.host_capacity describe >"$describe_file" 2>/dev/null \
-        || : >"$describe_file"
-      container_line="$(storage_occupancy_fields "$describe_file")"
-    fi
-    if [[ -n "$helper_upper" ]]; then
-      # Refresh the independent host reading on retries as occupancy moves.
-      if (( attempt > 1 )); then
-        storage_host_helper "$id" "$helper_upper" "$deadline" "${helper_file%/*}" >"$helper_file" 2>/dev/null || : >"$helper_file"
-      fi
-      host_used=""; host_avail=""; helper_root=""; helper_size=""; helper_upper_size=""
-      IFS=$'\037' read -r helper_root helper_type helper_size helper_upper_size host_used host_avail \
-        < <(storage_helper_fields "$helper_file") || true
-      host_line=""
-      if [[ "$helper_root" == "$mount_root" && "$helper_size" == "$size" && "$helper_upper_size" == "$size" ]]; then
-        host_line="$host_used $host_avail"
-      fi
-    else
-      host_line="$(
-        storage_bounded "$deadline" df -B1 --output=used,avail "$mount_root" 2>/dev/null \
-          | tail -n1 || true
-      )"
-    fi
-    # Cleared first: `read` leaves its targets alone at EOF, so a second
-    # attempt would otherwise compare the previous attempt's numbers.
-    container_used=""; container_avail=""; host_used=""; host_avail=""
-    read -r container_used container_avail <<<"$container_line" || true
-    read -r host_used host_avail <<<"$host_line" || true
-    if [[ -z "$container_used" || -z "$container_avail" || -z "$host_used" || -z "$host_avail" ]]; then
-      note="a reading did not arrive within ${STORAGE_CALL_TIMEOUT_S}s (the probe or df was cut short)"
-    elif [[ ! "$container_used" =~ ^[0-9]+$ || ! "$container_avail" =~ ^[0-9]+$ \
-       || ! "$host_used" =~ ^[0-9]+$ || ! "$host_avail" =~ ^[0-9]+$ ]]; then
-      note="one of the two readings was not numeric"
-    else
-      delta_used=$(( container_used - host_used ))
-      delta_avail=$(( container_avail - host_avail ))
-      if (( delta_used < 0 )); then delta_used=$(( -delta_used )); fi
-      if (( delta_avail < 0 )); then delta_avail=$(( -delta_avail )); fi
-      note="used differs by ${delta_used} B and available by ${delta_avail} B (tolerance ${tolerance} B)"
-      if (( delta_used <= tolerance && delta_avail <= tolerance )); then
-        printf '%s' "$note"
-        return 0
-      fi
-    fi
-    if (( attempt < 3 )); then
-      # The wait is inside the budget as well: a retry that cannot afford its
-      # own pause has nothing left to spend on the attempt after it.
-      pause=$(( deadline - SECONDS ))
-      if (( pause > 2 )); then pause=2; fi
-      if (( pause > 0 )); then sleep "$pause"; fi
-    fi
-  done
-  printf '%s' "$note"
-  return 1
-}
-
-append_storage_entry() {
-  # Key, verdict, mount root, filesystem type, size and reason; the file last.
-  local key="$1" verdict="$2" mount_root="$3" fstype="$4" size="$5" reason="$6" file="$7"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$key" "$verdict" "$mount_root" "$fstype" "$size" "$reason" >>"$file"
-}
-
 verify_storage_probe() {
-  # Attest every replica's storage reading and write the verdict document.
-  #
-  # Takes the attestation directory, the runner ids, the readiness deadline and
-  # whether that deadline is a fence, from check_shared_live_stack — which has
-  # already proven the replicas are alive, because a verdict about a container
-  # that is not running would be about nothing.
-  #
-  # The two kinds of caller need different budgets and the difference is not
-  # cosmetic. A rollout's deadline is a promise to the control plane: whatever
-  # the readiness probes have already spent is gone, and a fence that has
-  # already expired means this attestation gets nothing at all — the marker is
-  # late whether or not it runs. A manual `check` has no fence; its deadline is
-  # "now", and it is the path the design gives operators to refresh a verdict,
-  # so it gets the attestation's own budget.
-  local attest_dir="$1" runner_ids="$2" deadline="${3:-$SECONDS}" fenced="${4:-0}"
-  local entries_file id index storage_rc ok reason upperdir fstype
-  local total upper_size root_size mount_root host_fstype host_upperdir helper_rc note storage_deadline
-  local helper_upper helper_file helper_used helper_available
-  local -a ids=() pids=()
-
-  if [[ "$(storage_probe_name)" == "off" ]]; then
-    # Clear the entries rather than leaving the previous verdict in place. A
-    # replica started before the switch still carries `overlay_root` in its
-    # environment — an environment is fixed when the container is created — and
-    # against a stale verdict it would go on publishing capacity for a host the
-    # operator has just switched off. Emptying the document stops the figures
-    # now; the `up` that recreates the container stops the measuring.
-    log "storage measurement is switched off; clearing the verdict so replicas from before the switch stop publishing capacity"
-    : >"${attest_dir}/storage-entries.tsv"
-    write_storage_verdict "${attest_dir}/storage-entries.tsv" || true
-    return 0
-  fi
-  if [[ -z "$runner_ids" ]]; then
-    warn "no runner replica is available to attest storage against"
-    return 0
-  fi
-  # `timeout` is what makes the per-call bound real, and every call below is
-  # local work with no business outliving a few seconds. Without it this host
-  # gets no storage measurement at all, rather than an unbounded `docker exec`
-  # in the rollout path: "no number" is the right answer when the only way to
-  # get one is to risk holding a deployment open.
-  if ! command -v timeout >/dev/null 2>&1; then
-    warn "coreutils 'timeout' is not on PATH; skipping storage attestation rather than risking an unbounded probe call"
-    return 0
-  fi
+  # Storage refresh remains nonfatal. Every fatal readiness proof has already
+  # run before this function, so the attestation spends only their unused time.
+  local runner_ids="$2" deadline="${3:-$SECONDS}" fenced="${4:-0}"
+  local probe remaining id
+  local -a runner_arguments=()
+  probe="$(env_or_dotenv AGENT_HOST_STORAGE_PROBE)"
+  probe="${probe:-overlay_root}"
   if (( fenced )); then
-    storage_deadline="$deadline"
-    if (( storage_deadline > SECONDS + STORAGE_ATTEST_BUDGET_S )); then
-      storage_deadline=$((SECONDS + STORAGE_ATTEST_BUDGET_S))
+    remaining=$((deadline - SECONDS))
+    if (( remaining > STORAGE_ATTEST_BUDGET_S )); then
+      remaining="$STORAGE_ATTEST_BUDGET_S"
     fi
   else
-    storage_deadline=$((SECONDS + STORAGE_ATTEST_BUDGET_S))
+    remaining="$STORAGE_ATTEST_BUDGET_S"
   fi
-  if (( storage_deadline - SECONDS <= STORAGE_KILL_AFTER_S )); then
-    warn "the rollout's readiness fence has no room left for a storage attestation; leaving storage unverified"
-    return 0
-  fi
-
-  # Asked in parallel and through the same command the runner samples with: a
-  # shell re-implementation could agree with itself while both differ from
-  # what the heartbeat will carry.
   for id in $runner_ids; do
-    (
-      storage_rc=0
-      storage_bounded "$storage_deadline" docker exec "$id" \
-        python -m cloud_agent_host.host_capacity describe \
-        >"${attest_dir}/${id}.storage.json" 2>"${attest_dir}/${id}.storage.stderr" \
-        || storage_rc=$?
-      printf '%s' "${storage_rc}" >"${attest_dir}/${id}.storage.status"
-    ) &
-    ids+=("$id")
-    pids+=("$!")
+    runner_arguments+=(--runner "$id")
   done
-  for index in "${!pids[@]}"; do
-    wait "${pids[index]}" || true
-  done
-
-  entries_file="${attest_dir}/storage-entries.tsv"
-  : >"$entries_file"
-  for index in "${!ids[@]}"; do
-    id="${ids[index]}"
-    if (( storage_deadline - SECONDS <= STORAGE_KILL_AFTER_S )); then
-      # No entry for the replicas that were not reached: the runner draws the
-      # same conclusion from an absent entry, which is `unverified`.
-      warn "the storage attestation ran out of its budget; the remaining replicas keep reporting unverified"
-      break
-    fi
-    storage_rc="$(cat "${attest_dir}/${id}.storage.status" 2>/dev/null || true)"
-    if [[ "$storage_rc" == "124" || "$storage_rc" == "137" ]]; then
-      # 124 is timeout's own verdict; 137 is what it reports when the call had
-      # to be SIGKILLed after ignoring SIGTERM.
-      warn "runner $id did not answer the storage probe description within its budget; leaving its storage unverified"
-      continue
-    fi
-    if [[ "$storage_rc" != "0" ]]; then
-      warn "runner $id could not run the storage probe description; leaving its storage unverified"
-      continue
-    fi
-    ok=""; reason=""; upperdir=""; fstype=""; total=""
-    # The two free-space fields are deliberately dropped here: occupancy is
-    # compared by storage_usage_agrees below, under a tolerance, and reading
-    # them into names nobody reads is how a stricter check than the design's
-    # gets added by accident.
-    # shellcheck disable=SC2034
-    IFS=$'\037' read -r ok reason upperdir fstype total ignored_free ignored_avail \
-      < <(storage_describe_fields "${attest_dir}/${id}.storage.json") || true
-    if [[ "$ok" != "1" || -z "$upperdir" ]]; then
-      # No entry is written: the runner reaches the same conclusion on its own,
-      # and reporting it "unsupported" here would speak for a probe that has
-      # not been asked. A reason of `source_unavailable` may be transient.
-      warn "runner $id cannot describe its storage filesystem (${reason:-no reason}); it will report no reading"
-      continue
-    fi
-    # Every use below hands this path to a host tool, which wants the real
-    # bytes. `$upperdir` keeps its escapes: it is the key the runner looks its
-    # own verdict up by, and a key translated on one side is not a key.
-    host_upperdir="$(storage_host_path "$upperdir")"
-
-    # The mount root, not the upper directory: a project quota on the upper
-    # directory's project returns the quota from both, so the two would agree
-    # while neither describes the disk.
-    root_size=""; upper_size=""; helper_upper=""; helper_rc=0
-    mount_root=""; host_fstype=""
-    helper_file="${attest_dir}/${id}.host-storage.json"
-    # Both fields from one call, and the type first. Two separately bounded
-    # calls are two chances to be cut short and two reads of a mount table that
-    # moves, so the pair they return need not describe the same mount; and the
-    # type never contains a blank, which leaves the rest of the line — blanks
-    # and all — to the mount point.
-    #
-    # That type is the *host's*, not the container's: inside the container `/`
-    # is an overlay, and the entry names the filesystem the writable layers
-    # actually live on. When it cannot be established the entry says nothing,
-    # rather than repeating the `overlay` every container would report.
-    read -r host_fstype mount_root < <(
-      storage_bounded "$storage_deadline" findmnt -n -o FSTYPE,TARGET -T "$host_upperdir" 2>/dev/null \
-        | head -n1 || true
-    ) || true
-    if [[ -z "$mount_root" || "$mount_root" != /* ]]; then
-      # The ordinary host-user path remains useful on accessible filesystems.
-      # A permission failure needs independent metadata, not a guessed parent.
-      if storage_host_helper "$id" "$host_upperdir" "$storage_deadline" "$attest_dir" >"$helper_file" \
-          2>"${attest_dir}/${id}.host-storage.stderr"; then
-        IFS=$'\037' read -r mount_root host_fstype root_size upper_size helper_used helper_available \
-          < <(storage_helper_fields "$helper_file") || true
-        if [[ -n "$root_size" ]]; then helper_upper="$host_upperdir"; fi
-      else
-        helper_rc=$?
-      fi
-    fi
-    if [[ -z "$mount_root" || "$mount_root" != /* ]]; then
-      if (( helper_rc != 0 )); then
-        # Name the tool that failed. The helper exists exactly where findmnt
-        # cannot answer, so reporting its failure as findmnt's sends the reader
-        # to a permission problem that is not the one they have — and the
-        # helper's own diagnosis is on a stream nothing else ever prints.
-        append_storage_entry "$upperdir" "unverified" "" "$host_fstype" "$total" \
-          "the read-only storage helper exited ${helper_rc} instead of locating the filesystem containing ${host_upperdir}" \
-          "$entries_file"
-        warn "runner $id: the read-only storage helper exited ${helper_rc}; leaving its storage unverified"
-        if [[ -s "${attest_dir}/${id}.host-storage.stderr" ]]; then
-          printf '[sandbox-host] %s storage helper said:\n' "$id" >&2
-          tail -n 5 "${attest_dir}/${id}.host-storage.stderr" >&2 || true
-        fi
-      else
-        append_storage_entry "$upperdir" "unverified" "" "$host_fstype" "$total" \
-          "the host could not locate the filesystem containing ${host_upperdir}" "$entries_file"
-        warn "runner $id: findmnt could not locate the filesystem containing ${host_upperdir}"
-      fi
-      continue
-    fi
-    if [[ -z "$helper_upper" ]]; then
-      root_size="$(storage_df_size "$mount_root" "$storage_deadline")"
-    fi
-    if [[ -z "$root_size" ]]; then
-      append_storage_entry "$upperdir" "unverified" "$mount_root" "$host_fstype" "$total" \
-        "df could not size ${mount_root} on the host" "$entries_file"
-      warn "runner $id: df could not size ${mount_root}"
-      continue
-    fi
-    if storage_quota_configured "$storage_deadline"; then
-      append_storage_entry "$upperdir" "unsupported" "$mount_root" "$host_fstype" "$root_size" \
-        "the Docker daemon is configured with overlay2.size, so this reading is a project quota" \
-        "$entries_file"
-      warn "runner $id: daemon configuration sets overlay2.size; storage capacity would be a quota, not the disk"
-      continue
-    fi
-    if [[ -z "$helper_upper" ]]; then
-      upper_size="$(storage_df_size "$host_upperdir" "$storage_deadline")"
-    fi
-    if [[ -z "$upper_size" ]]; then
-      # "No answer" is not "a different answer". A `df` that was cut short, or
-      # skipped because the budget ran out, returns nothing — and comparing
-      # that nothing against the mount root's size disagrees with it, which is
-      # how a missing measurement becomes a statement about the host's
-      # configuration that nobody established.
-      append_storage_entry "$upperdir" "unverified" "$mount_root" "$host_fstype" "$root_size" \
-        "df could not size ${host_upperdir} within the attestation's budget" "$entries_file"
-      warn "runner $id: df could not size ${host_upperdir}; leaving its storage unverified"
-      continue
-    fi
-    if [[ "$upper_size" != "$root_size" ]]; then
-      append_storage_entry "$upperdir" "unsupported" "$mount_root" "$host_fstype" "$root_size" \
-        "df reports ${upper_size} B for ${host_upperdir} but ${root_size} B for its mount root, which is a project quota" \
-        "$entries_file"
-      warn "runner $id: the upper directory and its mount root disagree on size; treating the topology as unsupported"
-      continue
-    fi
-    if [[ "$total" != "$root_size" ]]; then
-      # `size` is the hard criterion: it does not move under writes, so a
-      # mismatch means the container is not looking at the filesystem the host
-      # just measured.
-      append_storage_entry "$upperdir" "unsupported" "$mount_root" "$host_fstype" "$root_size" \
-        "the container reports ${total} B for its root filesystem but the host reports ${root_size} B for ${mount_root}" \
-        "$entries_file"
-      warn "runner $id: the container and the host disagree on the filesystem's size; treating the topology as unsupported"
-      continue
-    fi
-    if note="$(storage_usage_agrees "$id" "$mount_root" "$root_size" "$storage_deadline" \
-        "$helper_upper" "$helper_file" "${attest_dir}/${id}.storage.json")"; then
-      append_storage_entry "$upperdir" "verified" "$mount_root" "$host_fstype" "$root_size" "" "$entries_file"
-      log "runner $id: storage verified against ${mount_root} (${host_fstype:-unknown filesystem}, ${root_size} B)"
-    else
-      append_storage_entry "$upperdir" "unverified" "$mount_root" "$host_fstype" "$root_size" \
-        "the container's occupancy never matched the host's: ${note}" "$entries_file"
-      warn "runner $id: occupancy readings did not agree; ${note}"
-    fi
-  done
-
-  write_storage_verdict "$entries_file" || return 0
+  python3 "$STORAGE_ATTESTATION_SCRIPT" verify \
+    --verdict-file "$(storage_verdict_file)" \
+    --deployment-sha "${AGENT_DEPLOYMENT_SHA:-}" \
+    --daemon-json "${DOCKER_DAEMON_JSON:-/etc/docker/daemon.json}" \
+    --probe "$probe" \
+    --budget-seconds "$remaining" \
+    "${runner_arguments[@]}" \
+    || warn "storage attestation failed unexpectedly; storage attestation not refreshed"
 }
-
 probe_sandbox_relay() {
   local network="$1" url="$2" label="$3" deadline="$4" diagnostic="$5"
   local relay_service="$6" relay_id relay_ip relay_host relay_error=""
@@ -1542,8 +851,8 @@ check_shared_live_stack() {
   [[ "$sandbox_manager_root" == "$expected_root" ]] \
     || die "sandbox manager reports retained DockerRootDir '${sandbox_manager_root:-unset}', expected '$expected_root'"
 
-  # The inference-gateway probe above is a different tunnel. Prove the runner
-  # can also reach the control plane that receives its capability heartbeat.
+  # The MCP relay probe above is a different tunnel. Prove the runner can also
+  # reach the control plane that receives its capability heartbeat.
   # The control-plane deployment performs the authoritative second half: it
   # waits for a fresh database heartbeat and dials this sandbox manager in reverse.
   while ! control_status="$(docker exec "$first_id" python -c \
@@ -1598,8 +907,6 @@ KATA_SETUP_SCRIPT="${KATA_SETUP_SCRIPT:-deploy/host/setup_kata_runtime.sh}"
 if [[ "$AGENT_DEPLOY_MODE" == "artifacts" && "$KATA_SETUP_SCRIPT" == "deploy/host/setup_kata_runtime.sh" ]]; then
   KATA_SETUP_SCRIPT="$SCRIPT_DIR/setup_kata_runtime.sh"
 fi
-
-warn() { printf '[sandbox-host] WARNING: %s\n' "$*" >&2; }
 
 require_kata_host() {
   # Gate before anything starts. The runner's own preflight would fail per job
@@ -1724,7 +1031,6 @@ check_candidate() {
     -e "AGENT_EGRESS_CHAT_NETWORK_POOL=$(env_or_dotenv AGENT_EGRESS_CHAT_NETWORK_POOL)" \
     -e "AGENT_EGRESS_DNS_SERVER=$(env_or_dotenv AGENT_EGRESS_DNS_SERVER)" \
     -e "AGENT_EGRESS_PROTECTED_CIDRS=$(env_or_dotenv AGENT_EGRESS_PROTECTED_CIDRS)" \
-    -e "AGENT_GATEWAY_URL=http://${GATEWAY_HOSTNAME}:${TUNNEL_PORT}" \
     -e "AGENT_SANDBOX_MCP_URL=http://${MCP_HOSTNAME}:${MCP_TUNNEL_PORT}" \
     "$runner_image" python -c 'from cloud_agent_shared.egress import network_from_env; network_from_env()' \
     || die "the sandbox network settings were refused (see the error above); fix AGENT_EGRESS_CHAT_NETWORK_POOL, AGENT_EGRESS_DNS_SERVER or AGENT_EGRESS_PROTECTED_CIDRS before any runner is drained"
@@ -1932,7 +1238,7 @@ cmd_activate() {
   prepare_storage_verdict
   drain_runners_then_sandbox_manager
 
-  log "starting the three purpose-scoped tunnels, sandbox manager, and the runner service"
+  log "starting the deployment's scoped tunnels, sandbox manager, and runner"
   # `--remove-orphans` because a renamed service leaves its old container
   # running otherwise: compose only replaces containers for services the file
   # still declares, so `agent-runner` outliving `runner` would mean two sets of
@@ -1993,21 +1299,14 @@ cmd_check() {
   local fenced=0
   if (( wait_seconds > 0 )); then fenced=1; fi
   validate_retained_config
-  # Ask from the relay network, where group lifecycle finds the two relays it
-  # attaches to every group bridge: reaching the gateway from this host's shell
-  # proves nothing about the tunnel a sandbox will be handed. The group bridge
+  # Ask from the relay network, where group lifecycle finds the MCP relay it
+  # attaches to every group bridge: reaching it from this host's shell proves
+  # nothing about the tunnel a sandbox will be handed. The group bridge
   # itself, with this deployment's host rules around it, is proved per group by
-  # the guest check that runs before any repository code.
+  # the guest check that runs before any repository code. Probe it before
+  # publishing the exact-SHA readiness marker.
   local network="$RELAY_NETWORK"
-  local url="http://${GATEWAY_HOSTNAME}:${TUNNEL_PORT}/health"
-  log "probing ${url} from the ${network} network"
-  probe_sandbox_relay "$network" "$url" "inference gateway" "$deadline" \
-    "Check 'docker logs' for the gateway-tunnel container: an SSH connection that cannot authenticate or bind its forward restarts." "gateway-tunnel"
-
-  # MCP is a second deliberately narrow destination on the same relay
-  # network. A healthy model tunnel does not prove this separate SSH key,
-  # listener, alias, or forward. Probe it before publishing the exact-SHA
-  # readiness marker.
+  local url
   url="http://${MCP_HOSTNAME}:${MCP_TUNNEL_PORT}/healthz"
   log "probing ${url} from the ${network} network"
   probe_sandbox_relay "$network" "$url" "MCP-only relay" "$deadline" \
@@ -2019,9 +1318,8 @@ cmd_check() {
 cmd_status() {
   compose ps
   printf '\n'
-  compose logs --tail 20 \
-    gateway-tunnel mcp-tunnel control-plane-tunnel \
-    sandbox-manager runner
+  local services=(mcp-tunnel control-plane-tunnel sandbox-manager runner)
+  compose logs --tail 20 "${services[@]}"
 }
 
 cmd_down() {

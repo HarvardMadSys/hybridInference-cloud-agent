@@ -67,6 +67,7 @@ MAX_CONTENT_BYTES = 512 * 1024
 MAX_CONTENT_BLOCKS = 64
 SESSION_CLOSE_TIMEOUT_S = 2.0
 SESSION_CHECK_TIMEOUT_S = 5.0
+SESSION_REAP_DEADLINE_S = 5.0
 _CLEANUP_CONCURRENCY = 8
 
 #: Content types the platform can carry through unchanged.
@@ -569,11 +570,31 @@ class McpHost:
 
         sessions = list(self._sessions.values())
         closed = 0
-        for offset in range(0, len(sessions), _CLEANUP_CONCURRENCY):
-            closed += sum(
-                await asyncio.gather(
-                    *(reap(session) for session in sessions[offset : offset + _CLEANUP_CONCURRENCY])
-                )
+        checked = 0
+        started = asyncio.get_running_loop().time()
+        try:
+            async with asyncio.timeout(SESSION_REAP_DEADLINE_S):
+                for offset in range(0, len(sessions), _CLEANUP_CONCURRENCY):
+                    batch = sessions[offset : offset + _CLEANUP_CONCURRENCY]
+                    # Rotate before awaiting: even a cancelled batch cannot
+                    # monopolize the next pass. Preserve replacement identity.
+                    for session in batch:
+                        handle = session.key.handle()
+                        if self._sessions.get(handle) is session:
+                            self._sessions[handle] = self._sessions.pop(handle)
+                    checked += len(batch)
+                    closed += sum(await asyncio.gather(*(reap(session) for session in batch)))
+        except TimeoutError:
+            logger.warning("agent_mcp_session_reap_timed_out")
+        finally:
+            logger.debug(
+                "agent_mcp_session_reap_pass",
+                extra={
+                    "duration_seconds": asyncio.get_running_loop().time() - started,
+                    "candidates": len(sessions),
+                    "checked": checked,
+                    "deferred": len(sessions) - checked,
+                },
             )
         return closed
 

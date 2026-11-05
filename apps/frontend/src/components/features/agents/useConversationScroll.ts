@@ -1,7 +1,6 @@
 'use client';
 
 // Owns every write to the Chat transcript's scroll position.
-//
 // The rail, the directory panel and the back-to-bottom control only *ask* this
 // hook to move; nothing else in the view calls `scrollTo`, and nothing else
 // decides which turn the reader is on. Keeping that in one place is what makes
@@ -12,6 +11,7 @@
 // decides where a click lands and which mark is current is testable without a
 // browser; the hook is the DOM shell around it.
 
+import { KEYBOARD_INPUT_SELECTOR } from '@/lib/keyboardShortcuts';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 /** Distance between the turn's opening and the top of the reading area. */
@@ -767,7 +767,7 @@ export function useConversationScroll({
       // input-method behaviour belong to the field, not to the reader's
       // position in the transcript.
       const target = event.target instanceof Element ? event.target : null;
-      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+      if (target?.closest(KEYBOARD_INPUT_SELECTOR)) return;
       if (SCROLL_KEYS.has(event.key)) noteGesture();
     };
     container.addEventListener('scroll', onScroll, { passive: true });

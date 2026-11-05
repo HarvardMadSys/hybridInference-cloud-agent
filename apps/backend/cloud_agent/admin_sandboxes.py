@@ -130,6 +130,7 @@ class AdminSandbox(BaseModel):
     deletion_sha256: str | None = None
     deletion_size_bytes: int | None = Field(None, gt=0)
     deletion_error: str | None = None
+    deletion_retry_exhausted_at: datetime | None = None
     deleted_at: datetime | None = None
     memory_limit: str
     cpu_limit: str
@@ -147,6 +148,9 @@ class AdminSandbox(BaseModel):
     idle_deadline: datetime | None = None
     updated_at: datetime
     host_last_heartbeat_at: datetime | None = None
+    #: The kind of this sandbox's newest incident within 24 hours, listed only.
+    last_incident: str | None = Field(None, max_length=64)
+    last_incident_at: datetime | None = None
 
 
 class AdminSandboxList(BaseModel):
@@ -198,6 +202,41 @@ class AdminSandboxCheckpoint(BaseModel):
     durations_ms: dict[str, int] = Field(default_factory=dict)
 
 
+class AdminSandboxDeletionAttempt(BaseModel):
+    """Sanitized, bounded diagnostics for one deletion worker attempt."""
+
+    correlation_id: str
+    request_id: str
+    host_id: str
+    attempt_number: int = Field(ge=1)
+    stage: Literal[
+        "sandbox_manager_resolution",
+        "stop_verification",
+        "archive_prepare",
+        "upload_authorization",
+        "archive_upload",
+        "archive_verification",
+        "durable_receipt",
+        "container_removal",
+        "database_finalization",
+        "discard_container_removal",
+        "discard_receipt_validation",
+        "cleanup_claim_renewal",
+        "cleanup_abort",
+    ]
+    outcome: Literal["running", "retrying", "succeeded", "failed", "lease_expired"]
+    failure_code: str | None = Field(None, max_length=64, pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    sandbox_manager_status: int | None = Field(None, ge=100, le=599)
+    retry_class: Literal["transient", "permanent", "operator_action"] | None = None
+    retry_scheduled: bool | None = None
+    cleanup_outcome: Literal["not_required", "pending", "acknowledged", "unconfirmed"] = (
+        "not_required"
+    )
+    started_at: datetime
+    updated_at: datetime
+    finished_at: datetime | None = None
+
+
 class AdminSandboxDetail(BaseModel):
     """A consistent sandbox inspection with at most 128 current members."""
 
@@ -206,6 +245,9 @@ class AdminSandboxDetail(BaseModel):
     observed_at: datetime
     terminal_activity_error: str | None = None
     latest_checkpoint: AdminSandboxCheckpoint | None = None
+    deletion_attempts: list[AdminSandboxDeletionAttempt] = Field(
+        default_factory=list, max_length=50
+    )
 
 
 class AdminSandboxStopRequest(BaseModel):

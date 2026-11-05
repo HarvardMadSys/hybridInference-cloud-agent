@@ -11,8 +11,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from pathlib import Path
 
+from cloud_agent_host.atomic_file import atomic_replace_bytes
 from cloud_agent_host.enrollment import credential_path
-from cloud_agent_host.environment_preparation import EnvironmentPreparation
 from cloud_agent_host.sandbox import SandboxError
 
 
@@ -91,12 +91,13 @@ class ActionReceipts:
 
     @staticmethod
     def _save(path: Path, receipt: dict[str, Any]) -> None:
-        EnvironmentPreparation._save(path, receipt)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        # A reservation prevents replay, so a directory-sync failure remains a
+        # hard error even though the replacement may already be visible.
+        atomic_replace_bytes(
+            path,
+            json.dumps(receipt).encode(),
+            directory_sync="strict",
+        )
 
     def stop(self, workspace_id: str, terminal_id: str) -> None:
         """Fence an action stopped before its delayed create request reaches the broker."""

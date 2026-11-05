@@ -66,6 +66,7 @@ from cloud_agent_shared.host_settings import admin_values, reported_values
 from cloud_agent_shared.sandbox_archive_settings import (
     SandboxArchivePolicy,
     SandboxArchivePolicyError,
+    archive_bucket,
 )
 
 if TYPE_CHECKING:
@@ -116,6 +117,11 @@ async def _apply(command: Awaitable[_Result]) -> _Result:
     try:
         return await command
     except HostCommandError as exc:
+        if exc.code is not None:
+            raise HTTPException(
+                status_code=exc.status,
+                detail={"error": {"type": exc.code, "message": str(exc)}},
+            ) from None
         raise HTTPException(status_code=exc.status, detail=str(exc)) from None
 
 
@@ -150,6 +156,7 @@ def _to_item(row: dict[str, Any], *, now: datetime | None = None) -> AgentRunner
     if last_seen.tzinfo is None:
         last_seen = last_seen.replace(tzinfo=UTC)
     epoch = row.get("capacity_epoch")
+    moving_out = row.get("removal_requested_at") is not None and bool(row.get("removal_moves_out"))
     return AgentRunnerHost(
         host=row["host"],
         active=bool(row["is_active"]),
@@ -180,6 +187,10 @@ def _to_item(row: dict[str, Any], *, now: datetime | None = None) -> AgentRunner
         # silently defaulting it would make a partial CAS contract look usable.
         drain_fence_epoch=row["drain_fence_epoch"],
         removal_pending=row.get("removal_requested_at") is not None,
+        removal_moves_out=moving_out,
+        sandboxes_left=int(row.get("sandboxes_left") or 0) if moving_out else None,
+        sandboxes_unmovable=int(row.get("sandboxes_unmovable") or 0) if moving_out else None,
+        removal_leaves_unmoved=moving_out and bool(row.get("removal_leaves_unmoved")),
         sandbox_runtime=row.get("sandbox_runtime"),
         sandbox_image_digest=row.get("sandbox_image_digest"),
         runtime_versions=row.get("runtime_versions"),
@@ -371,6 +382,7 @@ def _archive_audit_snapshot(values: dict[str, Any]) -> dict[str, bool | int | st
         key: values[key]
         for key in (
             "enabled",
+            "s3_uri",
             "region",
             "kms_key_arn",
             "expected_bucket_owner",
@@ -400,13 +412,16 @@ async def set_sandbox_archive_settings(
 ) -> SandboxArchiveSettingsResponse:
     """Atomically replace the archive policy; hosts apply it on their next beat.
 
-    The destination is fixed in server code. A saved access key is encrypted
-    at rest and is not returned. With no key, sandbox managers authenticate with their
-    workload identity and still require the bucket owner and KMS key.
+    Only the bucket of the destination is a setting; an omitted ``s3_uri``
+    keeps the stored one. A saved access key is encrypted at rest and is not
+    returned. With no key, sandbox managers authenticate with their workload
+    identity and still require the bucket owner and KMS key.
     """
     job_store = _require_store(store)
     previous = await job_store.host_pool.sandbox_archive_settings()
     settings = payload.model_dump(exclude={"revision"})
+    if settings["s3_uri"] is None:
+        settings["s3_uri"] = previous["s3_uri"]
     if (
         settings["aws_access_key_id"]
         and not settings["aws_secret_access_key"]
@@ -417,6 +432,7 @@ async def set_sandbox_archive_settings(
     try:
         checked = SandboxArchivePolicy(
             enabled=settings["enabled"],
+            bucket=archive_bucket(settings["s3_uri"]),
             region=settings["region"],
             kms_key_arn=settings["kms_key_arn"],
             expected_bucket_owner=settings["expected_bucket_owner"],
@@ -728,16 +744,37 @@ async def remove_agent_runner_host(
         False,
         description=(
             "Remove a host that is still running attempts. Their leases expire "
-            "at once, so the removed machine can no longer heartbeat, renew "
-            "grants, establish residencies or call tools for them; the next "
+            "at once, so the removed machine can no longer heartbeat, "
+            "establish residencies or call tools for them; the next "
             "reaper pass requeues them or, for an indeterminate retained-chat "
             "activation, marks the chat LOST instead of replaying it."
+        ),
+    ),
+    allow_unmoved: bool = Query(
+        False,
+        description=(
+            "Remove a host even though some of its sandboxes will stay on it. "
+            "Without it the request is refused with 409 no_move_target when no "
+            "other host or no checkpoint can take them now, or 409 cannot_move "
+            "when some can never move (a stopped sandbox whose checkpoint "
+            "failed, say): those sandboxes stay on the removed host and their "
+            "chats cannot continue until it returns. Whatever can move still "
+            "moves first."
         ),
     ),
     _admin_id: str = Depends(verify_admin_access),
     store: _AdminHostsStorage | None = Depends(get_storage),
 ) -> ListAgentRunnerHostsResponse:
     """Revoke this host's credential and take it out of the pool.
+
+    When its sandboxes can move -- checkpoints are on and another host would
+    restore them -- the host first moves them out: it drains, each idle
+    sandbox stops into a checkpoint and is handed to another host, and the
+    reaper revokes it once none is left and its running turns end. Nothing
+    running is interrupted. A removal that would leave sandboxes on the host
+    is refused unless ``allow_unmoved``, and then keeps the meaning below once
+    whatever can move has moved. A sandbox whose checkpoint fails during the
+    move holds the removal until it is repeated with ``allow_unmoved``.
 
     A host still holding slots is not revoked on the spot: its running attempts
     belong to a machine the platform would have just declared gone, and nobody
@@ -751,7 +788,7 @@ async def remove_agent_runner_host(
     attempt and residency leases in the same transaction. The attempts' worker
     tokens name no host, so a lease left to run would be one the removed
     machine could keep renewing. Lease fencing then rejects every later write
-    from it, and the reaper supersedes the attempts and revokes their grants
+    from it, and the reaper supersedes the attempts and lapses their residencies
     on its next pass. A retained activation is not replayed because the
     platform cannot know whether its prompt ran, so that chat is marked LOST.
 
@@ -761,13 +798,17 @@ async def remove_agent_runner_host(
     evidence that the retained container or Docker data-root was deleted.
     """
     job_store = _require_store(store)
-    deferred = await _apply(HostCommands(job_store.host_pool).remove(host=host, force=force))
+    deferred = await _apply(
+        HostCommands(job_store.host_pool).remove(
+            host=host, force=force, allow_unmoved=allow_unmoved
+        )
+    )
     await log_admin_action(
         job_store,
         get_client_ip(request),
         "agent.runner_host.remove",
         None,
-        {"host": host, "force": force, "deferred": deferred},
+        {"host": host, "force": force, "allow_unmoved": allow_unmoved, "deferred": deferred},
         actor_id=_admin_id,
     )
     return await _snapshot(job_store.host_pool)

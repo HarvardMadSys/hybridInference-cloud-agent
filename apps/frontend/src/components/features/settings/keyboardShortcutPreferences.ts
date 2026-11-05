@@ -3,12 +3,23 @@
 import { useCallback, useRef, useSyncExternalStore } from 'react';
 import {
   DEFAULT_KEYBOARD_SHORTCUTS,
+  isApplePlatform,
   parseKeyboardShortcuts,
   type KeyboardShortcuts,
 } from '@/lib/keyboardShortcuts';
 
 export function keyboardShortcutsStorageKey(userId: string): string {
   return `agents.keyboard-shortcuts.${encodeURIComponent(userId)}`;
+}
+
+const unchanging = () => () => {};
+
+/**
+ * Whether hints should name Command rather than Ctrl. The server cannot tell,
+ * so it and hydration say Ctrl; the browser's own answer follows straight after.
+ */
+export function useApplePlatform(): boolean {
+  return useSyncExternalStore(unchanging, isApplePlatform, () => false);
 }
 
 const snapshots = new Map<string, KeyboardShortcuts>();

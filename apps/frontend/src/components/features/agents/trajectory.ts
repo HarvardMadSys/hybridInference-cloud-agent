@@ -85,8 +85,18 @@ function asText(value: unknown): string {
 
 /** A single line, trimmed and bounded — rows are one line high. */
 export function preview(value: unknown, limit = 160): string {
+  return boundedLine(value, limit).text;
+}
+
+/**
+ * `preview`, and whether it cut the line. A cut line is final for text that
+ * only grows: whatever is appended lies past the part it shows.
+ */
+export function boundedLine(value: unknown, limit = 160): { text: string; full: boolean } {
   const text = asText(value).replace(/\s+/g, ' ').trim();
-  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+  return text.length > limit
+    ? { text: `${text.slice(0, limit - 1)}…`, full: true }
+    : { text, full: false };
 }
 
 function labelOf(eventType: string, payload: Record<string, unknown>): string {
@@ -144,8 +154,9 @@ export function toTrajectory(events: (AgentJobEventApi | AgentThreadEventApi)[])
       attemptId: event.attempt_id,
       seq: event.seq,
       eventType,
-      actor: ACTOR_BY_TYPE[eventType] ?? 'runtime',
-      lane: LANE_BY_TYPE[eventType] ?? 'other',
+      // Own entries only: a type of `__proto__` must not find Object.prototype's.
+      actor: Object.hasOwn(ACTOR_BY_TYPE, eventType) ? ACTOR_BY_TYPE[eventType] : 'runtime',
+      lane: Object.hasOwn(LANE_BY_TYPE, eventType) ? LANE_BY_TYPE[eventType] : 'other',
       label: labelOf(eventType, payload),
       detail: detailOf(eventType, payload),
       at: event.created_at ?? null,
@@ -158,21 +169,6 @@ export function toTrajectory(events: (AgentJobEventApi | AgentThreadEventApi)[])
       ...(durationMs !== undefined ? { durationMs } : {}),
     };
   });
-}
-
-/**
- * Filter rows by a free-text query.
- *
- * Matches the label, the preview and the event type, which is what a reader
- * can see on the row. Searching the full payload would find rows whose match
- * is invisible until they open one, which reads as a broken filter.
- */
-export function filterTrajectory(rows: TrajectoryRow[], query: string): TrajectoryRow[] {
-  const needle = query.trim().toLowerCase();
-  if (!needle) return rows;
-  return rows.filter((row) =>
-    `${row.label} ${row.detail} ${row.eventType}`.toLowerCase().includes(needle),
-  );
 }
 
 /** Serialize the stored stream for download, exactly as the platform holds it. */

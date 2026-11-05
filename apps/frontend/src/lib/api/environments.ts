@@ -123,19 +123,29 @@ export interface EnvironmentBinding {
   setup_script: string;
   start_script: string;
   actions: EnvironmentAction[];
+  /** Each action's latest run, without its output. */
+  action_runs?: ActionRun[];
   steps: EnvironmentStep[];
 }
 export interface ActionRun {
   id: string;
+  action_id?: string;
   state: string;
   terminal_id?: string;
   job_id?: string;
   exit_code?: number | null;
   output: string;
 }
-async function call<T>(path: string, method = 'GET', body?: unknown, key?: string): Promise<T> {
+async function call<T>(
+  path: string,
+  method = 'GET',
+  body?: unknown,
+  key?: string,
+  signal?: AbortSignal,
+): Promise<T> {
   const response = await fetchWithAuth(config.apiBase, `/v1/agent/${path}`, {
     method,
+    signal,
     cache: 'no-store',
     headers: { 'Content-Type': 'application/json', ...(key ? { 'Idempotency-Key': key } : {}) },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
@@ -270,22 +280,38 @@ export const suggestEnvironmentScript = (repo: string) =>
     'POST',
     { repo },
   );
-export const testEnvironment = (
+/**
+ * The key of each test request not yet answered with its run, by environment
+ * version. A test whose response was lost may be running; the retry carries
+ * the same key, so the control plane answers with that run instead of
+ * refusing a second test while the dialog cannot see or cancel the first.
+ */
+const pendingTests = new Map<string, string>();
+
+export async function testEnvironment(
   environment_id: string,
   environment_revision: number,
   global_revision: number,
-) =>
-  call<EnvironmentRun>(
+): Promise<EnvironmentRun> {
+  const scope = `${environment_id}:${environment_revision}:${global_revision}`;
+  const key = pendingTests.get(scope) ?? crypto.randomUUID();
+  pendingTests.set(scope, key);
+  // Kept on any failure: the control plane records a key only with the run it
+  // made, so resending one it never recorded is simply a new request.
+  const run = await call<EnvironmentRun>(
     'environment-runs',
     'POST',
     { environment_id, environment_revision, global_revision },
-    crypto.randomUUID(),
+    key,
   );
+  if (pendingTests.get(scope) === key) pendingTests.delete(scope);
+  return run;
+}
 export const getEnvironmentRun = (id: string) => call<EnvironmentRun>(`environment-runs/${id}`);
 export const cancelEnvironmentRun = (id: string) =>
   call<EnvironmentRun>(`environment-runs/${id}/cancel`, 'POST');
-export const getWorkspaceEnvironment = (jobId: string) =>
-  call<EnvironmentBinding>(`jobs/${jobId}/thread/environment`);
+export const getWorkspaceEnvironment = (jobId: string, signal?: AbortSignal) =>
+  call<EnvironmentBinding>(`jobs/${jobId}/thread/environment`, 'GET', undefined, undefined, signal);
 export const retryWorkspaceEnvironment = (jobId: string) =>
   call<unknown>(`jobs/${jobId}/thread/environment/retry`, 'POST');
 export const startEnvironmentAction = (jobId: string, actionId: string, key: string) =>
@@ -295,8 +321,8 @@ export const startEnvironmentAction = (jobId: string, actionId: string, key: str
     undefined,
     key,
   );
-export const getEnvironmentActionRun = (id: string) =>
-  call<ActionRun>(`environment-action-runs/${id}`);
+export const getEnvironmentActionRun = (id: string, signal?: AbortSignal) =>
+  call<ActionRun>(`environment-action-runs/${id}`, 'GET', undefined, undefined, signal);
 export const stopEnvironmentAction = (id: string) =>
   call<ActionRun>(`environment-action-runs/${id}/stop`, 'POST');
 

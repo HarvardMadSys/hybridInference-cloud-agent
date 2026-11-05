@@ -9,6 +9,9 @@ general enough to be shared with the job and worker surfaces — `_workspace_id`
 
 `_require_workspace_entitlement` is one of them: it re-checks, at use time, that
 the owner may still reach the repository the workspace was cloned from.
+
+An attached terminal's input, resize and kill go through `_terminal_control`
+instead: one read, and no start fence, since none of them can start the container.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Res
 from fastapi.responses import StreamingResponse
 
 from cloud_agent import measurement_writer
+from cloud_agent.api._local_auth import terminal_open_fence
 from cloud_agent.api._operation_measurements import (
     FILE_READ_STAGE,
     measured_call,
@@ -29,10 +33,17 @@ from cloud_agent.api._operation_measurements import (
     profiling_answer_headers,
     record_measurement,
 )
-from cloud_agent.api._owner_auth import OWNER_STREAM_MAX_S, _owned_job, require_agent_owner
+from cloud_agent.api._owner_auth import (
+    OWNER_STREAM_MAX_S,
+    _no_such_job,
+    _owned_job,
+    owner_stream_guard,
+    require_agent_owner,
+)
 from cloud_agent.api._workspace_access import (
     _TERMINAL_ID_PATTERN,
     _sandbox_manager_for_job,
+    _terminal_control_manager,
     _workspace_id,
     _workspace_not_ready,
 )
@@ -55,9 +66,8 @@ from cloud_agent.operation_measurement import (
 )
 from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent.schemas import (
+    AgentGitWorkspaceMetadataResponse,
     AgentGitWorkspaceResponse,
-    AgentTerminalRequest,
-    AgentTerminalResponse,
     AgentTerminalSessionCreateRequest,
     AgentTerminalSessionInputRequest,
     AgentTerminalSessionListResponse,
@@ -74,7 +84,7 @@ from cloud_agent.workspace_errors import (
 from cloud_agent_shared.workspace_browser import WorkspacePathError, normalize_workspace_path
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from cloud_agent.ports import (
         ConversationQueries,
@@ -83,8 +93,8 @@ if TYPE_CHECKING:
         SandboxRepository,
         SourceControlRepository as SourceControlPort,
     )
-    from cloud_agent.ports.environments import EnvironmentRepository
-    from cloud_agent.sandbox_manager_client import SandboxManagerStream
+    from cloud_agent.ports.environments import EnvironmentBindingRepository
+    from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerStream
 
 
 router = APIRouter(prefix="/v1/agent")
@@ -103,7 +113,11 @@ class _WorkspaceStorage(Protocol):
     operation_measurements: OperationMeasurements
     sandbox: SandboxRepository
     source_control: SourceControlPort
-    environments: EnvironmentRepository
+
+    @property
+    def environments(self) -> EnvironmentBindingRepository:
+        """Environment persistence needed by this flow."""
+        ...
 
 
 def _require_store(store: _WorkspaceStorage | None) -> _WorkspaceStorage:
@@ -234,8 +248,58 @@ async def _terminal_owner_workspace(
     return job, sandbox_manager
 
 
+async def _terminal_control(
+    *,
+    job_id: str,
+    user: dict[str, Any],
+    store: _WorkspaceStorage | None,
+    app_credentials: Any | None,
+    require_ready: bool,
+    call: Callable[[SandboxManagerClient, str], Awaitable[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Send an attached terminal its input, a resize or its kill.
+
+    The browser sends about one of these per keystroke. One owner-scoped read
+    answers what :func:`_terminal_owner_workspace` reads three times, and the
+    call goes straight to the manager (:func:`_terminal_control_manager`):
+    no start fence and no manifest registration, which none of the three
+    needs. Ownership and readiness refuse exactly as there.
+
+    Every other case takes :func:`_terminal_owner_workspace` and answers as it
+    always has. So does a manager that does not know the chat: it restarted
+    and lost the forked chats' aliases, which that path registers again before
+    the call is sent once more. The manager refused it before touching the
+    terminal, so nothing is written twice.
+    """
+    job_store = _require_store(store)
+    route = await job_store.sandbox.terminal_control_route(job_id=job_id, user_id=user["user_id"])
+    if route is None:
+        raise _no_such_job(job_id)
+    if require_ready and not route.workspace_ready:
+        raise _workspace_not_ready()
+    sandbox_manager = _terminal_control_manager(route)
+    if sandbox_manager is not None and route.thread_id is not None:
+        try:
+            return await call(sandbox_manager, route.thread_id)
+        except SandboxManagerError as exc:
+            if not _workspace_not_materialized(exc):
+                raise _terminal_sandbox_manager_http_error(exc) from exc
+    job, sandbox_manager = await _terminal_owner_workspace(
+        job_id=job_id,
+        user=user,
+        store=store,
+        app_credentials=app_credentials,
+        require_ready=require_ready,
+        recheck_entitlement=False,
+    )
+    try:
+        return await call(sandbox_manager, _workspace_id(job))
+    except SandboxManagerError as exc:
+        raise _terminal_sandbox_manager_http_error(exc) from exc
+
+
 @router.get("/jobs/{job_id}/files", response_model=AgentWorkspaceResponse)
-async def get_agent_job_workspace_file(
+async def get_agent_job_workspace_file(  # noqa: PLR0912, PLR0915 complexity baseline, #771
     job_id: str,
     request: Request,
     path: str = Query("", max_length=4096),
@@ -481,51 +545,6 @@ async def write_agent_job_workspace_file(
         raise _sandbox_manager_http_error(exc) from exc
 
 
-@router.post("/jobs/{job_id}/terminal", response_model=AgentTerminalResponse)
-async def run_agent_job_terminal_command(
-    job_id: str,
-    body: AgentTerminalRequest,
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _WorkspaceStorage | None = Depends(get_storage),
-    app_credentials: Any | None = Depends(get_agent_app_credentials),
-) -> AgentTerminalResponse:
-    """Run an owner-entered command inside the retained chat sandbox."""
-    job_store = _require_store(store)
-    job = await _owned_job(job_store.conversation_queries, job_id, user)
-    await _require_workspace_entitlement(
-        job=job, user=user, store=job_store, app_credentials=app_credentials
-    )
-    await _require_mutable_workspace_ready(job=job, store=job_store.sandbox)
-    sandbox_manager = await _sandbox_manager_for_job(job_store, job)
-    if sandbox_manager is None:
-        raise HTTPException(status_code=409, detail="This deployment has no live sandbox manager.")
-    environment = (
-        await job_store.environments.get_environment_binding(
-            user["user_id"], job["environment_binding_id"]
-        )
-        if job.get("environment_binding_id")
-        else None
-    )
-    if environment is not None and not environment.required:
-        environment = None
-    try:
-        result = await sandbox_manager.terminal(
-            _workspace_id(job),
-            command=body.command,
-            cwd=body.cwd,
-            timeout_seconds=body.timeout_seconds,
-            **({"environment": environment} if environment else {}),
-        )
-        return AgentTerminalResponse(**result)
-    except SandboxManagerError as exc:
-        if _workspace_not_materialized(exc):
-            raise HTTPException(
-                status_code=409,
-                detail="This retained terminal workspace is not materialized.",
-            ) from exc
-        raise _sandbox_manager_http_error(exc) from exc
-
-
 @router.post(
     "/jobs/{job_id}/terminals",
     response_model=AgentTerminalSessionResponse,
@@ -563,20 +582,24 @@ async def create_agent_job_terminal(
             if measure is not None:
                 measure.name_request(TERMINAL_CREATE)
                 measure.mark(TERMINAL_CREATE)
-            try:
-                payload = await measured_call(
-                    measure,
-                    TERMINAL_CREATE,
-                    call=lambda profiling: sandbox_manager.create_terminal(
-                        _workspace_id(job),
-                        rows=body.rows,
-                        cols=body.cols,
-                        profiling=profiling,
-                        **({"environment": environment} if environment else {}),
-                    ),
-                )
-            except SandboxManagerError as exc:
-                raise _terminal_sandbox_manager_http_error(exc) from exc
+            async with terminal_open_fence(
+                _require_store(store), str(user["user_id"]), sandbox_manager, _workspace_id(job)
+            ) as opened:
+                try:
+                    payload = await measured_call(
+                        measure,
+                        TERMINAL_CREATE,
+                        call=lambda profiling: sandbox_manager.create_terminal(
+                            _workspace_id(job),
+                            rows=body.rows,
+                            cols=body.cols,
+                            profiling=profiling,
+                            **({"environment": environment} if environment else {}),
+                        ),
+                    )
+                except SandboxManagerError as exc:
+                    raise _terminal_sandbox_manager_http_error(exc) from exc
+                opened["terminal"] = payload
             if measure is not None:
                 measure.outcome = "completed"
             response = measured_response(AgentTerminalSessionResponse, measure, payload)
@@ -665,7 +688,9 @@ _SSE_FRAME_END = b"\n\n"
 
 
 async def _relay_terminal_stream(
-    upstream: SandboxManagerStream, request: Request
+    upstream: SandboxManagerStream,
+    request: Request,
+    still_admitted: Callable[[], Awaitable[bool]] | None = None,
 ) -> AsyncIterator[bytes]:
     """Relay the sandbox manager's PTY stream until the client leaves or the cap passes.
 
@@ -685,6 +710,8 @@ async def _relay_terminal_stream(
             # Chunks are cut where the network cut them, not at frames.
             tail = (tail + chunk)[-len(_SSE_FRAME_END) :]
             if tail == _SSE_FRAME_END and clock() >= closes_at:
+                break
+            if tail == _SSE_FRAME_END and still_admitted is not None and not await still_admitted():
                 break
     finally:
         await upstream.aclose()
@@ -740,7 +767,9 @@ async def stream_agent_job_terminal(
                 measure.outcome = "completed"
 
             response = StreamingResponse(
-                _relay_terminal_stream(upstream, request),
+                _relay_terminal_stream(
+                    upstream, request, owner_stream_guard(request, str(user["user_id"]))
+                ),
                 media_type="text/event-stream",
                 headers=(
                     _SSE_HEADERS
@@ -780,24 +809,18 @@ async def write_agent_job_terminal_input(
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> AgentTerminalSessionResponse:
     """Write bounded base64 input to an active interactive terminal."""
-    job, sandbox_manager = await _terminal_owner_workspace(
-        job_id=job_id,
-        user=user,
-        store=store,
-        app_credentials=app_credentials,
-        require_ready=True,
-        recheck_entitlement=False,
-    )
-    try:
-        return AgentTerminalSessionResponse(
-            **(
-                await sandbox_manager.terminal_input(
-                    _workspace_id(job), terminal_id, data=body.data
-                )
-            )
+    return AgentTerminalSessionResponse(
+        **await _terminal_control(
+            job_id=job_id,
+            user=user,
+            store=store,
+            app_credentials=app_credentials,
+            require_ready=True,
+            call=lambda sandbox_manager, workspace_id: sandbox_manager.terminal_input(
+                workspace_id, terminal_id, data=body.data
+            ),
         )
-    except SandboxManagerError as exc:
-        raise _terminal_sandbox_manager_http_error(exc) from exc
+    )
 
 
 @router.post(
@@ -813,24 +836,18 @@ async def resize_agent_job_terminal(
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> AgentTerminalSessionResponse:
     """Resize an active interactive terminal."""
-    job, sandbox_manager = await _terminal_owner_workspace(
-        job_id=job_id,
-        user=user,
-        store=store,
-        app_credentials=app_credentials,
-        require_ready=True,
-        recheck_entitlement=False,
-    )
-    try:
-        return AgentTerminalSessionResponse(
-            **(
-                await sandbox_manager.resize_terminal(
-                    _workspace_id(job), terminal_id, rows=body.rows, cols=body.cols
-                )
-            )
+    return AgentTerminalSessionResponse(
+        **await _terminal_control(
+            job_id=job_id,
+            user=user,
+            store=store,
+            app_credentials=app_credentials,
+            require_ready=True,
+            call=lambda sandbox_manager, workspace_id: sandbox_manager.resize_terminal(
+                workspace_id, terminal_id, rows=body.rows, cols=body.cols
+            ),
         )
-    except SandboxManagerError as exc:
-        raise _terminal_sandbox_manager_http_error(exc) from exc
+    )
 
 
 @router.delete(
@@ -845,19 +862,70 @@ async def delete_agent_job_terminal(
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> AgentTerminalSessionResponse:
     """Idempotently kill an interactive terminal, even while a new job runs."""
-    job, sandbox_manager = await _terminal_owner_workspace(
+    return AgentTerminalSessionResponse(
+        **await _terminal_control(
+            job_id=job_id,
+            user=user,
+            store=store,
+            app_credentials=app_credentials,
+            require_ready=False,
+            call=lambda sandbox_manager, workspace_id: sandbox_manager.delete_terminal(
+                workspace_id, terminal_id
+            ),
+        )
+    )
+
+
+def _git_workspace_response(
+    payload: dict[str, Any], *, metadata_only: bool
+) -> AgentGitWorkspaceMetadataResponse | AgentGitWorkspaceResponse:
+    if metadata_only:
+        return AgentGitWorkspaceMetadataResponse.model_validate(payload)
+    return AgentGitWorkspaceResponse.model_validate(payload)
+
+
+async def _agent_job_git_workspace(
+    *,
+    job_id: str,
+    user: dict[str, Any],
+    store: _WorkspaceStorage | None,
+    app_credentials: Any | None,
+    metadata_only: bool,
+) -> AgentGitWorkspaceMetadataResponse | AgentGitWorkspaceResponse:
+    job_store = _require_store(store)
+    job = await _owned_job(job_store.conversation_queries, job_id, user)
+    await _require_workspace_entitlement(
+        job=job, user=user, store=job_store, app_credentials=app_credentials
+    )
+    sandbox_manager = await _sandbox_manager_for_job(job_store, job)
+    if sandbox_manager is None:
+        return _git_workspace_response({"available": False}, metadata_only=metadata_only)
+    operation = sandbox_manager.git_metadata if metadata_only else sandbox_manager.git
+    try:
+        payload = await operation(_workspace_id(job), base_sha=job.get("base_sha"))
+        return _git_workspace_response(payload, metadata_only=metadata_only)
+    except SandboxManagerError as exc:
+        if _workspace_not_materialized(exc):
+            return _git_workspace_response({"available": False}, metadata_only=metadata_only)
+        raise _sandbox_manager_http_error(exc) from exc
+
+
+@router.get("/jobs/{job_id}/git/metadata", response_model=AgentGitWorkspaceMetadataResponse)
+async def get_agent_job_git_workspace_metadata(
+    job_id: str,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _WorkspaceStorage | None = Depends(get_storage),
+    app_credentials: Any | None = Depends(get_agent_app_credentials),
+) -> AgentGitWorkspaceMetadataResponse:
+    """Read a cheap live-workspace revision and changed-path summary."""
+    result = await _agent_job_git_workspace(
         job_id=job_id,
         user=user,
         store=store,
         app_credentials=app_credentials,
-        recheck_entitlement=False,
+        metadata_only=True,
     )
-    try:
-        return AgentTerminalSessionResponse(
-            **(await sandbox_manager.delete_terminal(_workspace_id(job), terminal_id))
-        )
-    except SandboxManagerError as exc:
-        raise _terminal_sandbox_manager_http_error(exc) from exc
+    return AgentGitWorkspaceMetadataResponse.model_validate(result)
 
 
 @router.get("/jobs/{job_id}/git", response_model=AgentGitWorkspaceResponse)
@@ -868,19 +936,11 @@ async def get_agent_job_git_workspace(
     app_credentials: Any | None = Depends(get_agent_app_credentials),
 ) -> AgentGitWorkspaceResponse:
     """Read live retained-workspace status, diff and recent commits."""
-    job_store = _require_store(store)
-    job = await _owned_job(job_store.conversation_queries, job_id, user)
-    await _require_workspace_entitlement(
-        job=job, user=user, store=job_store, app_credentials=app_credentials
+    result = await _agent_job_git_workspace(
+        job_id=job_id,
+        user=user,
+        store=store,
+        app_credentials=app_credentials,
+        metadata_only=False,
     )
-    sandbox_manager = await _sandbox_manager_for_job(job_store, job)
-    if sandbox_manager is None:
-        return AgentGitWorkspaceResponse(available=False)
-    try:
-        return AgentGitWorkspaceResponse(
-            **(await sandbox_manager.git(_workspace_id(job), base_sha=job.get("base_sha")))
-        )
-    except SandboxManagerError as exc:
-        if _workspace_not_materialized(exc):
-            return AgentGitWorkspaceResponse(available=False)
-        raise _sandbox_manager_http_error(exc) from exc
+    return AgentGitWorkspaceResponse.model_validate(result)

@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { isTemporaryWorkspace } from '@/lib/temporaryWorkspace';
 import { useEffect, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
@@ -22,6 +23,7 @@ import type {
 } from '@/lib/api/environments';
 import type { TranslationKey } from '@/lib/i18n/translate';
 import { EnvironmentDialog } from './EnvironmentDialog';
+import { pollWhileVisible } from './visiblePolling';
 import { emptyEnvironment } from './EnvironmentManager';
 import {
   ACTIVE_STATES,
@@ -82,6 +84,18 @@ function VariableList({
 }
 
 /**
+ * The idempotency key of each action start whose answer has not arrived, by
+ * conversation turn and action. Outside the panel, which unmounts whenever
+ * another tab is chosen: a Run pressed again after coming back is the same
+ * request, not a second copy of the command.
+ */
+const pendingStarts = new Map<string, string>();
+
+function bumpRunVersion(versions: Map<string, number>, actionId: string): void {
+  versions.set(actionId, (versions.get(actionId) ?? 0) + 1);
+}
+
+/**
  * A conversation's Environment panel. What the reader needs first is whether
  * the workspace is ready and, when it is not, what to do about it; then the
  * saved commands they can run. The fixed configuration behind it is detail.
@@ -90,10 +104,12 @@ export function WorkspaceEnvironment({
   jobId,
   repo,
   onTerminal,
+  visible = true,
 }: {
   jobId: string;
   repo: string;
   onTerminal: () => void;
+  visible?: boolean;
 }) {
   const t = useT();
   const phase = usePhaseLabel();
@@ -104,8 +120,13 @@ export function WorkspaceEnvironment({
   // succeeds; an action's failure stays until the owner acts again.
   const [loadError, setLoadError] = useState('');
   const [runs, setRuns] = useState<Record<string, ActionRun>>({});
+  // Run identity changes synchronously fence list/detail responses that began
+  // before a local start or a newer cross-tab run was observed.
+  const runIds = useRef(new Map<string, string>());
+  const runVersions = useRef(new Map<string, number>());
+  const listedOutputs = useRef(new Map<string, string>());
+  const localStarts = useRef(new Set<string>());
   const [busy, setBusy] = useState(false);
-  const pendingKeys = useRef<Record<string, string>>({});
   const [reload, setReload] = useState(0);
   const [skipArmed, setSkipArmed] = useState(false);
   const [editing, setEditing] = useState<{
@@ -113,45 +134,124 @@ export function WorkspaceEnvironment({
     globals: EnvironmentConfig;
   } | null>(null);
   useEffect(() => {
+    if (!visible) return;
     let active = true;
-    const refresh = () => {
-      void getWorkspaceEnvironment(jobId)
-        .then((value) => {
-          if (!active) return;
-          setBound(value);
-          setLoadError('');
-        })
-        .catch((e) => {
-          if (active) setLoadError(e instanceof Error ? e.message : String(e));
+    const adoptRuns = async (
+      listed: ActionRun[],
+      signal: AbortSignal,
+      observedVersions: Map<string, number>,
+    ) => {
+      const adopted: ActionRun[] = [];
+      const finished: ActionRun[] = [];
+      for (const run of listed) {
+        const actionId = run.action_id;
+        if (
+          !actionId ||
+          localStarts.current.has(actionId) ||
+          (runVersions.current.get(actionId) ?? 0) !== (observedVersions.get(actionId) ?? 0)
+        )
+          continue;
+        if (runIds.current.get(actionId) !== run.id) {
+          runIds.current.set(actionId, run.id);
+          bumpRunVersion(runVersions.current, actionId);
+          adopted.push(run);
+        }
+        if (!ACTIVE_STATES.includes(run.state) && listedOutputs.current.get(actionId) !== run.id) {
+          listedOutputs.current.set(actionId, run.id);
+          finished.push(run);
+        }
+      }
+      if (adopted.length)
+        setRuns((previous) => {
+          const next = { ...previous };
+          for (const run of adopted) next[run.action_id!] = run;
+          return next;
         });
+      await Promise.all(
+        finished.map((run) =>
+          getEnvironmentActionRun(run.id, signal)
+            .then((value) => {
+              const actionId = run.action_id!;
+              if (!active || signal.aborted || runIds.current.get(actionId) !== run.id) return;
+              setRuns((previous) =>
+                previous[actionId]?.id === run.id ? { ...previous, [actionId]: value } : previous,
+              );
+            })
+            .catch(() => {
+              // The state is already shown; only its output is missing.
+              const actionId = run.action_id!;
+              if (listedOutputs.current.get(actionId) === run.id)
+                listedOutputs.current.delete(actionId);
+            }),
+        ),
+      );
     };
-    refresh();
-    const timer = setInterval(refresh, 5000);
+    const stop = pollWhileVisible(async (signal) => {
+      try {
+        const observedVersions = new Map(runVersions.current);
+        const value = await getWorkspaceEnvironment(jobId, signal);
+        if (!active || signal.aborted) return 5000;
+        setBound(value);
+        setLoadError('');
+        await adoptRuns(value.action_runs ?? [], signal, observedVersions);
+        const unsettled =
+          ['pending', 'preparing'].includes(status(value)) ||
+          value.action_runs?.some((run) => ACTIVE_STATES.includes(run.state));
+        // Keep a bounded reconciliation interval even after success: a container
+        // restart or a change from another tab invalidates previous readiness.
+        return unsettled ? 5000 : 30000;
+      } catch (e) {
+        if (active && !signal.aborted) setLoadError(e instanceof Error ? e.message : String(e));
+        return 5000;
+      }
+    });
     return () => {
       active = false;
-      clearInterval(timer);
+      stop();
     };
-  }, [jobId, reload]);
+  }, [jobId, reload, visible]);
   useEffect(() => {
-    let active = true;
+    if (!visible) return;
     const current = Object.entries(runs).filter(([, run]) => ACTIVE_STATES.includes(run.state));
     if (!current.length) return;
-    const timer = setInterval(() => {
-      current.forEach(([id, run]) => {
-        void getEnvironmentActionRun(run.id)
-          .then((value) => {
-            if (active) setRuns((previous) => ({ ...previous, [id]: value }));
-          })
-          .catch((e) => {
-            if (active) setError(e instanceof Error ? e.message : String(e));
-          });
-      });
+    return pollWhileVisible(async (signal) => {
+      const updates = await Promise.all(
+        current.map(async ([actionId, run]) => {
+          try {
+            return [actionId, run.id, await getEnvironmentActionRun(run.id, signal)] as const;
+          } catch (e) {
+            if (!signal.aborted && runIds.current.get(actionId) === run.id)
+              setError(e instanceof Error ? e.message : String(e));
+            return [actionId, run.id, null] as const;
+          }
+        }),
+      );
+      if (!signal.aborted) {
+        for (const [actionId, expectedId, value] of updates)
+          if (
+            value &&
+            runIds.current.get(actionId) === expectedId &&
+            !ACTIVE_STATES.includes(value.state)
+          )
+            listedOutputs.current.set(actionId, value.id);
+        setRuns((previous) => {
+          let next = previous;
+          for (const [actionId, expectedId, value] of updates) {
+            if (
+              value &&
+              runIds.current.get(actionId) === expectedId &&
+              previous[actionId]?.id === expectedId
+            ) {
+              if (next === previous) next = { ...previous };
+              next[actionId] = value;
+            }
+          }
+          return next;
+        });
+      }
+      return 1500;
     }, 1500);
-    return () => {
-      active = false;
-      clearInterval(timer);
-    };
-  }, [runs]);
+  }, [runs, visible]);
   async function perform(action: () => Promise<unknown>) {
     setBusy(true);
     setError('');
@@ -283,12 +383,12 @@ export function WorkspaceEnvironment({
           <p className="text-foreground">
             {t('environment.newVersionAvailable', { revision: bound.revision ?? 0 })}
           </p>
-          <a
+          <Link
             href={`/?repo=${encodeURIComponent(repo)}`}
             className="inline-block font-medium text-accent hover:underline"
           >
             {t('environment.newWorkspace')}
-          </a>
+          </Link>
         </div>
       ) : null}
 
@@ -314,7 +414,14 @@ export function WorkspaceEnvironment({
                         onClick={() =>
                           void perform(async () => {
                             const result = await stopEnvironmentAction(run.id);
-                            setRuns((v) => ({ ...v, [action.id]: result }));
+                            if (runIds.current.get(action.id) !== run.id) return;
+                            if (!ACTIVE_STATES.includes(result.state))
+                              listedOutputs.current.set(action.id, result.id);
+                            setRuns((value) =>
+                              value[action.id]?.id === run.id
+                                ? { ...value, [action.id]: result }
+                                : value,
+                            );
                           })
                         }
                       >
@@ -329,11 +436,22 @@ export function WorkspaceEnvironment({
                           void perform(async () => {
                             // The same key for a retry after a lost response, so
                             // the command is not started twice.
-                            const key = pendingKeys.current[action.id] ?? crypto.randomUUID();
-                            pendingKeys.current[action.id] = key;
-                            const result = await startEnvironmentAction(jobId, action.id, key);
-                            delete pendingKeys.current[action.id];
-                            setRuns((v) => ({ ...v, [action.id]: result }));
+                            const pending = `${jobId}:${action.id}`;
+                            const key = pendingStarts.get(pending) ?? crypto.randomUUID();
+                            pendingStarts.set(pending, key);
+                            localStarts.current.add(action.id);
+                            bumpRunVersion(runVersions.current, action.id);
+                            try {
+                              const result = await startEnvironmentAction(jobId, action.id, key);
+                              pendingStarts.delete(pending);
+                              runIds.current.set(action.id, result.id);
+                              bumpRunVersion(runVersions.current, action.id);
+                              if (!ACTIVE_STATES.includes(result.state))
+                                listedOutputs.current.set(action.id, result.id);
+                              setRuns((value) => ({ ...value, [action.id]: result }));
+                            } finally {
+                              localStarts.current.delete(action.id);
+                            }
                           })
                         }
                       >

@@ -1,6 +1,8 @@
-"""Attempt-window SQL shared between the ledger and the queue."""
+"""Attempt SQL shared across the storage layer: the attempt window, and the live lock."""
 
 from __future__ import annotations
+
+from typing import Any
 
 # Bound a shared grant to one attempt's execution interval. A subsequent
 # attempt may start before a delayed predecessor is marked finished; clamp
@@ -21,3 +23,31 @@ NEXT_ATTEMPT_START_SQL = """
       AND (next_attempt.started_at, next_attempt.id) > (a.started_at, a.id)
 )
 """
+
+
+async def lock_live_attempt(conn: Any, attempt_id: int, lease_generation: int | None) -> str | None:
+    """Lock a running attempt whose lease is live, and name its job.
+
+    ``None`` when the attempt is not running under ``lease_generation`` (any,
+    when that is ``None``) or its lease has expired. One statement: the lock is
+    taken in a subquery, and the outer query compares the lease only with the
+    rows the lock hands back, so the clock is read after any wait for the lock.
+    In the locking query's own select list it would be read before the wait.
+    """
+    row = await conn.fetchrow(
+        """
+        WITH locked AS (
+            SELECT job_id, lease_expires_at
+            FROM agent_attempts
+            WHERE id = $1 AND ($2::bigint IS NULL OR lease_generation = $2)
+              AND status = 'running'
+            FOR UPDATE
+        )
+        SELECT job_id, lease_expires_at > clock_timestamp() AS live FROM locked
+        """,
+        attempt_id,
+        lease_generation,
+    )
+    if row is None or not row["live"]:
+        return None
+    return str(row["job_id"])

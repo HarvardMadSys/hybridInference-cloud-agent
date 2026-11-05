@@ -14,7 +14,7 @@ refresh that started before that must not put it back.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -45,7 +45,7 @@ def _row(**overrides: Any) -> dict[str, Any]:
         "access_token_ciphertext": cipher.encrypt("old-access"),
         "refresh_token_ciphertext": cipher.encrypt("old-refresh"),
         "client_secret_ciphertext": None,
-        "expires_at": datetime.now(timezone.utc) + timedelta(seconds=30),
+        "expires_at": datetime.now(UTC) + timedelta(seconds=30),
         "scopes": ["read"],
         "issuer": "https://auth.example.com",
         "resource": "https://mcp.example.com/mcp",
@@ -209,7 +209,7 @@ class TestWhenToRefresh:
 
     def test_a_comfortably_valid_token_is_left_alone(self) -> None:
         """Refreshing on every call would hammer the authorization server."""
-        row = _row(expires_at=datetime.now(timezone.utc) + timedelta(hours=2))
+        row = _row(expires_at=datetime.now(UTC) + timedelta(hours=2))
         assert not refresh.should_refresh(row)
 
     def test_no_expiry_means_no_refresh(self) -> None:
@@ -514,9 +514,7 @@ class TestRefresh:
     @pytest.mark.asyncio
     async def test_an_expired_connection_with_no_refresh_token_says_reconnect(self) -> None:
         """There is nothing to try, and "expired" is what the user can act on."""
-        store = FakeStore(
-            _row(refresh_token_ciphertext=None, expires_at=datetime.now(timezone.utc))
-        )
+        store = FakeStore(_row(refresh_token_ciphertext=None, expires_at=datetime.now(UTC)))
         with pytest.raises(refresh.RefreshRefused):
             await refresh.refresh_credential(
                 store,
@@ -746,7 +744,7 @@ class TestEnsureFresh:
     @pytest.mark.asyncio
     async def test_a_fresh_credential_costs_nothing(self, monkeypatch) -> None:
         """No claim, no request: the common case is a dictionary read."""
-        store = FakeStore(_row(expires_at=datetime.now(timezone.utc) + timedelta(hours=1)))
+        store = FakeStore(_row(expires_at=datetime.now(UTC) + timedelta(hours=1)))
         row = await refresh.ensure_fresh(store, row=store.row)  # type: ignore[arg-type]
         assert store.claims == 0
         assert row["id"] == 7
@@ -767,8 +765,8 @@ class TestEnsureFresh:
 
         store = FakeStore(
             _row(
-                expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
-                refresh_lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+                expires_at=datetime.now(UTC) - timedelta(seconds=1),
+                refresh_lease_expires_at=datetime.now(UTC) + timedelta(seconds=60),
             )
         )
         store.leased.add(0)
@@ -785,7 +783,7 @@ class TestEnsureFresh:
         assert not task.done()
         store.row.update(
             access_token_ciphertext=mcp_cipher(_KEY).encrypt("fresh-access"),
-            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
             credential_version=5,
             refresh_lease_expires_at=None,
         )
@@ -802,22 +800,18 @@ class TestEnsureFresh:
         store = FakeStore(
             _row(
                 credential_version=5,
-                expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+                expires_at=datetime.now(UTC) - timedelta(seconds=1),
             )
         )
         if change == "expired-lease":
-            store.row["refresh_lease_expires_at"] = datetime.now(timezone.utc) - timedelta(
-                seconds=1
-            )
+            store.row["refresh_lease_expires_at"] = datetime.now(UTC) - timedelta(seconds=1)
         elif change == "timeout":
             monkeypatch.setattr(refresh, "REFRESH_LEASE_SECONDS", 0.01)
-            store.row["refresh_lease_expires_at"] = datetime.now(timezone.utc) + timedelta(
-                seconds=60
-            )
+            store.row["refresh_lease_expires_at"] = datetime.now(UTC) + timedelta(seconds=60)
         elif change == "disabled":
             store.row["status"] = "disabled"
         elif change == "deleted":
-            store.row["deleted_at"] = datetime.now(timezone.utc)
+            store.row["deleted_at"] = datetime.now(UTC)
         with pytest.raises(refresh.RefreshRefused):
             await refresh.ensure_fresh(store, row={**store.row, "credential_version": 4})
         assert store.claims == 1
@@ -829,8 +823,8 @@ class TestEnsureFresh:
 
         store = FakeStore(
             _row(
-                expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
-                refresh_lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
+                expires_at=datetime.now(UTC) - timedelta(seconds=1),
+                refresh_lease_expires_at=datetime.now(UTC) + timedelta(seconds=60),
             )
         )
         store.leased.add(0)

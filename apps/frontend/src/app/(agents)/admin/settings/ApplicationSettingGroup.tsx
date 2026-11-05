@@ -4,6 +4,15 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import { useModalDialog } from '@/components/ui/useModalDialog';
+import { Select } from '@/components/ui/Select';
+import {
+  MENU_ACTIONS,
+  MENU_POSITIONED,
+  MENU_ROW_DESTRUCTIVE,
+  menuRowClass,
+} from '@/components/ui/menuStyles';
+import { usePopupMenu } from '@/components/ui/usePopupMenu';
+import { SuggestionInput } from '@/components/ui/SuggestionInput';
 import type {
   AdminSettingDefinition,
   AdminSettingValue,
@@ -11,7 +20,7 @@ import type {
 } from '@/lib/api/adminSettings';
 
 import type { ApplicationSettingsState } from './ApplicationSettings';
-import { ARCHIVE_BUCKET, displayValue, parseValue } from './settingValues';
+import { ARCHIVE_BUCKET, namedOptions, parseValue, valueLabel } from './settingValues';
 
 type Changes = Record<string, AdminSettingValue | null>;
 // `snapshot` is what the review shows as current. It applies only at that
@@ -20,6 +29,17 @@ type Review = { changes: Changes; reset?: AdminSettingDefinition; snapshot: Agen
 const INPUT_CLASS =
   'ui-input min-h-11 w-full disabled:cursor-not-allowed disabled:opacity-50 aria-[invalid=true]:border-status-error';
 const BUTTON_CLASS = 'ui-button ui-button-secondary min-h-11';
+const GITHUB_APP_PRIVATE_KEY = 'github_app_private_key';
+
+/**
+ * Describe precedence from the saved snapshot without claiming every process
+ * has applied that snapshot or that a mounted file is readable.
+ */
+function keySourceNote(key: string, configured: boolean): string {
+  return key === GITHUB_APP_PRIVATE_KEY && configured
+    ? ' A saved key is configured and takes precedence over a mounted key when applied.'
+    : '';
+}
 
 export function SettingsIcon({
   kind,
@@ -143,7 +163,7 @@ function ReviewChanges({
                         ? review.snapshot.secret_configured[key]
                           ? 'Configured · hidden'
                           : 'Not configured'
-                        : displayValue(current) || '(empty)'}
+                        : valueLabel(key, current) || '(empty)'}
                     </dd>
                   </div>
                   <span aria-hidden="true" className="hidden items-center px-1 text-muted sm:flex">
@@ -168,7 +188,7 @@ function ReviewChanges({
                         ? value === null
                           ? 'Not configured — secret will be cleared'
                           : 'New secret · hidden'
-                        : displayValue(next) || '(empty) — this setting will be cleared'}
+                        : valueLabel(key, next) || '(empty) — this setting will be cleared'}
                     </dd>
                   </div>
                 </dl>
@@ -219,6 +239,100 @@ function ReviewChanges({
   );
 }
 
+/** The per-field overflow action; a real menu with shared dismissal and keys. */
+export function FieldActionsMenu({
+  label,
+  actionLabel,
+  actionText,
+  disabled,
+  onAction,
+}: {
+  label: string;
+  actionLabel: string;
+  actionText: string;
+  disabled: boolean;
+  onAction: (trigger: HTMLButtonElement) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  const trigger = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  const popup = usePopupMenu({
+    open,
+    onOpenChange: setOpen,
+    triggerRef: trigger,
+    menuRef: menu,
+    placement: { gap: 4, width: 208, maxWidth: 260, preferredHeight: 80, maxHeight: 240 },
+  });
+  return (
+    <div className="relative shrink-0">
+      <button
+        ref={trigger}
+        type="button"
+        aria-label={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? id : undefined}
+        disabled={disabled}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={popup.triggerKeyDown}
+        className="ui-button ui-button-ghost flex h-11 w-11 items-center justify-center text-lg"
+      >
+        ···
+      </button>
+      {open ? (
+        <div
+          ref={menu}
+          id={id}
+          role="menu"
+          aria-label={label}
+          style={popup.style}
+          className={`${MENU_ACTIONS} ${MENU_POSITIONED} w-52`}
+          onKeyDown={popup.onKeyDown}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            tabIndex={-1}
+            disabled={disabled}
+            className={disabled ? menuRowClass({ disabled: true }) : MENU_ROW_DESTRUCTIVE}
+            aria-label={actionLabel}
+            onClick={() => {
+              if (!trigger.current) return;
+              setOpen(false);
+              onAction(trigger.current);
+              trigger.current.focus();
+            }}
+          >
+            {actionText}
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function describedBy(id: string, error: string | undefined): string {
+  return [`${id}-help`, error && `${id}-error`].filter(Boolean).join(' ');
+}
+
+/** A dropdown's options: named choices, or the server's own with any unlisted value kept. */
+function selectOptions(field: AdminSettingDefinition, value: string, saved: string) {
+  const named = namedOptions(field.key, saved);
+  if (named || !field.choices?.length) return named;
+  return [
+    ...(field.choices.includes(value) ? [] : [{ value, label: value }]),
+    ...field.choices.map((choice) => ({ value: choice, label: choice || '(empty)' })),
+  ];
+}
+
+/** A model id is one token, so the free-text line toggle stays off it, as off a dropdown. */
+function offersMultiline(field: AdminSettingDefinition, showInput: boolean): boolean {
+  return (
+    showInput && field.kind === 'string' && !field.choices?.length && !namedOptions(field.key, '')
+  );
+}
+
 export function ApplicationSettingGroup({
   title,
   fields,
@@ -228,7 +342,8 @@ export function ApplicationSettingGroup({
   fields: AdminSettingDefinition[];
   settings: ApplicationSettingsState;
 }) {
-  const { snapshot, saved, busy, save } = settings;
+  const { snapshot, saved, busy, save, isSettingVisible, setGoverningDraft, clearGoverningDrafts } =
+    settings;
   const [editing, setEditing] = useState(false);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [replacing, setReplacing] = useState<Record<string, boolean>>({});
@@ -242,7 +357,10 @@ export function ApplicationSettingGroup({
   const groupId = useId();
   const incoming = (field: AdminSettingDefinition) =>
     field.secret ? '' : String(snapshot?.values[field.key] ?? field.default);
-  const changed = fields.filter(
+  // Fields of an unselected provider or a disabled feature are not shown. Their
+  // drafts are kept for switching back, but never counted or submitted.
+  const shown = fields.filter((field) => isSettingVisible(field.key));
+  const changed = shown.filter(
     (field) =>
       !field.read_only && drafts[field.key] !== undefined && drafts[field.key] !== incoming(field),
   );
@@ -278,6 +396,7 @@ export function ApplicationSettingGroup({
     setReplacing({});
     setMultiline({});
     setErrors({});
+    clearGoverningDrafts(fields.map((field) => field.key));
     setEditing(false);
     requestAnimationFrame(() => editButton.current?.focus());
   };
@@ -320,6 +439,7 @@ export function ApplicationSettingGroup({
 
   return (
     <div
+      hidden={!shown.length}
       className={`mt-4 rounded-xl border bg-surface first:mt-0 ${editing ? 'border-accent/30 shadow-[0_0_0_3px_rgb(var(--ui-accent)/0.04)]' : 'border-border'}`}
     >
       <div className="flex min-h-14 items-center justify-between gap-4 rounded-t-xl border-b border-border/70 bg-surface-muted/45 px-4 py-2 sm:px-5">
@@ -348,7 +468,7 @@ export function ApplicationSettingGroup({
           ref={editButton}
           type="button"
           aria-label={`Edit ${title} settings`}
-          disabled={busy || editing || fields.every((field) => field.read_only)}
+          disabled={busy || editing || shown.every((field) => field.read_only)}
           hidden={editing}
           className={`ui-button ui-button-ghost min-h-9 shrink-0 gap-1.5 px-2.5 text-xs hover:bg-surface-hover [@media(pointer:coarse)]:min-h-11 ${editing ? 'hidden' : ''}`}
           onClick={() => {
@@ -356,7 +476,7 @@ export function ApplicationSettingGroup({
             requestAnimationFrame(() =>
               form.current
                 ?.querySelector<HTMLElement>(
-                  'input:not([type="checkbox"]), select, textarea, [data-replace]',
+                  'input:not([type="checkbox"]):not([type="hidden"]), [role="combobox"], textarea, [data-replace]',
                 )
                 ?.focus(),
             );
@@ -384,34 +504,39 @@ export function ApplicationSettingGroup({
           prepare();
         }}
       >
-        {fields.map((field) => {
+        {shown.map((field) => {
           const key = field.key;
           const id = `application-setting-${key}`;
           const configured = snapshot?.secret_configured[key] ?? false;
           const editable = editing && !field.read_only;
           const showInput = editable && (!field.secret || replacing[key]);
           const value = drafts[key] ?? incoming(field);
+          const options = selectOptions(field, value, incoming(field));
           const error = errors[key];
-          const inputProps = {
+          const change = (next: string) => {
+            setDrafts((previous) => {
+              const updated = { ...previous };
+              if (next === incoming(field)) delete updated[key];
+              else updated[key] = next;
+              return updated;
+            });
+            setErrors((previous) => ({ ...previous, [key]: '' }));
+            setGoverningDraft(key, next === incoming(field) ? undefined : next);
+          };
+          const fieldProps = {
             id,
             name: key,
             value,
             disabled: busy,
             'aria-invalid': !!error,
-            'aria-describedby': `${id}-help${error ? ` ${id}-error` : ''}`,
+            'aria-describedby': describedBy(id, error),
             className: INPUT_CLASS,
-            onChange: (
-              event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>,
-            ) => {
-              const next = event.target.value;
-              setDrafts((previous) => {
-                const updated = { ...previous };
-                if (next === incoming(field)) delete updated[key];
-                else updated[key] = next;
-                return updated;
-              });
-              setErrors((previous) => ({ ...previous, [key]: '' }));
-            },
+          };
+          const selectProps = { ...fieldProps, onValueChange: change };
+          const inputProps = {
+            ...fieldProps,
+            onChange: (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+              change(event.target.value),
           };
           return (
             <div
@@ -428,13 +553,14 @@ export function ApplicationSettingGroup({
                 </label>
                 <p id={`${id}-help`} className="mt-1 break-words text-xs leading-5 text-muted">
                   {field.description}
+                  {keySourceNote(key, configured)}
                   {editable &&
                     key === ARCHIVE_BUCKET &&
                     ' Saving an S3 URI replaces the prefix; a bucket-root URI clears it.'}
                 </p>
                 {editable && !field.secret && (
                   <p className="mt-2 break-words text-xs text-muted">
-                    Default: {displayValue(field.default) || '(empty)'}
+                    Default: {valueLabel(key, field.default) || '(empty)'}
                   </p>
                 )}
               </div>
@@ -460,7 +586,7 @@ export function ApplicationSettingGroup({
                             {configured ? 'Configured · value hidden' : 'Not configured'}
                           </span>
                         ) : (
-                          displayValue(snapshot?.values[key] ?? field.default) || (
+                          valueLabel(key, snapshot?.values[key] ?? field.default) || (
                             <span className="text-muted">Not set</span>
                           )
                         )}
@@ -469,19 +595,15 @@ export function ApplicationSettingGroup({
                         )}
                       </div>
                     ) : field.kind === 'boolean' ? (
-                      <select {...inputProps}>
-                        <option value="true">Enabled</option>
-                        <option value="false">Disabled</option>
-                      </select>
-                    ) : field.choices?.length ? (
-                      <select {...inputProps}>
-                        {!field.choices.includes(value) && <option value={value}>{value}</option>}
-                        {field.choices.map((choice) => (
-                          <option key={choice} value={choice}>
-                            {choice || '(empty)'}
-                          </option>
-                        ))}
-                      </select>
+                      <Select
+                        {...selectProps}
+                        options={[
+                          { value: 'true', label: 'Enabled' },
+                          { value: 'false', label: 'Disabled' },
+                        ]}
+                      />
+                    ) : options ? (
+                      <Select {...selectProps} options={options} />
                     ) : field.kind === 'string' && (multiline[key] ?? value.includes('\n')) ? (
                       <textarea
                         {...inputProps}
@@ -491,7 +613,7 @@ export function ApplicationSettingGroup({
                         className={`${INPUT_CLASS} resize-y`}
                       />
                     ) : (
-                      <input
+                      <SuggestionInput
                         {...inputProps}
                         type={
                           field.secret ? 'password' : field.kind === 'string' ? 'text' : 'number'
@@ -502,38 +624,22 @@ export function ApplicationSettingGroup({
                         min={field.minimum}
                         max={field.maximum}
                         placeholder={field.secret ? 'Enter new secret' : undefined}
+                        suggestions={null}
                       />
                     )}
                   </div>
                   {editable && (
-                    <details className="relative shrink-0">
-                      <summary
-                        aria-label={`More actions for ${field.label}`}
-                        className="ui-button ui-button-ghost flex h-11 w-11 cursor-pointer list-none items-center justify-center text-lg [&::-webkit-details-marker]:hidden"
-                        onClick={(event) => {
-                          if (busy) event.preventDefault();
-                        }}
-                      >
-                        ···
-                      </summary>
-                      <div className="absolute right-0 z-20 mt-1 w-52 rounded-xl border border-border bg-surface-raised p-1 shadow-lg">
-                        <button
-                          type="button"
-                          disabled={busy || (field.secret && !configured)}
-                          className="ui-button ui-button-ghost min-h-11 w-full justify-start text-status-error"
-                          aria-label={`${field.secret ? 'Clear' : 'Restore default for'} ${field.label}`}
-                          onClick={(event) => {
-                            if (!snapshot) return;
-                            const details = event.currentTarget.closest('details');
-                            returnFocus.current = details?.querySelector('summary') ?? null;
-                            if (details) details.open = false;
-                            setReview({ changes: { [key]: null }, reset: field, snapshot });
-                          }}
-                        >
-                          {field.secret ? 'Clear secret…' : 'Restore default…'}
-                        </button>
-                      </div>
-                    </details>
+                    <FieldActionsMenu
+                      label={`More actions for ${field.label}`}
+                      actionLabel={`${field.secret ? 'Clear' : 'Restore default for'} ${field.label}`}
+                      actionText={field.secret ? 'Clear secret…' : 'Restore default…'}
+                      disabled={busy || (field.secret && !configured)}
+                      onAction={(trigger) => {
+                        if (!snapshot) return;
+                        returnFocus.current = trigger;
+                        setReview({ changes: { [key]: null }, reset: field, snapshot });
+                      }}
+                    />
                   )}
                 </div>
                 {editable && field.secret && !replacing[key] && (
@@ -551,7 +657,7 @@ export function ApplicationSettingGroup({
                     {configured ? 'Replace secret' : 'Set secret'}
                   </button>
                 )}
-                {showInput && field.kind === 'string' && !field.choices?.length && (
+                {offersMultiline(field, showInput) && (
                   <label className="mt-2 flex min-h-9 cursor-pointer items-center gap-2 text-xs text-muted">
                     <input
                       type="checkbox"

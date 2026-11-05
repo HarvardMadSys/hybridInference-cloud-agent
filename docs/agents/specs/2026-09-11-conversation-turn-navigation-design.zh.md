@@ -351,7 +351,7 @@ DSH 本地来源：`/Users/realtmxi/Documents/Github/deepseek-harness`。下列�
 - **C2**：[Agent API client](../../web/src/lib/api/agents.ts)、[owner routes](../../cloud_agent/api/routes.py)、[thread storage queries](../../cloud_agent/storage/store.py)。
 - **C3**：[adapt.ts](../../web/src/components/features/agents/adapt.ts)、[types.ts](../../web/src/components/features/agents/types.ts)。
 - **C4**：[JobDetail.tsx](../../web/src/components/features/agents/JobDetail.tsx)。
-- **C5**：[Job page](../../web/src/app/%28agents%29/%5BjobId%5D/page.tsx)、[现有任务导航说明](../../user/sidebar-navigation.md)。
+- **C5**：[Job page](../../web/src/app/%28agents%29/%5BjobId%5D/page.tsx)、[现有任务导航说明](../../developer/web-app.md#sidebar-and-conversation-list)。
 - **C6**：[TrajectoryView.tsx](../../web/src/components/features/agents/TrajectoryView.tsx)。
 
 ## 13. 实现记录（2026-09-11）
@@ -368,7 +368,7 @@ DSH 本地来源：`/Users/realtmxi/Documents/Github/deepseek-harness`。下列�
 | 正文接线与锚点                  | `web/src/components/features/agents/JobDetail.tsx`                             |
 | 展示行的稳定标识                | `AgentEvent.sourceEventId`（`types.ts`、`adapt.ts`）                           |
 | 文案                            | `web/src/lib/i18n/dictionaries/{en,zh-CN}.ts` 的 `turnNavigation.*`            |
-| 面向使用者的行为说明与人工验收步骤 | [`docs/conversation-navigation.md`](../../user/conversation-navigation.md)           |
+| 面向使用者的行为说明与人工验收步骤 | [`docs/conversation-navigation.md`](../../developer/web-app.md#conversation-view)           |
 
 与设计相比的两点实现细节：
 
@@ -445,7 +445,7 @@ DSH 本地来源：`/Users/realtmxi/Documents/Github/deepseek-harness`。下列�
 
 ### 13.7 尚未执行
 
-- 真实布局下的滚动行为。`useConversationScroll.dom.test.tsx` 用注入的盒模型覆盖了控制器的判断（落点、阅读轮次、布局补偿、跟随恢复、目标缺失），但那是给定的几何，不是浏览器算出来的：Markdown 换行重排、sticky 输入区的实际遮挡、ResizeObserver 的真实时序、指针与触摸事件，以及跳转落点的像素级误差（±4px）都仍未验证。可复现的人工步骤见 [conversation-navigation.md](../../user/conversation-navigation.md#verifying-it-in-a-browser)。
+- 真实布局下的滚动行为。`useConversationScroll.dom.test.tsx` 用注入的盒模型覆盖了控制器的判断（落点、阅读轮次、布局补偿、跟随恢复、目标缺失），但那是给定的几何，不是浏览器算出来的：Markdown 换行重排、sticky 输入区的实际遮挡、ResizeObserver 的真实时序、指针与触摸事件，以及跳转落点的像素级误差（±4px）都仍未验证。可复现的人工步骤见 [conversation-navigation.md](../../developer/web-app.md#checking-it-in-a-browser)。
 - 100+ 轮、两种 Chat 宽度、Fork 复制历史在真实数据下的表现。
 - staging 上的真实验收。仓库目前没有配置 Web 浏览器 E2E 入口，因此本次未新增浏览器用例；若要在 CI 中固化这些场景，需要先接入一个浏览器测试框架，那是独立于本功能的一项工作。
 - `make check`（Python 侧）。本次未改动 `cloud_agent/`、`cloud_agent_host/` 或迁移文件，开工前的 `dev` 基线在该门禁上是否为绿未在本次核对。

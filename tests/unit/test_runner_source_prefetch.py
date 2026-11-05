@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import io
 import os
+import subprocess
+import sys
 import tarfile
 import threading
+import time
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -51,10 +54,14 @@ class Source:
         self.archives: list[Any] = []
         self.limits: list[int] = []
 
-    def prepare_worktree(self, *, workdir: str, **_kwargs: Any) -> str:
+    def prepare_worktree(self, *, workdir: str, stop=None, **_kwargs: Any) -> str:
         self.workdirs.append(workdir)
         self.started.set()
-        assert self.release.wait(5), "the test never let the clone finish"
+        deadline = time.monotonic() + 5
+        while not self.release.wait(0.01):
+            assert time.monotonic() < deadline, "the test never let the clone finish"
+            if stop is not None and stop.is_set():
+                raise WorktreeError("source clone was abandoned")
         if self.error is not None:
             raise self.error
         return _BASE
@@ -80,7 +87,7 @@ def _run_turn(
 ) -> SimpleNamespace:
     """Drive one shared turn with the clone scripted and everything else mocked."""
     monkeypatch.setattr(runner_mod, "prepare_worktree", source.prepare_worktree)
-    monkeypatch.setattr(runner_mod, "checkout_output_branch", lambda *_args: None)
+    monkeypatch.setattr(runner_mod, "checkout_output_branch", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(runner_mod, "build_source_archive", source.build_source_archive)
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(backend, "version_stamp", _stamp)
@@ -154,7 +161,6 @@ def _run_turn(
         heart=heart or SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
-        gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=finish,
         host_settings={"source_import_max_mib": 64},
@@ -220,7 +226,9 @@ def test_a_turn_that_stops_before_its_checkout_leaves_nothing_behind(
 
     assert turn.result == 2
     assert turn.imported == []
-    assert [archive.closed for archive in source.archives] == [True]
+    assert [archive.closed for archive in source.archives] == (
+        [True] if clone_finished_first else []
+    )
     assert not os.path.exists(source.workdirs[0])
 
 
@@ -237,7 +245,7 @@ def test_a_follow_up_clones_nothing(monkeypatch):
 def test_a_discarded_source_cannot_be_imported(monkeypatch):
     source = Source()
     monkeypatch.setattr(runner_mod, "prepare_worktree", source.prepare_worktree)
-    monkeypatch.setattr(runner_mod, "checkout_output_branch", lambda *_args: None)
+    monkeypatch.setattr(runner_mod, "checkout_output_branch", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(runner_mod, "build_source_archive", source.build_source_archive)
     prefetch = runner_mod._prefetch_retained_source(job=_JOB, uid=1000, gid=1000, max_bytes=1)
     for thread in _prefetch_threads():
@@ -269,6 +277,38 @@ def test_the_real_clone_and_archive_run_on_the_prefetch_thread(monkeypatch, remo
         names = archive.getnames()
     assert any(name.endswith("hello.py") for name in names)
     assert not any(name.endswith("second.txt") for name in names), "the pinned base, not the tip"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="other filesystems refuse non-UTF-8 names")
+def test_a_tracked_name_that_is_not_utf8_still_starts_a_chat(monkeypatch, tmp_path):
+    """Git keeps a name as the bytes it was committed with, here Latin-1."""
+    source = tmp_path / "source"
+    source.mkdir()
+    git = ["git", "-C", str(source), "-c", "user.email=a@b", "-c", "user.name=t"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    (source / "uv.lock").write_text("version = 1\n")
+    with open(os.path.join(os.fsencode(source), b"r\xe9sum\xe9.txt"), "wb") as handle:
+        handle.write(b"cv\n")
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-qm", "base"], check=True)
+    head = subprocess.run(
+        [*git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "clone", "-q", "--bare", str(source), str(tmp_path / "remotes/owner/name.git")],
+        check=True,
+    )
+    monkeypatch.setattr(
+        runner_mod, "repo_clone_base_url", lambda **_kwargs: f"file://{tmp_path / 'remotes'}"
+    )
+    prefetch = runner_mod._prefetch_retained_source(
+        job=replace(_JOB, repo="owner/name", base_sha=head), uid=1000, gid=1000
+    )
+    manager = Mock()
+
+    assert prefetch.import_into(manager, Mock()) == head
+    manager.import_archive.assert_called_once()
+    assert set(prefetch.lockfiles() or {}) == {"uv.lock"}
 
 
 def test_the_prefetch_clone_is_stopped_at_the_turns_import_limit(monkeypatch, remote):

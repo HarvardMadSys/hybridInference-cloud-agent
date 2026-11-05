@@ -5,13 +5,17 @@ them on the host and keeps the per-group relay exceptions current.
 
 **Who can touch the host's rules.** The runner and the sandbox manager run in
 containers with the Docker socket, not in the host's network namespace, and
-hold no ``NET_ADMIN``. They change host rules through a short-lived helper:
-this process's own image, started in the host's network namespace under plain
-runc (a Kata VM would edit its own kernel, not the host's), with ``NET_ADMIN``
-and no other capability, a read-only root and no-new-privileges, running
-``nft``. The helper keeps nothing; the kernel holds the rules, so they outlive
-the process that installed them and every restart of it. A host reboot clears
-them, and nothing starts a group until they are back.
+hold no ``NET_ADMIN``. They change host rules through a helper: this process's
+own image, started in the host's network namespace under plain runc (a Kata VM
+would edit its own kernel, not the host's), with ``NET_ADMIN`` and no other
+capability, a read-only root and no-new-privileges, running ``nft``. The
+runner's host service and the sandbox manager each keep one such helper
+running while they use it (:mod:`cloud_agent_host.network_guard_helper`, where
+its threat analysis is written down) and start a disposable one for a step it
+cannot take; a turn's own process uses disposable helpers only. Neither
+keeps anything; the kernel holds the rules, so they outlive the process that
+installed them and every restart of it. A host reboot clears them, and nothing
+starts a group until they are back.
 
 **Verified, not assumed.** After every install the tables are read back and
 compared with what was rendered: every chain, its hook and every rule count,
@@ -19,16 +23,44 @@ the protected set, the pool registration. A table someone flushed, a set that
 lost its elements, a chain that is present but empty, all fail the check, and
 a failed check means no new group network and no activation.
 
-**One helper per step.** Starting a helper container costs far more than the
+**One request per step.** Starting a helper container costs far more than the
 nft calls it makes, and every activation waits for it. So an install and its
-read-back run in one helper, and a bridge's relay update reads, compares and
-writes in one helper. A relay update that would change nothing is skipped when
+read-back are one step, and a bridge's relay update reads, compares and writes
+in one step. A step is one request to the long-lived helper, or one disposable
+helper when that is busy or fails it; either runs the same program
+(:data:`_NFT_BATCH`), and the answer is read and checked the same way. A relay
+update that would change nothing is skipped when
 this guard wrote or read those exact exceptions for that exact Docker network
 within the last :data:`HELD_RELAYS_TRUST_S`, and no reinstall or failed check
 has happened since. Every read-back of the tables (the sweep's, every few
 seconds while groups run) confirms or forgets those remembered exceptions, so
 the memory is never trusted longer than the rules themselves are, and a stalled
 sweep sends the next update back to the kernel.
+
+**Bridges update side by side.** A bridge's relay or SSH update changes only
+that bridge's elements, so groups starting together on different bridges run
+their updates at the same time, and only updates of one bridge take turns. An
+install and its read-back still run alone: they wait for the updates under
+way, and no update starts while one runs or waits, so no update can slip
+between the install and the check that must pass before a group joins its
+bridge.
+
+**A turn's child starts no helper.** The host service hands each turn's child
+its own verification (:meth:`HostNetworkGuard.handover`), made again first once
+it is :data:`GUARD_RENEW_S` old. The child adopts it
+(:meth:`HostNetworkGuard.adopt`) and trusts it as an activation trusts its own,
+until :data:`GUARD_RECHECK_S` after it was made. A verification missing, failed
+or malformed declines the turn before it is accepted. One that is sound but
+older than that means the child was slow to start, not that the rules are
+wrong: the child adopts nothing from it and installs and reads back the rules
+itself, as every child did before it was handed one.
+
+**A reinstalled table holds no exceptions.** A table someone deleted (a
+firewall reload's ``flush ruleset``) is installed again with empty relay and
+SSH sets. Every read-back reports what each bridge still holds
+(:class:`HeldExceptions`), so the sweep can give a group that kept running its
+exceptions back: its relays from what Docker reports, and its SSH targets as
+this guard last wrote them for that same Docker network.
 
 **Neighbours.** Every deployment registers its address pool in its own table.
 The check runs after the install, so of two deployments starting together with
@@ -40,18 +72,29 @@ drawing the host's own traffic for those addresses.
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import ipaddress
 import json
+import math
 import os
 import re
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
+from cloud_agent_host import network_guard_helper
 from cloud_agent_host.logging_utils import get_logger
+from cloud_agent_host.network_guard_helper import (
+    HelperStuck,
+    LongLivedHelper,
+    Remove,
+    Spawn,
+    serve_program,
+)
 from cloud_agent_shared.egress import (
     RELAY_FAMILIES,
     SSH_TARGET_FAMILIES,
@@ -82,17 +125,26 @@ GUARD_RENEW_S = 45.0
 #: while the sweep keeps reading in its place, not while a long sweep step
 #: (a final-archive upload) holds the sweep back.
 HELD_RELAYS_TRUST_S = 10.0
+#: The turn-payload key the host service's verification travels under. The
+#: parent adds it after the claim's underscore keys are stripped, so a claim can
+#: never supply one.
+VERIFICATION_KEY = "_network"
 
 _HELPER_TIMEOUT_S = 60
+#: How much of a failed check's reason a child repeats when it declines. The
+#: whole answer is one line the host reads at most 4 KiB of.
+_HANDED_REASON_MAX = 1000
 _RULE = re.compile(r"^add rule (\w+) (\S+) (\w+) ")
 _BASE_CHAIN = re.compile(r"^add chain (\w+) (\S+) (\w+) \{ type filter hook (\w+) ")
 
-# One guard step in one disposable helper: an optional install, then the reads
-# in order, then optionally one bridge's relay update and one bridge's SSH
-# target update, each computed from what the kernel holds at that moment and
-# rendered as ``render_relay_update`` renders it. Every nft call is checked,
-# and the first failure ends the helper with nft's own message and no output.
-# No shell, persistent helper or cached kernel state is involved.
+# One guard step: an optional install, then the reads in order, then
+# optionally one bridge's relay update and one bridge's SSH target update, each
+# computed from what the kernel holds at that moment and rendered as
+# ``render_relay_update`` renders it. Every nft call is checked, and the first
+# failure ends the step with nft's own message and no output. No shell or
+# cached kernel state is involved: a disposable helper runs this once, and the
+# long-lived helper runs it afresh, with a fresh Python globals dict, for each
+# request (``serve_program``).
 _NFT_BATCH = """
 import json
 import subprocess
@@ -164,6 +216,18 @@ if request.get("ssh_targets"):
     answer["ssh_update"] = converge(request["ssh_targets"], "ssh_targets", "SSH target")
 json.dump(answer, sys.stdout)
 """
+#: The long-lived helper's program: :data:`_NFT_BATCH` for each request it reads.
+_NFT_SERVE = serve_program(_NFT_BATCH)
+
+
+@dataclass(frozen=True)
+class HeldExceptions:
+    """What one read-back of this deployment's tables showed each bridge holding."""
+
+    #: Relay exceptions per bridge, held in every relay family.
+    relays: dict[str, frozenset[tuple[str, int]]]
+    #: SSH exceptions per bridge.
+    ssh_targets: dict[str, frozenset[tuple[str, int]]]
 
 
 @dataclass(frozen=True)
@@ -178,21 +242,113 @@ class _HeldRelays:
     confirmed_at: float
 
 
-Runner = Callable[[list[str], str | None], subprocess.CompletedProcess[str]]
+#: Runs one ``docker`` command: ``(argv, stdin)``, and ``timeout=`` too in a
+#: guard with a long-lived helper, for what it left of a step's minute.
+Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
 class NetworkGuardError(SandboxError):
     """The host's sandbox rules are missing, wrong, or cannot be changed."""
 
 
-def _run(argv: list[str], stdin: str | None) -> subprocess.CompletedProcess[str]:
+class _HelperLock:
+    """Who may run a helper now: an install or a read-back alone, or updates of different bridges.
+
+    An update changes only its own bridge's elements (see :data:`_NFT_BATCH`),
+    so updates of different bridges cannot undo each other and run side by
+    side, while updates of one bridge take turns. An install, a read-back and
+    what the guard concludes from them hold the lock exclusively. They wait
+    for the updates under way, and while one waits or runs no update starts,
+    so a stream of updates cannot hold an install back.
+
+    The exclusive side is re-entrant, as :meth:`HostNetworkGuard.handover`
+    needs. Nothing else nests: an update inside an exclusive hold or inside
+    another update, or an exclusive hold inside an update, raises rather than
+    deadlock.
+    """
+
+    def __init__(self) -> None:
+        self._changed = threading.Condition(threading.Lock())
+        #: The thread holding the lock exclusively, and how many times over.
+        self._owner: int | None = None
+        self._depth = 0
+        #: Threads waiting to hold it exclusively. No update starts while any does.
+        self._waiting = 0
+        #: The threads running an update.
+        self._updating: set[int] = set()
+        #: Each bridge's turn, with the number of updates holding or awaiting it,
+        #: so a bridge's lock is kept only while an update of it needs one.
+        self._bridges: dict[str, tuple[threading.Lock, int]] = {}
+
+    @contextlib.contextmanager
+    def exclusive(self) -> Iterator[None]:
+        """Hold off every update: wait for those under way, and start none meanwhile."""
+        me = threading.get_ident()
+        with self._changed:
+            if me in self._updating:
+                raise RuntimeError("a network guard update cannot take the guard exclusively")
+            if self._owner != me:
+                self._waiting += 1
+                try:
+                    self._changed.wait_for(lambda: self._owner is None and not self._updating)
+                finally:
+                    # Should the wait end in an exception, the updates it held
+                    # back may start.
+                    self._waiting -= 1
+                    self._changed.notify_all()
+                self._owner = me
+            self._depth += 1
+        try:
+            yield
+        finally:
+            with self._changed:
+                self._depth -= 1
+                if not self._depth:
+                    self._owner = None
+                    self._changed.notify_all()
+
+    @contextlib.contextmanager
+    def bridge(self, name: str) -> Iterator[None]:
+        """Update one bridge: after its earlier updates, beside other bridges' updates."""
+        me = threading.get_ident()
+        with self._changed:
+            if self._owner == me or me in self._updating:
+                raise RuntimeError("a network guard update cannot run inside another guard step")
+            turn, users = self._bridges.get(name, (threading.Lock(), 0))
+            self._bridges[name] = (turn, users + 1)
+        try:
+            # The bridge's turn first, so an update queued behind another of its
+            # bridge is not one that an install waits for.
+            with turn:
+                with self._changed:
+                    self._changed.wait_for(lambda: self._owner is None and not self._waiting)
+                    self._updating.add(me)
+                try:
+                    yield
+                finally:
+                    with self._changed:
+                        self._updating.discard(me)
+                        if not self._updating:
+                            self._changed.notify_all()
+        finally:
+            with self._changed:
+                turn, users = self._bridges[name]
+                if users > 1:
+                    self._bridges[name] = (turn, users - 1)
+                else:
+                    del self._bridges[name]
+
+
+def _run(
+    argv: list[str], stdin: str | None, timeout: float | None = None
+) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             argv,
             input=stdin,
             capture_output=True,
             text=True,
-            timeout=_HELPER_TIMEOUT_S,
+            timeout=_HELPER_TIMEOUT_S if timeout is None else timeout,
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -233,6 +389,48 @@ def _relay_elements(elements: list[Any]) -> set[tuple[str, str, int]]:
     return found
 
 
+def _set_elements_in(listing: list[Any], name: str) -> list[Any]:
+    """One set's elements in a ``list table`` listing; none if it holds none."""
+    for item in listing:
+        found = item.get("set") if isinstance(item, dict) else None
+        if isinstance(found, dict) and found.get("name") == name:
+            raw = found.get("elem") or []
+            return raw if isinstance(raw, list) else [raw]
+    return []
+
+
+def _held_in(
+    listings: dict[str, list[Any]], families: tuple[str, ...], name: str
+) -> dict[str, frozenset[tuple[str, int]]]:
+    """The ``address . port`` elements each bridge holds in set ``name`` of every family."""
+    per_family: list[dict[str, set[tuple[str, int]]]] = []
+    for family in families:
+        found: dict[str, set[tuple[str, int]]] = {}
+        for bridge, address, port in _relay_elements(_set_elements_in(listings[family], name)):
+            found.setdefault(bridge, set()).add((address, port))
+        per_family.append(found)
+    bridges = set.intersection(*(set(found) for found in per_family))
+    return {
+        bridge: frozenset(set.intersection(*(found[bridge] for found in per_family)))
+        for bridge in bridges
+    }
+
+
+def _read_exceptions(tables: list[list[Any]]) -> HeldExceptions | None:
+    """What ``list table`` listings of :data:`RELAY_FAMILIES`, in order, show each bridge holding.
+
+    ``None`` when an element cannot be read: nothing is concluded from it.
+    """
+    try:
+        listings = dict(zip(RELAY_FAMILIES, tables, strict=True))
+        return HeldExceptions(
+            relays=_held_in(listings, RELAY_FAMILIES, "relays"),
+            ssh_targets=_held_in(listings, SSH_TARGET_FAMILIES, SSH_TARGETS_SET),
+        )
+    except (NetworkGuardError, TypeError, ValueError, AttributeError, KeyError):
+        return None
+
+
 class HostNetworkGuard:
     """This deployment's rules on this host, through the trusted helper."""
 
@@ -243,27 +441,82 @@ class HostNetworkGuard:
         docker_binary: str = "docker",
         helper_image: str | None = None,
         run: Runner | None = None,
+        spawn: Spawn | None = None,
+        remove: Remove | None = None,
     ) -> None:
         self.network = network
         self.docker_binary = docker_binary
         self._helper_image = helper_image
         self._run = run or _run
-        self._lock = threading.RLock()
+        #: The helper kept running between steps, for a process that outlives
+        #: them: only a guard given ``spawn`` has one. ``remove`` takes a helper
+        #: that failed a step out of the way before the step runs again.
+        self._long_lived = (
+            LongLivedHelper(
+                spawn,
+                remove or functools.partial(network_guard_helper.remove_helper, docker_binary),
+                name_prefix=f"{network.table}-helper",
+            )
+            if spawn is not None
+            else None
+        )
+        #: Held across every helper run and the record kept of it, so kernel
+        #: writes and what this guard remembers of them never interleave. An
+        #: install, a read-back and what is concluded from them hold it
+        #: exclusively; a relay or SSH update holds only its bridge's turn,
+        #: beside other bridges' updates.
+        self._lock = _HelperLock()
+        #: Guards ``_verified_at``, ``_held``, ``_relays_written`` and
+        #: ``_ssh_written``, and is never held across a helper: a check that a
+        #: fresh verification or a fresh relay record answers does not wait
+        #: behind another bridge's helper run, and updates of different bridges
+        #: keep their records side by side. Taken after ``_lock`` when both are
+        #: needed, never before.
+        self._state = threading.Lock()
+        #: Held while the helpers' image is looked up, so updates that start
+        #: together before it is known inspect this container once.
+        self._image_lock = threading.Lock()
         self._verified_at: float | None = None
         self._held: dict[str, _HeldRelays] = {}
+        #: The SSH exceptions this guard last wrote for each bridge, with the
+        #: Docker network they were written for. Unlike ``_held`` this is not
+        #: a shortcut but what a running group gets back when a reinstalled
+        #: table lost it, so a failed check does not forget it.
+        self._ssh_written: dict[str, tuple[str, frozenset[tuple[str, int]]]] = {}
+        #: The relay exceptions this guard last wrote for each bridge. Kept
+        #: for the same reason: it is what says that a read-back lost one,
+        #: whatever ports the relays share.
+        self._relays_written: dict[str, frozenset[tuple[str, int]]] = {}
 
     # ── public surface ──────────────────────────────────────────────────
 
-    def ensure(self, *, max_age_s: float = GUARD_RECHECK_S) -> None:
-        """Install (idempotently) and verify, at most once per ``max_age_s``."""
-        with self._lock:
-            now = time.monotonic()
-            if self._verified_at is not None and now - self._verified_at < max_age_s:
-                return
-            self._verified_at = None
-            # Remembered exceptions survive only if the read-back after this
-            # install shows them still held.
-            held, self._held = self._held, {}
+    def ensure(
+        self, *, max_age_s: float = GUARD_RECHECK_S, warm: bool = False
+    ) -> HeldExceptions | None:
+        """Install (idempotently) and verify, at most once per ``max_age_s``.
+
+        Returns what the read-back showed each bridge holding, or ``None``
+        when the last verification still stood and nothing was read. With
+        ``warm``, a verification that stands then starts the long-lived
+        helper for the step its caller is about to take (:meth:`warm`).
+        """
+        held = self._ensure(max_age_s)
+        if warm:
+            self.warm()
+        return held
+
+    def _ensure(self, max_age_s: float) -> HeldExceptions | None:
+        with self._state:
+            if self._verified_within(max_age_s):
+                return None
+        with self._lock.exclusive():
+            with self._state:
+                if self._verified_within(max_age_s):
+                    return None
+                self._verified_at = None
+                # Remembered exceptions survive only if the read-back after this
+                # install shows them still held.
+                held, self._held = self._held, {}
             rendered = render_ruleset(self.network)
             read_at = time.monotonic()
             listings = self._batch(
@@ -272,11 +525,17 @@ class HostNetworkGuard:
             self._verify(rendered, listings=listings[:-1])
             self._refuse_overlapping_pools(listing=listings[-1])
             self._refuse_overlapping_routes()
-            self._held = held
-            self._observe_relays(listings[: len(RELAY_FAMILIES)], read_at=read_at)
-            self._verified_at = time.monotonic()
+            with self._state:
+                self._held = held
+                self._observe_relays(listings[: len(RELAY_FAMILIES)], read_at=read_at)
+                self._verified_at = time.monotonic()
+            return _read_exceptions(listings[: len(RELAY_FAMILIES)])
 
-    def recheck(self) -> None:
+    def _verified_within(self, max_age_s: float) -> bool:
+        """Whether the last verification is younger than ``max_age_s``; ``_state`` held."""
+        return self._verified_at is not None and time.monotonic() - self._verified_at < max_age_s
+
+    def recheck(self, *, renew_after_s: float = GUARD_RENEW_S) -> HeldExceptions | None:
         """Read this deployment's tables from the kernel now, and repair them if changed.
 
         :meth:`ensure` trusts a verification for a minute, which suits
@@ -287,22 +546,45 @@ class HostNetworkGuard:
         reinstalling, and only a difference (or a failed read) costs the full
         :meth:`ensure`: reinstall, read back, and the neighbour and route
         checks. That raises when the rules still cannot be shown, which is
-        what stops the running groups. A verification past
-        :data:`GUARD_RENEW_S` takes the full path regardless, so those checks
-        keep their cadence and an activation never finds the verification
-        lapsed.
+        what stops the running groups. A verification ``renew_after_s`` old,
+        :data:`GUARD_RENEW_S` unless told otherwise, takes the full path
+        regardless, so the sweep keeps those checks on their cadence and an
+        activation never finds the verification lapsed.
+
+        An activation's own read-back, after its guest's network check, passes
+        :data:`GUARD_RECHECK_S`. What it needs is the kernel read now, which
+        it gets at any age, and it already trusts a full verification that
+        young, as its :meth:`ensure` did moments before. Renewing is the
+        sweep's to do: a start that met the renewal window paid for a
+        reinstall, a neighbour read and a route helper on its way to the
+        prompt. A verification past :data:`GUARD_RECHECK_S`, or one a failed
+        read invalidated, still takes the full path there too.
+
+        Returns what the read-back showed each bridge holding, as
+        :meth:`ensure` does: a table reinstalled here, or by another process
+        since, holds none of the running groups' exceptions.
         """
-        with self._lock:
+        with self._state:
             verified_at = self._verified_at
-        if verified_at is not None and time.monotonic() - verified_at < GUARD_RENEW_S:
+        if verified_at is None:
+            # An install under way clears the verification until its read-back.
+            # Wait for it, so this pass reads the table it leaves.
+            with self._lock.exclusive(), self._state:
+                verified_at = self._verified_at
+        if verified_at is not None and time.monotonic() - verified_at < renew_after_s:
             try:
                 read_at = time.monotonic()
                 listings = self._list_many(self._verification_reads())
                 self._verify(render_ruleset(self.network), listings=listings)
-                with self._lock:
+                with self._lock.exclusive(), self._state:
                     self._observe_relays(listings[: len(RELAY_FAMILIES)], read_at=read_at)
-                return
+                return _read_exceptions(listings[: len(RELAY_FAMILIES)])
             except NetworkGuardError as exc:
+                # Activations stop trusting the rules now, not once another
+                # bridge's helper lets the invalidation below take the lock.
+                with self._state:
+                    self._verified_at = None
+                    self._held = {}
                 logger.warning(
                     "network_guard_rules_changed",
                     extra={
@@ -312,13 +594,139 @@ class HostNetworkGuard:
                     },
                 )
                 self.invalidate()
-        self.ensure(max_age_s=GUARD_RENEW_S)
+        return self.ensure(max_age_s=renew_after_s)
 
     def invalidate(self) -> None:
         """Forget the last verification, so the next activation reads the kernel."""
-        with self._lock:
+        with self._lock.exclusive(), self._state:
             self._verified_at = None
             self._held = {}
+
+    def warm(self) -> None:
+        """Start the long-lived helper ahead of a step an activation is about to take.
+
+        For an activation, never the sweep: a host with nothing running keeps
+        no helper (:mod:`cloud_agent_host.idle_host_rules`). A create calls it
+        once its rules check stands (``ensure(warm=True)``). The start that
+        follows gives a new or stopped group's fresh bridge its relay update
+        after the bridge's Docker work, and that update otherwise waited for a
+        helper container to start whenever the last one had idled out.
+        Started here, the container starts beside the create and that Docker
+        work instead. It is the same helper, flag for flag, and nothing about
+        a step changes. Never raises and never waits: a guard without a
+        long-lived helper, a busy one, or one whose image cannot be found
+        leaves the step to start what it needs, as it always did.
+        """
+        if self._long_lived is None:
+            return
+        try:
+            command = self._command("python3", ["-c", _NFT_SERVE], interactive=True)
+            self._long_lived.warm(command)
+        except Exception as exc:
+            logger.warning(
+                "network_guard_helper_not_warmed",
+                extra={
+                    "event": "network_guard_helper_not_warmed",
+                    "table": self.network.table,
+                    "detail": str(exc)[:300],
+                },
+            )
+
+    def close(self) -> None:
+        """Stop the long-lived helper; every later step runs on a disposable one.
+
+        Nothing has to call this: the helper also exits when this process
+        does, however it ends (:mod:`cloud_agent_host.network_guard_helper`).
+        """
+        if self._long_lived is not None:
+            self._long_lived.close()
+
+    def handover(self) -> dict[str, Any]:
+        """This guard's verification, for the child a turn is handed to (:meth:`adopt`).
+
+        Made again first once it is :data:`GUARD_RENEW_S` old. The child
+        trusts it only while it is younger than :data:`GUARD_RECHECK_S`, so
+        this leaves the child the difference to start in; a child that takes
+        longer checks the rules itself.
+
+        A check that fails is handed over as its reason, for the child to
+        decline the turn with. This never raises: an exception here would
+        reach the host as an uncertain launch, and a turn that never started
+        would wait out its lease instead of going straight back.
+        """
+        try:
+            with self._lock.exclusive():
+                self.ensure(max_age_s=GUARD_RENEW_S)
+                with self._state:
+                    verified_at = self._verified_at
+                image = self._image()
+        except Exception as exc:
+            return {"error": str(exc) or type(exc).__name__}
+        if verified_at is None:
+            # The sweep found the tables changed after that check, which it
+            # may do without the helper lock, and stopped trusting them.
+            return {"error": "the sandbox network rules changed while the turn was handed over"}
+        return {"verified_at": verified_at, "helper_image": image}
+
+    def adopt(self, verification: object) -> bool:
+        """Hold the host service's verification (:meth:`handover`) as this guard's own.
+
+        For a turn's child, which then starts no helper before it accepts the
+        turn. The verification is trusted exactly as long as the host's guard
+        trusts it, until :data:`GUARD_RECHECK_S` after it was made: the host
+        service started the child, on the same kernel, so both read the same
+        monotonic clock. Raises when the verification is missing, failed or
+        malformed, and the child declines. Returns ``False``, holding nothing
+        of it, when it is sound but older than that: the child was slow to
+        start, so its own check installs and reads back the rules instead.
+        """
+        if not isinstance(verification, dict):
+            raise NetworkGuardError(
+                "the host service handed this turn over without verifying the sandbox network rules"
+            )
+        if "error" in verification:
+            raise NetworkGuardError(
+                "the host service could not verify the sandbox network rules: "
+                + str(verification["error"])[:_HANDED_REASON_MAX]
+            )
+        verified_at = verification.get("verified_at")
+        image = verification.get("helper_image")
+        now = time.monotonic()
+        if (
+            # A monotonic time, as the host's guard read it.
+            not isinstance(verified_at, float)
+            or not math.isfinite(verified_at)
+            or verified_at > now
+            or not isinstance(image, str)
+            or not image.startswith("sha256:")
+        ):
+            raise NetworkGuardError(
+                "the host service handed over an unreadable verification of the sandbox "
+                "network rules"
+            )
+        age = now - verified_at
+        if age >= GUARD_RECHECK_S:
+            logger.warning(
+                "network_guard_verification_aged_out",
+                extra={
+                    "event": "network_guard_verification_aged_out",
+                    "table": self.network.table,
+                    "age_s": round(age, 1),
+                    "detail": (
+                        f"the host service verified the sandbox network rules {age:.0f}s ago "
+                        f"and a turn trusts a verification for {GUARD_RECHECK_S:.0f}s; this "
+                        "turn's child was slow to start, so it checks the rules itself"
+                    ),
+                },
+            )
+            return False
+        with self._lock.exclusive():
+            self._helper_image = self._helper_image or image
+            with self._state:
+                self._verified_at = float(verified_at)
+                # Nothing this guard remembers was read back with that verification.
+                self._held = {}
+        return True
 
     def sync_relays(
         self,
@@ -336,22 +744,17 @@ class HostNetworkGuard:
         """
         self._require_own_bridge(bridge)
         wanted = frozenset((str(address), int(port)) for address, port in endpoints)
-        with self._lock:
-            held = self._held.pop(bridge, None)
-            now = time.monotonic()
-            if (
-                network_id
-                and held is not None
-                and held.network_id == network_id
-                and held.endpoints == wanted
-                # Never trusted longer than the rules themselves are, nor
-                # longer than the sweep's reads of the kernel keep up.
-                and self._verified_at is not None
-                and now - self._verified_at < GUARD_RECHECK_S
-                and now - held.confirmed_at < HELD_RELAYS_TRUST_S
-            ):
-                self._held[bridge] = held
+        with self._state:
+            if self._relays_held(bridge, wanted, network_id):
+                self._relays_written[bridge] = wanted
                 return
+        with self._lock.bridge(bridge):
+            with self._state:
+                if self._relays_held(bridge, wanted, network_id):
+                    self._relays_written[bridge] = wanted
+                    return
+                self._held.pop(bridge, None)
+                self._relays_written.pop(bridge, None)
             written_at = time.monotonic()
             self._batch(
                 [],
@@ -362,26 +765,98 @@ class HostNetworkGuard:
                     "wanted": sorted([address, port] for address, port in wanted),
                 },
             )
-            if network_id:
-                self._held[bridge] = _HeldRelays(network_id, wanted, written_at)
+            with self._state:
+                self._relays_written[bridge] = wanted
+                if network_id:
+                    self._held[bridge] = _HeldRelays(network_id, wanted, written_at)
 
-    def sync_ssh_targets(self, bridge: str, endpoints: set[tuple[str, int]]) -> None:
+    def _relays_held(
+        self, bridge: str, wanted: frozenset[tuple[str, int]], network_id: str | None
+    ) -> bool:
+        """Whether ``wanted`` is already this network's update, recently confirmed; ``_state`` held."""
+        held = self._held.get(bridge)
+        now = time.monotonic()
+        return bool(
+            network_id
+            and held is not None
+            and held.network_id == network_id
+            and held.endpoints == wanted
+            # Never trusted longer than the rules themselves are, nor
+            # longer than the sweep's reads of the kernel keep up.
+            and self._verified_at is not None
+            and now - self._verified_at < GUARD_RECHECK_S
+            and now - held.confirmed_at < HELD_RELAYS_TRUST_S
+        )
+
+    def sync_ssh_targets(
+        self,
+        bridge: str,
+        endpoints: set[tuple[str, int]],
+        *,
+        network_id: str | None = None,
+    ) -> None:
         """Make one bridge's SSH exceptions exactly ``endpoints``.
 
         Always read from the kernel and corrected in one helper. These change
         only when an owner's SSH selection does and are synced only for groups
         that have one, so there is no per-activation cost to save by
-        remembering them.
+        remembering them. With ``network_id``, the Docker network the bridge
+        belongs to, a successful write is kept for :meth:`restore_ssh_targets`.
         """
         self._require_own_bridge(bridge)
-        with self._lock:
-            self._batch([], ssh_targets=self._target_update(bridge, endpoints))
+        with self._lock.bridge(bridge):
+            with self._state:
+                self._ssh_written.pop(bridge, None)
+            update = self._target_update(bridge, endpoints)
+            self._batch([], ssh_targets=update)
+            if network_id:
+                with self._state:
+                    self._ssh_written[bridge] = (
+                        network_id,
+                        frozenset((address, port) for address, port in update["wanted"]),
+                    )
+
+    def written_relays(self, bridge: str) -> frozenset[tuple[str, int]] | None:
+        """The relay exceptions this guard last wrote for one bridge, if any."""
+        with self._state:
+            return self._relays_written.get(bridge)
+
+    def written_ssh_targets(self, bridge: str) -> tuple[str, frozenset[tuple[str, int]]] | None:
+        """The SSH exceptions this guard last wrote for one bridge, and for which network.
+
+        After any update of that bridge under way, so never the gap between
+        an update forgetting the old record and keeping the new one.
+        """
+        with self._lock.bridge(bridge), self._state:
+            return self._ssh_written.get(bridge)
+
+    def restore_ssh_targets(self, bridge: str, *, network_id: str) -> None:
+        """Write back the SSH exceptions this guard last wrote for this exact network.
+
+        Only for that network: a bridge removed and created again keeps its
+        name, and its successor gets its own SSH targets from its own turn.
+        The write is whatever is remembered when it runs, so an owner's change
+        synced meanwhile is never undone.
+        """
+        self._require_own_bridge(bridge)
+        with self._lock.bridge(bridge):
+            with self._state:
+                written = self._ssh_written.get(bridge)
+                if written is None:
+                    return
+                if written[0] != network_id:
+                    del self._ssh_written[bridge]
+                    return
+            self._batch([], ssh_targets=self._target_update(bridge, set(written[1])))
 
     def release_bridge(self, bridge: str) -> None:
         """Drop every exception a removed bridge had, relays and SSH alike, in one helper."""
         self._require_own_bridge(bridge)
-        with self._lock:
-            self._held.pop(bridge, None)
+        with self._lock.bridge(bridge):
+            with self._state:
+                self._held.pop(bridge, None)
+                self._relays_written.pop(bridge, None)
+                self._ssh_written.pop(bridge, None)
             self._batch(
                 [],
                 relays={
@@ -396,7 +871,7 @@ class HostNetworkGuard:
     def ssh_target_endpoints(self, bridge: str) -> set[tuple[str, int]]:
         """The SSH exceptions the kernel currently holds for one bridge."""
         table = self.network.table
-        with self._lock:
+        with self._lock.exclusive():
             (listing,) = self._list_many([["list", "set", "inet", table, SSH_TARGETS_SET]])
         elements = _relay_elements(self._set_elements(listing, "inet", table, SSH_TARGETS_SET))
         return {(address, port) for owner, address, port in elements if owner == bridge}
@@ -424,7 +899,7 @@ class HostNetworkGuard:
 
     def relay_endpoints(self, bridge: str) -> set[tuple[str, int]]:
         """The exceptions both tables currently hold for one bridge."""
-        with self._lock:
+        with self._lock.exclusive():
             held = [
                 {(address, port) for owner, address, port in elements if owner == bridge}
                 for elements in self._relay_sets().values()
@@ -441,7 +916,7 @@ class HostNetworkGuard:
             ["list", "set", "inet", table, "pool4"],
         ]
 
-    def _verify(self, rendered: str, *, listings: list[list[Any]] | None = None) -> None:
+    def _verify(self, rendered: str, *, listings: list[list[Any]] | None = None) -> None:  # noqa: C901, PLR0912 complexity baseline, #771
         table = self.network.table
         if listings is None:
             listings = self._list_many(self._verification_reads())
@@ -588,18 +1063,12 @@ class HostNetworkGuard:
         order, read starting at ``read_at``. An exception is confirmed only
         when every table holds exactly what was remembered for its bridge.
         Anything unreadable forgets everything, so the next update reads the
-        kernel itself.
+        kernel itself. The caller holds ``_lock`` exclusively, and ``_state``.
         """
         try:
-            per_family = []
-            for listing in tables:
-                elements: list[Any] = []
-                for item in listing:
-                    found = item.get("set") if isinstance(item, dict) else None
-                    if isinstance(found, dict) and found.get("name") == "relays":
-                        raw = found.get("elem") or []
-                        elements = raw if isinstance(raw, list) else [raw]
-                per_family.append(_relay_elements(elements))
+            per_family = [
+                _relay_elements(_set_elements_in(listing, "relays")) for listing in tables
+            ]
         except (NetworkGuardError, TypeError, ValueError, AttributeError):
             self._held = {}
             return
@@ -626,7 +1095,13 @@ class HostNetworkGuard:
         relays: dict[str, Any] | None = None,
         ssh_targets: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Run one guard step in one helper; see :data:`_NFT_BATCH`."""
+        """Run one guard step; see :data:`_NFT_BATCH`.
+
+        On the long-lived helper when it is free. A step it cannot take, and
+        any doubt about its answer, runs on a disposable helper, whose answer
+        is read and checked exactly as every answer was before. Either way the
+        step has the one minute a disposable helper always had.
+        """
         request: dict[str, Any] = {"reads": reads}
         if install is not None:
             request["install"] = install
@@ -634,13 +1109,43 @@ class HostNetworkGuard:
             request["relays"] = relays
         if ssh_targets is not None:
             request["ssh_targets"] = ssh_targets
-        result = self._helper("python3", ["-c", _NFT_BATCH], stdin=json.dumps(request), label="nft")
+        stdin = json.dumps(request)
+
+        def read(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+            return self._read_batch(
+                result, len(reads), relays=relays is not None, ssh_targets=ssh_targets is not None
+            )
+
+        if self._long_lived is None:
+            return read(self._helper("python3", ["-c", _NFT_BATCH], stdin=stdin, label="nft"))
+        # The minute starts once the image is known, as a disposable helper's
+        # always did: looking it up is not the helper's time.
+        command = self._command("python3", ["-c", _NFT_SERVE], interactive=True)
+        deadline = time.monotonic() + _HELPER_TIMEOUT_S
+        try:
+            served = self._long_lived.run(command, stdin, deadline=deadline, accept=read)
+        except HelperStuck as exc:
+            raise NetworkGuardError(f"network guard helper could not run: {exc}") from exc
+        if served is not None:
+            return served
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise NetworkGuardError("network guard helper could not run: no time was left")
+        return read(
+            self._helper("python3", ["-c", _NFT_BATCH], stdin=stdin, label="nft", timeout=left)
+        )
+
+    @staticmethod
+    def _read_batch(
+        result: subprocess.CompletedProcess[str], reads: int, *, relays: bool, ssh_targets: bool
+    ) -> dict[str, Any]:
+        """A step's answer with its listings unwrapped; raises unless it answers what was asked."""
         try:
             answer = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
             raise NetworkGuardError("nft returned unreadable JSON") from exc
         payloads = answer.get("listings") if isinstance(answer, dict) else None
-        if not isinstance(payloads, list) or len(payloads) != len(reads):
+        if not isinstance(payloads, list) or len(payloads) != reads:
             raise NetworkGuardError("nft returned an unexpected listing")
         listings: list[list[Any]] = []
         for payload in payloads:
@@ -648,9 +1153,9 @@ class HostNetworkGuard:
             if not isinstance(items, list):
                 raise NetworkGuardError("nft returned an unexpected listing")
             listings.append(items)
-        if relays is not None and not isinstance(answer.get("relay_update"), str):
+        if relays and not isinstance(answer.get("relay_update"), str):
             raise NetworkGuardError("nft returned no relay update")
-        if ssh_targets is not None and not isinstance(answer.get("ssh_update"), str):
+        if ssh_targets and not isinstance(answer.get("ssh_update"), str):
             raise NetworkGuardError("nft returned no SSH target update")
         return {**answer, "listings": listings}
 
@@ -662,12 +1167,32 @@ class HostNetworkGuard:
         stdin: str | None = None,
         net_admin: bool = True,
         label: str | None = None,
+        timeout: float | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        command = [
+        command = self._command(
+            entrypoint, args, interactive=stdin is not None, net_admin=net_admin
+        )
+        # ``timeout`` is what a long-lived helper left of the step's minute.
+        if timeout is None:
+            result = self._run(command, stdin)
+        else:
+            result = self._run(command, stdin, timeout=timeout)
+        if result.returncode != 0:
+            raise NetworkGuardError(
+                f"{label or ' '.join([entrypoint, *args[:4]])} failed: "
+                + (result.stderr or result.stdout).strip()[:400]
+            )
+        return result
+
+    def _command(
+        self, entrypoint: str, args: list[str], *, interactive: bool, net_admin: bool = True
+    ) -> list[str]:
+        """A helper's ``docker run`` command line, disposable and long-lived alike."""
+        return [
             self.docker_binary,
             "run",
             "--rm",
-            *(["--interactive"] if stdin is not None else []),
+            *(["--interactive"] if interactive else []),
             "--pull",
             "never",
             # The host's namespace and kernel: never a VM, whatever the daemon's
@@ -689,32 +1214,35 @@ class HostNetworkGuard:
             self._image(),
             *args,
         ]
-        result = self._run(command, stdin)
-        if result.returncode != 0:
-            raise NetworkGuardError(
-                f"{label or ' '.join([entrypoint, *args[:4]])} failed: "
-                + (result.stderr or result.stdout).strip()[:400]
-            )
-        return result
 
     def _image(self) -> str:
         """This process's own image: the same trusted build runs the helper."""
         if self._helper_image:
             return self._helper_image
-        container = os.environ.get("HOSTNAME", "")
-        inspected = self._run(
-            [self.docker_binary, "container", "inspect", "--format", "{{.Image}}", container],
-            None,
-        )
-        image = inspected.stdout.strip()
-        if inspected.returncode != 0 or not image.startswith("sha256:"):
-            raise NetworkGuardError(
-                "the network guard runs its helper from this container's own image, and "
-                f"could not inspect container {container!r}: "
-                + (inspected.stderr or inspected.stdout).strip()[:200]
+        with self._image_lock:
+            # Another bridge's update may have found it while this one waited.
+            if self._helper_image:
+                return self._helper_image
+            container = os.environ.get("HOSTNAME", "")
+            inspected = self._run(
+                [self.docker_binary, "container", "inspect", "--format", "{{.Image}}", container],
+                None,
             )
-        self._helper_image = image
-        return image
+            image = inspected.stdout.strip()
+            if inspected.returncode != 0 or not image.startswith("sha256:"):
+                raise NetworkGuardError(
+                    "the network guard runs its helper from this container's own image, and "
+                    f"could not inspect container {container!r}: "
+                    + (inspected.stderr or inspected.stdout).strip()[:200]
+                )
+            self._helper_image = image
+            return image
 
 
-__all__ = ["GUARD_RECHECK_S", "HostNetworkGuard", "NetworkGuardError"]
+__all__ = [
+    "GUARD_RECHECK_S",
+    "VERIFICATION_KEY",
+    "HeldExceptions",
+    "HostNetworkGuard",
+    "NetworkGuardError",
+]

@@ -2,7 +2,7 @@
 
 Setup, the agent and every fork member use one routable bridge named from the
 group's identity. The host's rules (``cloud_agent_shared.egress``) decide what
-it reaches; this lifecycle keeps the bridge, its two relays and the host's
+it reaches; this lifecycle keeps the bridge, its relay and the host's
 per-bridge relay exceptions consistent through create, wake, stop, relay
 rollouts and pruning, and refuses the per-phase topology it replaced.
 
@@ -25,6 +25,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -48,21 +49,21 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatFailStopped,
     RetainedChatLost,
 )
+from cloud_agent_host.network_guard import HostNetworkGuard
 from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
 from cloud_agent_shared.egress import SandboxNetwork, network_from_env
 
 _NAMESPACE = "this-stack"
 
 
-def _config(namespace: str = _NAMESPACE) -> SandboxNetwork:
+def _config(namespace: str = _NAMESPACE, *, mcp_port: int = 8000) -> SandboxNetwork:
     return network_from_env(
         {
             "AGENT_SANDBOX_NAMESPACE": namespace,
             "AGENT_EGRESS_CHAT_NETWORK_POOL": "10.240.0.0/16",
             "AGENT_EGRESS_DNS_SERVER": "1.1.1.1",
             "AGENT_RELAY_NETWORK": "agent-relays",
-            "AGENT_GATEWAY_URL": "http://agent-gateway:8080",
-            "AGENT_SANDBOX_MCP_URL": "http://agent-mcp:8000",
+            "AGENT_SANDBOX_MCP_URL": f"http://agent-mcp:{mcp_port}",
         }
     )
 
@@ -85,16 +86,31 @@ class FakeGuard:
     def __init__(self) -> None:
         self.ensured = 0
         self.fail: Exception | None = None
+        self.recheck_fail: Exception | None = None
+        self.rechecks = 0
+        #: Each recheck's ``renew_after_s``, ``None`` for the guard's default.
+        self.renew_after: list[float | None] = []
+        #: How many rules checks asked to warm the helper.
+        self.warmed = 0
         self.relays: dict[str, set[tuple[str, int]]] = {}
         self.network_ids: dict[str, str | None] = {}
         self.ssh_targets: dict[str, set[tuple[str, int]]] = {}
         self.events: list[str] = []
 
-    def ensure(self, **_kwargs: Any) -> None:
+    def ensure(self, *, warm: bool = False, **_kwargs: Any) -> None:
         self.events.append("ensure")
         if self.fail is not None:
             raise self.fail
         self.ensured += 1
+        self.warmed += warm
+
+    def recheck(self, *, renew_after_s: float | None = None) -> None:
+        self.events.append("recheck")
+        self.rechecks += 1
+        self.renew_after.append(renew_after_s)
+        if self.recheck_fail is not None:
+            raise self.recheck_fail
+        return None
 
     def sync_relays(
         self, bridge: str, endpoints: set[tuple[str, int]], *, network_id: str | None = None
@@ -103,7 +119,9 @@ class FakeGuard:
         self.relays[bridge] = set(endpoints)
         self.network_ids[bridge] = network_id
 
-    def sync_ssh_targets(self, bridge: str, endpoints: set[tuple[str, int]]) -> None:
+    def sync_ssh_targets(
+        self, bridge: str, endpoints: set[tuple[str, int]], *, network_id: str | None = None
+    ) -> None:
         self.events.append("sync_ssh_targets")
         self.ssh_targets[bridge] = set(endpoints)
 
@@ -127,9 +145,11 @@ class FakeDocker:
         self.before_rm: Any = None
         #: False models a Docker older than 28, which drops ``--gw-priority``.
         self.honours_gw_priority = True
+        #: Ids of networks that exist but that the daemon fails to inspect.
+        self.uninspectable: set[str] = set()
         self._ids = itertools.count(1)
         relays = self.add_network(config.relay_network, subnet="172.30.0.0/24", internal=True)
-        for container_id, alias in (("relay-gateway", "agent-gateway"), ("relay-mcp", "agent-mcp")):
+        for container_id, alias in (("relay-mcp", "agent-mcp"),):
             self.add_container(container_id, running=True)
             self.connect(relays["Id"], container_id, [alias])
 
@@ -238,10 +258,22 @@ class FakeDocker:
         self.calls.append(list(argv))
         command = argv[1:3]
         if command == ["network", "inspect"]:
-            network = self.network(argv[3])
-            if network is None:
-                return self._fail("Error response from daemon: network not found")
-            return self._ok(json.dumps([self._network_json(network)]))
+            # Like Docker: every network found is answered, and each one that
+            # is not, or that the daemon fails to read, is named on stderr
+            # with a non-zero exit.
+            found = [self.network(ref) for ref in argv[3:]]
+            readable = [net for net in found if net and net["Id"] not in self.uninspectable]
+            payload = [self._network_json(network) for network in readable]
+            errors = [
+                f"Error response from daemon: network {ref} not found"
+                if network is None
+                else f"Error response from daemon: network {ref}: input/output error"
+                for ref, network in zip(argv[3:], found, strict=True)
+                if network is None or network["Id"] in self.uninspectable
+            ]
+            if errors:
+                return subprocess.CompletedProcess(argv, 1, json.dumps(payload), "\n".join(errors))
+            return self._ok(json.dumps(payload))
         if command == ["network", "create"]:
             return self._create_network(argv)
         if command == ["network", "connect"]:
@@ -281,13 +313,17 @@ class FakeDocker:
             del self.networks[network["Id"]]
             return self._ok("")
         if command == ["network", "ls"]:
-            label = argv[argv.index("--filter") + 1].removeprefix("label=")
-            key, _, value = label.partition("=")
+            # Docker requires every label filter to match.
+            wanted = [
+                argv[index + 1].removeprefix("label=").partition("=")
+                for index, value in enumerate(argv)
+                if value == "--filter"
+            ]
             return self._ok(
                 "\n".join(
                     network["Id"]
                     for network in self.networks.values()
-                    if network["Labels"].get(key) == value
+                    if all(network["Labels"].get(key) == value for key, _, value in wanted)
                 )
             )
         if command == ["container", "inspect"]:
@@ -397,8 +433,8 @@ class FakeDocker:
         return subprocess.CompletedProcess([], 1, "", stderr)
 
 
-def _world(monkeypatch, *, runtime: str | None = None):
-    config = _config()
+def _world(monkeypatch, *, runtime: str | None = None, config: SandboxNetwork | None = None):
+    config = config or _config()
     backend = ContainerBackend(
         image="img", runtime=runtime, sandbox_network=config, sandbox_namespace=_NAMESPACE
     )
@@ -411,15 +447,17 @@ def _world(monkeypatch, *, runtime: str | None = None):
 
 
 def _owned_labels(manager: ChatSandboxManager, spec: ChatSandboxSpec) -> dict[str, str]:
-    return manager._network_labels(spec)
+    return manager._network_lifecycle._network_labels(spec)
 
 
 def _group_bridge(manager, docker, spec, *, age_s: float = 0, subnet: str = "10.240.9.0/29"):
-    name = manager.network_for(spec)
+    name = manager.network.network_for(spec)
     network = docker.add_network(
         name,
         subnet=subnet,
-        options={CHAT_NETWORK_BRIDGE_OPTION: manager._network().bridge_name(name)},
+        options={
+            CHAT_NETWORK_BRIDGE_OPTION: manager._network_lifecycle._network().bridge_name(name)
+        },
         labels=_owned_labels(manager, spec),
         age_s=age_s,
     )
@@ -429,16 +467,26 @@ def _group_bridge(manager, docker, spec, *, age_s: float = 0, subnet: str = "10.
 # ── naming ─────────────────────────────────────────────────────────────
 
 
+def test_manager_exposes_its_network_lifecycle(monkeypatch):
+    manager, _, _ = _world(monkeypatch)
+
+    assert manager.network is manager._network_lifecycle
+
+
 def test_each_group_gets_one_bridge_named_from_its_identity(monkeypatch):
     manager, _, _ = _world(monkeypatch)
     first = _spec()
-    name = manager.network_for(first)
+    name = manager.network.network_for(first)
     assert name.startswith("freeinference-chat-net-")
-    assert name == manager.network_for(first), "setup, agent and fork members share it"
-    assert name != manager.network_for(_spec(thread="athr_02", sandbox="asbx_02"))
-    assert name != manager.network_for(_spec(generation=4)), "a new generation, a new bridge"
-    bridge = manager._network().bridge_name(name)
-    assert len(bridge) <= 15 and bridge.startswith(manager._network().interface_prefix)
+    assert name == manager.network.network_for(first), "setup, agent and fork members share it"
+    assert name != manager.network.network_for(_spec(thread="athr_02", sandbox="asbx_02"))
+    assert name != manager.network.network_for(_spec(generation=4)), (
+        "a new generation, a new bridge"
+    )
+    bridge = manager._network_lifecycle._network().bridge_name(name)
+    assert len(bridge) <= 15 and bridge.startswith(
+        manager._network_lifecycle._network().interface_prefix
+    )
 
 
 def test_there_is_no_phase_switch_left_to_call(monkeypatch):
@@ -468,22 +516,21 @@ def test_a_new_bridge_is_routable_named_for_the_host_rules_and_holds_only_its_re
     manager, docker, guard = _world(monkeypatch)
     spec = _spec()
 
-    name = manager._ensure_group_network(spec)
+    name = manager._network_lifecycle._ensure_group_network(spec)
 
     create = next(argv for argv in docker.calls if argv[1:3] == ["network", "create"])
     assert "--internal" not in create, "routable: the host's rules decide the reach"
-    bridge = manager._network().bridge_name(name)
+    bridge = manager._network_lifecycle._network().bridge_name(name)
     assert f"{CHAT_NETWORK_BRIDGE_OPTION}={bridge}" in create
     subnet = ipaddress.IPv4Network(create[create.index("--subnet") + 1])
     assert subnet.prefixlen == 29 and subnet.subnet_of(ipaddress.IPv4Network("10.240.0.0/16"))
     for key, value in _owned_labels(manager, spec).items():
         assert f"{key}={value}" in create
-    assert f"{CHAT_NETWORK_SERVICES_LABEL}=agent-gateway,agent-mcp" in create
-    assert docker.names_on(name) == {"relay-gateway", "relay-mcp"}
+    assert f"{CHAT_NETWORK_SERVICES_LABEL}=agent-mcp" in create
+    assert docker.names_on(name) == {"relay-mcp"}
     # The host holds exactly one exception per relay, on this bridge's name.
     endpoints = docker.network(name)["endpoints"]
     assert guard.relays[bridge] == {
-        (endpoints["relay-gateway"]["ip"], 8080),
         (endpoints["relay-mcp"]["ip"], 8000),
     }
     assert guard.events[0] == "ensure", "rules are proved before any bridge exists"
@@ -493,51 +540,52 @@ def test_relays_join_a_group_bridge_that_can_never_become_their_way_out(monkeypa
     """Their SSH upstream stays on the stack's own network, not the sandbox rules."""
     manager, docker, _ = _world(monkeypatch)
 
-    name = manager._ensure_group_network(_spec())
+    name = manager._network_lifecycle._ensure_group_network(_spec())
 
     connects = [argv for argv in docker.calls if argv[1:3] == ["network", "connect"]]
     assert connects and all(
         argv[argv.index("--gw-priority") + 1] == str(RELAY_GATEWAY_PRIORITY) for argv in connects
     )
     assert RELAY_GATEWAY_PRIORITY < 0
-    for relay in ("relay-gateway", "relay-mcp"):
-        assert docker.container(relay)["networks"][name]["GwPriority"] < 0
+    assert docker.container("relay-mcp")["networks"][name]["GwPriority"] < 0
 
 
 def test_a_relay_attached_without_the_priority_is_attached_again_with_it(monkeypatch):
     manager, docker, _ = _world(monkeypatch)
     spec = _spec()
     name, network = _group_bridge(manager, docker, spec)
-    docker.connect(network["Id"], "relay-gateway", ["agent-gateway"])  # priority 0
+    docker.connect(network["Id"], "relay-mcp", ["agent-mcp"])  # priority 0
 
-    manager._ensure_group_network(spec)
+    manager._network_lifecycle._ensure_group_network(spec)
 
-    assert ["docker", "network", "disconnect", "--force", name, "relay-gateway"] in docker.calls
-    assert docker.container("relay-gateway")["networks"][name]["GwPriority"] < 0
+    assert ["docker", "network", "disconnect", "--force", name, "relay-mcp"] in docker.calls
+    assert docker.container("relay-mcp")["networks"][name]["GwPriority"] < 0
 
 
 def test_a_docker_that_ignores_the_gateway_priority_is_refused(monkeypatch):
     manager, docker, _ = _world(monkeypatch)
     docker.honours_gw_priority = False
     with pytest.raises(SandboxError, match="gateway priority"):
-        manager._ensure_group_network(_spec())
+        manager._network_lifecycle._ensure_group_network(_spec())
 
 
 def test_no_bridge_is_built_on_a_host_whose_rules_fail(monkeypatch):
     manager, docker, guard = _world(monkeypatch)
     guard.fail = SandboxError("inet cloud_agent_x chain 'from_group' holds 0 rules")
     with pytest.raises(SandboxError, match="from_group"):
-        manager._ensure_group_network(_spec())
+        manager._network_lifecycle._ensure_group_network(_spec())
     assert not [argv for argv in docker.calls if argv[1:3] == ["network", "create"]]
 
 
 def test_the_allocator_moves_past_a_subnet_another_process_claimed(monkeypatch):
     manager, docker, _ = _world(monkeypatch)
     spec = _spec()
-    first_choice = next(manager._candidate_chat_subnets(manager.network_for(spec)))
+    first_choice = next(
+        manager._network_lifecycle._candidate_chat_subnets(manager.network.network_for(spec))
+    )
     docker.add_network("someone-else", subnet=str(first_choice))
 
-    name = manager._ensure_group_network(spec)
+    name = manager._network_lifecycle._ensure_group_network(spec)
 
     creates = [argv for argv in docker.calls if argv[1:3] == ["network", "create"]]
     assert len(creates) == 2
@@ -558,17 +606,19 @@ def test_the_allocator_moves_past_a_subnet_another_process_claimed(monkeypatch):
 def test_a_bridge_with_the_group_name_but_not_the_guarded_shape_is_refused(monkeypatch, change):
     manager, docker, _ = _world(monkeypatch)
     spec = _spec()
-    name = manager.network_for(spec)
+    name = manager.network.network_for(spec)
     shape = {
         "subnet": "10.240.9.0/29",
-        "options": {CHAT_NETWORK_BRIDGE_OPTION: manager._network().bridge_name(name)},
+        "options": {
+            CHAT_NETWORK_BRIDGE_OPTION: manager._network_lifecycle._network().bridge_name(name)
+        },
         "labels": _owned_labels(manager, spec),
     }
     shape.update(change)
     docker.add_network(name, **shape)
 
     with pytest.raises(SandboxError, match="guarded group bridge"):
-        manager._ensure_group_network(spec)
+        manager._network_lifecycle._ensure_group_network(spec)
 
 
 def test_an_unexpected_peer_on_a_group_bridge_fails_closed(monkeypatch):
@@ -579,78 +629,72 @@ def test_an_unexpected_peer_on_a_group_bridge_fails_closed(monkeypatch):
     docker.connect(network["Id"], "stranger", ["something-else"])
 
     with pytest.raises(SandboxError, match="unexpected peer"):
-        manager._ensure_group_network(spec)
+        manager._network_lifecycle._ensure_group_network(spec)
 
 
 def test_a_relay_rollout_swaps_the_endpoint_and_the_host_exception(monkeypatch):
     manager, docker, guard = _world(monkeypatch)
     spec = _spec()
-    name = manager._ensure_group_network(spec)
-    bridge = manager._network().bridge_name(name)
-    old_ip = docker.network(name)["endpoints"]["relay-gateway"]["ip"]
+    name = manager._network_lifecycle._ensure_group_network(spec)
+    bridge = manager._network_lifecycle._network().bridge_name(name)
+    old_ip = docker.network(name)["endpoints"]["relay-mcp"]["ip"]
 
     # Compose replaces the gateway relay: the old container leaves the relay
     # network and a new one answers to the same alias.
     relays = docker.network("agent-relays")
-    relays["endpoints"].pop("relay-gateway")
-    docker.containers["relay-gateway"]["running"] = False
-    docker.add_container("relay-gateway-2", running=True)
-    docker.connect(relays["Id"], "relay-gateway-2", ["agent-gateway"])
+    relays["endpoints"].pop("relay-mcp")
+    docker.containers["relay-mcp"]["running"] = False
+    docker.add_container("relay-mcp-2", running=True)
+    docker.connect(relays["Id"], "relay-mcp-2", ["agent-mcp"])
 
-    manager._ensure_group_network(spec)
+    manager._network_lifecycle._ensure_group_network(spec)
 
     endpoints = docker.network(name)["endpoints"]
-    assert "relay-gateway" not in endpoints and "relay-gateway-2" in endpoints
-    new_ip = endpoints["relay-gateway-2"]["ip"]
-    assert (new_ip, 8080) in guard.relays[bridge]
-    assert (old_ip, 8080) not in guard.relays[bridge] or old_ip == new_ip
+    assert "relay-mcp" not in endpoints and "relay-mcp-2" in endpoints
+    new_ip = endpoints["relay-mcp-2"]["ip"]
+    assert (new_ip, 8000) in guard.relays[bridge]
+    assert (old_ip, 8000) not in guard.relays[bridge] or old_ip == new_ip
 
 
-def test_one_relay_serving_both_services_gets_an_exception_for_each_port(monkeypatch):
-    """The configuration accepts one relay name for both services; so must the rules.
+def test_reconciliation_reads_the_bridge_again_only_after_detaching_a_stale_relay(
+    monkeypatch,
+):
+    """A detach changes the bridge, so its result is read back; no detach, no second read."""
+    manager, docker, _ = _world(monkeypatch)
+    spec = _spec()
+    name = manager._network_lifecycle._ensure_group_network(spec)
 
-    Keyed by name, the second port replaced the first, the in-guest check then
-    found the gateway port refused, and every wake of every group failed.
-    """
-    config = network_from_env(
-        {
-            "AGENT_SANDBOX_NAMESPACE": _NAMESPACE,
-            "AGENT_EGRESS_CHAT_NETWORK_POOL": "10.240.0.0/16",
-            "AGENT_EGRESS_DNS_SERVER": "1.1.1.1",
-            "AGENT_RELAY_NETWORK": "agent-relays",
-            "AGENT_GATEWAY_URL": "http://agent-relay:8080",
-            "AGENT_SANDBOX_MCP_URL": "http://agent-relay:8001",
-        }
-    )
-    backend = ContainerBackend(image="img", sandbox_network=config, sandbox_namespace=_NAMESPACE)
-    guard = FakeGuard()
-    backend._network_guard = guard  # type: ignore[assignment]
-    manager = ChatSandboxManager(backend)
-    docker = FakeDocker(config)
-    monkeypatch.setattr(manager, "_run", docker)
-    docker.add_container("relay-both", running=True)
-    docker.connect(docker.network("agent-relays")["Id"], "relay-both", ["agent-relay"])
+    def bridge_reads() -> int:
+        return sum(argv[1:] == ["network", "inspect", name] for argv in docker.calls)
 
-    name = manager._ensure_group_network(_spec())
+    docker.calls.clear()
+    manager._network_lifecycle._ensure_group_network(spec)
+    assert bridge_reads() == 2, "its shape, then its members: nothing to detach"
 
-    address = docker.network(name)["endpoints"]["relay-both"]["ip"]
-    assert guard.relays[manager._network().bridge_name(name)] == {
-        (address, 8080),
-        (address, 8001),
-    }
+    # Compose replaced the gateway relay; the old one is still on the bridge.
+    relays = docker.network("agent-relays")
+    relays["endpoints"].pop("relay-mcp")
+    docker.containers["relay-mcp"]["running"] = False
+    docker.add_container("relay-mcp-2", running=True)
+    docker.connect(relays["Id"], "relay-mcp-2", ["agent-mcp"])
+    docker.calls.clear()
+    manager._network_lifecycle._ensure_group_network(spec)
+
+    assert ["docker", "network", "disconnect", name, "relay-mcp"] in docker.calls
+    assert bridge_reads() == 3, "the membership is checked on a reading taken after the detach"
+    assert set(docker.network(name)["endpoints"]) == {"relay-mcp-2"}
 
 
 def test_relay_owners_are_read_in_one_inspect_and_must_be_unambiguous(monkeypatch):
     manager, docker, _ = _world(monkeypatch)
-    assert manager._relay_owners() == {
-        "relay-gateway": ["agent-gateway"],
+    assert manager._network_lifecycle._relay_owners() == {
         "relay-mcp": ["agent-mcp"],
     }
     assert sum(argv[1:3] == ["container", "inspect"] for argv in docker.calls) == 1
-    docker.add_container("second-gateway", running=True)
-    docker.connect(docker.network("agent-relays")["Id"], "second-gateway", ["agent-gateway"])
+    docker.add_container("second-mcp", running=True)
+    docker.connect(docker.network("agent-relays")["Id"], "second-mcp", ["agent-mcp"])
     with pytest.raises(SandboxError, match="multiple running containers"):
-        manager._relay_owners()
+        manager._network_lifecycle._relay_owners()
 
 
 # ── attaching the sandbox ─────────────────────────────────────────────
@@ -663,9 +707,9 @@ def test_first_activation_moves_the_sandbox_off_the_dormant_bootstrap_bridge(mon
     bootstrap = docker.add_network(CHAT_BOOTSTRAP_NETWORK, subnet="172.17.0.0/16")
     docker.connect(bootstrap["Id"], "sandbox-container", [])
 
-    moved = manager._require_group_network(spec, manager._require(spec))
+    moved = manager._network_lifecycle._require_group_network(spec, manager._require(spec))
 
-    assert moved.networks == (manager.network_for(spec),)
+    assert moved.networks == (manager.network.network_for(spec),)
 
 
 def test_a_running_sandbox_is_never_rewired_underneath_it(monkeypatch):
@@ -676,7 +720,7 @@ def test_a_running_sandbox_is_never_rewired_underneath_it(monkeypatch):
     docker.connect(elsewhere["Id"], "sandbox-container", [])
 
     with pytest.raises(SandboxError):
-        manager._require_group_network(spec, manager._require(spec))
+        manager._network_lifecycle._require_group_network(spec, manager._require(spec))
     assert "sandbox-container" in docker.network("some-bridge")["endpoints"]
 
 
@@ -698,7 +742,7 @@ def test_a_sandbox_left_on_the_old_per_phase_topology_is_refused_not_adopted(mon
     docker.connect(legacy["Id"], "sandbox-container", [])
 
     with pytest.raises(SandboxError, match="one-time cleanup"):
-        manager._require_group_network(spec, manager._require(spec))
+        manager._network_lifecycle._require_group_network(spec, manager._require(spec))
     with pytest.raises(SandboxError, match="one-time cleanup"):
         manager.stop(spec)
     assert docker.network("freeinference-chat-net-oldphase") is not None
@@ -708,12 +752,12 @@ def test_idle_stop_releases_the_bridge_and_its_exceptions_and_wake_rebuilds(monk
     manager, docker, guard = _world(monkeypatch)
     spec = _spec()
     docker.add_sandbox(spec, running=True)
-    name = manager._ensure_group_network(spec)
+    name = manager._network_lifecycle._ensure_group_network(spec)
     docker.connect(docker.network(name)["Id"], "sandbox-container", [])
-    bridge = manager._network().bridge_name(name)
+    bridge = manager._network_lifecycle._network().bridge_name(name)
     checked: list[str] = []
     monkeypatch.setattr(
-        manager,
+        manager._network_lifecycle,
         "_verify_guest_network",
         lambda s, **_kwargs: checked.append(s.sandbox_id),
     )
@@ -726,7 +770,7 @@ def test_idle_stop_releases_the_bridge_and_its_exceptions_and_wake_rebuilds(monk
     started = manager.start(spec)
     assert started.running is True
     assert started.networks == (name,)
-    assert docker.names_on(name) == {"relay-gateway", "relay-mcp", "sandbox-container"}
+    assert docker.names_on(name) == {"relay-mcp", "sandbox-container"}
     assert guard.relays[bridge] and checked == [spec.sandbox_id]
 
 
@@ -741,7 +785,7 @@ def test_wake_reconnects_a_same_name_bridge_when_docker_kept_the_old_id(monkeypa
     docker.containers["sandbox-container"]["networks"][name]["NetworkID"] = "deleted-network-id"
     network["endpoints"].pop("sandbox-container")
 
-    refreshed = manager._require_group_network(spec, manager._require(spec))
+    refreshed = manager._network_lifecycle._require_group_network(spec, manager._require(spec))
 
     assert ["docker", "network", "connect", name, "sandbox-container"] in docker.calls
     assert refreshed.networks == (name,)
@@ -770,11 +814,13 @@ def test_a_new_sandbox_meets_its_bridge_only_when_it_first_starts(monkeypatch):
     manager, docker, guard = _world(monkeypatch)
     docker.add_network(CHAT_BOOTSTRAP_NETWORK, subnet="172.17.0.0/16")
     spec = _spec()
-    name = manager.network_for(spec)
+    name = manager.network.network_for(spec)
     synced_after = _record_relay_syncs(guard, docker)
     checked: list[str] = []
     monkeypatch.setattr(
-        manager, "_verify_guest_network", lambda s, **_kwargs: checked.append(s.sandbox_id)
+        manager._network_lifecycle,
+        "_verify_guest_network",
+        lambda s, **_kwargs: checked.append(s.sandbox_id),
     )
 
     created = manager.create(spec)
@@ -793,15 +839,14 @@ def test_a_new_sandbox_meets_its_bridge_only_when_it_first_starts(monkeypatch):
 
     assert started.running is True
     assert started.networks == (name,)
-    assert docker.names_on(name) == {"relay-gateway", "relay-mcp", created.container_id}
+    assert docker.names_on(name) == {"relay-mcp", created.container_id}
     joined = docker.calls.index(["docker", "network", "connect", name, created.container_id])
     assert len(synced_after) == 1
     assert synced_after[0] > joined, "the exceptions are written once the sandbox has joined"
-    bridge = manager._network().bridge_name(name)
+    bridge = manager._network_lifecycle._network().bridge_name(name)
     assert guard.network_ids[bridge] == docker.network(name)["Id"]
     endpoints = docker.network(name)["endpoints"]
     assert guard.relays[bridge] == {
-        (endpoints["relay-gateway"]["ip"], 8080),
         (endpoints["relay-mcp"]["ip"], 8000),
     }
     assert checked == [spec.sandbox_id]
@@ -811,9 +856,11 @@ def test_a_wake_writes_the_relay_exceptions_once_the_sandbox_has_rejoined(monkey
     manager, docker, guard = _world(monkeypatch)
     spec = _spec()
     docker.add_sandbox(spec)
-    name = manager.network_for(spec)
+    name = manager.network.network_for(spec)
     synced_after = _record_relay_syncs(guard, docker)
-    monkeypatch.setattr(manager, "_verify_guest_network", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        manager._network_lifecycle, "_verify_guest_network", lambda *_args, **_kwargs: None
+    )
 
     manager.start(spec)
 
@@ -821,8 +868,7 @@ def test_a_wake_writes_the_relay_exceptions_once_the_sandbox_has_rejoined(monkey
     assert len(synced_after) == 1
     assert synced_after[0] > joined
     endpoints = docker.network(name)["endpoints"]
-    assert guard.relays[manager._network().bridge_name(name)] == {
-        (endpoints["relay-gateway"]["ip"], 8080),
+    assert guard.relays[manager._network_lifecycle._network().bridge_name(name)] == {
         (endpoints["relay-mcp"]["ip"], 8000),
     }
 
@@ -844,7 +890,99 @@ def test_start_proves_the_network_from_inside_and_stops_a_sandbox_that_fails(mon
     assert failed.value.inspection.running is False
     assert failed.value.inspection.container_id == "sandbox-container"
     assert docker.containers["sandbox-container"]["running"] is False
-    assert docker.network(manager.network_for(spec)) is None
+    assert docker.network(manager.network.network_for(spec)) is None
+
+
+def test_cold_start_rechecks_host_rules_after_guest_proof(monkeypatch):
+    manager, docker, guard = _world(monkeypatch)
+    spec = _spec()
+    docker.add_sandbox(spec)
+    guest_checked = threading.Event()
+    finish_guest_check = threading.Event()
+    errors: list[BaseException] = []
+
+    def verify_guest(*_args, **_kwargs) -> None:
+        guest_checked.set()
+        assert finish_guest_check.wait(timeout=5)
+
+    monkeypatch.setattr(
+        manager._network_lifecycle,
+        "_verify_guest_network",
+        verify_guest,
+    )
+
+    def start() -> None:
+        try:
+            manager.start(spec)
+        except BaseException as exc:
+            errors.append(exc)
+
+    starting = threading.Thread(target=start)
+    starting.start()
+    assert guest_checked.wait(timeout=2)
+    guard.recheck_fail = SandboxError("nft rules disappeared during start")
+    finish_guest_check.set()
+    starting.join(timeout=5)
+
+    assert not starting.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], RetainedChatFailStopped)
+    assert errors[0].inspection.running is False
+    assert docker.containers["sandbox-container"]["running"] is False
+    assert guard.rechecks == 1
+
+
+def test_a_create_warms_the_helper_and_its_start_leaves_renewal_to_the_sweep(monkeypatch):
+    """The start's read-back reads the kernel; renewing the verification is the sweep's."""
+    from cloud_agent_host.network_guard import GUARD_RECHECK_S, GUARD_RENEW_S
+
+    manager, docker, guard = _world(monkeypatch)
+    docker.add_network(CHAT_BOOTSTRAP_NETWORK, subnet="172.17.0.0/16")
+    spec = _spec()
+    monkeypatch.setattr(
+        manager._network_lifecycle, "_verify_guest_network", lambda *_args, **_kwargs: None
+    )
+
+    manager.create(spec)
+
+    assert guard.events == ["ensure"]
+    assert guard.warmed == 1, "the create did not start the helper ahead of the relay update"
+
+    manager.start(spec)
+
+    assert guard.events[-1] == "recheck", "the read-back did not come last"
+    assert guard.renew_after == [GUARD_RECHECK_S]
+
+    manager.network.verify_host_rules([spec])
+
+    assert guard.renew_after == [GUARD_RECHECK_S, GUARD_RENEW_S], "the sweep's renewal moved"
+
+
+def test_cold_start_raw_stops_when_structured_stop_inspection_breaks(monkeypatch):
+    manager, docker, guard = _world(monkeypatch)
+    spec = _spec()
+    docker.add_sandbox(spec)
+    guard.recheck_fail = SandboxError("nft rules disappeared during start")
+    monkeypatch.setattr(
+        manager._network_lifecycle, "_verify_guest_network", lambda *_args, **_kwargs: None
+    )
+
+    def invalid_structured_stop(*_args, **_kwargs):
+        raise AttributeError("Docker inspection has no State")
+
+    monkeypatch.setattr(manager, "stop", invalid_structured_stop)
+
+    with pytest.raises(SandboxError, match="nft rules disappeared during start"):
+        manager.start(spec)
+
+    assert docker.containers["sandbox-container"]["running"] is False
+    assert [
+        manager.backend.docker_binary,
+        "stop",
+        "--time",
+        "10",
+        "sandbox-container",
+    ] in docker.calls
 
 
 def _check_that_times_out_once(monkeypatch, manager) -> list[str]:
@@ -877,7 +1015,7 @@ def test_a_start_that_fails_before_its_check_passes_stops_its_guest(monkeypatch)
         manager.start(spec)
     assert failed.value.inspection.running is False
     assert docker.containers["sandbox-container"]["running"] is False
-    assert docker.network(manager.network_for(spec)) is None
+    assert docker.network(manager.network.network_for(spec)) is None
 
     started = manager.start(spec)
 
@@ -931,9 +1069,9 @@ def test_the_guest_check_expects_the_resolver_each_runtime_really_uses(monkeypat
         docker.add_sandbox(_spec(), running=True)
         seen.clear()
         monkeypatch.setattr(manager, "exec_capture", capture)
-        manager._verify_guest_network(_spec())
+        manager._network_lifecycle._verify_guest_network(_spec())
         assert seen[0][4] == resolver
-        assert json.loads(seen[0][5]) == [["agent-gateway", 8080], ["agent-mcp", 8000]]
+        assert json.loads(seen[0][5]) == [["agent-mcp", 8000]]
 
 
 def test_the_guest_check_never_imports_modules_from_the_workspace(monkeypatch):
@@ -949,7 +1087,7 @@ def test_the_guest_check_never_imports_modules_from_the_workspace(monkeypatch):
     manager, docker, _ = _world(monkeypatch)
     docker.add_sandbox(_spec(), running=True)
     monkeypatch.setattr(manager, "exec_capture", capture)
-    manager._verify_guest_network(_spec())
+    manager._network_lifecycle._verify_guest_network(_spec())
 
     argv, kwargs = seen[0]
     assert argv[:4] == ["/usr/bin/python3", "-I", "-c", _GUEST_NETWORK_CHECK]
@@ -960,7 +1098,7 @@ def test_a_kata_guest_is_given_its_relays_and_the_one_resolver(monkeypatch):
     manager, docker, _ = _world(monkeypatch, runtime=KATA_RUNTIME)
     spec = _spec()
     docker.add_sandbox(spec, running=True)
-    name = manager._ensure_group_network(spec)
+    name = manager._network_lifecycle._ensure_group_network(spec)
     docker.connect(docker.network(name)["Id"], "sandbox-container", [])
     captured: list[list[str]] = []
     monkeypatch.setattr(
@@ -971,23 +1109,23 @@ def test_a_kata_guest_is_given_its_relays_and_the_one_resolver(monkeypatch):
         ),
     )
 
-    manager._sync_kata_guest_network(spec, manager._require(spec))
+    manager._network_lifecycle._sync_kata_guest_network(spec, manager._require(spec))
 
     argv = captured[0]
+    assert argv[:3] == ["python3", "-I", "-c"]
     endpoints = docker.network(name)["endpoints"]
-    assert json.loads(argv[3]) == {
-        "agent-gateway": endpoints["relay-gateway"]["ip"],
+    assert json.loads(argv[4]) == {
         "agent-mcp": endpoints["relay-mcp"]["ip"],
     }
-    assert argv[4] == "1.1.1.1"
-    assert "/etc/resolv.conf" in argv[2] and "O_NOFOLLOW" in argv[2]
+    assert argv[5] == "1.1.1.1"
+    assert "/etc/resolv.conf" in argv[3] and "O_NOFOLLOW" in argv[3]
 
 
 def _running_kata_group(monkeypatch):
     manager, docker, guard = _world(monkeypatch, runtime=KATA_RUNTIME)
     spec = _spec()
     docker.add_sandbox(spec, running=True)
-    name = manager._ensure_group_network(spec)
+    name = manager._network_lifecycle._ensure_group_network(spec)
     network = docker.network(name)
     network["Created"] = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
     docker.connect(network["Id"], "sandbox-container", [])
@@ -996,7 +1134,7 @@ def _running_kata_group(monkeypatch):
         manager,
         "_kata_privileged_exec",
         lambda _spec, argv, **_kwargs: (
-            synced.append(json.loads(argv[3])) or subprocess.CompletedProcess(argv, 0, "", "")
+            synced.append(json.loads(argv[4])) or subprocess.CompletedProcess(argv, 0, "", "")
         ),
     )
     docker.calls.clear()
@@ -1016,11 +1154,13 @@ def test_hot_network_reconciliation_reuses_only_its_own_inspections(monkeypatch,
             if argv[1:3] in (["network", "inspect"], ["container", "inspect"])
         ]
         # Previously 19 inspections per call, before the guest helper's own
-        # identity check. Reusing data inside one call must not become a cache
-        # across commands: the second call gathers the same fresh evidence.
-        assert len(inspections) == 10
-        assert ["docker", "container", "inspect", "relay-gateway"] not in inspections
-        assert ["docker", "container", "inspect", "relay-mcp"] not in inspections
+        # identity check, and 10 while reconciliation read the bridge a second
+        # time after detaching nothing. Reusing data inside one call must not
+        # become a cache across commands: the second call gathers the same
+        # fresh evidence.
+        assert len(inspections) == 9
+        # Each read names all the relays at once; with one relay that reads the same.
+        assert inspections.count(["docker", "container", "inspect", "relay-mcp"]) == 2
         assert not any(
             argv[1:3] in (["network", "connect"], ["network", "disconnect"])
             for argv in docker.calls
@@ -1028,7 +1168,6 @@ def test_hot_network_reconciliation_reuses_only_its_own_inspections(monkeypatch,
         assert guard.ensured == checked + attempt + 1
     endpoints = docker.network(name)["endpoints"]
     expected = {
-        "agent-gateway": endpoints["relay-gateway"]["ip"],
         "agent-mcp": endpoints["relay-mcp"]["ip"],
     }
     assert synced == [expected, expected], "guest file protections are checked on every call"
@@ -1038,18 +1177,18 @@ def test_a_later_command_observes_new_relay_owners_and_guest_addresses(monkeypat
     manager, docker, guard, spec, name, synced = _running_kata_group(monkeypatch)
     manager.require_network(spec)
     relays = docker.network("agent-relays")
-    relays["endpoints"].pop("relay-gateway")
-    docker.containers["relay-gateway"]["running"] = False
-    docker.add_container("relay-gateway-new", running=True)
-    docker.connect(relays["Id"], "relay-gateway-new", ["agent-gateway"])
+    relays["endpoints"].pop("relay-mcp")
+    docker.containers["relay-mcp"]["running"] = False
+    docker.add_container("relay-mcp-new", running=True)
+    docker.connect(relays["Id"], "relay-mcp-new", ["agent-mcp"])
 
     manager.require_network(spec)
 
     endpoints = docker.network(name)["endpoints"]
-    assert "relay-gateway" not in endpoints
-    assert synced[-1]["agent-gateway"] == endpoints["relay-gateway-new"]["ip"]
-    assert guard.relays[manager._network().bridge_name(name)] == {
-        (synced[-1]["agent-gateway"], 8080),
+    assert "relay-mcp" not in endpoints
+    assert synced[-1]["agent-mcp"] == endpoints["relay-mcp-new"]["ip"]
+    assert guard.relays[manager._network_lifecycle._network().bridge_name(name)] == {
+        (synced[-1]["agent-mcp"], 8000),
         (synced[-1]["agent-mcp"], 8000),
     }
     # The next command must also notice a new untrusted peer even though the
@@ -1075,7 +1214,7 @@ def test_activation_refuses_topology_changes_after_the_rule_sync(monkeypatch, mu
             docker.add_container("stranger", running=True)
             docker.connect(network["Id"], "stranger", ["untrusted"])
         elif mutation == "relay_address":
-            network["endpoints"]["relay-gateway"]["ip"] = "10.240.99.6"
+            network["endpoints"]["relay-mcp"]["ip"] = "10.240.99.6"
         elif mutation == "bridge_id":
             network["Id"] = "replacement-with-the-same-name"
         elif mutation == "sandbox_endpoint":
@@ -1101,10 +1240,10 @@ def test_relay_replacement_during_reconciliation_refuses_old_addresses(monkeypat
             discoveries += 1
             if discoveries == 2:
                 relays = docker.network("agent-relays")
-                relays["endpoints"].pop("relay-gateway")
-                docker.containers["relay-gateway"]["running"] = False
-                docker.add_container("relay-gateway-new", running=True)
-                docker.connect(relays["Id"], "relay-gateway-new", ["agent-gateway"])
+                relays["endpoints"].pop("relay-mcp")
+                docker.containers["relay-mcp"]["running"] = False
+                docker.add_container("relay-mcp-new", running=True)
+                docker.connect(relays["Id"], "relay-mcp-new", ["agent-mcp"])
         return docker(argv, **kwargs)
 
     monkeypatch.setattr(manager, "_run", replace_during_discovery)
@@ -1129,7 +1268,7 @@ def test_relay_endpoint_change_is_detected_by_the_final_discovery(monkeypatch, c
         if argv[1:] == ["network", "inspect", "agent-relays"]:
             discoveries += 1
             if discoveries == 2:
-                networks = docker.containers["relay-gateway"]["networks"]
+                networks = docker.containers["relay-mcp"]["networks"]
                 if change == "alias":
                     networks[name]["Aliases"] = []
                     networks[name]["DNSNames"] = []
@@ -1151,18 +1290,18 @@ def test_attach_discards_network_evidence_from_before_connection(monkeypatch, ra
     manager, docker, guard = _world(monkeypatch, runtime=KATA_RUNTIME)
     spec = _spec()
     sandbox = docker.add_sandbox(spec)
-    name = manager.network_for(spec)
+    name = manager.network.network_for(spec)
     synced: list[dict[str, str]] = []
-    old_gateway_address = ""
+    old_relay_address = ""
     mutated = False
 
     def connect_then_change(argv, **kwargs):
-        nonlocal mutated, old_gateway_address
+        nonlocal mutated, old_relay_address
         result = docker(argv, **kwargs)
         if not mutated and argv[1:] == ["network", "connect", name, "sandbox-container"]:
             mutated = True
             network = docker.network(name)
-            old_gateway_address = network["endpoints"]["relay-gateway"]["ip"]
+            old_relay_address = network["endpoints"]["relay-mcp"]["ip"]
             # Another trusted lifecycle actor starts the just-connected
             # container before this caller's post-connect inspection.
             sandbox["running"] = True
@@ -1170,10 +1309,10 @@ def test_attach_discards_network_evidence_from_before_connection(monkeypatch, ra
             sandbox["networks"][name]["NetworkID"] = network["Id"]
             if race == "relay_rollout":
                 relays = docker.network("agent-relays")
-                relays["endpoints"].pop("relay-gateway")
-                docker.containers["relay-gateway"]["running"] = False
-                docker.add_container("relay-gateway-new", running=True)
-                docker.connect(relays["Id"], "relay-gateway-new", ["agent-gateway"])
+                relays["endpoints"].pop("relay-mcp")
+                docker.containers["relay-mcp"]["running"] = False
+                docker.add_container("relay-mcp-new", running=True)
+                docker.connect(relays["Id"], "relay-mcp-new", ["agent-mcp"])
             else:
                 docker.networks.pop(network["Id"])
                 docker.add_network(
@@ -1189,7 +1328,7 @@ def test_attach_discards_network_evidence_from_before_connection(monkeypatch, ra
         manager,
         "_kata_privileged_exec",
         lambda _spec, argv, **_kwargs: (
-            synced.append(json.loads(argv[3])) or subprocess.CompletedProcess(argv, 0, "", "")
+            synced.append(json.loads(argv[4])) or subprocess.CompletedProcess(argv, 0, "", "")
         ),
     )
     if race == "bridge_replacement":
@@ -1199,16 +1338,15 @@ def test_attach_discards_network_evidence_from_before_connection(monkeypatch, ra
     else:
         manager.require_network(spec)
         endpoints = docker.network(name)["endpoints"]
-        assert "relay-gateway" not in endpoints
+        assert "relay-mcp" not in endpoints
         assert synced == [
             {
-                "agent-gateway": endpoints["relay-gateway-new"]["ip"],
-                "agent-mcp": endpoints["relay-mcp"]["ip"],
+                "agent-mcp": endpoints["relay-mcp-new"]["ip"],
             }
         ]
-        assert synced[0]["agent-gateway"] != old_gateway_address
-        assert (synced[0]["agent-gateway"], 8080) in guard.relays[
-            manager._network().bridge_name(name)
+        assert synced[0]["agent-mcp"] != old_relay_address
+        assert (synced[0]["agent-mcp"], 8000) in guard.relays[
+            manager._network_lifecycle._network().bridge_name(name)
         ]
     assert mutated
 
@@ -1231,36 +1369,175 @@ def test_guest_network_snapshot_still_checks_files_and_skips_unchanged_writes(
     )
 
     def run_script(_spec, argv, **_kwargs):
-        monkeypatch.setattr(sys, "argv", ["-c", *argv[3:]])
+        monkeypatch.setattr(sys, "argv", ["-c", *argv[4:]])
         try:
-            exec(compile(argv[2], "<guest-network>", "exec"), {})
+            exec(compile(argv[3], "<guest-network>", "exec"), {})
         except (RuntimeError, OSError) as exc:
             return subprocess.CompletedProcess(argv, 1, "", str(exc))
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(manager, "_kata_privileged_exec", run_script)
     current = manager._require(spec)
-    addresses = {"agent-gateway": "10.240.9.2", "agent-mcp": "10.240.9.3"}
-    manager._sync_kata_guest_network(spec, current, addresses)
+    addresses = {"agent-mcp": "10.240.9.3"}
+    manager._network_lifecycle._sync_kata_guest_network(spec, current, addresses)
     unchanged_mtime = 1_000_000_000
     for path in (hosts, resolv):
         os.utime(path, ns=(unchanged_mtime, unchanged_mtime))
-    manager._sync_kata_guest_network(spec, current, addresses)
+    manager._network_lifecycle._sync_kata_guest_network(spec, current, addresses)
     assert [path.stat().st_mtime_ns for path in (hosts, resolv)] == [unchanged_mtime] * 2
 
     # Supplying already resolved addresses never skips the guest-owned-file
     # refusal or symlink protection, even after an earlier successful sync.
     resolv.chmod(0o666)
     with pytest.raises(SandboxError, match="root-owned and protected"):
-        manager._sync_kata_guest_network(spec, current, addresses)
+        manager._network_lifecycle._sync_kata_guest_network(spec, current, addresses)
     resolv.chmod(0o644)
     hosts.write_text("127.0.0.1 localhost\n# BEGIN FREEINFERENCE RELAYS\nunterminated\n")
     with pytest.raises(SandboxError, match="invalid managed relay block"):
-        manager._sync_kata_guest_network(spec, current, addresses)
+        manager._network_lifecycle._sync_kata_guest_network(spec, current, addresses)
     hosts.unlink()
     hosts.symlink_to(resolv)
     with pytest.raises(SandboxError, match="network sync failed"):
-        manager._sync_kata_guest_network(spec, current, addresses)
+        manager._network_lifecycle._sync_kata_guest_network(spec, current, addresses)
+
+
+# ── a table the sweep reinstalls ──────────────────────────────────────
+
+
+def _guarded_world(monkeypatch, config: SandboxNetwork | None = None):
+    """The lifecycle against the Docker model, and its rules through the real guard."""
+    from tests.unit.test_network_guard import FakeNft
+
+    manager, docker, _ = _world(monkeypatch, config=config)
+    nft = FakeNft()
+    guard = HostNetworkGuard(
+        manager._network_lifecycle._network(), helper_image="sha256:" + "a" * 64, run=nft
+    )
+    manager.backend._network_guard = guard
+    return manager, docker, guard, nft
+
+
+def _running_on_its_bridge(manager, docker, spec) -> str:
+    docker.add_sandbox(spec, running=True)
+    name = manager._network_lifecycle._ensure_group_network(spec)
+    docker.connect(docker.network(name)["Id"], "sandbox-container", [])
+    return name
+
+
+def test_a_flushed_table_gives_each_running_group_its_exceptions_back(monkeypatch):
+    """A firewall reload flushes the host's ruleset, and the sweep's check reinstalls it.
+
+    The table comes back with empty relay and SSH sets. A group that kept
+    running would stay cut off from its MCP relay, and from its SSH servers, until its next turn; the check puts back what it held.
+    """
+    manager, docker, guard, nft = _guarded_world(monkeypatch)
+    spec = _spec()
+    bridge = manager._network_lifecycle._network().bridge_name(
+        _running_on_its_bridge(manager, docker, spec)
+    )
+    manager.network.sync_ssh_targets(spec, {("93.184.216.34", 22)})
+    relays = guard.relay_endpoints(bridge)
+    assert len(relays) == 1
+
+    nft.tables.clear()  # `flush ruleset`, from a firewall reload
+    manager.network.verify_host_rules([spec])
+
+    assert guard.relay_endpoints(bridge) == relays
+    assert guard.ssh_target_endpoints(bridge) == {("93.184.216.34", 22)}
+
+
+def test_a_relay_exception_lost_on_its_own_comes_back(monkeypatch):
+    """The endpoint gone cuts the group off from its relay, whatever else survived."""
+    manager, docker, guard, nft = _guarded_world(monkeypatch)
+    spec = _spec()
+    bridge = manager._network_lifecycle._network().bridge_name(
+        _running_on_its_bridge(manager, docker, spec)
+    )
+    manager.network.sync_ssh_targets(spec, {("93.184.216.34", 22)})
+    relays = guard.relay_endpoints(bridge)
+    assert len(relays) == 1
+    address, _port = max(relays)
+    for table in nft.tables.values():
+        if "relays" in table["sets"]:
+            table["sets"]["relays"] = [
+                element for element in table["sets"]["relays"] if element["concat"][1] != address
+            ]
+    assert guard.relay_endpoints(bridge) == set()
+
+    manager.network.verify_host_rules([spec])
+
+    assert guard.relay_endpoints(bridge) == relays
+
+
+def test_a_running_group_whose_exceptions_are_held_costs_the_check_no_docker_call(monkeypatch):
+    manager, docker, _guard, _nft = _guarded_world(monkeypatch)
+    spec = _spec()
+    _running_on_its_bridge(manager, docker, spec)
+    manager.network.sync_ssh_targets(spec, {("93.184.216.34", 22)})
+    docker.calls.clear()
+
+    manager.network.verify_host_rules([spec])
+
+    assert docker.calls == []
+
+
+def test_ssh_exceptions_never_come_back_on_a_successor_bridge(monkeypatch):
+    """A bridge removed and created again keeps its name; it gets its SSH servers from its turn."""
+    manager, docker, guard, nft = _guarded_world(monkeypatch)
+    spec = _spec()
+    name = _running_on_its_bridge(manager, docker, spec)
+    bridge = manager._network_lifecycle._network().bridge_name(name)
+    manager.network.sync_ssh_targets(spec, {("93.184.216.34", 22)})
+    # Another process (the runner, with a guard of its own) removed the
+    # bridge, and the group came back on a new one with the same name.
+    old = docker.network(name)
+    for container in docker.containers.values():
+        container["networks"].pop(name, None)
+    del docker.networks[old["Id"]]
+    HostNetworkGuard(guard.network, helper_image="sha256:" + "a" * 64, run=nft).release_bridge(
+        bridge
+    )
+    _running_on_its_bridge(manager, docker, spec)
+    assert docker.network(name)["Id"] != old["Id"]
+
+    nft.tables.clear()
+    manager.network.verify_host_rules([spec])
+
+    assert len(guard.relay_endpoints(bridge)) == 1, "relays come from Docker, so they come back"
+    assert guard.ssh_target_endpoints(bridge) == set()
+
+
+def test_a_group_whose_exceptions_cannot_be_restored_does_not_fail_the_check(monkeypatch, caplog):
+    """The rules are in place; a group cut off from its relays is not an unguarded host."""
+    manager, docker, guard, nft = _guarded_world(monkeypatch)
+    spec = _spec()
+    bridge = manager._network_lifecycle._network().bridge_name(
+        _running_on_its_bridge(manager, docker, spec)
+    )
+    nft.tables.clear()
+    docker.containers["relay-mcp"]["running"] = False  # mid-rollout
+
+    with caplog.at_level(logging.WARNING):
+        manager.network.verify_host_rules([spec])
+
+    assert guard.relay_endpoints(bridge) == set()
+    assert "chat_group_exceptions_not_restored" in caplog.text
+
+
+def test_a_group_no_longer_on_its_bridge_gets_nothing_back(monkeypatch):
+    manager, docker, guard, nft = _guarded_world(monkeypatch)
+    spec = _spec()
+    bridge = manager._network_lifecycle._network().bridge_name(
+        _running_on_its_bridge(manager, docker, spec)
+    )
+    manager.network.sync_ssh_targets(spec, {("93.184.216.34", 22)})
+    docker.containers["sandbox-container"]["running"] = False
+
+    nft.tables.clear()
+    manager.network.verify_host_rules([spec])
+
+    assert guard.relay_endpoints(bridge) == set()
+    assert guard.ssh_target_endpoints(bridge) == set()
 
 
 # ── releasing and pruning ─────────────────────────────────────────────
@@ -1272,10 +1549,13 @@ def test_release_tolerates_the_null_network_and_an_already_pruned_bridge(monkeyp
     docker.add_sandbox(spec)
     current = manager._require(spec)
     null = ChatSandboxInspection(**{**current.__dict__, "networks": (CHAT_NULL_NETWORK,)})
-    assert manager._release_sandbox_networks(spec, null).container_id == "sandbox-container"
+    assert (
+        manager._network_lifecycle._release_sandbox_networks(spec, null).container_id
+        == "sandbox-container"
+    )
     gone = ChatSandboxInspection(**{**current.__dict__, "networks": ("already-pruned",)})
     docker.containers["sandbox-container"]["networks"]["already-pruned"] = {"NetworkID": "x"}
-    manager._release_sandbox_networks(spec, gone)
+    manager._network_lifecycle._release_sandbox_networks(spec, gone)
     assert "already-pruned" not in docker.containers["sandbox-container"]["networks"]
 
 
@@ -1286,65 +1566,7 @@ def test_a_live_network_this_chat_does_not_own_is_still_a_violation(monkeypatch)
     other = docker.add_network("operator-network", subnet="172.19.0.0/16")
     docker.connect(other["Id"], "sandbox-container", [])
     with pytest.raises(SandboxError, match="not its group bridge"):
-        manager._release_sandbox_networks(spec, manager._require(spec))
-
-
-def test_a_stale_orphan_bridge_and_its_exceptions_are_pruned(monkeypatch):
-    manager, docker, guard = _world(monkeypatch)
-    orphan = _spec(thread="athr_gone", sandbox="asbx_gone")
-    name, _ = _group_bridge(manager, docker, orphan, age_s=3600)
-    manager._attach_relays(name)
-    bridge = manager._network().bridge_name(name)
-    guard.relays[bridge] = {("10.240.9.3", 8080)}
-
-    manager.prune_orphan_networks([])
-
-    assert docker.network(name) is None
-    assert guard.relays[bridge] == set()
-
-
-def test_prune_keeps_a_young_bridge_and_the_live_bridge_of_a_retained_chat(monkeypatch):
-    manager, docker, _ = _world(monkeypatch)
-    young, _ = _group_bridge(manager, docker, _spec(thread="athr_new", sandbox="asbx_new"))
-    live_spec = _spec()
-    docker.add_sandbox(live_spec, running=True)
-    live, live_network = _group_bridge(
-        manager, docker, live_spec, age_s=3600, subnet="10.240.10.0/29"
-    )
-    docker.connect(live_network["Id"], "sandbox-container", [])
-
-    manager.prune_orphan_networks([live_spec])
-
-    assert docker.network(young) is not None
-    assert docker.network(live) is not None
-
-
-def test_prune_reports_but_never_touches_legacy_or_foreign_networks(monkeypatch, caplog):
-    manager, docker, _ = _world(monkeypatch)
-    legacy = docker.add_network(
-        "freeinference-chat-net-legacy",
-        subnet="10.240.200.0/29",
-        internal=True,
-        labels={CHAT_NETWORK_LABEL: "true", CHAT_NAMESPACE_LABEL: _NAMESPACE},
-        age_s=3600,
-    )
-    foreign_spec = _spec(thread="athr_f", sandbox="asbx_f")
-    foreign = docker.add_network(
-        "freeinference-chat-net-foreign",
-        subnet="10.240.201.0/29",
-        labels={
-            **_owned_labels(manager, foreign_spec),
-            CHAT_NAMESPACE_LABEL: "sibling-stack",
-        },
-        age_s=3600,
-    )
-
-    with caplog.at_level(logging.WARNING):
-        manager.prune_orphan_networks([])
-
-    assert docker.network(legacy["Id"]) is not None
-    assert docker.network(foreign["Id"]) is not None
-    assert "chat_legacy_network_found" in caplog.text
+        manager._network_lifecycle._release_sandbox_networks(spec, manager._require(spec))
 
 
 def test_opportunistic_cleanup_never_detaches_a_sandbox_that_attached_meanwhile(monkeypatch):
@@ -1354,7 +1576,7 @@ def test_opportunistic_cleanup_never_detaches_a_sandbox_that_attached_meanwhile(
     name, network = _group_bridge(manager, docker, spec, age_s=3600)
     docker.connect(network["Id"], "sandbox-container", [])
 
-    manager._release_owned_network(
+    manager._network_lifecycle._release_owned_network(
         name, spec, only_if_sandbox_unattached=True, expected_network_id=network["Id"]
     )
 
@@ -1366,11 +1588,89 @@ def test_stale_cleanup_leaves_a_same_name_replacement_alone(monkeypatch):
     spec = _spec()
     name, _ = _group_bridge(manager, docker, spec, age_s=3600)
 
-    manager._release_owned_network(
+    manager._network_lifecycle._release_owned_network(
         name, spec, only_if_sandbox_unattached=True, expected_network_id="the-old-id"
     )
 
     assert docker.network(name) is not None
+
+
+def test_final_network_release_follows_a_renamed_exact_container(monkeypatch):
+    manager, docker, _ = _world(monkeypatch)
+    spec = _spec()
+    original = docker.add_sandbox(spec, running=True)
+    name, network = _group_bridge(manager, docker, spec)
+    docker.connect(network["Id"], original["Id"], [])
+    original["running"], original["status"] = False, "exited"
+    original["Name"] = "/renamed-original"
+
+    released = manager.release_stopped_networks(
+        spec,
+        expected_container_id=original["Id"],
+    )
+
+    assert released.container_id == original["Id"]
+    assert released.networks == ()
+    assert docker.network(name) is None
+
+
+@pytest.mark.parametrize("restart_read", (2, 3, 4))
+def test_final_network_release_rejects_a_restart_at_each_exact_read(monkeypatch, restart_read):
+    manager, docker, _ = _world(monkeypatch)
+    spec = _spec()
+    original = docker.add_sandbox(spec, running=True)
+    name, network = _group_bridge(manager, docker, spec)
+    docker.connect(network["Id"], original["Id"], [])
+    original["running"], original["status"] = False, "exited"
+    require_exact = manager._require_exact
+    reads = 0
+
+    def restart_at_exact_read(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        if reads == restart_read:
+            original["running"], original["status"] = True, "running"
+        return require_exact(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_require_exact", restart_at_exact_read)
+    docker.calls.clear()
+    with pytest.raises(SandboxError, match=r"running|restarted"):
+        manager.release_stopped_networks(spec, expected_container_id=original["Id"])
+
+    assert original["running"] is True
+    if restart_read < 4:
+        assert docker.network(name) is not None
+        assert not any(call[1:3] == ["network", "disconnect"] for call in docker.calls)
+
+
+def test_final_network_release_leaves_a_same_name_bridge_replacement_alone(monkeypatch):
+    manager, docker, _ = _world(monkeypatch)
+    spec = _spec()
+    original = docker.add_sandbox(spec, running=True)
+    name, network = _group_bridge(manager, docker, spec)
+    docker.connect(network["Id"], original["Id"], [])
+    original["running"], original["status"] = False, "exited"
+    old_id = network["Id"]
+    release = manager._network_lifecycle._release_owned_network
+
+    def replace_before_release(*args, **kwargs):
+        del docker.networks[old_id]
+        _group_bridge(manager, docker, spec)
+        return release(*args, **kwargs)
+
+    monkeypatch.setattr(
+        manager._network_lifecycle, "_release_owned_network", replace_before_release
+    )
+    docker.calls.clear()
+    with pytest.raises(SandboxError, match="network intent"):
+        manager.release_stopped_networks(spec, expected_container_id=original["Id"])
+
+    replacement = docker.network(name)
+    assert manager._require_exact(spec, original["Id"]).networks == (name,)
+    assert replacement is not None and replacement["Id"] != old_id
+    assert not any(
+        call[1:3] in (["network", "disconnect"], ["network", "rm"]) for call in docker.calls
+    )
 
 
 def test_final_network_release_refuses_a_same_name_container_replacement(monkeypatch):
@@ -1379,7 +1679,7 @@ def test_final_network_release_refuses_a_same_name_container_replacement(monkeyp
     original = docker.add_sandbox(spec, running=False)
     name, network = _group_bridge(manager, docker, spec)
     docker.connect(network["Id"], original["Id"], [])
-    release = manager._release_sandbox_networks
+    release = manager._network_lifecycle._release_sandbox_networks
 
     def replace_before_release(release_spec, current, **kwargs):
         original["Name"] = "/renamed-original"
@@ -1393,7 +1693,9 @@ def test_final_network_release_refuses_a_same_name_container_replacement(monkeyp
         docker.connect(network["Id"], replacement["Id"], [])
         return release(release_spec, current, **kwargs)
 
-    monkeypatch.setattr(manager, "_release_sandbox_networks", replace_before_release)
+    monkeypatch.setattr(
+        manager._network_lifecycle, "_release_sandbox_networks", replace_before_release
+    )
     docker.calls.clear()
 
     with pytest.raises(RetainedChatLost, match="identity changed"):
@@ -1415,7 +1717,7 @@ def test_a_network_outside_this_chat_is_never_removed(monkeypatch):
     name, network = _group_bridge(manager, docker, spec)
     network["Labels"][CHAT_NAMESPACE_LABEL] = "sibling-stack"
     with pytest.raises(SandboxError, match="outside this chat"):
-        manager._release_owned_network(name, spec)
+        manager._network_lifecycle._release_owned_network(name, spec)
     assert docker.network(name) is not None
 
 
@@ -1456,26 +1758,28 @@ def test_a_stale_unattached_bridge_is_reclaimed_and_rebuilt(monkeypatch):
     docker.add_sandbox(spec)
     name, old = _group_bridge(manager, docker, spec, age_s=3600)
 
-    manager._ensure_group_network(spec)
+    manager._network_lifecycle._ensure_group_network(spec)
 
     rebuilt = docker.network(name)
     assert rebuilt is not None and rebuilt["Id"] != old["Id"]
-    assert docker.names_on(name) == {"relay-gateway", "relay-mcp"}
+    assert docker.names_on(name) == {"relay-mcp"}
 
 
 def test_orphan_cleanup_restores_relays_when_a_sandbox_attaches_before_remove(monkeypatch):
     manager, docker, guard = _world(monkeypatch)
     spec = _spec(thread="athr_late", sandbox="asbx_late")
     name, network = _group_bridge(manager, docker, spec, age_s=3600)
-    manager._attach_relays(name)
+    manager._network_lifecycle._attach_relays(name)
     docker.add_container("late-sandbox", running=True)
     docker.before_rm = lambda: docker.connect(network["Id"], "late-sandbox", [])
 
-    manager.prune_orphan_networks([])
+    manager.network.prune_orphan_networks([])
 
     assert docker.network(name) is not None, "a bridge in use survives"
-    assert {"relay-gateway", "relay-mcp", "late-sandbox"} <= docker.names_on(name)
-    assert guard.relays[manager._network().bridge_name(name)], "and keeps its exceptions"
+    assert {"relay-mcp", "late-sandbox"} <= docker.names_on(name)
+    assert guard.relays[manager._network_lifecycle._network().bridge_name(name)], (
+        "and keeps its exceptions"
+    )
 
 
 def test_stale_cleanup_restores_relays_when_its_own_sandbox_attaches_before_remove(
@@ -1485,15 +1789,15 @@ def test_stale_cleanup_restores_relays_when_its_own_sandbox_attaches_before_remo
     spec = _spec()
     docker.add_sandbox(spec, running=True)
     name, network = _group_bridge(manager, docker, spec, age_s=3600)
-    manager._attach_relays(name)
+    manager._network_lifecycle._attach_relays(name)
     docker.before_rm = lambda: docker.connect(network["Id"], "sandbox-container", [])
 
-    manager._release_owned_network(
+    manager._network_lifecycle._release_owned_network(
         name, spec, only_if_sandbox_unattached=True, expected_network_id=network["Id"]
     )
 
-    assert docker.names_on(name) == {"relay-gateway", "relay-mcp", "sandbox-container"}
-    assert guard.relays[manager._network().bridge_name(name)]
+    assert docker.names_on(name) == {"relay-mcp", "sandbox-container"}
+    assert guard.relays[manager._network_lifecycle._network().bridge_name(name)]
 
 
 # ── the guest's own check, executed against a model of its network ────
@@ -1554,7 +1858,6 @@ def _guest_check(monkeypatch, *, route: str = "0100F00A", **changes: Any) -> lis
     """Run the check the way a guest does, with ``changes`` to what it meets."""
     outcomes: dict = {
         ("127.0.0.11", 53, "udp"): _ROOT_ANSWER,
-        ("agent-gateway", 8080, "tcp"): "ok",
         ("agent-mcp", 8000, "tcp"): "ok",
         ("10.240.0.1", 9, "udp"): errno.EHOSTUNREACH,
         ("169.254.169.254", 80, "tcp"): errno.EHOSTUNREACH,
@@ -1580,7 +1883,7 @@ def _guest_check(monkeypatch, *, route: str = "0100F00A", **changes: Any) -> lis
     monkeypatch.setattr(
         sys,
         "argv",
-        ["-c", "127.0.0.11", json.dumps([["agent-gateway", 8080], ["agent-mcp", 8000]])],
+        ["-c", "127.0.0.11", json.dumps([["agent-mcp", 8000]])],
     )
     printed = io.StringIO()
     with contextlib.redirect_stdout(printed):

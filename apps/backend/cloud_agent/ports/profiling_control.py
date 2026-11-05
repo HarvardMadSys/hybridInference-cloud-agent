@@ -90,21 +90,6 @@ class ProfilingControl(Protocol):
         """Return how many frozen records this experiment actually stored."""
         ...
 
-    async def mark_run_lifecycle(
-        self,
-        *,
-        run_id: str,
-        lifecycle: str,
-        now: datetime,
-        deployment: str,
-        source: str,
-        created_by: str | None,
-        control_revision: int,
-        stop_reason: str = "",
-    ) -> None:
-        """Attach lifecycle and provenance to a run the control plane created."""
-        ...
-
     async def get_run(self, *, run_id: str) -> dict[str, Any] | None:
         """Return one experiment manifest with its lifecycle, or ``None``."""
         ...

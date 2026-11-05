@@ -1,0 +1,74 @@
+{
+  "manifest_contract": {
+    "schema_version": 1,
+    "retired_web_variants": [{"variant": "agents", "base_path": "/agents"}],
+    "artifact_shape_sha256": "10bef9c2b29f19c721153d432ac57828b5f8b62b1e050646f7ea456fe07ad3c5"
+  },
+  "artifacts": [
+    {
+      "name": "control",
+      "role": "control",
+      "variant": null,
+      "base_path": null,
+      "api_url": null,
+      "platform": "linux/arm64",
+      "architecture": "arm64",
+      "dockerfile": "deploy/control-plane/Dockerfile",
+      "runner_labels": ["self-hosted", "Linux", "ARM64", "image-verify-arm64"],
+      "smoke_key": "control",
+      "ci_scopes": ["backend"]
+    },
+    {
+      "name": "web-root",
+      "role": "web",
+      "variant": "root",
+      "base_path": "",
+      "api_url": "/api",
+      "platform": "linux/arm64",
+      "architecture": "arm64",
+      "dockerfile": "deploy/control-plane/Dockerfile.web",
+      "runner_labels": ["self-hosted", "Linux", "ARM64", "image-verify-arm64"],
+      "smoke_key": "web-root",
+      "ci_scopes": ["web"]
+    },
+    {
+      "name": "runner",
+      "role": "runner",
+      "variant": null,
+      "base_path": null,
+      "api_url": null,
+      "platform": "linux/amd64",
+      "architecture": "amd64",
+      "dockerfile": "deploy/host/Dockerfile.agent-runner",
+      "runner_labels": ["self-hosted", "Linux", "X64", "image-verify-x64"],
+      "smoke_key": "runner",
+      "ci_scopes": ["backend"]
+    },
+    {
+      "name": "sandbox",
+      "role": "sandbox",
+      "variant": null,
+      "base_path": null,
+      "api_url": null,
+      "platform": "linux/amd64",
+      "architecture": "amd64",
+      "dockerfile": "deploy/sandbox/Dockerfile.agent-sandbox",
+      "runner_labels": ["self-hosted", "Linux", "X64", "image-verify-x64"],
+      "smoke_key": "sandbox",
+      "ci_scopes": ["backend"]
+    },
+    {
+      "name": "tunnel",
+      "role": "tunnel",
+      "variant": null,
+      "base_path": null,
+      "api_url": null,
+      "platform": "linux/amd64",
+      "architecture": "amd64",
+      "dockerfile": "deploy/host/Dockerfile.agent-ssh-tunnel",
+      "runner_labels": ["self-hosted", "Linux", "X64", "image-verify-x64"],
+      "smoke_key": "tunnel",
+      "ci_scopes": []
+    }
+  ]
+}

@@ -27,7 +27,7 @@ vi.mock('@/components/providers/AuthProvider', async () => {
   const actual = await vi.importActual<typeof import('@/components/providers/AuthProvider')>(
     '@/components/providers/AuthProvider',
   );
-  return { hasAgentPermission: actual.hasAgentPermission };
+  return { ...actual };
 });
 vi.mock('@/lib/api/admin', () => ({
   listAdminAuditLog: vi.fn(),
@@ -169,6 +169,20 @@ describe('admin Audit log', () => {
     expect(screen.getByText('203.0.113.9')).toBeInTheDocument();
     expect(screen.getByText('user-7')).toBeInTheDocument();
     expect(screen.getByText(/"host": "rtx6000b"/)).toBeInTheDocument();
+  });
+
+  it('gives the exact time of a change in UTC, as every admin page does', async () => {
+    list.mockResolvedValue(page([entry(1, { created_at: '2026-10-07T13:00:00Z' })]));
+    render(<AdminAuditLogPage />);
+    const row = await screen.findByRole('button', { name: /Paused new work on rtx6000b/ });
+    expect(within(row).getByText('Oct 7')).toHaveAttribute(
+      'title',
+      expect.stringMatching(/^Oct 7, 2026, 1:00:00\sPM UTC$/),
+    );
+
+    fireEvent.click(row);
+
+    expect(screen.getByText(/^Oct 7, 2026, 1:00:00\sPM UTC$/)).toBeInTheDocument();
   });
 
   it('says when nothing is recorded, and retries a failed read', async () => {

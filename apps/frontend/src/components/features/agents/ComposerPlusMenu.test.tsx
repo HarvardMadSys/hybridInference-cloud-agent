@@ -108,6 +108,37 @@ describe('ComposerPlusMenu', () => {
     expect(screen.getByRole('menuitem', { name: /Skills/ })).toHaveFocus();
   });
 
+  it('renders the SSH list inside the one composer panel, with back navigation', () => {
+    const ssh = {
+      choices: [
+        {
+          id: 'srv-1',
+          name: 'gpu',
+          login: 'ubuntu@gpu.example.org:22',
+          selected: true,
+          blocked: false,
+        },
+      ],
+      loading: false,
+      saving: false,
+      error: null,
+      count: 1,
+      reload: vi.fn(),
+      toggle: vi.fn(),
+    };
+    renderMenu({ ssh });
+    fireEvent.click(within(open()).getByRole('menuitem', { name: /SSH servers/ }));
+    const panel = screen.getByRole('dialog', { name: 'SSH servers' });
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    // One card only: the inner list must not draw a second border/background.
+    // The embed has no card of its own: exactly one bordered panel is shown.
+    expect(panel.querySelectorAll('.shadow-card')).toHaveLength(0);
+    expect(within(panel).getByRole('switch', { name: 'gpu' })).toBeChecked();
+    fireEvent.click(within(panel).getByRole('button', { name: /Back/ }));
+    expect(screen.getByRole('menu')).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: /SSH servers/ })).toHaveFocus();
+  });
+
   it('keeps MCP navigation inside the panel and resets it after dismissal', () => {
     renderMenu({
       mcp: { choices: [], loading: false, error: null, count: 0, reload: vi.fn(), toggle: vi.fn() },

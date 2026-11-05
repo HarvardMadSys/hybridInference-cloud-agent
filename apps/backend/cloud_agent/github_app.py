@@ -1,4 +1,4 @@
-"""GitHub App credentials for the publisher (issue #1041).
+"""GitHub App credentials for checkout, entitlement and the GitHub relay (issue #1041).
 
 The design calls for a GitHub App rather than a personal access token, and the
 difference is not bureaucratic. A PAT is a long-lived, account-wide credential
@@ -14,7 +14,7 @@ repositories a user deliberately installed on, and nobody has to mint or rotate
 a credential by hand. Revocation is uninstalling the App.
 
 Tokens are cached until shortly before they expire, because the exchange is a
-network round trip and the publisher runs per job.
+network round trip and every turn's claim asks for a clone token.
 """
 
 from __future__ import annotations
@@ -24,15 +24,18 @@ import json as json_module
 import math
 import re
 import time
+from collections import OrderedDict
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlencode
 
 import httpx
 import jwt
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
+from cloud_agent.github_cache import RepositoryCache
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import number_setting
 from cloud_agent.source_control import SourceControlCipher
@@ -55,14 +58,17 @@ _TOKEN_REFRESH_MARGIN_S = 300
 # gives the repository a new installation, and an id kept for the life of the
 # process minted against one that no longer exists until a restart.
 _INSTALLATION_TTL_S = 300.0
+# Holder-scoped tokens have one slot per resident conversation. Keep their
+# aggregate memory and secret lifetime bounded even while conversations churn.
+_INSTALLATION_TOKEN_CACHE_MAX = 4096
 # What the token endpoint answers for an installation it no longer knows: gone
 # (404), refused for this repository (422), or the JWT refused (401). Each is
 # worth exactly one fresh look at which installation covers the repository.
 _STALE_INSTALLATION_STATUSES = frozenset({401, 404, 422})
-# How long one user's repository answer is reused. Entitlement is asked on every
-# workspace file read and terminal open; a minute keeps those off GitHub while
-# bounding how long a revoked permission still reads as granted.
-_USER_REPOSITORIES_TTL_S = 60.0
+# Targeted checks accept a repository name from each job request. Bound that
+# higher-cardinality cache so a stream of distinct, valid names cannot retain
+# process memory indefinitely.
+_USER_REPOSITORY_PERMISSIONS_MAX = 4096
 _COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{7,64}$")
 # What the token endpoint answers when the refresh token itself is finished:
 # expired, already spent, or its authorization revoked. GitHub sends its own
@@ -171,7 +177,7 @@ class UserTokens:
 
 def _user_tokens(body: dict[str, Any]) -> UserTokens:
     """Read GitHub's token response, with its relative expiries made absolute."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     def at(seconds: Any) -> datetime | None:
         return now + timedelta(seconds=int(seconds)) if isinstance(seconds, int) else None
@@ -218,12 +224,41 @@ class AppConfig:
     client_id: str = ""
     client_secret: str = ""
 
+    # Lazily parsed PEM (issue #772). ``object.__setattr__`` because the
+    # dataclass is frozen; the memo lives and dies with this instance, so a
+    # config rebuilt after a settings change parses its own key.
+    _parsed_key: Any = field(default=None, compare=False, repr=False)
+
+    def signing_key(self) -> Any:
+        """Return the parsed private key, parsing the PEM at most once.
+
+        ``jwt.encode`` re-validates the RSA key on every call when handed the
+        PEM string (~43 ms measured against ~0.7 ms with a parsed key), and
+        that cost lands synchronously on the event loop on the claim path —
+        every conversation claim mints an installation token (issue #772).
+        The memo lives on this object, not in module state: a config is
+        replaced wholesale when settings change, so a rotated key can never
+        be served from a memo computed for an earlier one. A parse failure
+        raises :class:`GitHubAppError` here, where it is a configuration
+        problem, rather than inside the signature call.
+        """
+        if self._parsed_key is None:
+            try:
+                object.__setattr__(
+                    self,
+                    "_parsed_key",
+                    load_pem_private_key(self.private_key.encode(), password=None),
+                )
+            except Exception as exc:
+                raise GitHubAppError(f"could not parse the App private key: {exc}") from exc
+        return self._parsed_key
+
     @classmethod
     def from_env(cls, env: dict[str, str]) -> AppConfig | None:
         """Build from environment, or None when the App is not configured.
 
         Returning None rather than raising is deliberate: a deployment without
-        the App should simply not publish, not fail to boot.
+        the App should simply go without GitHub, not fail to boot.
         """
         app_id = (env.get("AGENT_GITHUB_APP_ID") or "").strip()
         key = env.get("AGENT_GITHUB_APP_PRIVATE_KEY") or ""
@@ -259,9 +294,14 @@ def build_app_jwt(config: AppConfig, *, now: int | None = None) -> str:
                 "exp": issued + _JWT_TTL_S,
                 "iss": config.app_id,
             },
-            config.private_key,
+            # The parsed key, not the PEM string: PyJWT re-validates the RSA
+            # key on every call when handed PEM (~43 ms vs ~0.7 ms), and this
+            # runs on the event loop on the claim path (issue #772).
+            config.signing_key(),
             algorithm="RS256",
         )
+    except GitHubAppError:
+        raise
     except Exception as exc:
         raise GitHubAppError(f"could not sign the App JWT: {exc}") from exc
 
@@ -275,7 +315,7 @@ class _CachedToken:
 
 
 class GitHubAppCredentials:
-    """Mints and caches installation tokens for the publisher."""
+    """Mints and caches installation tokens, and speaks for the App to GitHub."""
 
     def __init__(
         self,
@@ -296,12 +336,25 @@ class GitHubAppCredentials:
         """
         self._config = config
         self._timeout_override = timeout_s
-        self._tokens: dict[tuple[int, str], _CachedToken] = {}
+        self._tokens: OrderedDict[tuple[int, str], _CachedToken] = OrderedDict()
         #: Per repository: when its installation was looked up, and the id.
-        self._installations: dict[str, tuple[float, int]] = {}
+        self._installations = RepositoryCache[str, int]("installations")
         #: Per user, per set of connected installations: when the answer was
         #: read, and the repositories it named.
-        self._user_repositories: dict[tuple[str, tuple[int, ...]], tuple[float, list[str]]] = {}
+        self._user_repositories = RepositoryCache[tuple[str, tuple[int, ...]], list[str]](
+            "user_repositories"
+        )
+        #: Successful bounded listings for one installation survive a grant-set
+        #: change, so a picker refresh only asks GitHub about newly connected
+        #: ones. Entitlement treats these as positive witnesses, never denials.
+        self._user_installation_repositories = RepositoryCache[tuple[str, int], list[str]](
+            "user_installation_repositories"
+        )
+        #: A single-repository check is not a complete installation listing.
+        #: Cache that narrower answer separately for the same revocation bound.
+        self._user_repository_permissions = RepositoryCache[tuple[str, int, str], bool](
+            "user_repository_permissions", max_size=_USER_REPOSITORY_PERMISSIONS_MAX
+        )
         self._cipher: SourceControlCipher | None = None
         self._client = client
         self._owned: httpx.AsyncClient | None = None
@@ -319,13 +372,17 @@ class GitHubAppCredentials:
         occasional. Repository entitlement asks GitHub on workspace file reads
         and terminal opens (through :meth:`writable_repositories_for_user`,
         whenever its minute-long answer has lapsed), so a per-call handshake
-        was on the interactive path, not just the publisher's.
+        was on the interactive path, not just the background loops'.
 
         One client for this object's lifetime instead. It is created on first
         use rather than in ``__init__`` because a client binds to the running
         loop, and this object is built during application startup.
         """
         effective_timeout_s = self._timeout_s if timeout_s is None else timeout_s
+        # Token state and the owned client belong to the first loop that uses
+        # these credentials. Bind borrowed-client instances too, so retirement
+        # from a dependency worker can marshal cache cleanup back here.
+        self._loop = asyncio.get_running_loop()
         if self._client is not None:
             yield self._client
             return
@@ -337,7 +394,6 @@ class GitHubAppCredentials:
             async with httpx.AsyncClient(timeout=effective_timeout_s) as client:
                 yield client
             return
-        self._loop = asyncio.get_running_loop()
         if self._owned is None:
             self._owned = httpx.AsyncClient(timeout=effective_timeout_s)
         else:
@@ -353,21 +409,38 @@ class GitHubAppCredentials:
     def retire(self) -> None:
         """Release this configuration's pool after its current calls finish."""
         self._retired = True
-        if self._loop is not None and not self._loop.is_closed():
-            self._loop.call_soon_threadsafe(self._schedule_retirement)
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            self._clear_tokens()
+            return
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is loop:
+            self._retire_on_loop()
+        else:
+            try:
+                loop.call_soon_threadsafe(self._retire_on_loop)
+            except RuntimeError:
+                # A loop can close between the check and the thread-safe call.
+                # It is no longer able to touch the cache, so inline cleanup is safe.
+                self._clear_tokens()
 
     @property
     def _timeout_s(self) -> float:
         if self._timeout_override is not None:
             return self._timeout_override
-        return number_setting("github_request_timeout_s", 30.0)
+        return number_setting("github_request_timeout_s")
 
     @property
     def request_timeout_s(self) -> float:
         """Effective deadline used for the next provider request."""
         return self._timeout_s
 
-    def _schedule_retirement(self) -> None:
+    def _retire_on_loop(self) -> None:
+        """Clear loop-owned secrets and close an idle owned client."""
+        self._clear_tokens()
         if not self._active_http and self._owned is not None:
             self._retire_task = asyncio.create_task(self.aclose())
 
@@ -376,16 +449,42 @@ class GitHubAppCredentials:
 
         A borrowed client belongs to whoever passed it in and is left open.
         """
+        self._clear_tokens()
         owned, self._owned = self._owned, None
         if owned is not None:
             await owned.aclose()
+
+    def _discard_token(self, key: tuple[int, str]) -> None:
+        """Drop one cached token and release this object's plaintext reference."""
+        cached = self._tokens.pop(key, None)
+        if cached is not None:
+            cached.token = ""
+
+    def _clear_tokens(self) -> None:
+        """Release every cached plaintext token reference."""
+        for cached in self._tokens.values():
+            cached.token = ""
+        self._tokens.clear()
+
+    def _prune_tokens(self, now: float) -> None:
+        """Drop expired tokens before any cache access or remote mint."""
+        for key in [key for key, cached in self._tokens.items() if cached.expires_at <= now]:
+            self._discard_token(key)
+
+    def _remember_token(self, key: tuple[int, str], cached: _CachedToken) -> None:
+        """Keep a newly minted token in a bounded least-recently-used cache."""
+        self._discard_token(key)
+        self._tokens[key] = cached
+        while len(self._tokens) > _INSTALLATION_TOKEN_CACHE_MAX:
+            _, evicted = self._tokens.popitem(last=False)
+            evicted.token = ""
 
     @property
     def cipher(self) -> SourceControlCipher:
         """The key users' GitHub tokens are stored under — GitLab's, domain and all.
 
         Built on first use, because a deployment that never lets users connect
-        publishes with the private key alone and needs no encryption key.
+        works with the private key alone and needs no encryption key.
         """
         if self._cipher is None:
             self._cipher = SourceControlCipher()
@@ -434,16 +533,19 @@ class GitHubAppCredentials:
             )
         return response.json()
 
-    async def installation_id_for(self, repo: str) -> int:
+    async def installation_id_for(self, repo: str, *, fresh: bool = False) -> int:
         """Return the installation covering ``owner/name``.
 
         A repository with no installation is not an error to retry — it means
-        the user has not installed the App there, and the publisher must say so
-        rather than appear to be broken.
+        the user has not installed the App there, and the caller must say so
+        rather than appear to be broken. ``fresh`` bypasses the short token-mint
+        cache when the id is serving as an authorization fence; the answer still
+        refreshes that cache for subsequent minting.
         """
-        cached = self._installations.get(repo)
-        if cached is not None and time.monotonic() - cached[0] < _INSTALLATION_TTL_S:
-            return cached[1]
+        if not fresh:
+            cached = self._installations.get(repo, ttl=_INSTALLATION_TTL_S)
+            if cached is not None:
+                return cached
         owner, _, name = repo.partition("/")
         if not owner or not name:
             raise GitHubAppError(f"repo must be 'owner/name', got {repo!r}")
@@ -462,7 +564,7 @@ class GitHubAppCredentials:
         installation_id = body.get("id")
         if not isinstance(installation_id, int):
             raise AppNotInstalled(f"no App installation covers {repo}")
-        self._installations[repo] = (time.monotonic(), installation_id)
+        self._installations.remember(repo, installation_id, ttl=_INSTALLATION_TTL_S)
         return installation_id
 
     async def token_for(
@@ -472,6 +574,7 @@ class GitHubAppCredentials:
         permissions: dict[str, str] | None = None,
         repository_scoped: bool = False,
         min_ttl_s: float = 0.0,
+        holder: str | None = None,
     ) -> str:
         """Return a live installation token for one repository.
 
@@ -479,8 +582,14 @@ class GitHubAppCredentials:
         installation token inherits *every* App permission unless it asks for
         less, so a consumer that only needs to read must say so. Combined with
         ``repository_scoped``, which limits the token to this repository alone,
-        that is how one App serves checkout (read), sandbox branch/PR writes,
-        and the trusted publisher without sharing broader installation scope.
+        that is how one App serves checkout and repository reads without
+        sharing broader installation scope.
+
+        ``holder`` names who outside this process the token is for, such as one
+        conversation's sandbox, which then gets a token of its own. Whoever
+        holds an installation token can revoke it, with no permission at all,
+        and a token shared with another holder or conversation would be
+        refused for all of them while this cache went on serving it.
 
         An installation that refuses to mint is looked up afresh once: the App
         may have been installed again under a new id. If the installation
@@ -495,7 +604,11 @@ class GitHubAppCredentials:
         scope = repo if repository_scoped else None
         try:
             token, minted = await self._token_in_scope(
-                installation_id, permissions=permissions, repository=scope, min_ttl_s=min_ttl_s
+                installation_id,
+                permissions=permissions,
+                repository=scope,
+                min_ttl_s=min_ttl_s,
+                holder=holder,
             )
         except GitHubAppError as exc:
             if exc.status not in _STALE_INSTALLATION_STATUSES:
@@ -508,6 +621,7 @@ class GitHubAppCredentials:
                     permissions=permissions,
                     repository=scope,
                     min_ttl_s=min_ttl_s,
+                    holder=holder,
                 )
             except GitHubAppError as retry_exc:
                 if retry_exc.status == 404:
@@ -534,6 +648,7 @@ class GitHubAppCredentials:
         permissions: dict[str, str] | None = None,
         repository: str | None = None,
         min_ttl_s: float = 0.0,
+        holder: str | None = None,
     ) -> tuple[str, bool]:
         """Return a token for one installation and scope, and whether it is new.
 
@@ -541,16 +656,24 @@ class GitHubAppCredentials:
         caller lands in the cache rather than only the ones that remembered to.
 
         Narrowed tokens must not share a cache slot with full ones, in either
-        direction: serving a read-only token to the publisher would break every
-        push, and serving a full one to the runner would silently undo the
-        narrowing that parameter exists for. The scope key is what keeps them
+        direction: serving a read-only token to a caller that asked for more
+        would break its writes, and serving a full one to the runner would
+        silently undo the narrowing that parameter exists for. The scope key is what keeps them
         apart, and it is derived from the same two values that shape the
         request — so a slot cannot describe a scope the token does not have.
+        It also names the token's holder, if it has one, which keeps that
+        holder's token apart from everyone else's in the same scope.
         """
-        scope_key = json_module.dumps({"p": permissions, "r": repository}, sort_keys=True)
-        cached = self._tokens.get((installation_id, scope_key))
+        scope_key = json_module.dumps(
+            {"h": holder, "p": permissions, "r": repository}, sort_keys=True
+        )
+        token_key = (installation_id, scope_key)
+        now = time.time()
+        self._prune_tokens(now)
+        cached = self._tokens.get(token_key)
         margin = max(_TOKEN_REFRESH_MARGIN_S, min_ttl_s)
-        if cached and cached.expires_at - margin > time.time():
+        if not self._retired and cached and cached.expires_at - margin > now:
+            self._tokens.move_to_end(token_key)
             return cached.token, False
 
         payload: dict[str, Any] = {}
@@ -569,10 +692,13 @@ class GitHubAppCredentials:
             raise GitHubAppError("GitHub returned no installation token")
         # GitHub reports expiry; fall back to the documented hour if absent so
         # a missing field cannot produce a token cached forever.
-        expires_at = time.time() + 3600
+        now = time.time()
+        expires_at = now + 3600
         if raw_expiry := body.get("expires_at"):
             expires_at = _parse_expiry(raw_expiry, default=expires_at)
-        self._tokens[installation_id, scope_key] = _CachedToken(token=token, expires_at=expires_at)
+        self._prune_tokens(now)
+        if not self._retired and expires_at > now:
+            self._remember_token(token_key, _CachedToken(token=token, expires_at=expires_at))
         return token, True
 
     async def exchange_user_code(self, code: str) -> UserTokens:
@@ -671,23 +797,74 @@ class GitHubAppCredentials:
         self, user_id: str, installation_ids: tuple[int, ...]
     ) -> list[str] | None:
         """This user's repositories if read within the last minute, else ``None``."""
-        cached = self._user_repositories.get((user_id, installation_ids))
-        if cached is None or time.monotonic() - cached[0] > number_setting(
-            "github_repository_cache_s", _USER_REPOSITORIES_TTL_S
-        ):
-            return None
-        return list(cached[1])
+        cached = self._user_repositories.get(
+            (user_id, installation_ids),
+            ttl=number_setting("github_repository_cache_s"),
+        )
+        return list(cached) if cached is not None else None
 
     def remember_user_repositories(
         self, user_id: str, installation_ids: tuple[int, ...], repositories: list[str]
     ) -> None:
         """Keep one user's answer for the next minute's reads."""
-        self._user_repositories[user_id, installation_ids] = (time.monotonic(), list(repositories))
+        self._user_repositories.remember(
+            (user_id, installation_ids),
+            list(repositories),
+            ttl=number_setting("github_repository_cache_s"),
+        )
+
+    def cached_user_installation_repositories(
+        self, user_id: str, installation_id: int
+    ) -> list[str] | None:
+        """Return one recent bounded installation listing."""
+        cached = self._user_installation_repositories.get(
+            (user_id, installation_id),
+            ttl=number_setting("github_repository_cache_s"),
+        )
+        return list(cached) if cached is not None else None
+
+    def remember_user_installation_repositories(
+        self, user_id: str, installation_id: int, repositories: list[str]
+    ) -> None:
+        """Remember one successful bounded listing for picker reuse."""
+        self._user_installation_repositories.remember(
+            (user_id, installation_id),
+            list(repositories),
+            ttl=number_setting("github_repository_cache_s"),
+        )
+
+    def cached_user_repository_permission(
+        self, user_id: str, installation_id: int, repo: str
+    ) -> bool | None:
+        """Return a recent targeted permission answer, including a refusal."""
+        return self._user_repository_permissions.get(
+            (user_id, installation_id, repo.casefold()),
+            ttl=number_setting("github_repository_cache_s"),
+        )
+
+    def remember_user_repository_permission(
+        self, user_id: str, installation_id: int, repo: str, allowed: bool
+    ) -> None:
+        """Remember one targeted answer without treating it as a full listing."""
+        key = (user_id, installation_id, repo.casefold())
+        self._user_repository_permissions.remember(
+            key,
+            allowed,
+            ttl=number_setting("github_repository_cache_s"),
+        )
 
     def forget_user(self, user_id: str) -> None:
         """Drop a user's remembered answer, when their connection changed."""
-        for key in [key for key in self._user_repositories if key[0] == user_id]:
-            self._user_repositories.pop(key, None)
+        for combined_key in [key for key in self._user_repositories if key[0] == user_id]:
+            self._user_repositories.pop(combined_key)
+        for installation_key in [
+            key for key in self._user_installation_repositories if key[0] == user_id
+        ]:
+            self._user_installation_repositories.pop(installation_key)
+        for permission_key in [
+            key for key in self._user_repository_permissions if key[0] == user_id
+        ]:
+            self._user_repository_permissions.pop(permission_key)
 
     async def create_personal_repository(
         self, user_token: str, *, name: str, description: str, private: bool
@@ -777,7 +954,9 @@ class GitHubAppCredentials:
         request opened, which a user who can only read could not do themselves.
 
         An installation the user can no longer reach contributes nothing; a
-        token GitHub refuses is :class:`UserAuthorizationRevoked`.
+        token GitHub refuses is :class:`UserAuthorizationRevoked`. A rate limit,
+        on any page, is an error: it says nothing about access, and an empty
+        answer would be remembered as the settled one.
         """
         repos: list[str] = []
         page = 1
@@ -794,13 +973,15 @@ class GitHubAppCredentials:
                 )
                 if response.status_code == 401:
                     raise UserAuthorizationRevoked("GitHub refused the user's token")
-                if response.status_code in (403, 404):
+                wait = rate_limit_wait(response)
+                if wait is None and response.status_code in (403, 404):
                     return []
                 if response.status_code >= 400:
                     raise GitHubAppError(
                         f"could not list the user's repositories in installation "
                         f"{installation_id} ({response.status_code})",
                         status=response.status_code,
+                        retry_after_s=wait,
                     )
                 entries = response.json().get("repositories", [])
                 repos.extend(
@@ -812,6 +993,46 @@ class GitHubAppCredentials:
                     break
                 page += 1
         return repos
+
+    async def user_can_push_repository(self, user_token: str, repo: str) -> bool:
+        """Whether GitHub says this user can push to one exact repository.
+
+        This is the constant-work entitlement path. The App installation is
+        checked separately against the user's saved grant, so this user-token
+        request proves only the other half of the boundary: their own push
+        permission. A plain 403/404 is a settled refusal; rate limits and
+        malformed successful answers are unavailable checks, never denials.
+        """
+        endpoint = _repository_endpoint(repo)
+        async with self._http() as client:
+            response = await client.get(
+                f"{self._config.api_base}{endpoint}",
+                headers={
+                    "Authorization": f"Bearer {user_token}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+            )
+        status = response.status_code
+        if status == 401:
+            raise UserAuthorizationRevoked("GitHub refused the user's token", status=status)
+        wait = rate_limit_wait(response)
+        if wait is None and status in (403, 404):
+            return False
+        if status >= 400:
+            raise GitHubAppError(
+                f"could not read the user's permission for {repo} ({status})",
+                status=status,
+                retry_after_s=wait,
+            )
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise GitHubAppError(f"GitHub returned no permissions for {repo}") from exc
+        permissions = body.get("permissions") if isinstance(body, dict) else None
+        if not isinstance(permissions, dict) or not isinstance(permissions.get("push"), bool):
+            raise GitHubAppError(f"GitHub returned no permissions for {repo}")
+        return permissions["push"]
 
     async def user_profile(self, user_token: str) -> dict[str, Any]:
         """Return ``{"id", "login"}`` for the GitHub user a token speaks as.
@@ -951,7 +1172,7 @@ class GitHubAppCredentials:
 
         The job stores the *sha*, never the branch name. A branch moves; a job
         that recorded "dev" would silently mean a different tree by the time it
-        ran, and the publisher applies its patch onto a pinned commit.
+        ran, and every turn of the conversation starts from one pinned commit.
 
         ``ref`` is the requester's text: only a name git accepts is sent, and
         encoded, so it can never select another endpoint or add a query.
@@ -981,10 +1202,10 @@ class GitHubAppCredentials:
     ) -> str:
         """Confirm ``sha`` is in the history of a branch of ``repo``; return that branch.
 
-        A job's base commit is fetched by hash and the publisher pushes a
-        branch built on it, so a hash alone would let a submission start from
-        any object GitHub serves for the repository, such as a fork's pull
-        request head, and have the platform push it under its own name.
+        A job's base commit is fetched by hash and the agent's branch is built
+        on it, so a hash alone would let a submission start from any object
+        GitHub serves for the repository, such as a fork's pull request head,
+        as if it were the repository's own history.
 
         ``branch`` is the one the job names. When it is not a branch of this
         repository (a tag, a commit, ``refs/pull/...``) or none is named, the
@@ -1110,11 +1331,10 @@ class GitHubAppCredentials:
 
     def forget(self, repo: str) -> None:
         """Drop cached state for a repo, e.g. after the App is uninstalled."""
-        cached = self._installations.pop(repo, None)
-        if cached is not None:
-            installation_id = cached[1]
+        installation_id = self._installations.pop(repo)
+        if installation_id is not None:
             for key in [k for k in self._tokens if k[0] == installation_id]:
-                self._tokens.pop(key, None)
+                self._discard_token(key)
 
 
 def _parse_expiry(raw: str, *, default: float) -> float:

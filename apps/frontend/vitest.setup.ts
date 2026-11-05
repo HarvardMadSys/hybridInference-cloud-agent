@@ -12,8 +12,16 @@
  * Failing loudly here turns "someone forgot a mock" from an intermittent,
  * environment-dependent crash into a named error at the call site.
  */
+import { configure } from '@testing-library/react';
 import { afterEach, beforeEach, vi } from 'vitest';
 import { clearAccountResources } from './src/components/features/profile/accountResource';
+
+// `findBy*` and `waitFor` give up after 1 s by default. That is a wait for a
+// render, not a requirement on it, and on a busy CI host a render that is
+// correct took longer: an admin page whose mocked data always shows "3.73 s"
+// failed to find that link. A wait that is part of what a test checks passes
+// its own `timeout`.
+configure({ asyncUtilTimeout: 5_000 });
 
 let blocked: string[] = [];
 

@@ -8,15 +8,25 @@ that reads these can import them without importing everything else.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from cloud_agent_shared.sandbox_restore import MAX_RESTORE_ATTEMPTS
+from cloud_agent.ports.sandbox import TerminalControlRoute
+from cloud_agent.storage._sql.hosts import (
+    JOB_HOST_SQL,
+    REVOKED_HOST_SQL,
+    UNDELETED_GROUP_SQL,
+    refuse_start_on_revoked_host,
+)
+from cloud_agent_shared.sandbox_restore import MAX_RESTORE_ATTEMPTS, RESTORE_RETRY_DELAYS_S
 from cloud_agent_shared.shared_protocol import (
     FORK_HELPER,
     MID_TURN_INPUT_CAPABILITY_PREFIX,
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 NATIVE_FORK_CAPABILITY_JSON = json.dumps([NATIVE_FORK_AT_ANCHOR_CAPABILITY], separators=(",", ":"))
 
@@ -69,57 +79,15 @@ THREAD_SANDBOX_SOURCE = f"""
         g.resident_slot_capacity, m.native_state,
         m.forked_from_thread_id, m.fork_anchor_job_id,
         g.last_activity_at AS group_last_activity_at,
+        -- The newest pull request this conversation's agent opened through
+        -- the GitHub relay.
         (
-            SELECT snapshot.state
-            FROM agent_sandbox_snapshots snapshot
-            WHERE snapshot.sandbox_id = g.id
-            ORDER BY snapshot.workspace_epoch DESC, snapshot.id DESC
-            LIMIT 1
-        ) AS workspace_publication_state,
-        -- The newest snapshot was published without a pull request: its
-        -- capture found nothing to publish.
-        (
-            SELECT snapshot.state = 'published' AND snapshot.published_pr_url IS NULL
-            FROM agent_sandbox_snapshots snapshot
-            WHERE snapshot.sandbox_id = g.id
-            ORDER BY snapshot.workspace_epoch DESC, snapshot.id DESC
-            LIMIT 1
-        ) AS workspace_publication_unchanged,
-        (
-            SELECT snapshot.published_pr_url
-            FROM agent_sandbox_snapshots snapshot
-            WHERE snapshot.sandbox_id = g.id AND snapshot.published_pr_url IS NOT NULL
-            ORDER BY snapshot.workspace_epoch DESC, snapshot.id DESC
+            SELECT pr.url
+            FROM agent_thread_pull_requests pr
+            WHERE pr.thread_id = m.thread_id
+            ORDER BY pr.created_at DESC, pr.number DESC
             LIMIT 1
         ) AS workspace_pr_url,
-        -- Something the owner has not published: a turn settled since the
-        -- last snapshot, or a last publication that failed. Turns settle in
-        -- order and a publication takes all of them, so each member's newest
-        -- settled turn answers for the ones before it. A Fork's copies of its
-        -- source's turns ran in no workspace of their own, and a temporary
-        -- workspace has nowhere to publish to.
-        EXISTS (
-            SELECT 1 FROM agent_threads published_to
-            WHERE published_to.id = m.thread_id AND published_to.repo IS NOT NULL
-        ) AND (
-            EXISTS (
-                SELECT 1 FROM agent_thread_sandbox_memberships settled
-                JOIN agent_jobs settled_job ON settled_job.id = settled.last_settled_job_id
-                WHERE settled.sandbox_id = g.id
-                  AND settled_job.fork_source_job_id IS NULL
-                  AND NOT EXISTS (
-                      SELECT 1 FROM agent_snapshot_jobs held
-                      WHERE held.job_id = settled.last_settled_job_id
-                  )
-            )
-            OR COALESCE((
-                SELECT snapshot.state = 'failed'
-                FROM agent_sandbox_snapshots snapshot
-                WHERE snapshot.sandbox_id = g.id
-                ORDER BY snapshot.workspace_epoch DESC, snapshot.id DESC
-                LIMIT 1
-            ), FALSE)
-        ) AS workspace_unpublished_changes,
         g.workspace_epoch,
         {NATIVE_FORK_CAPABLE} AS native_fork_capable,
         -- The host holding this group can hand a message to a running turn of
@@ -188,6 +156,100 @@ THREAD_SANDBOX_SOURCE = f"""
 ) AS s
 """
 
+# The columns of ``THREAD_SANDBOX_SOURCE`` a claim chooses its turn by, under
+# the same names, and none of the projections. A claim walks every queued turn
+# until one is runnable on the claiming host; joined to the full source, each
+# turn it passed paid for its pull request, its group's members and host
+# capabilities, which only the turn handed out returns.
+THREAD_SANDBOX_CLAIM_SOURCE = """
+(
+    SELECT
+        m.thread_id, g.id AS sandbox_id, g.host, g.container_id, g.state,
+        m.fork_operation_id, m.context_status, m.native_state,
+        TRUE AS shared_live, g.restore_attempts,
+        g.last_activity_at AS group_last_activity_at
+    FROM agent_thread_sandbox_memberships m
+    JOIN agent_sandboxes g ON g.id = m.sandbox_id
+) AS s
+"""
+
+
+def member_turn_running(group: str) -> str:
+    """SQL: whether a member of ``group`` is running a turn.
+
+    ``group`` names an ``agent_sandboxes`` row. A member holds its attempt
+    from admission until the turn settles, and while one does the group is
+    busy: it neither idles out nor stops.
+    """
+    return f"""EXISTS (
+        SELECT 1 FROM agent_thread_sandbox_memberships peer
+        WHERE peer.sandbox_id = {group}.id AND peer.active_attempt_id IS NOT NULL
+    )"""
+
+
+def group_has_live_peer(group: str, *, excluding: str | None = None) -> str:
+    """SQL: whether ``group`` still has a member whose context is not lost.
+
+    ``excluding`` names the member a statement is settling, which does not
+    count. A group with no such member has nothing left to run and stops.
+    """
+    excluded = "" if excluding is None else f" AND peer.thread_id <> {excluding}"
+    return f"""EXISTS (
+        SELECT 1 FROM agent_thread_sandbox_memberships peer
+        WHERE peer.sandbox_id = {group}.id{excluded}
+          AND peer.context_status <> 'lost'
+          AND peer.native_state <> 'lost'
+    )"""
+
+
+def group_is_quiet(group: str, *, operations: int = 0) -> str:
+    """SQL: whether ``group`` has no operation open and no member turn running, in parentheses.
+
+    ``operations`` is the count of open operations that still counts as none:
+    a statement that closes one in the same ``SET`` reads the count before it
+    drops, so it passes ``1``.
+    """
+    return f"({group}.active_operation_count = {operations} AND NOT {member_turn_running(group)})"
+
+
+def quiet_idle_deadline(group: str, timeout: str, *, operations: int = 0) -> str:
+    """SQL: ``group``'s idle deadline once quiet, or ``NULL`` while busy.
+
+    A quiet group (:func:`group_is_quiet`) idles out ``timeout`` seconds from
+    now; a busy one has no deadline until its last operation or turn ends.
+    """
+    return f"""CASE
+        WHEN {group_is_quiet(group, operations=operations)}
+        THEN clock_timestamp() + make_interval(secs => {timeout})
+        ELSE NULL
+    END"""
+
+
+# Whether member ``m`` of group ``g`` lets its owner change the workspace: the
+# durable copy of the sandbox manager's in-memory terminal suspension. Nothing
+# is lost, nothing prepares, stops, deletes or forks the group, and a turn in
+# flight has published ``workspace_ready``.
+WORKSPACE_READY_SQL = f"""(
+    m.context_status <> 'lost'
+    AND m.native_state <> 'lost'
+    AND g.state NOT IN (
+        'provisioning', 'stopping', 'stopped_dirty', 'lost'
+    )
+    AND g.stop_requested_at IS NULL
+    AND {UNDELETED_GROUP_SQL}
+    AND m.fork_operation_id IS NULL
+    AND (
+        m.active_attempt_id IS NULL
+        OR EXISTS (
+            SELECT 1 FROM agent_attempts active
+            WHERE active.id = m.active_attempt_id
+              AND active.status = 'running'
+              AND active.lease_expires_at > clock_timestamp()
+              AND active.terminal_ready = TRUE
+        )
+    )
+)"""
+
 # SET-clause fragment for ``agent_sandboxes``: count one more start the
 # control plane let through and drop the restore point a start would make
 # stale. A checkpoint receipt covers the group only while the sequence it
@@ -201,22 +263,139 @@ FENCE_START_SQL = (
 )
 
 
-async def fence_sandbox_start(conn: Any, sandbox_id: str) -> str | None:
-    """Fence one group against starts and return its state.
+async def fence_sandbox_start(conn: Any, sandbox_id: str) -> tuple[str, int | None] | None:
+    """Fence one group against starts; return its state and the new fence.
 
     For callers that are about to ask a sandbox manager for something that may
     start a stopped container: a workspace request, a fork, a snapshot. The
-    returned state lets them refuse a group that only a checkpoint holds.
+    returned state lets them refuse a group that only a checkpoint holds. The
+    returned ``start_seq`` is the one the request must carry: the manager
+    labels a run, and so the checkpoint of its stop, with the newest fence it
+    was told, and only a receipt naming the current fence covers the group.
+    A group bound to a revoked host is not fenced and has no new fence: it
+    reads ``host_revoked``, or ``cold`` once a late checkpoint has handed it
+    on (:func:`refuse_start_on_revoked_host`).
     """
-    return await conn.fetchval(
+    group = await conn.fetchrow(
+        "SELECT id, state, host FROM agent_sandboxes WHERE id = $1 FOR UPDATE", sandbox_id
+    )
+    if group is None:
+        return None
+    refused = await refuse_start_on_revoked_host(conn, group)
+    if refused is not None:
+        return refused, None
+    row = await conn.fetchrow(
         f"""
         UPDATE agent_sandboxes
         SET {FENCE_START_SQL}, updated_at = NOW()
         WHERE id = $1
-        RETURNING state
+        RETURNING state, start_seq
         """,
         sandbox_id,
     )
+    return str(row["state"]), int(row["start_seq"])
+
+
+async def lock_memberships(conn: Any, thread_ids: Sequence[str]) -> None:
+    """Lock these chats' memberships in thread order, before any of them is written.
+
+    The order the storage lock order sets for several memberships, and the
+    one a heartbeat takes for the residencies it extends together. A write
+    that takes them one at a time, or in one statement whose plan picks the
+    order, deadlocks with a beat that holds one it reaches later.
+    """
+    if not thread_ids:
+        return
+    await conn.execute(
+        "SELECT thread_id FROM agent_thread_sandbox_memberships "
+        "WHERE thread_id = ANY($1::text[]) ORDER BY thread_id FOR UPDATE",
+        list(thread_ids),
+    )
+
+
+async def read_terminal_control_route(
+    conn: Any, *, job_id: str, user_id: str
+) -> TerminalControlRoute | None:
+    """Read what an attached terminal's input, resize or kill needs, in one statement.
+
+    The browser sends about one per keystroke. The general workspace path reads
+    the whole job with every sandbox subquery, then the thread's readiness,
+    then the job's host, and fences the group's start between them. This reads
+    the same answers from one row and writes nothing: ownership as ``owns_job``
+    decides it, readiness as :data:`WORKSPACE_READY_SQL` does, and the host
+    ``host_for_job`` routes to (:data:`JOB_HOST_SQL`). ``None`` when the job is
+    not this owner's or its conversation is deleted.
+    """
+    owner = JOB_HOST_SQL.format(attempt="a", group="g")
+    row = await conn.fetchrow(
+        f"""
+        SELECT j.thread_id, j.terminal_resume_pending, g.state AS group_state,
+               m.thread_id IS NOT NULL
+                   AND COALESCE({WORKSPACE_READY_SQL}, FALSE) AS workspace_ready,
+               {REVOKED_HOST_SQL.format(host="g.host")} AS host_revoked,
+               {owner} AS host, h.broker_url AS sandbox_manager_url
+        FROM agent_jobs j
+        LEFT JOIN agent_threads t ON t.id = j.thread_id
+        LEFT JOIN agent_thread_sandbox_memberships m ON m.thread_id = j.thread_id
+        LEFT JOIN agent_sandboxes g ON g.id = m.sandbox_id
+        LEFT JOIN agent_attempts a ON a.id = j.current_attempt_id
+        LEFT JOIN agent_runner_hosts h ON h.host = {owner}
+        WHERE j.id = $1 AND j.user_id = $2 AND t.deleted_at IS NULL
+        """,
+        job_id,
+        user_id,
+    )
+    if row is None:
+        return None
+    return TerminalControlRoute(
+        thread_id=row["thread_id"],
+        workspace_ready=bool(row["workspace_ready"]),
+        terminal_resume_pending=bool(row["terminal_resume_pending"]),
+        group_state=row["group_state"],
+        host_revoked=bool(row["host_revoked"]),
+        host=(
+            None
+            if row["host"] is None
+            else {"host": row["host"], "sandbox_manager_url": row["sandbox_manager_url"]}
+        ),
+    )
+
+
+def restore_claim_due(attempts: str, failed_at: str) -> str:
+    """SQL: whether a cold group may be claimed for another restore now.
+
+    ``attempts`` names the group's ``restore_attempts`` and ``failed_at`` the
+    time its last restore failed, which is its ``last_activity_at``: every
+    path that hands a failed restore back to the checkpoint stamps it. A
+    group no restore has failed for is due at once. After the n-th failure it
+    waits the n-th of ``RESTORE_RETRY_DELAYS_S``, so the attempts outlast a
+    short registry or S3 outage instead of all failing inside it.
+    """
+    delays = ", ".join(repr(float(delay)) for delay in RESTORE_RETRY_DELAYS_S)
+    return (
+        f"({attempts} = 0 OR {failed_at} <= clock_timestamp() - make_interval(secs => "
+        f"(ARRAY[{delays}]::double precision[])"
+        f"[LEAST({attempts}, {len(RESTORE_RETRY_DELAYS_S)})]))"
+    )
+
+
+async def release_restore(
+    conn: Any, attempt_id: int, detail: str, *, reported_failed: bool = False
+) -> str | None:
+    """Return a group this attempt was restoring to its checkpoint, however it ended.
+
+    A restore counts as failed only once it may have begun: its host reserved
+    the group, or reports the restore failed (``reported_failed``). An attempt
+    that ends before its host reserved the group -- handed back, failed by the
+    hand-over or by its host before the reservation, or reaped when its lease
+    lapsed -- never reached the checkpoint and gives the group its attempt back
+    (:func:`release_unstarted_restore`); every other end is a failed restore
+    (:func:`release_failed_restore`). Returns the group's new state, or
+    ``None`` when the attempt restored nothing.
+    """
+    if not reported_failed and await release_unstarted_restore(conn, attempt_id):
+        return "cold"
+    return await release_failed_restore(conn, attempt_id, detail)
 
 
 async def release_failed_restore(conn: Any, attempt_id: int, detail: str) -> str | None:
@@ -228,8 +407,11 @@ async def release_failed_restore(conn: Any, attempt_id: int, detail: str) -> str
     checkpoint is untouched, so the group goes back to ``cold`` for another
     claim; a container the attempt may have left is fenced by the generation
     the next claim advances. Once the attempts run out it is ``lost`` instead.
-    Returns the group's new state, or ``None`` when the attempt restored
-    nothing.
+    The failure's time is the group's last activity, which the next claim
+    waits from (:func:`restore_claim_due`). Returns the group's new state, or
+    ``None`` when the attempt restored nothing. Callers go through
+    :func:`release_restore`, which first gives back an attempt whose restore
+    never began.
     """
     # Memberships before their group, the order every writer keeps. The
     # restoring member may already hold the attempt from its reservation.
@@ -252,10 +434,42 @@ async def release_failed_restore(conn: Any, attempt_id: int, detail: str) -> str
                 WHEN restore_attempts >= {MAX_RESTORE_ATTEMPTS} THEN 'lost' ELSE 'cold'
             END,
             container_id = NULL, restore_attempt_id = NULL,
-            last_error = $2, updated_at = NOW()
+            last_error = $2, last_activity_at = NOW(), updated_at = NOW()
         WHERE restore_attempt_id = $1 AND state = 'restoring'
         RETURNING state
         """,
         attempt_id,
         detail,
+    )
+
+
+async def release_unstarted_restore(conn: Any, attempt_id: int) -> bool:
+    """Return a group this attempt never began to restore, uncounted.
+
+    The claim that rehomes a cold group counts one restore attempt. Ended
+    before its host reserved the group -- the hand-over could not mint the
+    turn's credentials or refused the turn, the host could not launch or
+    start it, or the host died and the lease lapsed -- the claim never reached
+    the checkpoint. The group goes back to ``cold`` with that attempt given
+    back and its last failure's time unchanged, so the next claim waits only
+    as long as a real failure asks (:func:`restore_claim_due`). Returns
+    whether the attempt held such a group; one its host reserved is left to
+    :func:`release_failed_restore`.
+    """
+    return (
+        await conn.fetchval(
+            """
+            UPDATE agent_sandboxes g
+            SET state = 'cold', restore_attempt_id = NULL,
+                restore_attempts = g.restore_attempts - 1, updated_at = NOW()
+            WHERE g.restore_attempt_id = $1 AND g.state = 'restoring'
+              AND NOT EXISTS (
+                  SELECT 1 FROM agent_thread_sandbox_memberships m
+                  WHERE m.sandbox_id = g.id AND m.active_attempt_id = $1
+              )
+            RETURNING g.id
+            """,
+            attempt_id,
+        )
+        is not None
     )

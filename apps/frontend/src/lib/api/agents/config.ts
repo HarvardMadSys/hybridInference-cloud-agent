@@ -5,6 +5,20 @@ import type { SourceControlLoadStatus } from './integrations';
 
 const API_BASE = config.apiBase;
 
+/** One of the owner's enabled connections, as a composer offers it. */
+export interface ModelConnectionOptionApi {
+  id: string;
+  name: string;
+  /** Every listed model, in the owner's order. */
+  models: string[];
+  /**
+   * The listed models a task can run now, each with the agents that can run
+   * it: exactly what the server accepts. A model missing here is not
+   * verified, or no agent can use it.
+   */
+  model_runtimes: Record<string, string[]>;
+}
+
 export interface AgentConfigApi {
   environment_limits?: Record<string, unknown>;
   skill_limits?: import('@/lib/skillLimits').SkillLimits;
@@ -14,10 +28,6 @@ export interface AgentConfigApi {
   attachment_limits?: import('@/lib/attachmentLimits').AttachmentLimits;
   repos: string[];
   runtimes: string[];
-  /** Models an agent job can actually call — the create endpoint's own list. */
-  models: string[];
-  /** MCP servers this deployment offers. Never carries a URL or a credential. */
-  mcp_servers?: AgentMcpServerApi[];
   /** Runtimes that can be given MCP servers; others refuse such a job. */
   mcp_runtimes?: string[];
   /** Runtimes that install task-selected plugins when a sandbox is initialized. */
@@ -28,11 +38,19 @@ export interface AgentConfigApi {
    */
   runtime_reasoning_efforts?: Record<string, string[]>;
   /**
-   * Effort levels each model accepts. Offer the intersection with the chosen
-   * runtime's, and no control when it is empty — which is also what a backend
-   * too old to answer these produces.
+   * What a new task should start on: the model of this owner's newest turn,
+   * while its connection still lists it. Null leaves the model control empty
+   * until the owner chooses, rather than picking the first model in the list.
    */
-  model_reasoning_efforts?: Record<string, string[]>;
+  default_model?: string | null;
+  /** The owner's connection `default_model` ran on. */
+  default_model_connection_id?: string | null;
+  /** This owner's enabled model connections. Absent before the feature. */
+  model_connections?: ModelConnectionOptionApi[];
+  /** Whether this deployment lets owners add and run on their own connections. */
+  model_connections_enabled?: boolean;
+  /** No enabled connection can run anything yet; setup is gated separately. */
+  model_connection_required?: boolean;
   /**
    * Whether this user has done what the deployment asks before choosing a
    * repository: connected GitHub where users can, or been given a repository by
@@ -47,15 +65,6 @@ export interface AgentConfigApi {
    * Absent on a control plane that predates it, which then reads as before.
    */
   github_load_status?: SourceControlLoadStatus;
-}
-
-export interface AgentMcpServerApi {
-  name: string;
-  description: string;
-  /** Tools exposed. Empty means every tool the server offers. */
-  tools: string[];
-  /** Applied when a job does not choose its servers explicitly. */
-  default: boolean;
 }
 
 /**

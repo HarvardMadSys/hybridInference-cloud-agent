@@ -80,24 +80,58 @@ def test_malformed_tokens_raise(bad):
 
 def test_scopes_round_trip():
     """A minted token reports the scope it was minted with."""
-    from cloud_agent.tokens import SCOPE_FULL, SCOPE_MODEL
+    from cloud_agent.tokens import SCOPE_FULL, SCOPE_MCP
 
     full = mint_worker_token(job_id="j", attempt_id=1, lease_generation=1)
-    model = mint_worker_token(job_id="j", attempt_id=1, lease_generation=1, scope=SCOPE_MODEL)
+    mcp = mint_worker_token(job_id="j", attempt_id=1, lease_generation=1, scope=SCOPE_MCP)
     assert parse_worker_token(full)["scope"] == SCOPE_FULL
-    assert parse_worker_token(model)["scope"] == SCOPE_MODEL
+    assert parse_worker_token(mcp)["scope"] == SCOPE_MCP
     # Different scopes are different tokens: one cannot be swapped for the other.
-    assert full != model
+    assert full != mcp
+
+
+def test_the_retired_model_scope_is_no_longer_minted_or_parsed():
+    """``model`` was the pre-grant sandbox credential; the cutover ended it (#822).
+
+    Minting refuses it, and an old signed ``model`` token — the shape a job
+    started before the H4 cutover would still carry — no longer parses at all
+    rather than parsing into a scope nothing accepts.
+    """
+    from cloud_agent.tokens import (
+        _TOKEN_PREFIX,
+        InvalidAgentToken,
+        _b64encode,
+        _signing_key,
+    )
+
+    with pytest.raises(ValueError):
+        mint_worker_token(job_id="j", attempt_id=1, lease_generation=1, scope="model")
+
+    import hashlib
+    import hmac
+    import json
+
+    payload = json.dumps(
+        {"j": "j", "a": 1, "g": 1, "s": "model"},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    # Signed correctly on purpose: the refusal below must be the scope check,
+    # not a signature failure.
+    signature = hmac.new(_signing_key(), payload, hashlib.sha256).digest()
+    legacy = f"{_TOKEN_PREFIX}.{_b64encode(payload)}.{_b64encode(signature)}"
+    with pytest.raises(InvalidAgentToken):
+        parse_worker_token(legacy)
 
 
 def test_scope_is_signed_not_advisory():
     """Editing the scope claim invalidates the signature."""
-    from cloud_agent.tokens import SCOPE_MODEL
+    from cloud_agent.tokens import SCOPE_MCP
 
-    model = mint_worker_token(job_id="j", attempt_id=1, lease_generation=1, scope=SCOPE_MODEL)
+    mcp = mint_worker_token(job_id="j", attempt_id=1, lease_generation=1, scope=SCOPE_MCP)
     full = mint_worker_token(job_id="j", attempt_id=1, lease_generation=1)
-    # Splice the full token's payload onto the model token's signature.
-    forged = ".".join([model.split(".")[0], full.split(".")[1], model.split(".")[2]])
+    # Splice the full token's payload onto the mcp token's signature.
+    forged = ".".join([mcp.split(".")[0], full.split(".")[1], mcp.split(".")[2]])
     with pytest.raises(InvalidAgentToken):
         parse_worker_token(forged)
 

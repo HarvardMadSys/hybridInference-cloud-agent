@@ -26,6 +26,7 @@ export interface AgentMemoryScope {
   enabled: boolean;
   memories: AgentMemory[];
   archived: AgentMemory[];
+  archived_next_cursor?: string | null;
 }
 
 function json(method: string, body: unknown, signal?: AbortSignal): RequestInit {
@@ -49,11 +50,19 @@ function scopeQuery(repo: string | null): string {
 export async function getMemories(
   repo: string | null,
   signal?: AbortSignal,
+  archiveCursor?: string,
 ): Promise<AgentMemoryScope> {
-  const response = await fetchWithAuth(config.apiBase, `${MEMORIES}${scopeQuery(repo)}`, {
-    signal,
-    cache: 'no-store',
-  });
+  const query = new URLSearchParams();
+  if (repo) query.set('repo', repo);
+  if (archiveCursor) query.set('archive_cursor', archiveCursor);
+  const response = await fetchWithAuth(
+    config.apiBase,
+    `${MEMORIES}${query.size ? `?${query}` : ''}`,
+    {
+      signal,
+      cache: 'no-store',
+    },
+  );
   return jsonOrThrow<AgentMemoryScope>(response);
 }
 

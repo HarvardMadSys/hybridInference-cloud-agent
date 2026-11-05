@@ -134,4 +134,41 @@ describe('shared modal ownership', () => {
     fireEvent.keyDown(window, { key: 'Tab' });
     expect(screen.getByRole('button', { name: 'Close Choices' })).toHaveFocus();
   });
+
+  it('reaches a disclosure summary, and what it discloses only while it is open', () => {
+    render(
+      <Modal title="History" onClose={vi.fn()}>
+        <details>
+          <summary>Revision 2</summary>
+          <button>Restore</button>
+        </details>
+        <button>Done</button>
+      </Modal>,
+    );
+    const summary = screen.getByText('Revision 2');
+    fireEvent.keyDown(window, { key: 'Tab' });
+    expect(summary).toHaveFocus();
+    fireEvent.keyDown(window, { key: 'Tab' });
+    expect(screen.getByRole('button', { name: 'Done' })).toHaveFocus();
+
+    summary.closest('details')!.open = true;
+    fireEvent.keyDown(window, { key: 'Tab', shiftKey: true });
+    expect(screen.getByRole('button', { name: 'Restore' })).toHaveFocus();
+  });
+
+  it('moves past a control that does not take focus instead of holding Tab on it', () => {
+    render(
+      <Modal title="Refusing" onClose={vi.fn()}>
+        <button>Unfocusable</button>
+        <button>Next action</button>
+      </Modal>,
+    );
+    // A browser can refuse focus for reasons the DOM does not show.
+    screen.getByRole('button', { name: 'Unfocusable' }).focus = vi.fn();
+
+    fireEvent.keyDown(window, { key: 'Tab' });
+    expect(screen.getByRole('button', { name: 'Next action' })).toHaveFocus();
+    fireEvent.keyDown(window, { key: 'Tab', shiftKey: true });
+    expect(screen.getByRole('button', { name: 'Close Refusing' })).toHaveFocus();
+  });
 });

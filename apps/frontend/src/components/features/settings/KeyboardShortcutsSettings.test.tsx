@@ -17,6 +17,7 @@ import {
   matchesShortcut,
   parseKeyboardShortcuts,
 } from '@/lib/keyboardShortcuts';
+import { onPlatform } from '@/lib/platformTestSupport';
 import { KeyboardShortcutsSettings } from './KeyboardShortcutsSettings';
 import { keyboardShortcutsStorageKey, useKeyboardShortcuts } from './keyboardShortcutPreferences';
 
@@ -68,7 +69,7 @@ describe('keyboard shortcut settings', () => {
     renderSettings();
     expect(
       screen.getByRole('button', { name: 'Change shortcut for Toggle task list' }),
-    ).toHaveTextContent('⌘ / Ctrl + Shift + B');
+    ).toHaveTextContent('Ctrl + Shift + B');
     fireEvent.click(screen.getByRole('button', { name: 'Disable shortcut for Toggle task list' }));
     expect(monitor.result.current[0].sidebar).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Reset to defaults' }));
@@ -78,18 +79,41 @@ describe('keyboard shortcut settings', () => {
   it('keeps the old shortcut when a candidate conflicts, is reserved, or has no modifier', () => {
     renderSettings();
     const input = record();
-    fireEvent.keyDown(input, { key: 'k', metaKey: true });
+    fireEvent.keyDown(input, { key: 'k', ctrlKey: true });
     expect(screen.getByRole('alert')).toHaveTextContent('Already used by “Search chats”');
     fireEvent.keyDown(input, { key: 'w', ctrlKey: true });
     expect(screen.getByRole('alert')).toHaveTextContent('reserved');
     fireEvent.keyDown(input, { key: 'g' });
-    expect(screen.getByRole('alert')).toHaveTextContent('Use Command or Ctrl');
+    expect(screen.getByRole('alert')).toHaveTextContent('Use Ctrl with a letter');
+    // Off Apple platforms the Windows key is not the modifier shortcuts use.
+    fireEvent.keyDown(input, { key: 'g', metaKey: true });
+    expect(screen.getByRole('alert')).toHaveTextContent('Use Ctrl with a letter');
     expect(localStorage.getItem(keyboardShortcutsStorageKey(auth.userId!))).toBeNull();
     fireEvent.keyDown(input, { key: 'Escape' });
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
     expect(
       screen.getByRole('button', { name: 'Change shortcut for Toggle task list' }),
-    ).toHaveTextContent('⌘ / Ctrl + B');
+    ).toHaveTextContent('Ctrl + B');
+  });
+
+  it('records and names Command on a Mac, where Control edits text', () => {
+    onPlatform('MacIntel');
+    const view = renderSettings();
+    expect(screen.getByText(/press Command with a letter/)).toBeInTheDocument();
+    expect(screen.getByText('⌘ + Enter')).toBeInTheDocument();
+    const input = record();
+    fireEvent.keyDown(input, { key: 'g', ctrlKey: true });
+    expect(screen.getByRole('alert')).toHaveTextContent('Use Command with a letter');
+    expect(localStorage.getItem(keyboardShortcutsStorageKey(auth.userId!))).toBeNull();
+    fireEvent.keyDown(input, { key: 'g', metaKey: true });
+    expect(
+      JSON.parse(localStorage.getItem(keyboardShortcutsStorageKey(auth.userId!))!).sidebar,
+    ).toEqual({ key: 'g', shift: false });
+    view.unmount();
+    renderSettings();
+    expect(
+      screen.getByRole('button', { name: 'Change shortcut for Toggle task list' }),
+    ).toHaveTextContent('⌘ + G');
   });
 
   it('ignores IME and repeated keys, and lets Tab leave the recorder', () => {

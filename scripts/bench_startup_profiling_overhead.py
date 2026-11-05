@@ -17,7 +17,7 @@ the four real startup paths is a separate script,
 What is measured
 ----------------
 
-One *simulated* startup attempt, shaped after ``run_once`` and
+One *simulated* startup attempt, shaped after the claim in ``run_forever`` and
 ``_run_shared_live_attempt`` in ``apps/backend/cloud_agent_host/runner.py``:
 
 * one ``start_operation(operation="attempt.startup", host=..., worker_id=...)``,
@@ -123,7 +123,7 @@ import sys
 import tempfile
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -421,7 +421,7 @@ def run_descriptor(max_operations: int) -> str:
         {
             "run_id": f"bench-{uuid.uuid4().hex[:12]}",
             "operations": [STARTUP_OPERATION],
-            "expires_at": (datetime.now(timezone.utc) + RUN_LIFETIME).isoformat(),
+            "expires_at": (datetime.now(UTC) + RUN_LIFETIME).isoformat(),
             "max_operations": max_operations,
         },
         separators=(",", ":"),
@@ -628,7 +628,7 @@ def build_payload(
             "which the exporter keeps up with. Drops never block, so `onsink - on` is "
             "the enqueue path, not disk latency -- the write is on the exporter thread",
         ],
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "python": platform.python_version(),
         "platform": platform.platform(),
         "clock": "time.perf_counter_ns",

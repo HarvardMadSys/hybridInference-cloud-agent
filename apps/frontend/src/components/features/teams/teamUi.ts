@@ -19,6 +19,7 @@ const KNOWN_ERRORS = {
   invitation_closed: 'teams.error.invitationClosed',
   invitation_limit_reached: 'teams.error.invitationLimit',
   invitation_unavailable: 'teams.error.invitationUnavailable',
+  no_longer_member: 'teams.error.noLongerMember',
   not_found: 'teams.error.notFound',
   owner_cannot_leave: 'teams.error.ownerCannotLeave',
   owner_not_admitted: 'teams.error.ownerNotAdmitted',
@@ -34,7 +35,10 @@ const KNOWN_ERRORS = {
 /** A readable sentence for a team refusal, in the reader's language. */
 export function teamErrorMessage(t: Translator, cause: unknown): string {
   if (cause instanceof APIError) {
-    const key = KNOWN_ERRORS[cause.code as keyof typeof KNOWN_ERRORS];
+    // Own entries only: a code of `__proto__` must not find Object.prototype's.
+    const key = Object.hasOwn(KNOWN_ERRORS, cause.code)
+      ? KNOWN_ERRORS[cause.code as keyof typeof KNOWN_ERRORS]
+      : undefined;
     if (key) return t(key);
   }
   return t('teams.error.generic');

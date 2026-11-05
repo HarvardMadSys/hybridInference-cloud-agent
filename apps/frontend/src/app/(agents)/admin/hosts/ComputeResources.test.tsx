@@ -18,6 +18,7 @@ import AddComputeServer from './AddComputeServer';
 import ComputeConnectionForm from './ComputeConnectionForm';
 import ComputeResourcePanel from './ComputeResourcePanel';
 import ComputeResources from './ComputeResources';
+import { chooseOption } from '@/components/ui/__tests__/select';
 
 vi.mock('@/lib/api/compute', () => ({
   getComputeProviders: vi.fn(),
@@ -26,7 +27,6 @@ vi.mock('@/lib/api/compute', () => ({
   removeComputeServer: vi.fn(),
   getComputeOperations: vi.fn(),
   createComputeServer: vi.fn(),
-  preflightComputeServer: vi.fn(),
   importComputeResource: vi.fn(),
   saveComputeDeploymentProfile: vi.fn(),
   getComputeAutomaticSetup: vi.fn(),
@@ -40,6 +40,7 @@ vi.mock('@/lib/api/compute', () => ({
   rotateComputeAllocation: vi.fn(),
   actOnComputeOperation: vi.fn(),
   resolveComputeOperation: vi.fn(),
+  confirmComputeOperationAbsent: vi.fn(),
 }));
 
 vi.mock('@/lib/api/admin', () => ({ forgetAgentRunnerHost: vi.fn() }));
@@ -279,6 +280,46 @@ describe('server acquisition UI', () => {
     );
   });
 
+  it("starts a new CloudLab server's storage where small-lan mounts its data disk", async () => {
+    vi.mocked(api.createComputeServer).mockResolvedValue({ operation: operation() });
+    renderAdd();
+    expect(screen.getByLabelText('Sandbox storage path')).toHaveValue('');
+    fireEvent.click(screen.getByRole('radio', { name: /CloudLab/ }));
+    expect(screen.getByLabelText('Sandbox storage path')).toHaveValue('/mydata');
+    expect(
+      screen.getByText(/small-lan profile mounts its data disk at \/mydata/),
+    ).toBeInTheDocument();
+    // An existing experiment's disk is wherever its own profile put it.
+    fireEvent.click(screen.getByRole('radio', { name: 'Connect existing' }));
+    expect(screen.getByLabelText('Sandbox storage path')).toHaveValue('');
+    fireEvent.click(screen.getByRole('radio', { name: 'Create new' }));
+    fireEvent.change(screen.getByLabelText('Server name'), { target: { value: 'Cloud machine' } });
+    fireEvent.change(screen.getByLabelText('Project'), { target: { value: 'FAST25-AE' } });
+    fireEvent.change(screen.getByLabelText('Profile'), { target: { value: 'small-lan' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create server' }));
+    await waitFor(() =>
+      expect(api.createComputeServer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          provider_id: 'cloudlab',
+          mode: 'provision',
+          sandbox_storage_path: '/mydata',
+        }),
+      ),
+    );
+  });
+
+  it('keeps a storage path the administrator typed when the server type changes', () => {
+    renderAdd();
+    fireEvent.click(screen.getByRole('radio', { name: /CloudLab/ }));
+    fireEvent.change(screen.getByLabelText('Sandbox storage path'), {
+      target: { value: '/data/cloudlab' },
+    });
+    fireEvent.click(screen.getByRole('radio', { name: 'Connect existing' }));
+    expect(screen.getByLabelText('Sandbox storage path')).toHaveValue('/data/cloudlab');
+    fireEvent.click(screen.getByRole('radio', { name: /Existing SSH server/ }));
+    expect(screen.getByLabelText('Sandbox storage path')).toHaveValue('/data/cloudlab');
+  });
+
   it('keeps verified host keys when an older catalog does not advertise unchecked CloudLab SSH', () => {
     const providers = catalog.providers.map((provider) => {
       if (provider.id !== 'cloudlab') return provider;
@@ -312,9 +353,10 @@ describe('server acquisition UI', () => {
   it('warns when connect-existing ignores a previously selected registration policy', () => {
     renderAdd();
     fireEvent.click(screen.getByRole('radio', { name: /CloudLab/ }));
-    fireEvent.change(screen.getByLabelText('SSH host-key checking'), {
-      target: { value: 'registration' },
-    });
+    chooseOption(
+      screen.getByLabelText('SSH host-key checking'),
+      'Registered by the node at first boot',
+    );
     expect(
       screen.queryByText('CloudLab SSH host identity will not be verified.'),
     ).not.toBeInTheDocument();
@@ -419,7 +461,7 @@ describe('server acquisition UI', () => {
     },
   );
 
-  it('keeps optional CloudLab values and defaults when advanced options are collapsed', async () => {
+  it('shows optional CloudLab values and retains them with defaults on submit', async () => {
     vi.mocked(api.createComputeServer).mockResolvedValue({ operation: operation() });
     const withAdvancedFields: ComputeCatalog = {
       ...catalog,
@@ -456,13 +498,11 @@ describe('server acquisition UI', () => {
     fireEvent.change(screen.getByLabelText('Sandbox storage path'), {
       target: { value: '/mnt/cloudlab-data' },
     });
-    const advanced = screen.getByText('Advanced options');
-    const details = advanced.closest('details')!;
-    expect(details).not.toHaveAttribute('open');
-    fireEvent.click(advanced);
+    expect(screen.getByText('Additional options')).toBeVisible();
+    expect(screen.getByLabelText('Project group')).toBeVisible();
+    expect(screen.getByLabelText('Profile parameters')).toBeVisible();
+    expect(screen.getByLabelText('Project group').closest('details')).toBeNull();
     fireEvent.change(screen.getByLabelText('Project group'), { target: { value: 'research' } });
-    fireEvent.click(advanced);
-    expect(details).not.toHaveAttribute('open');
     fireEvent.click(screen.getByRole('button', { name: 'Create server' }));
     await waitFor(() =>
       expect(api.createComputeServer).toHaveBeenCalledWith(
@@ -487,22 +527,18 @@ describe('server acquisition UI', () => {
     ]);
     fillSshForm();
     const picker = screen.getByRole('combobox', { name: 'Use SSH key' });
-    expect(picker).toHaveValue('');
-    fireEvent.change(picker, { target: { value: 'other-key' } });
+    expect(picker).toHaveTextContent('Select…');
+    chooseOption(picker, 'Other key');
     expect(screen.queryByRole('combobox', { name: 'Use SSH key' })).not.toBeInTheDocument();
     expect(screen.getByText('Other key')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Change SSH key' })).toHaveFocus();
     fireEvent.click(screen.getByRole('button', { name: 'Change SSH key' }));
     expect(screen.getByRole('combobox', { name: 'Use SSH key' })).toHaveFocus();
-    fireEvent.change(screen.getByRole('combobox', { name: 'Use SSH key' }), {
-      target: { value: '__new__' },
-    });
+    chooseOption(screen.getByRole('combobox', { name: 'Use SSH key' }), 'Add a new SSH key…');
     fireEvent.change(screen.getByLabelText('SSH private key'), {
       target: { value: 'discard-this-key' },
     });
-    fireEvent.change(screen.getByRole('combobox', { name: 'Use SSH key' }), {
-      target: { value: 'other-key' },
-    });
+    chooseOption(screen.getByRole('combobox', { name: 'Use SSH key' }), 'Other key');
     fireEvent.click(screen.getByRole('button', { name: 'Add server' }));
     await waitFor(() =>
       expect(api.createComputeServer).toHaveBeenCalledWith(
@@ -542,12 +578,13 @@ describe('server acquisition UI', () => {
       'CloudLab experiment name must be 16 characters or fewer.',
     );
     expect(input).toHaveFocus();
-    expect(input.closest('details')).toHaveAttribute('open');
+    expect(input).toBeVisible();
+    expect(input.closest('details')).toBeNull();
     expect(api.createComputeServer).not.toHaveBeenCalled();
     expect(api.saveComputeConnection).not.toHaveBeenCalled();
   });
 
-  it('opens advanced options and focuses invalid JSON before saving credentials or creating a server', async () => {
+  it('focuses visible invalid JSON before saving credentials or creating a server', async () => {
     const withJson: ComputeCatalog = {
       ...catalog,
       providers: catalog.providers.map((provider) => ({
@@ -567,15 +604,13 @@ describe('server acquisition UI', () => {
     vi.mocked(api.createComputeServer).mockResolvedValue({ operation: operation() });
     renderAdd(vi.fn(), withJson);
     fillSshForm();
-    const summary = screen.getByText('Advanced options');
-    fireEvent.click(summary);
+    expect(screen.getByLabelText('Profile parameters')).toBeVisible();
     fireEvent.change(screen.getByLabelText('Profile parameters'), { target: { value: '{broken' } });
-    fireEvent.click(summary);
     fireEvent.click(screen.getByRole('button', { name: 'Add server' }));
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Profile parameters must contain valid JSON.',
     );
-    expect(summary.closest('details')).toHaveAttribute('open');
+    expect(screen.getByLabelText('Profile parameters')).toBeVisible();
     expect(screen.getByLabelText('Profile parameters')).toHaveFocus();
     expect(api.createComputeServer).not.toHaveBeenCalled();
     expect(api.saveComputeConnection).not.toHaveBeenCalled();
@@ -629,7 +664,6 @@ describe('server acquisition UI', () => {
     fireEvent.change(screen.getByLabelText('Sandbox storage path'), {
       target: { value: '/mnt/unused-data' },
     });
-    fireEvent.click(screen.getByText('Advanced options'));
     fireEvent.click(
       screen.getByRole('checkbox', { name: 'Only track this resource (skip server setup)' }),
     );
@@ -777,7 +811,6 @@ describe('server acquisition UI', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add server' }));
     await waitFor(() => expect(received).toHaveBeenCalledWith(next, true));
     expect(api.createComputeServer).toHaveBeenCalledOnce();
-    expect(api.preflightComputeServer).not.toHaveBeenCalled();
   });
 });
 
@@ -1186,6 +1219,65 @@ describe('resource dashboard', () => {
     expect(api.createComputeServer).not.toHaveBeenCalled();
   });
 
+  it('closes an unknown acquisition as never created only once the portal was checked', async () => {
+    const lost = operation({
+      state: 'unknown',
+      allowed_actions: ['retry', 'resolve', 'confirm_absent'],
+    });
+    const closed = {
+      ...lost,
+      state: 'cancelled',
+      message: 'An administrator confirmed the provider created nothing for this request.',
+      allowed_actions: [],
+    };
+    vi.mocked(api.getComputeOperations).mockResolvedValue({ operations: [lost] });
+    vi.mocked(api.confirmComputeOperationAbsent).mockImplementation(async () => {
+      vi.mocked(api.getComputeOperations).mockResolvedValue({ operations: [closed] });
+      return { operation: closed };
+    });
+    render(<ComputeResources onHostsChanged={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Activity.*1 active/ }));
+    fireEvent.click(
+      await screen.findByRole('button', { name: /acquire · CloudLab experiment · unknown/ }),
+    );
+    const dialog = await screen.findByRole('dialog', { name: 'Resource operation' });
+    expect(
+      within(dialog).getByText(/If an experiment does exist, adopt it above instead/),
+    ).toBeInTheDocument();
+    const close = within(dialog).getByRole('button', { name: 'Nothing was created' });
+    expect(close).toBeDisabled();
+    fireEvent.click(close);
+    expect(api.confirmComputeOperationAbsent).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      within(dialog).getByRole('checkbox', { name: /it has no experiment for this request/ }),
+    );
+    fireEvent.click(close);
+    await waitFor(() => expect(api.confirmComputeOperationAbsent).toHaveBeenCalledWith('op-a'));
+    expect(await within(dialog).findByText('acquire: cancelled')).toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole('button', { name: 'Nothing was created' }),
+    ).not.toBeInTheDocument();
+    expect(api.resolveComputeOperation).not.toHaveBeenCalled();
+    expect(api.actOnComputeOperation).not.toHaveBeenCalled();
+  });
+
+  it('names a server whose acquisition created nothing as not created, not disconnected', async () => {
+    vi.mocked(api.getComputeServers).mockResolvedValue({
+      allocations: [
+        allocation({ name: 'Lost request', state: 'absent', external_id: null, nodes: [] }),
+      ],
+      hosts: [],
+      active_host: null,
+      observed_at: '2026-10-04T08:00:00Z',
+    });
+    render(<ComputeResources onHostsChanged={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Show released/ }));
+    const row = screen.getByRole('listitem', { name: 'Lost request' });
+    expect(within(row).getByText('Not created')).toBeInTheDocument();
+    expect(within(row).queryByText('Disconnected')).not.toBeInTheDocument();
+  });
+
   it('keeps one resource row and its retained count when the global target changes', async () => {
     vi.mocked(api.getComputeServers).mockResolvedValue({
       allocations: [allocation()],
@@ -1558,6 +1650,153 @@ describe('resource dashboard', () => {
     expect(api.retireComputeAllocation).not.toHaveBeenCalled();
   });
 
+  it('shows the release and removal steps on the server overview', async () => {
+    render(<ComputeResources onHostsChanged={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Manage CloudLab experiment' }));
+    const dialog = screen.getByRole('dialog', { name: 'CloudLab experiment' });
+    expect(
+      within(dialog).getByRole('heading', { name: 'Remove from inventory' }),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByText('Release the cloud resource first, then remove its records.'),
+    ).toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Release server' }));
+    expect(
+      within(dialog).getByRole('button', { name: 'Preview retirement impact' }),
+    ).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: '← Overview' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Remove server' }));
+    expect(
+      within(dialog).getByRole('button', { name: 'Permanently remove server' }),
+    ).toBeDisabled();
+    expect(api.removeComputeServer).not.toHaveBeenCalled();
+    expect(api.retireComputeAllocation).not.toHaveBeenCalled();
+  });
+
+  it('offers removal alone once a server is released', async () => {
+    vi.mocked(api.getComputeServers).mockResolvedValue({
+      allocations: [
+        allocation({ name: 'Released server', state: 'terminated', allowed_actions: [] }),
+      ],
+      hosts: [],
+      active_host: null,
+      observed_at: '2026-10-04T08:00:00Z',
+    });
+    render(<ComputeResources onHostsChanged={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Show released/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Manage Released server' }));
+    const dialog = screen.getByRole('dialog', { name: 'Released server' });
+    expect(
+      within(dialog).getByText('Delete this server and its records from the inventory.'),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole('button', { name: 'Release server' }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Remove server' }));
+    expect(within(dialog).getByRole('heading', { name: 'Remove server' })).toBeInTheDocument();
+  });
+
+  it('opens the server activity when an unresolved operation holds a removal', async () => {
+    vi.mocked(api.getComputeOperations).mockResolvedValue({
+      operations: [
+        operation({ state: 'unknown', message: 'Provider result unknown', allowed_actions: [] }),
+      ],
+    });
+    vi.mocked(api.removeComputeServer).mockRejectedValue(
+      new APIError(
+        'external_operation_unresolved',
+        'The external operation is unresolved; reconcile its result before continuing.',
+        409,
+      ),
+    );
+    render(<ComputeResources onHostsChanged={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Manage CloudLab experiment' }));
+    const dialog = screen.getByRole('dialog', { name: 'CloudLab experiment' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Remove server' }));
+    expect(within(dialog).queryByRole('button', { name: 'Open activity' })).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: /I confirm permanent removal/ }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Permanently remove server' }));
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      'The external operation is unresolved; reconcile its result before continuing.',
+    );
+    expect(
+      within(dialog).queryByRole('button', { name: 'Release server' }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Open activity' }));
+    expect(within(dialog).getByRole('button', { name: 'Activity' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(within(dialog).getByRole('button', { name: /acquire · unknown/ })).toBeInTheDocument();
+  });
+
+  it('leads a removal refused for an unreleased resource to the release step', async () => {
+    vi.mocked(api.removeComputeServer).mockRejectedValue(
+      new APIError(
+        'resource_release_required',
+        "Release cloud resources or disable attached hosts before removing this server's records.",
+        409,
+      ),
+    );
+    render(<ComputeResources onHostsChanged={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Manage CloudLab experiment' }));
+    const dialog = screen.getByRole('dialog', { name: 'CloudLab experiment' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Remove server' }));
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: /I confirm permanent removal/ }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Permanently remove server' }));
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      'Release cloud resources or disable attached hosts',
+    );
+    expect(within(dialog).queryByRole('button', { name: 'Open activity' })).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Release server' }));
+    expect(
+      within(dialog).getByRole('button', { name: 'Preview retirement impact' }),
+    ).toBeInTheDocument();
+    expect(api.retireComputeAllocation).not.toHaveBeenCalled();
+  });
+
+  it('shows removal on an unmanaged server without the actions menu', async () => {
+    vi.mocked(api.getComputeServers).mockResolvedValue({
+      allocations: [],
+      hosts: [
+        {
+          host: 'old-host',
+          status: 'disabled',
+          retained_groups: 0,
+          allocation_id: null,
+          compute_node_id: null,
+        },
+      ],
+      active_host: null,
+      observed_at: '2026-10-04T08:00:00Z',
+    });
+    vi.mocked(forgetAgentRunnerHost).mockResolvedValue(
+      {} as Awaited<ReturnType<typeof forgetAgentRunnerHost>>,
+    );
+    render(
+      <ComputeResources
+        onHostsChanged={vi.fn()}
+        serverGroups={[{ name: 'Team server', members: [{ host: 'old-host' }] }]}
+      />,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Manage Team server' }));
+    const dialog = screen.getByRole('dialog', { name: 'Team server' });
+    expect(
+      within(dialog).getByText(/Stop the host agent first, then remove its records/),
+    ).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Remove server' }));
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: /I confirm permanent removal/ }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Permanently remove server' }));
+
+    await waitFor(() => expect(forgetAgentRunnerHost).toHaveBeenCalledWith('old-host'));
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Team server was removed from the server inventory.',
+    );
+  });
+
   it('removes grouped unmanaged Host records and retries only records that remain', async () => {
     const hosts = ['old-host', 'kata-host'];
     vi.mocked(api.getComputeServers).mockResolvedValue({
@@ -1683,9 +1922,7 @@ describe('resource dashboard', () => {
       target: { value: '/mnt/user-data' },
     });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Change SSH key' }));
-    fireEvent.change(within(dialog).getByLabelText('Use SSH key'), {
-      target: { value: '__new__' },
-    });
+    chooseOption(within(dialog).getByLabelText('Use SSH key'), 'Add a new SSH key…');
     fireEvent.change(within(dialog).getByLabelText('SSH private key'), {
       target: { value: 'private-key-input' },
     });

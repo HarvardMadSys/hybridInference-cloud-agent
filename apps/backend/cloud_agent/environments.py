@@ -1,6 +1,11 @@
 """Safe domain failures for owner environment configuration and execution."""
 
-from cloud_agent.source_control import SourceControlCipher, SourceControlError
+from cloud_agent.credential_cipher import (
+    USER_CREDENTIAL_ENCRYPTION_KEY,
+    CredentialCipher,
+    CredentialCipherError,
+)
+from cloud_agent.settings import setting_env
 from cloud_agent_shared.environment import ENVIRONMENT_DOMAIN
 
 
@@ -42,19 +47,22 @@ class EnvironmentEncryptionError(Exception):
     """Environment values cannot be encrypted or decrypted by this deployment."""
 
 
-class EnvironmentCipher(SourceControlCipher):
+class EnvironmentCipher(CredentialCipher):
     """Translate only environment-key failures into the environment error domain."""
 
     def __init__(self) -> None:
         """Derive the environment domain key without exposing key diagnostics."""
         try:
-            super().__init__(domain=ENVIRONMENT_DOMAIN)
-        except SourceControlError:
+            super().__init__(
+                setting_env(USER_CREDENTIAL_ENCRYPTION_KEY, "") or "",
+                domain=ENVIRONMENT_DOMAIN,
+            )
+        except CredentialCipherError:
             raise EnvironmentEncryptionError("Environment encryption is unavailable") from None
 
     def decrypt(self, value: str) -> str:
         """Read environment ciphertext with an environment-specific failure."""
         try:
             return super().decrypt(value)
-        except SourceControlError:
+        except CredentialCipherError:
             raise EnvironmentEncryptionError("Environment decryption failed") from None

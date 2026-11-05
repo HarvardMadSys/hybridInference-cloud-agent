@@ -55,12 +55,12 @@ def test_generated_keys_are_distinct_valid_and_redacted():
 
 
 def test_tunnel_accounts_are_stable_distinct_and_never_management_user():
-    names = {tunnel_username("setup-1", role) for role in ("inference", "mcp", "control")}
-    assert len(names) == 3
+    names = {tunnel_username("setup-1", role) for role in ("mcp", "control")}
+    assert len(names) == 2
     assert all(name.startswith("ca-") and len(name) < 32 and name != "admin" for name in names)
     assert tunnel_username("setup-1", "mcp") == tunnel_username("setup-1", "mcp")
     assert tunnel_username("setup-2", "mcp") not in names
-    for setup_id, role in [("bad\nMatch all", "mcp"), ("okay", "shell")]:
+    for setup_id, role in [("bad\nMatch all", "mcp"), ("okay", "shell"), ("okay", "inference")]:
         with pytest.raises(ProviderError):
             tunnel_username(setup_id, role)
 
@@ -79,14 +79,15 @@ async def test_transport_uses_fixed_script_and_json_stdin_only():
     transport.run.return_value = json.dumps({"ok": True})
     helper = SshTunnelSetup(transport=transport)
     key = generate_tunnel_key()
-    await helper.provision_gateway(SSH, key.public_key, 8080, "setup-1")
+    other = generate_tunnel_key()
+    await helper.provision_control(SSH, key.public_key, other.public_key, ENDPOINT, 8092, "setup-1")
     call = transport.run.call_args
     assert call.args[0] == SSH
     assert call.args[1].startswith("sudo -n python3 -c ")
     assert key.public_key not in call.args[1]
     params = json.loads(call.kwargs["stdin"])
-    assert params["key"] == key.public_key
-    assert params["inference_username"] == tunnel_username("setup-1", "inference")
+    assert params["mcp_key"] == key.public_key
+    assert params["mcp_username"] == tunnel_username("setup-1", "mcp")
     assert key.private_key.get_secret_value() not in call.kwargs["stdin"].decode()
 
 
@@ -107,22 +108,6 @@ async def test_discovery_parses_endpoint_and_failures_do_not_echo_remote_materia
 
 
 @pytest.mark.asyncio
-async def test_gateway_check_returns_verified_machine_identity():
-    transport = AsyncMock()
-    transport.run.return_value = json.dumps({"ok": True, "machine_identity": IDENTITY})
-    helper = SshTunnelSetup(transport=transport)
-    assert await helper.check_gateway(SSH, 8080) == IDENTITY
-    for identity in [None, "raw-machine-id", 123, "x" * 64]:
-        transport.run.return_value = json.dumps({"ok": True, "machine_identity": identity})
-        with pytest.raises(ProviderError, match="invalid machine identity"):
-            await helper.check_gateway(SSH, 8080)
-    transport.run.return_value = json.dumps({"ok": False, "reason": "PRIVATE KEY SECRET ENV"})
-    with pytest.raises(ProviderError) as exc:
-        await helper.discover_control_plane(SSH, SHA)
-    assert "PRIVATE" not in str(exc.value)
-
-
-@pytest.mark.asyncio
 async def test_control_requires_distinct_keys_ports_and_safe_identifiers():
     transport = AsyncMock()
     helper = SshTunnelSetup(transport=transport)
@@ -136,8 +121,6 @@ async def test_control_requires_distinct_keys_ports_and_safe_identifiers():
         with pytest.raises(ProviderError):
             await helper.provision_control(SSH, key, other, ENDPOINT, reverse, setup_id)
     transport.run.assert_not_awaited()
-    with pytest.raises(ProviderError):
-        await helper.check_gateway(SSH, True)
     with pytest.raises(ProviderError):
         await helper.discover_control_plane(SSH, "HEAD")
 

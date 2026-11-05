@@ -27,7 +27,6 @@ _ENV = {
     "AGENT_EGRESS_CHAT_NETWORK_POOL": "10.240.0.0/16",
     "AGENT_EGRESS_DNS_SERVER": "1.1.1.1",
     "AGENT_RELAY_NETWORK": "agent-relays",
-    "AGENT_GATEWAY_URL": "http://agent-gateway:8080",
     "AGENT_SANDBOX_MCP_URL": "http://agent-mcp:8000",
 }
 
@@ -46,11 +45,8 @@ def test_a_complete_environment_is_one_network() -> None:
     assert network.pool == ipaddress.IPv4Network("10.240.0.0/16")
     assert network.dns_server == ipaddress.IPv4Address("1.1.1.1")
     assert network.relay_network == "agent-relays"
-    assert network.relays == (
-        RelayEndpoint("agent-gateway", 8080),
-        RelayEndpoint("agent-mcp", 8000),
-    )
-    assert network.relay_hosts == ("agent-gateway", "agent-mcp")
+    assert network.relays == (RelayEndpoint("agent-mcp", 8000),)
+    assert network.relay_hosts == ("agent-mcp",)
 
 
 def test_a_configuration_error_is_a_sandbox_error() -> None:
@@ -90,14 +86,42 @@ def test_two_deployments_on_one_host_do_not_share_a_prefix_or_table() -> None:
         ("AGENT_RELAY_NETWORK", ""),
         ("AGENT_EGRESS_PROTECTED_CIDRS", "140.247.0.0/33"),
         ("AGENT_EGRESS_PROTECTED_CIDRS", "2001:db8::/32"),
-        ("AGENT_GATEWAY_URL", "agent-gateway:8080"),
-        ("AGENT_GATEWAY_URL", "http://10.0.0.5:8080"),
+        ("AGENT_SANDBOX_MCP_URL", "agent-mcp:8000"),
+        ("AGENT_SANDBOX_MCP_URL", "http://10.0.0.5:8000"),
         ("AGENT_SANDBOX_MCP_URL", "ftp://agent-mcp:8000"),
     ],
 )
 def test_an_unsafe_or_incomplete_setting_is_refused(var: str, value: str) -> None:
     with pytest.raises(SandboxNetworkError):
         _network(**{var: value})
+
+
+@pytest.mark.parametrize(
+    "pool",
+    [
+        "169.254.169.0/24",  # link-local: the cloud metadata service's block
+        "127.0.0.0/16",
+        "0.0.0.0/16",
+        "192.0.0.0/24",
+        "192.0.2.0/24",
+        "198.18.0.0/16",
+        "240.0.0.0/16",
+    ],
+)
+def test_a_pool_outside_rfc1918_is_refused_even_where_python_calls_it_private(pool: str) -> None:
+    """Group bridges are carved from RFC1918 space, and only from it.
+
+    Python's ``is_private`` also says yes to loopback, link-local and the
+    special-purpose blocks. A bridge carved from 169.254.169.0/24 would route
+    the host's own traffic for the metadata service into a sandbox's bridge.
+    """
+    with pytest.raises(SandboxNetworkError, match="RFC1918"):
+        _network(AGENT_EGRESS_CHAT_NETWORK_POOL=pool)
+
+
+@pytest.mark.parametrize("pool", ["10.240.0.0/16", "172.20.0.0/16", "192.168.100.0/24"])
+def test_each_rfc1918_block_can_hold_the_pool(pool: str) -> None:
+    assert _network(AGENT_EGRESS_CHAT_NETWORK_POOL=pool).pool == ipaddress.IPv4Network(pool)
 
 
 def test_there_is_no_mode_to_select() -> None:

@@ -6,6 +6,8 @@ import {
   DEFAULT_KEYBOARD_SHORTCUTS,
   SHORTCUT_ACTIONS,
   SHORTCUT_LABELS,
+  chordLabel,
+  hasPrimaryModifier,
   isReservedShortcut,
   shortcutConflict,
   shortcutLabel,
@@ -13,14 +15,21 @@ import {
   type ShortcutAction,
   type ShortcutBinding,
 } from '@/lib/keyboardShortcuts';
-import { useKeyboardShortcuts } from './keyboardShortcutPreferences';
+import { useApplePlatform, useKeyboardShortcuts } from './keyboardShortcutPreferences';
 
-const BUILT_IN_SHORTCUTS = [
-  ['send', 'Enter'],
-  ['newline', 'Shift + Enter'],
-  ['sendNow', '⌘ / Ctrl + Enter'],
-  ['stop', 'Esc'],
-] as const;
+function builtInShortcuts(apple: boolean) {
+  return [
+    ['send', 'Enter'],
+    ['newline', 'Shift + Enter'],
+    ['sendNow', chordLabel('Enter', apple)],
+    ['stop', 'Esc'],
+  ] as const;
+}
+
+/** The primary modifier by the name its key carries. */
+function modifierName(apple: boolean): string {
+  return apple ? 'Command' : 'Ctrl';
+}
 
 function ShortcutRow({
   action,
@@ -34,6 +43,7 @@ function ShortcutRow({
   onChange: (binding: ShortcutBinding | null) => void;
 }) {
   const t = useT();
+  const apple = useApplePlatform();
   const [recording, setRecording] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -79,12 +89,8 @@ function ShortcutRow({
                   return;
                 }
                 if (event.repeat || ['Meta', 'Control', 'Shift', 'Alt'].includes(event.key)) return;
-                if (
-                  event.metaKey === event.ctrlKey ||
-                  event.altKey ||
-                  !/^[a-z]$/i.test(event.key)
-                ) {
-                  setError(t('settings.shortcuts.invalid'));
+                if (!hasPrimaryModifier(event) || event.altKey || !/^[a-z]$/i.test(event.key)) {
+                  setError(t('settings.shortcuts.invalid', { modifier: modifierName(apple) }));
                   return;
                 }
                 const next = { key: event.key.toLowerCase(), shift: event.shiftKey };
@@ -115,7 +121,7 @@ function ShortcutRow({
             >
               {binding ? (
                 <kbd id={`shortcut-${action}-binding`} className="font-mono text-xs">
-                  {shortcutLabel(binding)}
+                  {shortcutLabel(binding, apple)}
                 </kbd>
               ) : (
                 <span id={`shortcut-${action}-binding`} className="text-sm text-muted">
@@ -155,6 +161,7 @@ export function KeyboardShortcutsSettings() {
   const { state } = useAuth();
   const userId = state.user?.id;
   const t = useT();
+  const apple = useApplePlatform();
   const [shortcuts, update] = useKeyboardShortcuts(userId);
   const customized = JSON.stringify(shortcuts) !== JSON.stringify(DEFAULT_KEYBOARD_SHORTCUTS);
 
@@ -165,7 +172,7 @@ export function KeyboardShortcutsSettings() {
     >
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <p id="shortcut-recording-help" className="text-xs leading-5 text-muted">
-          {t('settings.shortcuts.recordingHelp')}
+          {t('settings.shortcuts.recordingHelp', { modifier: modifierName(apple) })}
         </p>
         <button
           type="button"
@@ -188,7 +195,7 @@ export function KeyboardShortcutsSettings() {
       <div className="border-t border-border pt-3">
         <h2 className="text-xs font-semibold text-foreground">{t('settings.shortcuts.builtIn')}</h2>
         <dl className="mt-2 grid gap-x-6 gap-y-2 text-xs sm:grid-cols-2">
-          {BUILT_IN_SHORTCUTS.map(([action, keys]) => (
+          {builtInShortcuts(apple).map(([action, keys]) => (
             <div key={action} className="flex items-start justify-between gap-3">
               <dt className="leading-5 text-muted">{t(`settings.shortcuts.${action}`)}</dt>
               <dd className="shrink-0 rounded border border-border bg-surface-muted px-1.5 py-0.5 text-foreground">

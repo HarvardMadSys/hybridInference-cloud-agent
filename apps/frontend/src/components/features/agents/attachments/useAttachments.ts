@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useRef, useState, type ClipboardEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type ClipboardEvent } from 'react';
 import {
   DEFAULT_ATTACHMENT_LIMITS,
   formatBytes,
@@ -27,11 +27,49 @@ export interface AttachmentEntry {
   status: 'uploading' | 'ready' | 'rejected';
   id?: number;
   error?: string;
+  /**
+   * A local object URL for an image the user just handed us, so the composer
+   * can show the picture instead of its file name. It survives the upload —
+   * the staged bytes come back only through an authenticated request, and a
+   * thumbnail should not need one. Revoked with the entry.
+   */
+  previewUrl?: string;
 }
 
 /** Counts and bytes that a new file has to fit into. */
 function accepted(entries: AttachmentEntry[]): AttachmentEntry[] {
   return entries.filter((entry) => entry.status !== 'rejected');
+}
+
+/**
+ * A local URL for an image the user just handed us.
+ *
+ * Reading the file back for a data URL would copy megabytes onto the JS heap
+ * for every pasted screenshot; an object URL is a handle to bytes the browser
+ * already holds. `URL.createObjectURL` is absent outside a browser and in some
+ * test environments, and a missing preview is only a cosmetic loss, so the
+ * composer then falls back to its file chip.
+ */
+function previewUrlFor(file: File, path: string): string | undefined {
+  if (!file.type.startsWith('image/')) return undefined;
+  // A file inside a picked folder is drawn as that folder's chip, never as a
+  // picture, so a folder of screenshots must not hold a handle per file.
+  if (path.includes('/')) return undefined;
+  if (typeof URL.createObjectURL !== 'function') return undefined;
+  try {
+    return URL.createObjectURL(file);
+  } catch {
+    return undefined;
+  }
+}
+
+function revokePreview(url: string | undefined): void {
+  if (!url) return;
+  try {
+    URL.revokeObjectURL?.(url);
+  } catch {
+    // An already-revoked or otherwise unusable URL costs nothing to ignore.
+  }
 }
 
 export function useAttachments(
@@ -48,14 +86,75 @@ export function useAttachments(
   // Own reservations outside React state so remove/reset and a late upload
   // completion cannot release the same slot twice. State updaters stay pure,
   // even when React replays them in StrictMode.
-  const reservations = useRef(new Map<string, { size: number; id?: number }>());
+  const reservations = useRef(
+    new Map<string, { size: number; id?: number; previewUrl?: string }>(),
+  );
   const release = useCallback((key: string) => {
     const reservation = reservations.current.get(key);
     if (!reservation) return;
     reservations.current.delete(key);
     tally.current.count -= 1;
     tally.current.bytes -= reservation.size;
+    revokePreview(reservation.previewUrl);
     return reservation;
+  }, []);
+  // Submissions naming these uploads, and the uploads one of them delivered.
+  // An accepted upload belongs to the task or message it went with; one that
+  // never went anywhere is the user's to discard, and leaving discards it.
+  const sending = useRef(new Set<Promise<unknown>>());
+  const claimed = useRef(new Set<number>());
+  const unsent = useCallback(
+    () =>
+      [...reservations.current.values()].flatMap((reservation) =>
+        reservation.id === undefined || claimed.current.has(reservation.id) ? [] : [reservation.id],
+      ),
+    [],
+  );
+
+  // A staged upload counts against its owner's quota until it is sent or
+  // deleted, and nothing else on screen will ever offer it again: a composer
+  // left behind would otherwise hold its files' bytes, unseen, for a day.
+  useEffect(() => {
+    const onPageHide = (event: PageTransitionEvent) => {
+      // A page kept for Back returns with these files on screen. A request
+      // still in flight may name them, and cannot be waited for here.
+      if (event.persisted || sending.current.size) return;
+      for (const id of unsent()) void deleteAttachment(id, { keepalive: true }).catch(() => {});
+    };
+    window.addEventListener('pagehide', onPageHide);
+    const pending = sending.current;
+    const delivered = claimed.current;
+    const held = reservations.current;
+    return () => {
+      window.removeEventListener('pagehide', onPageHide);
+      const ids = unsent();
+      // An upload still in flight deletes itself on arrival (see `add`).
+      for (const reservation of held.values()) revokePreview(reservation.previewUrl);
+      held.clear();
+      tally.current = { count: 0, bytes: 0 };
+      // Deleting a file a submission in flight names would fail that
+      // submission, so wait for its answer; it may have delivered them.
+      void Promise.allSettled([...pending]).then(() => {
+        for (const id of ids) {
+          if (!delivered.has(id)) void deleteAttachment(id).catch(() => {});
+        }
+      });
+    };
+  }, [unsent]);
+
+  /** Track a submission naming the ready uploads, so leaving keeps them for it. */
+  const whileSending = useCallback(<T>(request: Promise<T>): Promise<T> => {
+    const named = [...reservations.current.values()].flatMap((reservation) =>
+      reservation.id === undefined ? [] : [reservation.id],
+    );
+    sending.current.add(request);
+    void request
+      .then(
+        () => named.forEach((id) => claimed.current.add(id)),
+        () => {},
+      )
+      .finally(() => sending.current.delete(request));
+    return request;
   }, []);
 
   const add = useCallback(
@@ -66,38 +165,30 @@ export function useAttachments(
         const key = `a${nextKey.current++}`;
         const path = uploadPathFor(file);
         const entry: AttachmentEntry = { key, path, size: file.size, status: 'uploading' };
+        // A rejected file gets no preview: nothing will carry it anywhere, and
+        // the reason is what the user has to read.
+        const reject = (error: string) => queued.push({ ...entry, status: 'rejected', error });
         if (!isSafeUploadPath(path, limits.max_path_length)) {
-          queued.push({ ...entry, status: 'rejected', error: t('attach.errorPath') });
+          reject(t('attach.errorPath'));
           continue;
         }
         if (file.size > limits.max_file_bytes) {
-          queued.push({
-            ...entry,
-            status: 'rejected',
-            error: t('attach.errorFileTooLarge', { limit: formatBytes(limits.max_file_bytes) }),
-          });
+          reject(t('attach.errorFileTooLarge', { limit: formatBytes(limits.max_file_bytes) }));
           continue;
         }
         if (tally.current.count + 1 > limits.max_files) {
-          queued.push({
-            ...entry,
-            status: 'rejected',
-            error: t('attach.errorTooMany', { limit: limits.max_files }),
-          });
+          reject(t('attach.errorTooMany', { limit: limits.max_files }));
           continue;
         }
         if (tally.current.bytes + file.size > limits.max_total_bytes) {
-          queued.push({
-            ...entry,
-            status: 'rejected',
-            error: t('attach.errorTotalTooLarge', { limit: formatBytes(limits.max_total_bytes) }),
-          });
+          reject(t('attach.errorTotalTooLarge', { limit: formatBytes(limits.max_total_bytes) }));
           continue;
         }
         tally.current.count += 1;
         tally.current.bytes += file.size;
-        reservations.current.set(key, { size: file.size });
-        queued.push(entry);
+        const previewUrl = previewUrlFor(file, path);
+        reservations.current.set(key, { size: file.size, previewUrl });
+        queued.push({ ...entry, previewUrl });
         void uploadAttachment(file, path)
           .then((saved) => {
             const reservation = reservations.current.get(key);
@@ -116,13 +207,14 @@ export function useAttachments(
             // tally has to describe what is actually attached, or the next
             // pick is admitted against bytes nobody is holding.
             if (!release(key)) return;
-            setEntries((old) =>
-              old.map((row) =>
-                row.key === key
-                  ? { ...row, status: 'rejected', error: getErrorMessage(cause) }
-                  : row,
-              ),
-            );
+            // `release` revoked this entry's preview with the slot; drop the
+            // dead URL so nothing tries to draw it.
+            const refused = {
+              previewUrl: undefined,
+              status: 'rejected' as const,
+              error: getErrorMessage(cause),
+            };
+            setEntries((old) => old.map((row) => (row.key === key ? { ...row, ...refused } : row)));
           });
       }
       setEntries((old) => [...old, ...queued]);
@@ -152,6 +244,7 @@ export function useAttachments(
   );
 
   const reset = useCallback(() => {
+    for (const reservation of reservations.current.values()) revokePreview(reservation.previewUrl);
     reservations.current.clear();
     tally.current = { count: 0, bytes: 0 };
     setEntries([]);
@@ -164,6 +257,7 @@ export function useAttachments(
     onPaste,
     remove,
     reset,
+    whileSending,
     /** What the create request sends. Empty until every upload has landed. */
     ids: live.flatMap((entry) => (entry.id === undefined ? [] : [entry.id])),
     uploading: live.some((entry) => entry.status === 'uploading'),

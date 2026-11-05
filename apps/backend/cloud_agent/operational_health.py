@@ -79,7 +79,7 @@ async def monitor_queue(
         await asyncio.sleep(
             interval_seconds
             if interval_seconds is not None
-            else number_setting("queue_monitor_interval_s", 60.0)
+            else number_setting("queue_monitor_interval_s")
         )
         snapshot: dict[str, int] = {}
         try:
@@ -94,8 +94,7 @@ async def monitor_queue(
             observed = event
             continue
         if event == previous and (
-            not event
-            or time.monotonic() - last_sent < number_setting("queue_alert_cooldown_s", 1800.0)
+            not event or time.monotonic() - last_sent < number_setting("queue_alert_cooldown_s")
         ):
             continue
         notification = event or "queue_recovered"

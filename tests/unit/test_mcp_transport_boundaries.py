@@ -11,12 +11,11 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from fastapi import HTTPException
-from starlette.requests import Request
 
 from cloud_agent.api import mcp_connections, mcp_relay
 from cloud_agent.mcp import catalog, host, oauth, protocol, refresh, sse, transports
 from cloud_agent.mcp.jsonrpc import decode, id_key
-from cloud_agent.mcp.models import AuthKind, AuthProfile, HeaderAuth, McpServer, Transport
+from cloud_agent.mcp.models import AuthKind, AuthProfile, HeaderAuth
 from cloud_agent.mcp.net_policy import EgressPolicy, EndpointRejected, normalize_url
 from cloud_agent.mcp.registry import resolve_connection
 from cloud_agent.mcp.transports import LegacySseTransport, RemoteTransportConfig, TransportError
@@ -146,17 +145,6 @@ def test_dispatch_rejects_forbidden_headers_in_existing_static_profiles(name):
         profile.header.render("synthetic")
     with pytest.raises(TransportError, match="reserved or forwarding"):
         transports.build_headers(_config(auth=profile), body=True)
-    request = Request({"type": "http", "headers": []})
-    server = McpServer(
-        name="example",
-        connection_id="1",
-        transport=Transport.STREAMABLE_HTTP,
-        url="https://127.0.0.1:9/mcp",
-        headers={name: "synthetic"},
-    )
-    with pytest.raises(HTTPException) as raised:
-        mcp_relay._upstream_headers(request, server)
-    assert raised.value.status_code == 503
 
 
 @pytest.mark.asyncio
@@ -484,48 +472,6 @@ async def test_compressed_responses_are_refused_before_any_body_is_pulled(reader
     await response.aclose()
     assert not body.pulled
     assert body.closed
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("content_type", ["application/json", "text/event-stream"])
-async def test_raw_relay_rejects_compression_before_returning_a_stream(monkeypatch, content_type):
-    body = _UnconsumedBody()
-    seen = []
-
-    def handler(request):
-        seen.append(request)
-        return _compressed_reply(body, content_type)
-
-    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    monkeypatch.setattr(mcp_relay, "guard_target", AsyncMock())
-    monkeypatch.setattr(mcp_relay, "build_upstream_client", lambda _: http)
-    request = Request({"type": "http", "headers": []})
-    with pytest.raises(HTTPException) as raised:
-        await mcp_relay._proxy(
-            request,
-            authorized=SimpleNamespace(
-                server=McpServer(
-                    name="example",
-                    connection_id="1",
-                    transport=Transport.STREAMABLE_HTTP,
-                    url="https://example.invalid/mcp",
-                ),
-                job_id="job",
-                attempt_id=1,
-                lease_generation=1,
-                residency_generation=None,
-            ),
-            store=SimpleNamespace(
-                credential_queries=SimpleNamespace(
-                    resolve_model_credential=AsyncMock(return_value={"job_id": "job"})
-                )
-            ),
-            method="POST",
-        )
-    assert raised.value.status_code == 502
-    assert seen[0].headers["accept-encoding"] == "identity"
-    assert not body.pulled
-    assert body.closed and http.is_closed
 
 
 @pytest.mark.asyncio

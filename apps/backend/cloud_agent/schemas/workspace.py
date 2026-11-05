@@ -88,23 +88,6 @@ class AgentWorkspaceWriteRequest(BaseModel):
     content: str = Field(..., max_length=2 * 1024 * 1024)
 
 
-class AgentTerminalRequest(BaseModel):
-    """Execute one user-entered shell command in the workspace sandbox."""
-
-    command: str = Field(..., min_length=1, max_length=8000)
-    cwd: str = Field("/workspace", min_length=1, max_length=4096)
-    timeout_seconds: float = Field(60.0, gt=0, le=120)
-
-
-class AgentTerminalResponse(BaseModel):
-    """Bounded output and resulting working directory for one command."""
-
-    output: str
-    stderr: str
-    exit_code: int
-    cwd: str
-
-
 _MAX_TERMINAL_INPUT_BYTES = 64 * 1024
 _MAX_TERMINAL_INPUT_BASE64_CHARS = 4 * ((_MAX_TERMINAL_INPUT_BYTES + 2) // 3)
 
@@ -192,11 +175,18 @@ class AgentGitCommit(BaseModel):
     authored_at: str
 
 
-class AgentGitWorkspaceResponse(BaseModel):
-    """Live diff, status, and commit data from the retained workspace."""
+class AgentGitWorkspaceMetadataResponse(BaseModel):
+    """Cheap status and revision data for invalidating an on-demand Git view."""
 
     available: bool
+    revision: str | None = Field(None, pattern=r"^[0-9a-f]{64}$")
     branch: str = ""
     changes: list[AgentGitChange] = Field(default_factory=list)
+    change_count: int = Field(0, ge=0)
+
+
+class AgentGitWorkspaceResponse(AgentGitWorkspaceMetadataResponse):
+    """Live diff, status, and commit data from the retained workspace."""
+
     patch: str = ""
     commits: list[AgentGitCommit] = Field(default_factory=list)

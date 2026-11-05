@@ -6,6 +6,17 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from cloud_agent_shared.model_connections import ANTHROPIC_MESSAGES, RESPONSES
+from cloud_agent_shared.protocol_compat import (
+    ENV_CLIENT,
+    ENV_MODEL,
+    ENV_UPSTREAM_KEY,
+    ENV_UPSTREAM_URL,
+    ORIGIN_PLACEHOLDER,
+    TOKEN_PLACEHOLDER,
+)
+from cloud_agent_shared.sandbox_mcp import SANDBOX_MCP_SERVER_NAME, SANDBOX_MCP_URL
+
 from .events import RAW, NormalizedEvent
 
 # Where the job token is handed to the agent CLI for its MCP calls. The
@@ -26,12 +37,10 @@ MCP_SERVERS_ENV = "AGENT_MCP_SERVERS"
 
 # The name every runtime knows the platform's MCP surface by.
 #
-# **One entry, not one per connection.** The relay's bare prefix is a merged
+# **One entry, not one per connection.** The relay's one endpoint is a merged
 # host: it answers ``initialize`` itself and presents every connection of the
 # job as a single catalogue whose tool and prompt names carry the connection's
-# alias. A per-connection entry would therefore present that same catalogue once
-# per connection, and a client that fanned out over them would offer every tool
-# as many times as the conversation has servers.
+# alias.
 #
 # The name is a label the CLI prefixes onto tool names, not an alias the relay
 # resolves -- aliases stay in the control plane, where a per-conversation name
@@ -41,18 +50,162 @@ MCP_SERVERS_ENV = "AGENT_MCP_SERVERS"
 MERGED_MCP_SERVER_NAME = "session"
 
 
+class ExactBaseUrl(str):
+    """An owner model connection's Base URL, to be used exactly as written.
+
+    The Gateway address a host is configured with may or may not end in
+    ``/v1``, so every adapter normalizes it to one that does. An owner's
+    provider decides its own path (``/v1``, ``/api/v1``, ``/v1beta/openai``),
+    and normalizing that would send the CLI somewhere the provider does not
+    serve. The type travels through the launch context unchanged, so the
+    adapters can tell the two apart without another parameter on every driver.
+    """
+
+    __slots__ = ()
+
+
+class MessagesBaseUrl(ExactBaseUrl):
+    """An owner connection's Base URL, for a member speaking Anthropic Messages.
+
+    Only Claude Code takes one, and only as ``ANTHROPIC_BASE_URL`` with one
+    trailing ``/v1`` dropped (``anthropic_base_url``), because its SDK appends
+    ``/v1/messages`` itself. An OpenAI-style adapter refuses it: the key and
+    URL belong to a protocol that adapter does not speak.
+    """
+
+    __slots__ = ()
+
+
+class TranslatedBaseUrl(ExactBaseUrl):
+    """A Chat Completions connection's URL, for a CLI that speaks another protocol.
+
+    The CLI is never pointed at it: the member's compatibility helper is
+    (``compat_launch``). Each subclass names the CLI's own protocol, so only
+    the adapter that speaks it accepts one.
+    """
+
+    __slots__ = ()
+    client_protocol = ""
+
+
+class ResponsesViaChatUrl(TranslatedBaseUrl):
+    """Codex's Responses, translated onto a Chat Completions connection."""
+
+    __slots__ = ()
+    client_protocol = RESPONSES
+
+
+class MessagesViaChatUrl(TranslatedBaseUrl):
+    """Claude Code's Anthropic Messages, translated onto a Chat Completions connection."""
+
+    __slots__ = ()
+    client_protocol = ANTHROPIC_MESSAGES
+
+
+class RuntimeConnectionUnsupportedError(RuntimeError):
+    """Raised when a runtime is asked to run on an owner connection it cannot speak to."""
+
+
+#: The image's interpreter running the helper the host installed (``compat_helper``).
+COMPAT_LAUNCHER = ("/usr/bin/python3", "-I", "/usr/local/libexec/model-protocol-translator.pyz")
+
+
+def connection_base_url(base_url: str, protocol: str, client_protocol: str = "") -> ExactBaseUrl:
+    """The launch-context form of an owner connection's URL, typed by its plan."""
+    if client_protocol and client_protocol != protocol:
+        translated = {RESPONSES: ResponsesViaChatUrl, ANTHROPIC_MESSAGES: MessagesViaChatUrl}
+        return translated[client_protocol](base_url)
+    if protocol == ANTHROPIC_MESSAGES:
+        return MessagesBaseUrl(base_url)
+    return ExactBaseUrl(base_url)
+
+
+def compat_launch(
+    argv: list[str],
+    env: dict[str, str],
+    url: TranslatedBaseUrl,
+    credential: str,
+    *,
+    model: str,
+) -> tuple[list[str], dict[str, str]]:
+    """The CLI's launch behind the member's compatibility helper.
+
+    The argv gains the launcher in front; the upstream's URL and key travel in
+    the environment the launcher consumes and removes before it becomes the
+    CLI (``cloud_agent_host.protocol_translator``). ``model`` locks the helper to one model;
+    empty takes the CLI's own ``--model`` argument.
+    """
+    return [*COMPAT_LAUNCHER, *argv], {
+        **env,
+        ENV_CLIENT: url.client_protocol,
+        ENV_UPSTREAM_URL: str(url),
+        ENV_UPSTREAM_KEY: credential,
+        ENV_MODEL: model,
+    }
+
+
+def compat_cli_credential(credential: str) -> str:
+    """What a translated member's CLI authenticates to its helper with.
+
+    The launcher writes the member's token here (the claim's
+    ``local_token``); the CLI never holds the provider key.
+    """
+    del credential
+    return TOKEN_PLACEHOLDER
+
+
+#: Where a translated CLI is told its provider is: the helper's loopback origin,
+#: written in by the launcher once its port is known.
+COMPAT_ORIGIN = ORIGIN_PLACEHOLDER
+
+
+def openai_base_url(base_url: str) -> str:
+    """The OpenAI-style base URL a CLI appends its own path to.
+
+    An owner connection's URL is used exactly; the Gateway's is normalized
+    to end in ``/v1``. A Messages connection is refused here, which is every
+    OpenAI-style adapter's one way to the URL: the control plane never pairs
+    them, and a runtime that got one would hand an Anthropic key to the wrong
+    protocol.
+    """
+    if isinstance(base_url, MessagesBaseUrl):
+        raise RuntimeConnectionUnsupportedError(
+            "this agent speaks an OpenAI protocol, and the connection offers Anthropic Messages"
+        )
+    if isinstance(base_url, TranslatedBaseUrl):
+        # Only Codex and Claude Code are ever translated, and each handles it
+        # before asking for a URL; anything else here is a pairing gone wrong.
+        raise RuntimeConnectionUnsupportedError(
+            "this agent is not run through the protocol compatibility helper"
+        )
+    if isinstance(base_url, ExactBaseUrl):
+        return str(base_url)
+    return base_url.rstrip("/").removesuffix("/v1") + "/v1"
+
+
+def merged_mcp_server(tool_name: object, *, separator: str) -> dict[str, str]:
+    """``{"mcp_server": ...}`` for a call named under the merged entry, else ``{}``.
+
+    Codex records the server beside a call's own name. pi's bridge and
+    OpenCode and Kilo instead prefix the entry's name onto the relay's
+    ``<alias>__<tool>``, each with its own ``separator``, so the server is read
+    back from that prefix. A relay tool may be called "task" or "list_agents",
+    and the server is what says it is not the runtime's own delegation.
+    """
+    prefix = f"{MERGED_MCP_SERVER_NAME}{separator}"
+    if isinstance(tool_name, str) and tool_name.startswith(prefix) and tool_name != prefix:
+        return {"mcp_server": MERGED_MCP_SERVER_NAME}
+    return {}
+
+
 @dataclass(frozen=True)
 class RuntimeCapabilities:
     """What a runtime can do, so the platform does not assume.
 
-    Session continuity is deliberately not declared here: it belongs to
-    ``drivers.HarnessCapabilities.continuity``, the only value the runner
-    consults when picking a turn's continuity path.
+    How a session continues, forks and takes a message mid-turn is declared by
+    the driver (``drivers.HarnessCapabilities``), not here.
     """
 
-    cost_report: bool = False
-    normalized_events: bool = False
-    tier: int = 2
     #: The reasoning-effort levels this adapter can actually put on the wire,
     #: in the CLI's own vocabulary. Empty means "cannot express effort", which
     #: is what every runtime whose flag nobody has verified declares — the
@@ -83,7 +236,7 @@ class RuntimeMCPConfig:
     connections it may be offered; the relay resolves each alias against that
     job's own bindings when the catalogue is built. The endpoints themselves no
     longer depend on those names — see :meth:`AgentRuntime.relay_urls` — so a
-    runtime is never told a per-connection address it could reconstruct an
+    runtime is never told an address it could reconstruct an
     alias from.
 
     **A separate address and a separate credential from inference.** MCP is
@@ -109,6 +262,10 @@ class RuntimeMCPConfig:
     base_url: str = ""
     #: The ``mcp``-scoped token. Never the inference credential.
     credential: str = ""
+    #: Whether the run also reaches the sandbox's MCP gateway, as the server
+    #: ``sandbox`` (cloud_agent_shared.sandbox_mcp). The gateway checks the
+    #: same credential, so every dialect's one header serves both servers.
+    sandbox: bool = False
 
 
 EMPTY_RUNTIME_MCP_CONFIG = RuntimeMCPConfig()
@@ -123,31 +280,18 @@ class RuntimeEffortUnsupportedError(RuntimeError):
 
 
 class AgentRuntime:
-    """Base adapter. Subclasses override the three questions."""
+    """Base adapter for one Agent CLI.
+
+    Each adapter builds its CLI's resident live process (``prepare_live``,
+    whose arguments differ between dialects) and describes what the CLI can
+    do. ``reasoning_effort`` is ``None`` for "let the CLI and the model
+    decide", which is every turn that predates the control and every pair
+    that cannot offer it; any other value must be one the runtime declared
+    (:meth:`_check_effort`).
+    """
 
     name = "generic"
     binary = ""
-
-    def prepare(
-        self,
-        *,
-        workdir: str,
-        task_prompt: str,
-        model: str,
-        gateway_base_url: str,
-        credential: str,
-        provides_isolation: bool = False,
-        mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
-        reasoning_effort: str | None = None,
-    ) -> tuple[list[str], dict[str, str]]:
-        """Return ``(argv, extra_env)`` to run this task headlessly.
-
-        ``reasoning_effort`` is ``None`` for "let the CLI and the model decide",
-        which is every turn that predates the control and every pair that
-        cannot offer it. A non-``None`` value must be one this runtime
-        declared; see :meth:`effort_args`.
-        """
-        raise NotImplementedError
 
     def _check_effort(self, effort: str | None) -> str | None:
         """Refuse a level this runtime never declared; return it otherwise.
@@ -185,7 +329,7 @@ class AgentRuntime:
         return []
 
     @staticmethod
-    def relay_urls(config: RuntimeMCPConfig, *, gateway_base_url: str) -> dict[str, str]:
+    def relay_urls(config: RuntimeMCPConfig, *, model_base_url: str) -> dict[str, str]:
         """Resolve one run's MCP configuration into the sandbox-local relay URL.
 
         The agent is told this service's fixed MCP-only relay URL, and nothing
@@ -194,16 +338,13 @@ class AgentRuntime:
         sandbox use these servers without ever holding their credentials.
 
         **The merged host, which is what makes a connection generic.** The
-        relay's per-connection route forwards one connection's protocol
-        untouched, so it can only serve a server that already speaks the shape
-        the CLI speaks: a legacy SSE server, a stateless-era server, or one that
-        answers a call with ``InputRequiredResult`` is a 405 or a protocol error
-        there. The bare prefix is the platform speaking MCP itself -- it opens
-        the session in whichever era the server turned out to speak, merges
-        every connection of the job into one catalogue, and routes a call back
-        to its own server. Pointing a runtime at a per-connection alias would
-        put the protocol back in the CLI's hands, which is the whole design
-        decision this replaced.
+        relay is the platform speaking MCP itself -- it opens the session in
+        whichever era the server turned out to speak, merges every connection
+        of the job into one catalogue, and routes a call back to its own
+        server. Forwarding one connection's protocol to the CLI untouched would
+        serve only a server that already speaks the shape the CLI speaks: a
+        legacy SSE server, a stateless-era server, or one that answers a call
+        with ``InputRequiredResult`` would fail there.
 
         Empty when the run has asked for no servers, which is not a relay with
         nothing in it: a run told about an endpoint it must not use would call
@@ -236,11 +377,14 @@ class AgentRuntime:
                 "MCP was requested but no relay credential was minted for this run"
             )
         base = config.base_url.rstrip("/").removesuffix("/v1")
-        return {MERGED_MCP_SERVER_NAME: f"{base}/v1/agent/mcp"}
+        endpoints = {MERGED_MCP_SERVER_NAME: f"{base}/v1/agent/mcp"}
+        if config.sandbox:
+            endpoints[SANDBOX_MCP_SERVER_NAME] = SANDBOX_MCP_URL
+        return endpoints
 
     @classmethod
     def _mcp_endpoints(
-        cls, config: RuntimeMCPConfig, *, gateway_base_url: str
+        cls, config: RuntimeMCPConfig, *, model_base_url: str
     ) -> dict[str, dict[str, Any]]:
         """The relay endpoint in Claude Code's own dialect and header syntax.
 
@@ -261,7 +405,7 @@ class AgentRuntime:
                 "timeout": 1560000,
                 "headers": {"Authorization": f"Bearer ${{{MCP_TOKEN_ENV}}}"},
             }
-            for server_id, url in cls.relay_urls(config, gateway_base_url=gateway_base_url).items()
+            for server_id, url in cls.relay_urls(config, model_base_url=model_base_url).items()
         }
 
     def parse_event(self, line: str) -> NormalizedEvent | None:
@@ -283,7 +427,7 @@ class AgentRuntime:
         self,
         config: RuntimeMCPConfig,
         *,
-        gateway_base_url: str,
+        model_base_url: str,
         env: dict[str, str],
     ) -> None:
         """Carry the relay endpoints into the run, or refuse to.
@@ -295,14 +439,14 @@ class AgentRuntime:
         with no MCP at all, so there is no override that supplies endpoints
         without a verified suppression.
         """
-        del gateway_base_url, env
+        del model_base_url, env
         self._require_empty_mcp_config(config)
 
     def _wrapper_mcp_env(
         self,
         config: RuntimeMCPConfig,
         *,
-        gateway_base_url: str,
+        model_base_url: str,
         env: dict[str, str],
     ) -> None:
         """Publish the relay endpoint for an image-shipped wrapper to merge.
@@ -312,13 +456,35 @@ class AgentRuntime:
         for itself on the turns where it is absent, which is the shape the
         suppression exists to prevent.
         """
-        endpoints = self.relay_urls(config, gateway_base_url=gateway_base_url)
+        endpoints = self.relay_urls(config, model_base_url=model_base_url)
         env[MCP_SERVERS_ENV] = json.dumps(endpoints, sort_keys=True)
         # The wrapper's config references this name; it has to resolve, to the
         # token or to the empty string when the run has no servers. Setting it
         # only sometimes would leave the reference dangling on the turns where
         # it was absent, which is the shape a stale token hides in.
         env[MCP_TOKEN_ENV] = config.credential
+
+    @staticmethod
+    def _wrapper_env(model_base_url: str, credential: str) -> dict[str, str]:
+        """The gateway and credential an image-shipped wrapper configures its CLI from.
+
+        Both the OpenAI and the Anthropic spelling, and the MCP tool timeout.
+        An owner connection speaks only the OpenAI one, so it gets only that.
+        """
+        if isinstance(model_base_url, ExactBaseUrl):
+            return {
+                "OPENAI_BASE_URL": openai_base_url(model_base_url),
+                "OPENAI_API_KEY": credential,
+                "MCP_TOOL_TIMEOUT": "1560000",
+            }
+        base = model_base_url.rstrip("/").removesuffix("/v1")
+        return {
+            "OPENAI_BASE_URL": f"{base}/v1",
+            "OPENAI_API_KEY": credential,
+            "ANTHROPIC_BASE_URL": base,
+            "ANTHROPIC_API_KEY": credential,
+            "MCP_TOOL_TIMEOUT": "1560000",
+        }
 
     @staticmethod
     def _raw(line: str, reason: str) -> NormalizedEvent:

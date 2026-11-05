@@ -3,45 +3,45 @@
 The sandbox manager needs the secret in memory. The database stores only ciphertext
 under the settings encryption key. Plaintext never stays in the JSONB column,
 and a missing key fails closed instead of writing the secret unprotected.
+
+A stored policy is read through :func:`stored_archive_policy` alone, which
+opens the key before it parses. ``SandboxArchivePolicy.from_mapping`` refuses
+the sealed key, so a reader that parsed the stored settings itself refused
+every policy with a saved key (#984).
 """
 
 from __future__ import annotations
 
-import os
-from typing import TYPE_CHECKING, Any
+import json
+from collections.abc import Mapping
+from typing import Any
 
-from cloud_agent.source_control import SourceControlCipher, SourceControlError
+from cloud_agent.credential_cipher import CredentialCipher, CredentialCipherError
+from cloud_agent.domain_cipher import settings_root_key
 from cloud_agent_shared.sandbox_archive_settings import (
     SandboxArchivePolicy,
     SandboxArchivePolicyError,
 )
 
-if TYPE_CHECKING:
-    from collections.abc import Mapping
-
 _DOMAIN = b"cloud-agent/sandbox-archive-aws/v1"
 _SECRET = "aws_secret_access_key"
 
 
-def _cipher() -> SourceControlCipher:
-    secret = (
-        os.environ.get("AGENT_SETTINGS_ENCRYPTION_KEY")
-        or os.environ.get("AGENT_SESSION_SECRET")
-        or ""
-    )
+def _cipher() -> CredentialCipher:
+    secret = settings_root_key()
     if len(secret.encode()) < 32:
         raise SandboxArchivePolicyError(
             "A settings encryption key of at least 32 bytes is required to store an AWS secret access key"
         )
     try:
-        return SourceControlCipher(secret, domain=_DOMAIN)
-    except SourceControlError as exc:
+        return CredentialCipher(secret, domain=_DOMAIN)
+    except CredentialCipherError as exc:
         raise SandboxArchivePolicyError(str(exc)) from exc
 
 
-def open_archive_secret(raw: Mapping[str, Any] | None) -> dict[str, Any]:
+def _open_archive_secret(raw: Mapping[str, Any]) -> dict[str, Any]:
     """Decrypt a stored secret, rejecting plaintext at rest."""
-    values = dict(raw or {})
+    values = dict(raw)
     secret = values.get(_SECRET)
     if secret in (None, ""):
         values.pop(_SECRET, None)
@@ -53,7 +53,7 @@ def open_archive_secret(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     ):
         try:
             values[_SECRET] = _cipher().decrypt(secret["ciphertext"])
-        except SourceControlError as exc:
+        except CredentialCipherError as exc:
             raise SandboxArchivePolicyError(
                 "stored AWS secret access key could not be decrypted"
             ) from exc
@@ -74,9 +74,26 @@ def seal_archive_storage(values: Mapping[str, Any]) -> dict[str, Any]:
     return sealed
 
 
-def load_stored_archive_policy(raw: Mapping[str, Any] | None) -> SandboxArchivePolicy:
-    """Parse one database object after decrypting its access key."""
-    return SandboxArchivePolicy.from_mapping(open_archive_secret(raw))
+def stored_archive_policy(row: Mapping[str, Any] | None) -> SandboxArchivePolicy:
+    """The archive policy an ``agent_runner_policy`` row stores, its access key opened.
+
+    The row holds the ``sandbox_archive_settings`` object and the
+    ``sandbox_archive_revision`` it is at. A missing row stores the default
+    policy. A policy that does not parse, or whose key does not open, raises
+    :class:`SandboxArchivePolicyError`, and each caller decides what that means
+    for it.
+    """
+    if row is None:
+        return SandboxArchivePolicy()
+    stored = row["sandbox_archive_settings"]
+    if isinstance(stored, (str, bytes)):
+        # asyncpg returns a JSONB column as its text.
+        stored = json.loads(stored)
+    if not isinstance(stored, Mapping):
+        raise SandboxArchivePolicyError("stored sandbox archive settings are not an object")
+    return SandboxArchivePolicy.from_mapping(
+        {**_open_archive_secret(stored), "revision": row["sandbox_archive_revision"]}
+    )
 
 
 def archive_settings_payload(

@@ -16,7 +16,6 @@ import {
   listMcpConnections,
   listMcpInvocations,
   previewMcpImport,
-  replaceMcpThreadBindings,
   saveMcpImport,
   testMcpConnection,
   validateMcpAuthorizationUrl,
@@ -232,42 +231,6 @@ describe('mcp api', () => {
     expect(fetchWithAuth).toHaveBeenCalledWith(
       expect.any(String),
       '/v1/agent/mcp/threads/thread%2Fone/bindings',
-    );
-  });
-
-  it('replaces a conversation selection wholesale', async () => {
-    fetchWithAuth.mockResolvedValue(jsonResponse({ bindings: [] }));
-
-    await replaceMcpThreadBindings('t1', [
-      {
-        connection_id: 3,
-        alias: 'wiki',
-        enabled: true,
-        tools: { search: 'allow' },
-        resources: {},
-        prompts: {},
-      },
-    ]);
-
-    expect(fetchWithAuth).toHaveBeenCalledWith(
-      expect.any(String),
-      '/v1/agent/mcp/threads/t1/bindings',
-      {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          bindings: [
-            {
-              connection_id: 3,
-              alias: 'wiki',
-              enabled: true,
-              tools: { search: 'allow' },
-              resources: {},
-              prompts: {},
-            },
-          ],
-        }),
-      },
     );
   });
 

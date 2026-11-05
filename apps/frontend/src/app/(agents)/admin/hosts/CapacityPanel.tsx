@@ -15,6 +15,7 @@
 // own first-column padding, so "Capacity · box-a" sits directly under "box-a".
 
 import type { AgentHostCapacityHistory, CapacityRange } from '@/lib/api/admin';
+import { Select } from '@/components/ui/Select';
 
 import CapacityChart from './CapacityChart';
 import {
@@ -121,18 +122,13 @@ export default function CapacityPanel({
                 <label htmlFor={switcherId} className="text-gray-500 dark:text-gray-400">
                   Curve source
                 </label>
-                <select
+                <Select
                   id={switcherId}
                   value={source ?? ''}
-                  onChange={(event) => onSourceChange(event.target.value)}
-                  className="rounded-md border border-gray-300 bg-white px-1.5 py-0.5 text-[11px] font-medium text-gray-700 dark:border-white/15 dark:bg-gray-900 dark:text-gray-200"
-                >
-                  {sources.map((option) => (
-                    <option key={option} value={option}>
-                      {option}
-                    </option>
-                  ))}
-                </select>
+                  onValueChange={onSourceChange}
+                  className="rounded-md border border-border-strong bg-surface px-1.5 py-0.5 text-[11px] font-medium text-foreground"
+                  options={sources.map((option) => ({ value: option, label: option }))}
+                />
               </span>
             ) : source === null ? (
               <span className="text-gray-500 dark:text-gray-400">

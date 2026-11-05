@@ -13,6 +13,7 @@ from tests.integration.storage.test_agent_job_store import (
     pool,  # noqa: F401 - pytest fixture
     store,  # noqa: F401 - pytest fixture
 )
+from tests.support.follow_ups import append_follow_up
 
 from cloud_agent.skills.models import SkillConflict, SkillError
 from cloud_agent.skills.selection import prompt_with_skills, resolve_skills
@@ -105,7 +106,7 @@ async def test_default_byte_limit_rolls_back_failed_update(store):
     )["default_enabled"]
 
 
-async def test_saved_turns_survive_edits_deletion_and_inherit_latest_selection(store):
+async def test_saved_turns_survive_edits_deletion_and_inherit_latest_selection(pool, store):
     skill = await create(store, default_enabled=True)
     original = await resolve_skills(store.skills, user_id="user-1", skill_ids=None)
     first = await _create_job(store, skills=original)
@@ -117,25 +118,25 @@ async def test_saved_turns_survive_edits_deletion_and_inherit_latest_selection(s
     )
     latest = await resolve_skills(store.skills, user_id="user-1", skill_ids=[skill["id"]])
     assert latest[0]["revision"] == 2
-    follow = await store.conversation_commands.create_follow_up(
-        parent_job_id=first["id"], user_id="user-1", prompt="Continue"
+    follow = await append_follow_up(
+        pool, parent_job_id=first["id"], user_id="user-1", prompt="Continue"
     )
     assert follow["skills"] == original
-    updated = await store.conversation_commands.create_follow_up(
-        parent_job_id=first["id"], user_id="user-1", prompt="Use the update", skills=latest
+    updated = await append_follow_up(
+        pool, parent_job_id=first["id"], user_id="user-1", prompt="Use the update", skills=latest
     )
     assert updated["skills"] == latest
     await store.skills.delete_skill(user_id="user-1", skill_id=skill["id"], revision=2)
-    inherited = await store.conversation_commands.create_follow_up(
-        parent_job_id=first["id"], user_id="user-1", prompt="Continue after deletion"
+    inherited = await append_follow_up(
+        pool, parent_job_id=first["id"], user_id="user-1", prompt="Continue after deletion"
     )
     assert inherited["skills"] == latest
     assert inherited["parent_job_id"] == updated["id"]
-    cleared = await store.conversation_commands.create_follow_up(
-        parent_job_id=first["id"], user_id="user-1", prompt="Clear", skills=[]
+    cleared = await append_follow_up(
+        pool, parent_job_id=first["id"], user_id="user-1", prompt="Clear", skills=[]
     )
-    after_clear = await store.conversation_commands.create_follow_up(
-        parent_job_id=first["id"], user_id="user-1", prompt="Still cleared"
+    after_clear = await append_follow_up(
+        pool, parent_job_id=first["id"], user_id="user-1", prompt="Still cleared"
     )
     assert cleared["skills"] == after_clear["skills"] == []
     assert "Selected skills (JSON):\n[]" in prompt_with_skills(
@@ -148,26 +149,26 @@ async def test_saved_turns_survive_edits_deletion_and_inherit_latest_selection(s
     assert original[0]["instructions"] == "Read the diff."
 
 
-async def test_legacy_jobs_and_followups_keep_null_selection(store):
+async def test_legacy_jobs_and_followups_keep_null_selection(pool, store):
     first = await _create_job(store)
-    follow = await store.conversation_commands.create_follow_up(
-        parent_job_id=first["id"], user_id="user-1", prompt="Continue"
+    follow = await append_follow_up(
+        pool, parent_job_id=first["id"], user_id="user-1", prompt="Continue"
     )
     assert first["skills"] is None and follow["skills"] is None
 
 
 @pytest.mark.parametrize("skill_ids", [None, []])
-async def test_no_skills_preserves_original_worker_prompt_across_turns(store, skill_ids):
+async def test_no_skills_preserves_original_worker_prompt_across_turns(pool, store, skill_ids):
     if skill_ids == []:
         # Explicitly opting out must still bypass an enabled account default.
         await create(store, default_enabled=True)
     selection = await resolve_skills(store.skills, user_id="user-1", skill_ids=skill_ids)
     first = await _create_job(store, skills=selection)
-    follow = await store.conversation_commands.create_follow_up(
-        parent_job_id=first["id"], user_id="user-1", prompt="Continue", skills=[]
+    follow = await append_follow_up(
+        pool, parent_job_id=first["id"], user_id="user-1", prompt="Continue", skills=[]
     )
-    inherited = await store.conversation_commands.create_follow_up(
-        parent_job_id=first["id"], user_id="user-1", prompt="Continue again"
+    inherited = await append_follow_up(
+        pool, parent_job_id=first["id"], user_id="user-1", prompt="Continue again"
     )
     claim = await _claim(store, worker_id="no-skills-worker", lease_ttl_seconds=60)
     assert claim["id"] == first["id"]
@@ -208,7 +209,7 @@ async def test_default_toggle_keeps_content_identity_and_fences_stale_writes(sto
     ] == 2
 
 
-async def test_library_and_job_reads_exclude_bodies_while_inheritance_keeps_them(store):
+async def test_library_and_job_reads_exclude_bodies_while_inheritance_keeps_them(pool, store):
     chosen = await create(store, instructions="中文", default_enabled=True)
     await create(store, "Unselected", instructions="x" * 65536)
     summaries = await store.skills.list_skills(user_id="user-1")
@@ -227,7 +228,8 @@ async def test_library_and_job_reads_exclude_bodies_while_inheritance_keeps_them
         assert public["skills"] == [
             {key: value for key, value in snapshots[0].items() if key != "instructions"}
         ]
-    follow = await store.conversation_commands.create_follow_up(
+    follow = await append_follow_up(
+        pool,
         parent_job_id=job["id"],
         user_id="user-1",
         prompt="Continue",

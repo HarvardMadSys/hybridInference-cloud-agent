@@ -17,7 +17,7 @@ describe('turn statistics', () => {
         statistics={{
           model_seconds: 1667,
           tool_seconds: 6490,
-          ttft_seconds: 2.9,
+          first_output_seconds: 96,
           output_tokens_per_second: 257,
           timing_source: 'message_events',
         }}
@@ -27,7 +27,7 @@ describe('turn statistics', () => {
     const section = within(screen.getByRole('region', { name: 'Turn statistics' }));
     expect(section.getByText('27m 47s')).toBeVisible();
     expect(section.getByText('108m 10s')).toBeVisible();
-    expect(section.getByText('2.9s')).toBeVisible();
+    expect(section.getByText('1m 36s')).toBeVisible();
     expect(section.getByText('257 tok/s')).toBeVisible();
     expect(section.queryByText(/Estimates from recorded activity/)).not.toBeInTheDocument();
     expect(section.getByText('LLM time')).toHaveAttribute(
@@ -38,9 +38,11 @@ describe('turn statistics', () => {
       'title',
       expect.stringContaining('Overlapping intervals are counted once'),
     );
-    expect(section.getByText('Avg time to first token (TTFT)')).toHaveAttribute(
+    expect(section.getByText('Avg time to first output')).toHaveAttribute(
       'title',
-      expect.stringContaining('averaged over runs with a recorded sample'),
+      expect.stringMatching(
+        /including sandbox, workspace and agent startup.*Not time to first token/,
+      ),
     );
     expect(section.getByText('Tokens per second (TPS)')).toHaveAttribute(
       'title',
@@ -54,7 +56,7 @@ describe('turn statistics', () => {
     {
       model_seconds: null,
       tool_seconds: null,
-      ttft_seconds: null,
+      first_output_seconds: null,
       output_tokens_per_second: null,
       timing_source: 'message_events',
     } satisfies AdminSessionStatistics,
@@ -71,13 +73,13 @@ describe('turn statistics', () => {
         statistics={{
           model_seconds: null,
           tool_seconds: 0,
-          ttft_seconds: 0.25,
+          first_output_seconds: 0.25,
           output_tokens_per_second: 0,
           timing_source: 'message_events',
         }}
       />,
     );
-    expect(screen.getByText('Unavailable')).toBeVisible();
+    expect(screen.getAllByText('Unavailable')).toHaveLength(1);
     expect(screen.getByText('0ms')).toBeVisible();
     expect(screen.getByText('250ms')).toBeVisible();
     expect(screen.getByText('0 tok/s')).toBeVisible();

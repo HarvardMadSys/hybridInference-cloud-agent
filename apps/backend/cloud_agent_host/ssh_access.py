@@ -427,7 +427,7 @@ def apply_ssh_access(
         fresh, revision, allowed, keep, clear = _newest(gate.stdout, spec.resident_slot_capacity)
         try:
             if fresh:
-                manager.sync_ssh_targets(spec, access.targets())
+                manager.network.sync_ssh_targets(spec, access.targets())
             payloads: list[tuple[int, dict[str, Any]]] = []
             for member in residents:
                 slot = slots[member.thread_id]
@@ -471,7 +471,7 @@ def apply_ssh_access(
 def _close_bridge(manager: ChatSandboxManager, spec: ChatSandboxSpec) -> None:
     """Drop every SSH exception of the group's bridge, without masking the failure."""
     with contextlib.suppress(Exception):
-        manager.sync_ssh_targets(spec, set())
+        manager.network.sync_ssh_targets(spec, set())
 
 
 __all__ = [

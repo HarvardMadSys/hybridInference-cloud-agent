@@ -18,7 +18,10 @@ export function connectionName(invocation: McpInvocationApi): string {
 
 /** What the held call does, in the sentence its card and notices use. */
 export function invocationAction(invocation: McpInvocationApi): string {
-  return `${INVOCATION_VERBS[invocation.capability_kind] ?? 'call'} ${invocation.capability_name}`;
+  const kind = invocation.capability_kind;
+  // Own entries only: a kind of `__proto__` must not find Object.prototype's.
+  const verb = Object.hasOwn(INVOCATION_VERBS, kind) ? INVOCATION_VERBS[kind] : 'call';
+  return `${verb} ${invocation.capability_name}`;
 }
 
 /**

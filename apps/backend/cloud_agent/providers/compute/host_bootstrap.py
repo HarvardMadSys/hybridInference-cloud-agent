@@ -3,7 +3,7 @@
 The first supported bootstrap OS is Ubuntu 22.04/24.04 amd64 with passwordless
 sudo and KVM. Docker/Compose and pinned Kata can be installed by the trusted
 profile. Tunnel permissions and sandbox manager routing must already be provisioned on
-the stable control-plane/gateway machines and supplied through the profile.
+the stable control-plane machine and supplied through the profile.
 """
 
 from __future__ import annotations
@@ -27,9 +27,17 @@ from cloud_agent.ports.external.host_bootstrap import (
     BootstrapResult,
     HostInventory,
     PreflightResult,
+    RecordedHostState,
     TransferResult,
 )
+from cloud_agent.providers.compute.release_scripts import _INVENTORY, _QUIESCE
 from cloud_agent.providers.compute.ssh import known_hosts_line
+from cloud_agent.providers.compute.transfer_scripts import (
+    _AUTHORIZE_TRANSFER,
+    _PUSH,
+    _REVOKE_TRANSFER_TARGET,
+    _TRANSFER_KEY,
+)
 from cloud_agent_shared.sandbox_manager_compat import manager_environment
 
 if TYPE_CHECKING:
@@ -548,7 +556,7 @@ with open(lock_path, 'a') as lock:
         run('data_mount_failed', ['systemctl', 'daemon-reload'])
     if params['install']:
         run('prerequisites_update_failed', ['apt-get', 'update'])
-        run('prerequisites_install_failed', ['apt-get', 'install', '-y', 'docker.io', 'docker-compose-v2', 'docker-buildx', 'curl', 'ca-certificates', 'xz-utils', 'zstd', 'rsync', 'nftables'])
+        run('prerequisites_install_failed', ['apt-get', 'install', '-y', 'docker.io', 'docker-compose-v2', 'docker-buildx', 'curl', 'ca-certificates', 'xz-utils', 'zstd', 'rsync', 'nftables', 'python3-yaml'])
         run('docker_start_failed', ['systemctl', 'enable', '--now', 'docker'])
         # The bundled script validates its pinned download checksum and KVM.
         run('kata_install_failed', ['bash', 'deploy/host/setup_kata_runtime.sh'])
@@ -598,9 +606,6 @@ print(json.dumps({'ready': ready, 'blocked_reasons': [] if ready else ['host_rea
 _REQUIRED_ENV = {
     "AGENT_SANDBOX_IMAGE",
     "AGENT_SANDBOX_MANAGER_TOKEN",
-    "AGENT_TUNNEL_SSH_DESTINATION",
-    "AGENT_TUNNEL_SSH_KEY",
-    "AGENT_TUNNEL_SSH_KNOWN_HOSTS",
     "AGENT_MCP_TUNNEL_SSH_DESTINATION",
     "AGENT_MCP_TUNNEL_SSH_KEY",
     "AGENT_MCP_TUNNEL_SSH_KNOWN_HOSTS",
@@ -625,15 +630,43 @@ _ALLOWED_NON_AGENT_ENV = {
     "OPENCODE_EXTRA_VERSIONS",
     "KILO_EXTRA_VERSIONS",
 }
+#: The relays a host's sandboxes and runner reach: the MCP-only relay and the
+#: control-plane API. Each has its own key and known_hosts file.
+_TUNNEL_PREFIXES = ("AGENT_MCP_TUNNEL", "AGENT_CONTROL_PLANE_TUNNEL")
 _FORBIDDEN_ENV = {
     "AGENT_COMPUTE_SECRET_KEY",
     "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY",
     "AGENT_CONTROL_TOKEN_SECRET",
     "AGENT_SESSION_SECRET",
+    "AGENT_LOCAL_SESSION_SECRET",
+    "AGENT_SMTP_PASSWORD",
     "AGENT_SANDBOX_ALLOW_OPEN_NETWORK",
     "AGENT_EGRESS_AGENT_TIER",
     "ALLOW_UNSAFE_CONTAINER_BACKEND",
 }
+
+
+#: Host settings of the removed Gateway inference relay and account mode. The
+#: host recipe refuses them too (``sandbox_host.sh``).
+_RETIRED_ENV = frozenset(
+    {
+        "AGENT_AUTH_MODE",
+        "AGENT_GATEWAY_URL",
+        "AGENT_GATEWAY_HOSTNAME",
+        "AGENT_TUNNEL_SSH_DESTINATION",
+        "AGENT_TUNNEL_SSH_PORT",
+        "AGENT_TUNNEL_SSH_KEY",
+        "AGENT_TUNNEL_SSH_KNOWN_HOSTS",
+        "AGENT_TUNNEL_REMOTE_HOST",
+        "AGENT_TUNNEL_REMOTE_PORT",
+        "AGENT_TUNNEL_LISTEN_PORT",
+    }
+)
+
+
+def _retired_inference(values: dict[str, str | None]) -> bool:
+    """Whether a profile still configures the removed Gateway inference relay or mode."""
+    return any(value for name, value in values.items() if name in _RETIRED_ENV)
 
 
 def _repack(source: bytes, assets: dict[str, bytes]) -> bytes:
@@ -729,7 +762,12 @@ _REMOTE_REASONS = frozenset(
         "unsafe_deployment_path",
         "invalid_deployment_archive",
         "host_stop_failed",
+        "host_quiesce_failed",
         "transfer_failed",
+        "host_inventory_unavailable",
+        "retained_containers_present",
+        "unmanaged_containers_present",
+        "orphan_state_present",
     }
 )
 
@@ -850,7 +888,7 @@ class SshHostBootstrap:
             "identity": identity,
         }
 
-    async def _archive(
+    async def _archive(  # noqa: C901, PLR0912 complexity baseline, #771
         self,
         profile: DeploymentProfile,
         intent: BootstrapIntent,
@@ -893,6 +931,13 @@ class SshHostBootstrap:
         }.items():
             template = template.replace("{" + key + "}", value)
         values = manager_environment(dotenv_values(stream=io.StringIO(template), interpolate=False))
+        if _retired_inference(values):
+            raise ProviderError(
+                "deployment_profile_invalid",
+                "Deployment profile still configures the removed Gateway inference relay "
+                "or account mode (AGENT_AUTH_MODE, AGENT_GATEWAY_*, AGENT_TUNNEL_SSH_* and "
+                "the relay's ports); remove those settings",
+            )
         if (
             any(
                 not name.startswith("AGENT_") and name not in _ALLOWED_NON_AGENT_ENV
@@ -949,10 +994,10 @@ class SshHostBootstrap:
                     "deployment_profile_invalid",
                     "Deployed credential files must be inside .compute-secrets/",
                 )
-            # OpenSSH refuses a private key without its final newline, and the
-            # Admin request models strip surrounding whitespace from every value.
+            # OpenSSH refuses a private key without its final newline, and
+            # profiles saved before inputs were kept exactly have lost it.
             assets[name] = ((await self._resolver.resolve(ref)).rstrip() + "\n").encode()
-        for prefix in ("AGENT_TUNNEL", "AGENT_MCP_TUNNEL", "AGENT_CONTROL_PLANE_TUNNEL"):
+        for prefix in _TUNNEL_PREFIXES:
             for suffix in ("SSH_KEY", "SSH_KNOWN_HOSTS"):
                 path = values[f"{prefix}_{suffix}"] or ""
                 relative = path.removeprefix(profile.deploy_root + "/")
@@ -1057,15 +1102,48 @@ class SshHostBootstrap:
         )
 
     async def inventory(
-        self, node: NodeObservation, profile: DeploymentProfile, intent: BootstrapIntent
+        self,
+        node: NodeObservation,
+        profile: DeploymentProfile,
+        intent: BootstrapIntent,
+        recorded: RecordedHostState | None = None,
     ) -> HostInventory:
         """Read complete Docker and retained state without deleting or adopting it."""
         params = self._params(profile, intent)
         script = (
             "sudo -n python3 -c " + shlex.quote(_INVENTORY) + " " + shlex.quote(json.dumps(params))
         )
-        result = self._json(await self._transport.run(self._connection(node), script, timeout=60))
-        return HostInventory.model_validate(result)
+        # The records grow with the Host's history; the command line must not.
+        records = (recorded or RecordedHostState()).model_dump_json().encode()
+        result = self._json(
+            await self._transport.run(self._connection(node), script, stdin=records, timeout=60)
+        )
+        return HostInventory.model_validate(
+            {**result, "blocked_reasons": _remote_reasons(result.get("blocked_reasons"))}
+        )
+
+    async def quiesce(
+        self, node: NodeObservation, profile: DeploymentProfile, intent: BootstrapIntent
+    ) -> int:
+        """Stop a releasing node's runner and remove the self-test sandboxes it left."""
+        params = self._params(profile, intent)
+        script = (
+            "sudo -n python3 -c " + shlex.quote(_QUIESCE) + " " + shlex.quote(json.dumps(params))
+        )
+        result = self._json(
+            await self._transport.run(
+                self._connection(node), script, timeout=_QUIESCE_TIMEOUT_SECONDS
+            )
+        )
+        removed = result.get("probes_removed")
+        if result.get("quiesced") is not True or not isinstance(removed, int):
+            reason = _remote_reason(result.get("reason"))
+            raise ProviderError(
+                reason or "host_quiesce_failed",
+                "The releasing Host's runner could not be stopped",
+                retryable=reason in {None, "host_quiesce_failed"},
+            )
+        return removed
 
     async def stop(
         self, node: NodeObservation, profile: DeploymentProfile, intent: BootstrapIntent
@@ -1201,7 +1279,10 @@ _TRANSFER_TIMEOUT_SECONDS = 4 * 3600
 # The sandbox manager's drain must end early enough inside the stop's SSH deadline to
 # leave time for the runner, the remaining containers and the daemons.
 _STOP_TIMEOUT_SECONDS = 900
+#: The runner's own 60 second stop grace, with room for Docker around it.
+_QUIESCE_TIMEOUT_SECONDS = 180
 _SANDBOX_MANAGER_DRAIN_SECONDS = 600
+
 
 _STOP = r"""
 import json, subprocess, sys
@@ -1247,200 +1328,6 @@ ok = not active and not shims
 print(json.dumps({'stopped': ok, 'reason': None if ok else 'host_stop_failed'}))
 """
 
-_TRANSFER_KEY = (
-    "umask 077; d=/var/lib/cloud-agent-transfer; mkdir -p $d; "
-    "[ -f $d/key ] || ssh-keygen -q -t ed25519 -N '' -C ca-transfer -f $d/key; cat $d/key.pub"
-)
-
-# The forced command of the transfer key on the target. The copy in _PUSH sends
-# only rsync's receiving server, through sudo, into the directories it copies;
-# anything else — a shell, another program, rsync --sender reading the target's
-# files back, another destination — is refused before it runs. Receiving into
-# /var/lib as root still trusts the source with the target's container state,
-# which is what the copy is for, but no longer with an interactive root shell.
-# Server arguments are what rsync 3.2.7 (Ubuntu 22.04 and 24.04) sends for the
-# _PUSH options: one short-option cluster ending in its capability string, a
-# few long options, then "." and the destination.
-_TRANSFER_RECEIVE = r"""
-import os, re, shlex, sys
-destinations = {
-    '/var/lib/',
-    '/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/',
-    '/var/lib/containerd/io.containerd.content.v1.content/blobs/sha256/',
-}
-options = {'--stats', '--numeric-ids', '--delete', '--no-r'}
-try:
-    argv = shlex.split(os.environ.get('SSH_ORIGINAL_COMMAND', ''))
-except ValueError:
-    argv = []
-if not (
-    len(argv) >= 7
-    and argv[:4] == ['sudo', '-n', 'rsync', '--server']
-    and argv[-2] == '.'
-    and argv[-1] in destinations
-    and all(
-        re.fullmatch(r'-[ldHogDtpAXrRxS]+(?:e\.[A-Za-z]+)?', flag) or flag in options
-        for flag in argv[4:-2]
-    )
-):
-    sys.stderr.write('this key only receives the Host state transfer\n')
-    raise SystemExit(1)
-os.execvp('sudo', argv)
-"""
-
-# Runs as the management user on the target; sudo only for daemon and state steps.
-_AUTHORIZE_TRANSFER = r"""
-import ipaddress, json, re, socket, subprocess, sys
-from pathlib import Path
-params = json.loads(sys.argv[1])
-def refuse(reason):
-    print(json.dumps({'authorized': False, 'reason': reason}))
-    raise SystemExit(0)
-marker = subprocess.run(['sudo', '-n', 'cat', params['root'] + '/.compute-identity.json'], capture_output=True, text=True)
-try:
-    if marker.returncode or json.loads(marker.stdout) != params['identity']:
-        refuse('deployment_identity_conflict')
-except ValueError:
-    refuse('deployment_identity_conflict')
-# Checked before anything here changes. The key works only from the source, as
-# this machine resolves the address the control plane reaches it at; sshd
-# matches from= against the peer's address.
-try:
-    sources = sorted({
-        str(ipaddress.ip_address(info[4][0].split('%')[0]))
-        for info in socket.getaddrinfo(params['source'], None, type=socket.SOCK_STREAM)
-    })
-except (OSError, UnicodeError, ValueError):
-    sources = []
-if not sources:
-    refuse('transfer_failed')
-receive = Path.home() / '.ssh' / 'ca-transfer-receive'
-if not all(re.fullmatch(r'[A-Za-z0-9_./+-]+', path) for path in (sys.executable, str(receive))):
-    refuse('transfer_failed')
-quiet = {'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL}
-if subprocess.run(['sudo', '-n', 'systemctl', 'stop', 'docker.socket', 'docker', 'containerd'], **quiet).returncode:
-    refuse('transfer_failed')
-if params['first']:
-    # A staged node holds no Host state yet. Empty its fresh daemons so the
-    # copy becomes an exact replica rather than a merge.
-    for path in ('/var/lib/docker', '/var/lib/containerd'):
-        if subprocess.run(['sudo', '-n', 'find', path, '-xdev', '-mindepth', '1', '-delete'], **quiet).returncode:
-            refuse('transfer_failed')
-ssh = Path.home() / '.ssh'
-ssh.mkdir(mode=0o700, exist_ok=True)
-receive.unlink(missing_ok=True)
-receive.write_text(RECEIVE_PROGRAM)
-receive.chmod(0o700)
-keys = ssh / 'authorized_keys'
-current = keys.read_text() if keys.exists() else ''
-entry = (
-    'restrict,from="' + ','.join(sources) + '",command="' + sys.executable + ' -I '
-    + str(receive) + '" ' + params['key']
-)
-# One transfer key at a time: an entry from an earlier attempt, or from a
-# control plane that authorized it without these restrictions, is replaced.
-kept = [line for line in current.splitlines() if not line.endswith(' ca-transfer')]
-keys.write_text(''.join(line + '\n' for line in [*kept, entry]))
-keys.chmod(0o600)
-print(json.dumps({'authorized': True}))
-""".replace("RECEIVE_PROGRAM", repr(_TRANSFER_RECEIVE))
-
-_REVOKE_TRANSFER_TARGET = (
-    "rm -f ~/.ssh/ca-transfer-receive; "
-    'f=~/.ssh/authorized_keys; [ -f "$f" ] || exit 0; '
-    '{ grep -v \' ca-transfer$\' "$f" || true; } > "$f.ca"; '
-    'mv "$f.ca" "$f"; chmod 600 "$f"'
-)
-
-# Runs as root on the source. The large directories of many independent
-# entries (snapshots and content blobs) are spread over parallel streams; one
-# more stream carries everything else. -x keeps each stream on the data disk:
-# running containers' merged root file systems are mounted under
-# /var/lib/docker/rootfs and must never be copied as files.
-_PUSH = r"""
-import json, os, re, subprocess, sys, tempfile, threading
-from pathlib import Path
-params = json.loads(sys.argv[1])
-work = Path('/var/lib/cloud-agent-transfer')
-known = work / 'known_hosts'
-known.write_bytes(sys.stdin.buffer.read())
-known.chmod(0o600)
-ssh = ' '.join([
-    'ssh', '-F', '/dev/null', '-i', str(work / 'key'), '-p', str(int(params['port'])),
-    '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'IdentityAgent=none',
-    '-o', 'StrictHostKeyChecking=yes', '-o', 'UserKnownHostsFile=' + str(known),
-    '-o', 'GlobalKnownHostsFile=/dev/null', '-o', 'UpdateHostKeys=no',
-    '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=8',
-])
-final = bool(params['final'])
-destination = params['user'] + '@' + params['address'] + ':'
-common = ['-HAXSx', '--numeric-ids', '--stats', '-e', ssh, '--rsync-path=sudo -n rsync']
-if final:
-    common.append('--delete')
-large = ['/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots',
-         '/var/lib/containerd/io.containerd.content.v1.content/blobs/sha256']
-jobs = []
-if final:
-    # Remove entries the source no longer has; the streams below only sync
-    # the entries that still exist. -d updates this one level without recursing.
-    for path in large:
-        if os.path.isdir(path):
-            jobs.append(['rsync', '-dlptgoD', *common, path + '/', destination + path + '/'])
-cleanup, jobs = jobs, []
-jobs.append(['rsync', '-a', *common,
-             *[part for path in large for part in ('--exclude', path.removeprefix('/var/lib') + '/*')],
-             '/var/lib/docker', '/var/lib/containerd', destination + '/var/lib/'])
-lists = []
-for path in large:
-    if not os.path.isdir(path):
-        continue
-    entries = sorted(os.listdir(path))
-    count = max(1, min(int(params['streams']), len(entries)))
-    for index in range(count):
-        chunk = entries[index::count]
-        if not chunk:
-            continue
-        listing = tempfile.NamedTemporaryFile('w', dir=work, delete=False)
-        listing.write('\n'.join(chunk) + '\n')
-        listing.close()
-        lists.append(listing.name)
-        jobs.append(['rsync', '-a', '-r', *common, '--files-from=' + listing.name,
-                     path + '/', destination + path + '/'])
-results = []
-lock = threading.Lock()
-def run(command):
-    result = subprocess.run(command, capture_output=True, text=True)
-    with lock:
-        results.append(result)
-for command in cleanup:
-    run(command)
-pending = list(jobs)
-def worker():
-    while True:
-        with lock:
-            if not pending:
-                return
-            command = pending.pop(0)
-        run(command)
-threads = [threading.Thread(target=worker) for _ in range(max(1, int(params['streams'])))]
-for thread in threads:
-    thread.start()
-for thread in threads:
-    thread.join()
-for name in lists:
-    os.unlink(name)
-# 24: files vanished while a running source was copied. Only a final copy,
-# taken from a stopped source, must be complete.
-allowed = {0} if final else {0, 24}
-copied = all(result.returncode in allowed for result in results)
-total = 0
-for result in results:
-    match = re.search(r'Total transferred file size: ([0-9,]+)', result.stdout)
-    if match:
-        total += int(match.group(1).replace(',', ''))
-print(json.dumps({'copied': copied, 'bytes': total, 'streams': len(threads)}))
-"""
-
 _WIPE = r"""
 import json, shutil, subprocess, sys
 from pathlib import Path
@@ -1462,54 +1349,4 @@ if state.exists() and not state.is_symlink():
 # Release reads an empty, running daemon as proof that nothing is retained.
 started = subprocess.run(['systemctl', 'start', 'containerd', 'docker'], **quiet).returncode == 0
 print(json.dumps({'wiped': removed and started}))
-"""
-
-
-_INVENTORY = r"""
-import json, shutil, subprocess, sys
-from pathlib import Path
-params = json.loads(sys.argv[1])
-root = Path(params['root'])
-marker = root / '.compute-identity.json'
-result = {'complete': False, 'retained_containers': 0, 'unknown_containers': 0, 'orphan_state': False, 'blocked_reasons': []}
-if root.exists() and any(root.iterdir()) and (not marker.is_file() or marker.is_symlink() or json.loads(marker.read_text()) != params['identity']):
-    result['blocked_reasons'].append('deployment_identity_conflict')
-elif not shutil.which('docker'):
-    result['orphan_state'] = any(Path(p).exists() for p in ('/var/lib/docker', '/var/lib/containerd', '/var/lib/cloud-agent', '/var/lib/hybridinference'))
-    result['complete'] = not result['orphan_state']
-else:
-    def output(args):
-        return subprocess.check_output(args, stderr=subprocess.DEVNULL, text=True).strip()
-    try:
-        ids = output(['docker', 'ps', '-aq']).split()
-        containers = json.loads(output(['docker', 'inspect', *ids])) if ids else []
-        project = params.get('project') or 'ca-' + params['identity']['node_id'].replace('-', '').lower()
-        for container in containers:
-            labels = (container.get('Config') or {}).get('Labels') or {}
-            if labels.get('org.freeinference.chat-sandbox') == 'true':
-                result['retained_containers'] += 1
-            elif labels.get('com.docker.compose.project') != project:
-                result['unknown_containers'] += 1
-        networks = output(['docker', 'network', 'ls', '-q', '--filter', 'label=org.freeinference.chat-sandbox-network=true'])
-        volumes = output(['docker', 'volume', 'ls', '-q'])
-        state_root = Path('/var/lib/cloud-agent')
-        state = state_root / params['identity']['host']
-        # Only this exact deployment's enrollment credential and flock file
-        # are inert. Another host, nested same-named file, or a symlink can
-        # hide retained state and must never be excused by its basename.
-        inert = {state / 'credential', state / '.enroll.lock'}
-        paths = list(state_root.rglob('*')) if state_root.exists() else []
-        unexpected = state_root.is_symlink() or any(p.is_symlink() or (not p.is_dir() and p not in inert) for p in paths)
-        legacy = Path('/var/lib/hybridinference')
-        result['orphan_state'] = bool(networks or volumes or unexpected or (legacy.exists() and any(legacy.iterdir())))
-        result['complete'] = True
-    except (subprocess.SubprocessError, ValueError):
-        result['blocked_reasons'].append('host_inventory_unavailable')
-if result['retained_containers']:
-    result['blocked_reasons'].append('retained_containers_present')
-if result['unknown_containers']:
-    result['blocked_reasons'].append('unmanaged_containers_present')
-if result['orphan_state']:
-    result['blocked_reasons'].append('orphan_state_present')
-print(json.dumps(result))
 """

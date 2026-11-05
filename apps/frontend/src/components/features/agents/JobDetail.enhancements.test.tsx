@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { offering, TEST_CONNECTION } from '@/test/connectionConfig';
 import '@testing-library/jest-dom/vitest';
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -31,9 +32,16 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   getAgentJobUsage: vi.fn().mockResolvedValue(null),
   refreshAgentJobUsage: vi.fn().mockResolvedValue(null),
   getAgentThreadStats: vi.fn().mockResolvedValue(null),
+  getAgentThreadModelTtft: vi.fn().mockResolvedValue(null),
   listAgentTerminals: vi.fn().mockResolvedValue([]),
   getAgentJobFiles: vi.fn().mockResolvedValue({ path: '', kind: 'directory', entries: [] }),
   getAgentJobGit: vi.fn().mockResolvedValue({ available: false }),
+  getAgentJobGitMetadata: vi.fn().mockResolvedValue({
+    available: false,
+    branch: '',
+    changes: [],
+    change_count: 0,
+  }),
 }));
 
 vi.mock('@/lib/api/mcp', async (importOriginal) => ({
@@ -75,8 +83,7 @@ function job(threadId = 'thread-first', overrides: Partial<AgentJob> = {}): Agen
     branch: 'agent/task',
     runtime: 'claude-code',
     model: 'qwen-test',
-    spentUsd: 0,
-    hasLedger: false,
+    modelConnectionId: TEST_CONNECTION,
     timeoutLabel: '',
     sandbox: 'container',
     attempts: [{ no: 1, status: 'live' }],
@@ -85,7 +92,6 @@ function job(threadId = 'thread-first', overrides: Partial<AgentJob> = {}): Agen
     diffFiles: [],
     diffStat: { add: 0, del: 0 },
     gates: [],
-    usage: { tokensIn: '0', tokensOut: '0', cachePct: 0, turns: 1 },
     ...overrides,
   };
 }
@@ -134,7 +140,7 @@ beforeEach(() => {
   vi.mocked(getAgentConfig).mockResolvedValue({
     repos: ['owner/repository'],
     runtimes: ['claude-code'],
-    models: ['qwen-test'],
+    ...offering(['qwen-test']),
     github_connected: true,
     github_install_url: null,
   });
@@ -418,6 +424,58 @@ describe('visible send modes', () => {
     await waitFor(() => expect(getThreadQueue).toHaveBeenCalled());
     expect(screen.getByRole('button', { name: mode.label })).toBeVisible();
     expect(screen.queryByRole('button', { name: 'Steer now' })).not.toBeInTheDocument();
+  });
+
+  it('queues, never steers, a draft that chose another model or source', async () => {
+    const mine = 'mconn_0123456789abcdef0123456789abcdef';
+    vi.mocked(getAgentConfig).mockResolvedValue({
+      repos: ['owner/repository'],
+      runtimes: ['claude-code'],
+      model_connections_enabled: true,
+      model_connections: [
+        ...(offering(['qwen-test']).model_connections ?? []),
+        {
+          id: mine,
+          name: 'Other',
+          models: ['qwen-test'],
+          model_runtimes: { 'qwen-test': ['claude-code'] },
+        },
+      ],
+      github_connected: true,
+      github_install_url: null,
+    });
+    vi.mocked(submitThreadMessage).mockResolvedValue({
+      pending: pending('Use my key', { model: 'qwen-test', model_connection_id: mine }),
+      job: null,
+    });
+    render(<JobDetail job={job()} userId="alice" />);
+    await screen.findByRole('button', { name: 'Steer now' });
+    // The standing help sits in Prompt options; the box is still described by it.
+    expect(screen.getByLabelText('Add a follow-up')).toHaveAccessibleDescription(
+      /to add to this turn/,
+    );
+    // The same model ID on another connection is another source, billed elsewhere.
+    fireEvent.click(screen.getByLabelText('Model for this turn'));
+    fireEvent.click(screen.getByRole('option', { name: 'qwen-test · Other' }));
+    expect(screen.queryByRole('button', { name: 'Steer now' })).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/runs as the next turn instead of joining the running one/),
+    ).toBeVisible();
+    expect(screen.getByLabelText('Add a follow-up')).toHaveAccessibleDescription(
+      /runs as the next turn instead of joining the running one/,
+    );
+    const box = screen.getByLabelText('Add a follow-up');
+    fireEvent.change(box, { target: { value: 'Use my key' } });
+    fireEvent.keyDown(box, { key: 'Enter', ctrlKey: true });
+    fireEvent.keyDown(box, { key: 'Enter', metaKey: true });
+    await waitFor(() =>
+      expect(submitThreadMessage).toHaveBeenCalledWith('thread-first', {
+        prompt: 'Use my key',
+        model: 'qwen-test',
+        model_connection_id: mine,
+      }),
+    );
+    expect(sendPendingMessageNow).not.toHaveBeenCalled();
   });
 
   it('hides steering while a file is uploading or attached and queues the file on the shortcut', async () => {

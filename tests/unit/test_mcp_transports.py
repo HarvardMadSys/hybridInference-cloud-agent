@@ -36,6 +36,7 @@ import httpx
 import pytest
 
 from cloud_agent.mcp import transports
+from cloud_agent.settings import number_setting
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -102,7 +103,7 @@ def _reply(request: httpx.Request, result: Any, **headers: str) -> httpx.Respons
 async def test_existing_transport_uses_updated_default_timeouts_and_keeps_overrides(monkeypatch):
     values = {"mcp_request_timeout_s": 120.0, "mcp_connect_timeout_s": 10.0}
     monkeypatch.setattr(
-        transports, "number_setting", lambda name, default=None: values.get(name, default)
+        transports, "number_setting", lambda name: values.get(name, number_setting(name))
     )
     timeouts = []
 

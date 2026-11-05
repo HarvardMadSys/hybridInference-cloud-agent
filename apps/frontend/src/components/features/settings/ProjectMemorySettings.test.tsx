@@ -6,6 +6,7 @@ import { LocaleProvider } from '@/components/providers/LocaleProvider';
 import { getMemories, getMemoryProjects } from '@/lib/api/agentMemory';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 import { ProjectMemorySettings } from './ProjectMemorySettings';
+import { chooseOption } from '@/components/ui/__tests__/select';
 
 vi.mock('@/components/providers/AuthProvider', () => ({
   useAuth: () => ({ state: { user: { id: 'alice' } } }),
@@ -50,7 +51,7 @@ describe('project memory', () => {
     await waitFor(() =>
       expect(getMemories).toHaveBeenCalledWith('alice/api', expect.any(AbortSignal)),
     );
-    fireEvent.change(select, { target: { value: 'alice/web' } });
+    chooseOption(select, 'alice/web');
     await waitFor(() =>
       expect(getMemories).toHaveBeenCalledWith('alice/web', expect.any(AbortSignal)),
     );

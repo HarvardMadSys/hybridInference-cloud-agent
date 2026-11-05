@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from fastapi import FastAPI
+from tests.support.owners import use_session_secret
 from tests.unit.test_mcp_host_sessions_and_results import Transport, session
 from tests.unit.test_mcp_protocol_and_authorization import _connection
 from tests.unit.test_mcp_transports import _client, _config
@@ -251,10 +252,16 @@ async def test_reaper_bounds_concurrent_database_lookups(monkeypatch):
 )
 async def test_maintenance_checks_current_job_and_connection_authority(monkeypatch, state):
     built, (current,) = await _opened(monkeypatch, "job:1")
-    binding = {"connection_id": 7, "owner_id": "owner", "enabled": state != "disabled"}
+    binding = {
+        "connection_id": 7,
+        "owner_id": "owner",
+        "enabled": state != "disabled",
+        "connection_status": "disabled" if state == "disconnected" else "connected",
+        "deleted_at": 1 if state == "deleted" else None,
+    }
     identity = {
         "user_id": "owner",
-        "mcp_bindings": [] if state == "removed" else [binding],
+        "mcp_bindings": [] if state in {"removed", "missing"} else [binding],
     }
     store = SimpleNamespace(
         credential_queries=SimpleNamespace(
@@ -280,6 +287,62 @@ async def test_maintenance_checks_current_job_and_connection_authority(monkeypat
     await mcp_runtime.close_host()
     assert current.transport.closed
     assert mcp_runtime._HOST_INSTANCE is None
+
+
+async def test_maintenance_reuses_one_fenced_binding_read_per_attempt(monkeypatch):
+    built = host.McpHost()
+    bindings = []
+    for i in range(100):
+        current = session(Transport())
+        current.key = host.SessionKey(
+            connection_id=str(i), member="job:1", owner_lease_generation=3
+        )
+        built._sessions[current.key.handle()] = current
+        bindings.append(
+            {
+                "connection_id": i,
+                "owner_id": "owner",
+                "enabled": True,
+                "connection_status": "connected",
+                "deleted_at": None,
+            }
+        )
+    resolve = AsyncMock(return_value={"user_id": "owner", "mcp_bindings": bindings})
+    store = SimpleNamespace(credential_queries=SimpleNamespace(resolve_model_credential=resolve))
+    monkeypatch.setattr(mcp_runtime, "_HOST_INSTANCE", built)
+    await mcp_runtime.reap_host_sessions(store)
+    resolve.assert_awaited_once_with(job_id="job", attempt_id=1, lease_generation=3)
+    assert len(built._sessions) == 100
+    # Never cache authority across passes: disabling a connection takes effect.
+    bindings[0]["connection_status"] = "disabled"
+    await mcp_runtime.reap_host_sessions(store)
+    assert resolve.await_count == 2
+    assert len(built._sessions) == 99
+    await built.aclose()
+
+
+async def test_reaping_deadline_rotates_past_a_stalled_prefix(monkeypatch):
+    built, sessions = await _opened(monkeypatch, *(f"job-{i}:1" for i in range(9)))
+    monkeypatch.setattr(host, "SESSION_REAP_DEADLINE_S", 0.02)
+    active = 0
+
+    async def live(key):
+        nonlocal active
+        if key == sessions[-1].key:
+            return False
+        active += 1
+        try:
+            await asyncio.Event().wait()
+        finally:
+            active -= 1
+
+    await asyncio.wait_for(built.reap_inactive(live), timeout=1)
+    assert not sessions[-1].transport.closed
+    assert active == 0
+    await asyncio.wait_for(built.reap_inactive(live), timeout=1)
+    assert sessions[-1].transport.closed
+    assert active == 0
+    await built.aclose()
 
 
 async def test_maintenance_retries_after_expiry_failure_and_stops_on_cancel(monkeypatch):
@@ -313,11 +376,13 @@ async def test_maintenance_retries_after_expiry_failure_and_stops_on_cancel(monk
 async def test_relay_lifespan_runs_maintenance_and_releases_upstream_sessions(monkeypatch):
     built, (current,) = await _opened(monkeypatch, "job:1")
     monkeypatch.setattr(mcp_runtime, "_HOST_INSTANCE", built)
+    use_session_secret(monkeypatch)
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "relay-lifespan-encryption-key")
     monkeypatch.setenv("AGENT_DATABASE_URL", "postgresql://test-only")
     monkeypatch.setattr("asyncpg.create_pool", AsyncMock(return_value=AsyncMock()))
     monkeypatch.setattr("cloud_agent.settings.initialize_settings", AsyncMock())
     monkeypatch.setattr(
-        "cloud_agent.identity_namespace.ensure_gateway_namespace", AsyncMock(return_value=None)
+        "cloud_agent.identity_namespace.ensure_local_namespace", AsyncMock(return_value=None)
     )
     started = asyncio.Event()
 
@@ -330,7 +395,7 @@ async def test_relay_lifespan_runs_maintenance_and_releases_upstream_sessions(mo
     async with lifespan(app, background=False):
         await asyncio.wait_for(started.wait(), timeout=0.5)
         assert app.state.reaper_task is None
-        assert app.state.publish_task is None
+        assert app.state.sandbox_deletion_task is None
         assert not current.transport.closed
     assert app.state.mcp_maintenance_task.cancelled()
     assert current.transport.closed

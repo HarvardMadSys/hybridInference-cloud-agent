@@ -250,4 +250,12 @@ describe('describeWhen', () => {
     expect(describeWhen('2026-10-08T09:00:00Z', now)).toBe('Yesterday');
     expect(describeWhen('2026-10-01T09:00:00Z', now)).not.toMatch(/ago/);
   });
+
+  it('counts days in UTC, as every admin page does, so Yesterday is only the day before', () => {
+    const now = Date.parse('2026-10-09T12:00:00Z');
+    expect(describeWhen('2026-10-08T00:30:00Z', now)).toBe('Yesterday');
+    // Under two days old, but two days back.
+    expect(describeWhen('2026-10-07T13:00:00Z', now)).toBe('Oct 7');
+    expect(describeWhen('2026-10-07T23:30:00Z', Date.parse('2026-10-09T00:30:00Z'))).toBe('Oct 7');
+  });
 });

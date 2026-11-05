@@ -172,6 +172,21 @@ def _json_or_null(value: list[int] | None) -> str | None:
     return None if value is None else json.dumps(value)
 
 
+def _steerable_into(message: Any, live: Any) -> bool:
+    """Whether ``message`` may go into ``live``'s running turn.
+
+    A message with no model inherits the turn it follows, so it fits any live
+    turn. One that names a model fits only a turn on that model *from that
+    source*: the same id on the Gateway and on a connection, or on two
+    connections, are different choices billed to different accounts.
+    """
+    if not message["model"]:
+        return True
+    return message["model"] == live["model"] and (message["model_connection_id"] or None) == (
+        live["model_connection_id"] or None
+    )
+
+
 class PostgresPendingMessageRepository:
     """A thread's pending messages, and the settlement that sends them in order."""
 
@@ -179,7 +194,7 @@ class PostgresPendingMessageRepository:
         """Wrap the pool the control plane already owns."""
         self._pool = pool
 
-    async def submit_message(
+    async def submit_message(  # noqa: C901, PLR0912 complexity baseline, #771
         self,
         *,
         thread_id: str,
@@ -196,6 +211,7 @@ class PostgresPendingMessageRepository:
         reset_reasoning_effort: bool = False,
         skills: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        model_connection_id: str | None = None,
     ) -> dict[str, Any]:
         """Put one message at the end of the owner's thread's queue.
 
@@ -207,11 +223,11 @@ class PostgresPendingMessageRepository:
 
         An idle-only action locks its membership, then its sandbox group after
         the thread lock. It requires the expected newest turn, no live turn,
-        waiting message, active member or Fork in the shared group, and its
-        latest snapshot to be published. Using the resolved skills, attachments
-        and effort choices, it creates the turn in this same transaction, never
-        a pending message. It replays its original receipt before these checks,
-        but cannot newly queue behind or resume waiting work.
+        waiting message, active member or Fork in the shared group. Using the
+        resolved skills, attachments and effort choices, it creates the turn
+        in this same transaction, never a pending message. It replays its
+        original receipt before these checks, but cannot newly queue behind or
+        resume waiting work.
 
         When nothing in the thread is running this is also the owner deciding
         to continue: a pause is cleared and the newest turn's ending counts as
@@ -242,9 +258,8 @@ class PostgresPendingMessageRepository:
                     return {"error": "session_archived"}
                 if require_idle:
                     # The thread lock freezes the newest turn. Its job is not
-                    # locked until the group shows nothing in flight: snapshot
-                    # publication reaches that job without the thread lock, and
-                    # it locks the group only after its included jobs.
+                    # locked until the group shows nothing in flight, and then
+                    # under the group (see the lock order in storage).
                     latest_job_id = await conn.fetchval(
                         "SELECT id FROM agent_jobs WHERE thread_id = $1 "
                         "ORDER BY turn_no DESC LIMIT 1",
@@ -286,24 +301,7 @@ class PostgresPendingMessageRepository:
                                     WHERE member.sandbox_id = $1
                                       AND (member.active_attempt_id IS NOT NULL
                                            OR member.fork_operation_id IS NOT NULL))
-                                AS has_active_member,
-                            (SELECT snapshot.state
-                             FROM agent_sandbox_snapshots snapshot
-                             WHERE snapshot.sandbox_id = $1
-                             ORDER BY snapshot.workspace_epoch DESC, snapshot.id DESC
-                             LIMIT 1) AS workspace_publication_state,
-                            -- A turn settled since the newest snapshot: the
-                            -- published pull request is behind the workspace.
-                            -- A Fork's copies of its source's turns do not count.
-                            EXISTS (SELECT 1 FROM agent_thread_sandbox_memberships member
-                                    JOIN agent_jobs settled
-                                      ON settled.id = member.last_settled_job_id
-                                    WHERE member.sandbox_id = $1
-                                      AND settled.fork_source_job_id IS NULL
-                                      AND NOT EXISTS (
-                                          SELECT 1 FROM agent_snapshot_jobs held
-                                          WHERE held.job_id = member.last_settled_job_id
-                                      )) AS has_unpublished_turn
+                                AS has_active_member
                         """,
                         group["id"],
                     )
@@ -312,21 +310,17 @@ class PostgresPendingMessageRepository:
                         or current["has_pending_message"]
                         or current["has_active_member"]
                         or group["active_operation_count"] != 0
-                        or current["workspace_publication_state"] != "published"
                     ):
                         return {"error": "conversation_changed"}
-                    if current["has_unpublished_turn"]:
-                        return {"error": "unpublished_changes"}
-                    # Every group member is idle, this thread is fenced and the
-                    # newest snapshot is published, so no publication of this
-                    # group holds the parent: the helper can lock it under the
-                    # group without a publication waiting on the group in turn.
+                    # Every group member is idle and this thread is fenced, so
+                    # the helper can lock the parent under the group.
                     job = await insert_follow_up(
                         conn,
                         parent_job_id=expected_latest_job_id,
                         user_id=user_id,
                         prompt=prompt,
                         model=model,
+                        model_connection_id=model_connection_id,
                         reasoning_effort=reasoning_effort,
                         reset_reasoning_effort=reset_reasoning_effort,
                         skills=skills,
@@ -366,8 +360,9 @@ class PostgresPendingMessageRepository:
                     INSERT INTO agent_pending_messages
                         (id, thread_id, user_id, state, prompt, skill_ids, attachment_ids,
                          model, reasoning_effort, client_request_id,
-                         client_request_fingerprint)
-                    VALUES ($1, $2, $3, 'queued', $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10)
+                         client_request_fingerprint, model_connection_id)
+                    VALUES ($1, $2, $3, 'queued', $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10,
+                            $11)
                     """,
                     message_id,
                     thread_id,
@@ -379,6 +374,8 @@ class PostgresPendingMessageRepository:
                     reasoning_effort,
                     client_request_id,
                     client_request_fingerprint,
+                    # Only with a model: an inherited model keeps its source.
+                    model_connection_id if model else None,
                 )
                 await _pin_attachments(
                     conn, message_id=message_id, user_id=user_id, attachment_ids=attachment_ids
@@ -483,7 +480,7 @@ class PostgresPendingMessageRepository:
                     """
                     UPDATE agent_pending_messages
                     SET prompt = $2, skill_ids = $3::jsonb, attachment_ids = $4::jsonb,
-                        model = $5, reasoning_effort = $6, state = $7,
+                        model = $5, reasoning_effort = $6, state = $7, model_connection_id = $8,
                         -- A message put back in line is being tried afresh, so
                         -- the refusal that held it no longer describes it.
                         last_error = CASE WHEN $7 = 'queued' THEN NULL ELSE last_error END,
@@ -503,6 +500,11 @@ class PostgresPendingMessageRepository:
                     if "reasoning_effort" in changes
                     else row["reasoning_effort"],
                     state,
+                    # The source travels with the model: a changed model takes
+                    # the source sent with it, null being the Gateway.
+                    (changes.get("model_connection_id") if changes.get("model") else None)
+                    if "model" in changes
+                    else row["model_connection_id"],
                 )
                 if "attachment_ids" in changes:
                     await _pin_attachments(
@@ -578,7 +580,9 @@ class PostgresPendingMessageRepository:
 
         Other refusals read like an edit's — ``not_found``, and
         ``revision_conflict`` or ``not_editable`` with ``current`` — plus
-        ``has_attachments`` and ``session_archived``.
+        ``has_attachments``, ``session_archived``, and ``model_mismatch`` with
+        ``current`` when the message chose a model or source other than the
+        live turn's (it stays queued for its own turn).
         """
         async with self._pool.acquire() as conn, conn.transaction():
             locked = await self._lock_for_change(
@@ -604,7 +608,8 @@ class PostgresPendingMessageRepository:
             if archived is not None:
                 return {"error": "session_archived"}
             live = await conn.fetchrow(
-                f"SELECT id, state, cancel_requested, current_attempt_id FROM agent_jobs "
+                "SELECT id, state, cancel_requested, current_attempt_id, model, "
+                "model_connection_id FROM agent_jobs "
                 f"WHERE thread_id = $1 AND {LIVE_TURN_SQL} ORDER BY turn_no DESC LIMIT 1",
                 thread_id,
             )
@@ -615,6 +620,14 @@ class PostgresPendingMessageRepository:
                 return {"idle": True}
             if live["cancel_requested"]:
                 return {"error": "not_running"}
+            if not _steerable_into(locked, live):
+                # The live turn answers on its own model and source, so a
+                # message that chose another would be billed where its owner
+                # did not choose. It waits for its own turn instead.
+                return {
+                    "error": "model_mismatch",
+                    "current": await read_pending_message(conn, message_id),
+                }
             await conn.execute(
                 """
                 UPDATE agent_pending_messages
@@ -1018,7 +1031,7 @@ class PostgresPendingMessageRepository:
                 )
             return await read_pending_message(conn, message_id)
 
-    async def settle_queue(
+    async def settle_queue(  # noqa: PLR0912 complexity baseline, #771
         self, *, thread_id: str, prepared: PreparedHead | None = None
     ) -> SettleOutcome:
         """Act on the newest turn's ending, and send the first message if it may go.
@@ -1131,6 +1144,7 @@ class PostgresPendingMessageRepository:
                         user_id=str(head["user_id"]),
                         prompt=str(head["prompt"]),
                         model=prepared.model,
+                        model_connection_id=prepared.model_connection_id,
                         reasoning_effort=prepared.reasoning_effort,
                         reset_reasoning_effort=prepared.reset_reasoning_effort,
                         skills=prepared.skills,
@@ -1152,13 +1166,16 @@ class PostgresPendingMessageRepository:
             await conn.execute("DELETE FROM agent_pending_messages WHERE id = $1", head["id"])
         return SettleOutcome(job=job, message_id=str(head["id"]))
 
-    async def threads_to_settle(self, *, limit: int = 50) -> list[str]:
+    async def threads_to_settle(self, *, limit: int = 50, after: str | None = None) -> list[str]:
         """Threads whose queue a settlement could move or pause right now.
 
         For the periodic sweep: a turn that ended without the finish route —
         the reaper's verdict, a control plane restarted mid-request — still
-        gets its queue acted on.
+        gets its queue acted on. In thread order, from past ``after`` when
+        given, so a sweep can page through them all.
         """
+        if limit < 1:
+            raise ValueError("limit must be at least 1")
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
@@ -1166,6 +1183,7 @@ class PostgresPendingMessageRepository:
                 FROM (SELECT DISTINCT thread_id FROM agent_pending_messages) waiting
                 JOIN agent_threads t ON t.id = waiting.thread_id
                 WHERE t.deleted_at IS NULL
+                  AND ($2::text IS NULL OR t.id > $2)
                   AND NOT EXISTS (
                         SELECT 1 FROM agent_jobs j
                         WHERE j.thread_id = t.id AND j.{LIVE_TURN_SQL}
@@ -1193,6 +1211,7 @@ class PostgresPendingMessageRepository:
                 LIMIT $1
                 """,
                 limit,
+                after,
             )
         return [str(row["id"]) for row in rows]
 

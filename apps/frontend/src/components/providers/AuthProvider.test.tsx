@@ -135,7 +135,7 @@ describe('AuthProvider current decision', () => {
   });
 });
 
-it('does not retain profile fields from an older API response', async () => {
+it('retains only the documented identity fields of a session', async () => {
   getMe.mockResolvedValue(
     Object.assign(
       { id: 'u1', agent_access: { allowed: true, permissions: ['agent.use' as const] } },
@@ -148,10 +148,14 @@ it('does not retain profile fields from an older API response', async () => {
     </AuthProvider>,
   );
   await waitFor(() => expect(current().loading).toBe(false));
+  // The account's email is part of its identity; a stray name or role is not.
   expect(current().user).toEqual({
     id: 'u1',
+    email: 'sentinel@example.test',
     agent_access: { allowed: true, permissions: ['agent.use'] },
   });
+  expect(current().user).not.toHaveProperty('role');
+  expect(current().user).not.toHaveProperty('user_name');
 });
 
 it('clears only the signing-out user’s unsent side drafts', async () => {
@@ -305,6 +309,71 @@ describe('AuthProvider and the browser’s other Agents tabs', () => {
     expect(current().user?.id).toBe('first');
   });
 
+  function slowRead() {
+    let answer!: (me: { id: string; agent_access: AgentAccessApi } | null) => void;
+    getMe.mockReturnValueOnce(new Promise((resolve) => (answer = resolve)));
+    return (me: { id: string; agent_access: AgentAccessApi } | null) => act(async () => answer(me));
+  }
+
+  it('lets a sign-out in another tab outlast a first read asked before it', async () => {
+    const reply = slowRead();
+    render(
+      <AuthProvider>
+        <Consumer />
+      </AuthProvider>,
+    );
+    getMe.mockResolvedValue(null);
+
+    announceFromAnotherTab(null);
+    await waitFor(() => expect(getMe).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(current().loading).toBe(false));
+    await reply({ id: 'first', agent_access: access });
+
+    expect(current().isAuthenticated).toBe(false);
+    expect(current().user).toBeNull();
+  });
+
+  it('keeps the account another tab switched to when an older read answers last', async () => {
+    let auth: ReturnType<typeof useAuth> | undefined;
+    function Switched() {
+      auth = useAuth();
+      return null;
+    }
+    getMe.mockResolvedValue({ id: 'first', agent_access: access });
+    render(
+      <AuthProvider>
+        <Consumer />
+        <Switched />
+      </AuthProvider>,
+    );
+    await waitFor(() => expect(current().user?.id).toBe('first'));
+    const reply = slowRead();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    getMe.mockResolvedValue({ id: 'second', agent_access: access });
+
+    announceFromAnotherTab('second');
+    await waitFor(() => expect(current().user?.id).toBe('second'));
+    act(() => auth?.acknowledgeSessionSwitch());
+    await reply({ id: 'first', agent_access: access });
+
+    expect(current().user?.id).toBe('second');
+    expect(auth?.sessionSwitched).toBe(false);
+  });
+
+  it('stays signed out when a read asked before signing out answers after it', async () => {
+    await renderAs('first');
+    vi.mocked(endSession).mockResolvedValue(undefined);
+    const reply = slowRead();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    await waitFor(() => expect(current().isAuthenticated).toBe(false));
+    await reply({ id: 'first', agent_access: access });
+
+    expect(current().isAuthenticated).toBe(false);
+    expect(current().user).toBeNull();
+  });
+
   it('tells the other tabs when it signs out', async () => {
     await renderAs('first');
     vi.mocked(endSession).mockResolvedValue(undefined);
@@ -317,4 +386,37 @@ describe('AuthProvider and the browser’s other Agents tabs', () => {
     await waitFor(() => expect(heard).toContainEqual({ userId: null }));
     tab.close();
   });
+});
+
+it('same-account local approval and revocation update on focus without a loading remount', async () => {
+  getMe.mockResolvedValue({
+    id: 'local',
+    email: 'local@example.test',
+    agent_access: { allowed: false, permissions: [] },
+  });
+  render(
+    <AuthProvider>
+      <Consumer />
+    </AuthProvider>,
+  );
+  await waitFor(() => expect(current().loading).toBe(false));
+  getMe.mockResolvedValue({
+    id: 'local',
+    email: 'local@example.test',
+    agent_access: { allowed: true, permissions: ['agent.use'] },
+  });
+  act(() => window.dispatchEvent(new Event('focus')));
+  await waitFor(() => expect(current().user.agent_access.allowed).toBe(true));
+  expect(current().loading).toBe(false);
+  getMe.mockResolvedValue({
+    id: 'local',
+    email: 'local@example.test',
+    agent_access: { allowed: false, permissions: [] },
+  });
+  vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 60_000);
+  act(() => window.dispatchEvent(new Event('focus')));
+  await waitFor(() => expect(current().user.agent_access.allowed).toBe(false));
+  expect(current().isAuthenticated).toBe(true);
+  expect(current().loading).toBe(false);
+  vi.restoreAllMocks();
 });

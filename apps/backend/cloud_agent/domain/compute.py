@@ -6,6 +6,8 @@ import base64
 import binascii
 import hashlib
 import json
+import re
+from datetime import datetime
 from typing import Any
 
 from cryptography.exceptions import UnsupportedAlgorithm
@@ -38,23 +40,56 @@ def discard_request_id(allocation_id: str) -> str:
     return "discard:" + allocation_id
 
 
+#: After its provider confirms a machine is gone, how long its Host must have
+#: been silent before what it still holds is taken as gone with it: the groups
+#: are marked lost, and a deletion without an archive finishes without it.
+RECLAIMED_QUIET_SECONDS = 600
+
 #: How long before its lease ends a Host starts moving its groups out.
 DEFAULT_MOVE_OUT_BEFORE_SECONDS = 7200
+#: How long before that window opens its lease is renewed. An extension the
+#: provider neither applies nor refuses is awaited ten minutes, so the renewal
+#: has been granted or given up by the time the window opens.
+MOVE_OUT_RENEWAL_LEAD_SECONDS = 900
+
+
+def refused_for_capacity(operation: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    """Whether a waiting acquisition's create was refused for capacity, creating nothing.
+
+    Only a definite rejection of the submission resets the step to ``pending``
+    and clears ``external_pending``; a create the provider answered with an
+    identity keeps that identity. A rate limit, an unknown outcome, or a
+    capacity message about a resource that has an identity does not qualify.
+    """
+    result = operation.get("result") or {}
+    reasons = result.get("blocked_reasons") or []
+    return (
+        operation.get("state") == "waiting"
+        and operation.get("step") == "pending"
+        and result.get("external_pending") is False
+        and bool(reasons)
+        and reasons[0].get("code") == "capacity_unavailable"
+        and not result.get("resource_ref")
+        and not result.get("external_id")
+        and not candidate.get("external_id")
+        and not candidate.get("nodes")
+    )
 
 
 def move_out_window_seconds(policy: dict[str, Any]) -> int:
     """How long before expiry this allocation's Host moves its groups out; 0 never.
 
-    A Host that rotates moves as a whole instead. With renewal, the window is
-    kept shorter than the horizon an extension reaches, so a granted extension
-    always ends the move rather than starting it again.
+    A Host that rotates moves as a whole instead. With renewal, the window and
+    the renewal lead before it are kept ten minutes shorter than the horizon an
+    extension reaches, so a granted extension always ends the move rather than
+    starting it again.
     """
     if policy.get("rotation_enabled"):
         return 0
     window = int(policy.get("move_out_before_seconds", DEFAULT_MOVE_OUT_BEFORE_SECONDS))
     if policy.get("enabled"):
         horizon = int(policy.get("extend_to_horizon_seconds", 14400))
-        window = min(window, max(0, horizon - 600))
+        window = min(window, max(0, horizon - 600 - MOVE_OUT_RENEWAL_LEAD_SECONDS))
     return max(0, window)
 
 
@@ -123,7 +158,10 @@ def provider_resource_absent(allocation: dict[str, Any] | None) -> bool:
     """Report whether no provider identity, node, or Host was ever recorded.
 
     A create that failed before CloudLab returned an experiment leaves this
-    shape. There is no machine to scan and no observation that can become fresh.
+    shape. So does one whose experiment was never observed: only its
+    acquisition keeps the identity, and release deletes it by that. No Host
+    of ours ran on either, so there is no machine to scan and no observation
+    that must become fresh.
     """
     if not allocation:
         return False
@@ -131,6 +169,44 @@ def provider_resource_absent(allocation: dict[str, Any] | None) -> bool:
         not allocation.get("external_id")
         and not allocation.get("nodes")
         and not allocation.get("hosts")
+    )
+
+
+def acquisition_absence_confirmable(
+    operation: dict[str, Any], allocation: dict[str, Any] | None
+) -> bool:
+    """Identify a manual acquisition an administrator may confirm created nothing.
+
+    Its provider call stopped without a result to trust, or failed or blocked
+    after it may have reached the provider, and nothing recorded names a
+    resource: no identity, node or Host. Only the provider's own portal can
+    settle that, so closing it is the administrator's statement, never an
+    observation of ours. A provider diagnostic that names an experiment or
+    says a create was accepted is the provider's word that something was
+    created, so it refuses the statement as well; one that only records an
+    ambiguous failure does not. Autoscaled acquisitions keep their own
+    lifecycle.
+    """
+    internal = operation.get("result") or {}
+    diagnostic = internal.get("provider_diagnostic")
+    if not isinstance(diagnostic, dict):
+        diagnostic = {}
+    return bool(
+        allocation
+        and not allocation.get("autoscaling_owned")
+        and allocation.get("mode") == "provision"
+        and operation.get("kind") == "acquire"
+        and operation.get("state") in {"unknown", "failed", "blocked"}
+        and not internal.get("resource_ref")
+        and not internal.get("external_id")
+        and not internal.get("resolved_external_id")
+        and not diagnostic.get("external_id")
+        and not diagnostic.get("submission_request_id")
+        and diagnostic.get("operation_outcome") != "accepted"
+        and diagnostic.get("provider_reason_code") != "request_accepted"
+        and provider_resource_absent(allocation)
+        and not allocation.get("release_committed_at")
+        and allocation.get("observed_state") not in {"terminated", "absent"}
     )
 
 
@@ -230,6 +306,90 @@ def public_connection(record: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def retirement_cancellable(kind: Any, state: Any, result: dict[str, Any] | None) -> bool:
+    """A retirement may be cancelled while it waits, until it stops its runners.
+
+    Cancelling reopens the Host to new work, and nothing starts a stopped
+    runner again. The workflow records ``runners_stopping`` before the first
+    stop, so a stop whose answer was lost still counts.
+    """
+    return (
+        kind == "retire"
+        and state in {"pending", "waiting", "blocked"}
+        and not (result or {}).get("runners_stopping")
+    )
+
+
+#: What each node's release scan may show: counts, flags and reason codes.
+_INVENTORY_FIELDS = {
+    "node_id": str,
+    "probes_removed": int,
+    "complete": bool,
+    "retained_containers": int,
+    "unknown_containers": int,
+    "orphan_state": bool,
+}
+
+
+def public_inventory(value: Any) -> list[dict[str, Any]]:
+    """Each node's release scan, field by field, dropping anything else it may hold."""
+    scans = []
+    for scan in value if isinstance(value, list) else []:
+        if not isinstance(scan, dict):
+            continue
+        shown = {
+            key: scan[key]
+            for key, kind in _INVENTORY_FIELDS.items()
+            # bool is an int: a count must not be one.
+            if type(scan.get(key)) is kind
+        }
+        reasons = scan.get("blocked_reasons")
+        shown["blocked_reasons"] = [
+            reason
+            for reason in (reasons if isinstance(reasons, list) else [])
+            if isinstance(reason, str) and re.fullmatch(r"[a-z_]{1,64}", reason)
+        ]
+        scans.append(shown)
+    return scans
+
+
+#: Where a release's proof came from; see ``cloud_agent.application.compute_release``.
+_RELEASE_EVIDENCE_SOURCES = {
+    "delete_acknowledged",
+    "provider_terminal",
+    "expired_not_found",
+    "never_created",
+}
+
+
+def public_release_evidence(value: Any) -> dict[str, Any] | None:
+    """A release's proof, field by field: its source, time, HTTP status and identity."""
+    if not isinstance(value, dict):
+        return None
+    source = value.get("source")
+    if not isinstance(source, str) or source not in _RELEASE_EVIDENCE_SOURCES:
+        return None
+    shown: dict[str, Any] = {"source": source}
+    for key in ("observed_at", "recorded_at"):
+        moment = value.get(key)
+        if isinstance(moment, str) and len(moment) <= 64:
+            try:
+                if datetime.fromisoformat(moment).tzinfo is not None:
+                    shown[key] = moment
+            except ValueError:
+                pass
+    status = value.get("http_status")
+    # bool is an int: a status must not be one.
+    if type(status) is int and 100 <= status <= 599:
+        shown["http_status"] = status
+    external_id = value.get("external_id")
+    if isinstance(external_id, str) and re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", external_id
+    ):
+        shown["external_id"] = external_id
+    return shown
+
+
 def public_operation(record: dict[str, Any], *, release_committed: bool = False) -> dict[str, Any]:
     """Expose progress, never private requests, worker fences, or profile contents."""
     result: dict[str, Any] = {
@@ -253,6 +413,7 @@ def public_operation(record: dict[str, Any], *, release_committed: bool = False)
         for key in (
             "checks",
             "blocked_reasons",
+            "provider_diagnostic",
             "nodes_ready",
             "target_expires_at",
             "actual_expires_at",
@@ -268,13 +429,17 @@ def public_operation(record: dict[str, Any], *, release_committed: bool = False)
         )
         if key in internal
     }
+    if "inventory" in internal:
+        result["result"]["inventory"] = public_inventory(internal["inventory"])
+    evidence = public_release_evidence(internal.get("release_evidence"))
+    if evidence is not None:
+        result["result"]["release_evidence"] = evidence
     result["blocked_reasons"] = internal.get("blocked_reasons", [])
     result["allowed_actions"] = []
     if record.get("state") in {"blocked", "failed", "unknown"}:
         result["allowed_actions"].append("retry")
     if (
-        record.get("kind") == "retire"
-        and record.get("state") in {"pending", "waiting", "blocked"}
+        retirement_cancellable(record.get("kind"), record.get("state"), internal)
         and not internal.get("external_pending")
         and not release_committed
     ):

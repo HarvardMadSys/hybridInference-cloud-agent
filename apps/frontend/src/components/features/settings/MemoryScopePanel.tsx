@@ -52,22 +52,29 @@ export function MemoryScopePanel({ repo }: { repo: string | null }) {
 
   /** Run one change, then show the scope as stored; a failure keeps drafts. */
   const run = useCallback(
-    async (change?: (signal: AbortSignal) => Promise<unknown>): Promise<boolean> => {
+    async (
+      change?: (signal: AbortSignal) => Promise<unknown>,
+      returnsScope = false,
+    ): Promise<boolean> => {
       request.current?.abort();
       const controller = new AbortController();
       request.current = controller;
       setPending(true);
       setProblem(null);
       let succeeded = true;
+      let result: unknown;
       try {
-        if (change) await change(controller.signal);
+        if (change) result = await change(controller.signal);
       } catch (cause) {
         if (controller.signal.aborted || !mounted.current) return false;
         setProblem(problemOf(cause));
         succeeded = false;
       }
       try {
-        const next = await getMemories(repo, controller.signal);
+        const next =
+          returnsScope && succeeded
+            ? (result as AgentMemoryScope)
+            : await getMemories(repo, controller.signal);
         if (controller.signal.aborted || !mounted.current) return false;
         setScope(next);
       } catch {
@@ -90,6 +97,15 @@ export function MemoryScopePanel({ repo }: { repo: string | null }) {
       request.current?.abort();
     };
   }, [run]);
+
+  const loadArchives = async () => {
+    if (!scope?.archived_next_cursor || pending) return;
+    const previous = scope.archived;
+    await run(async (signal) => {
+      const page = await getMemories(repo, signal, scope.archived_next_cursor!);
+      return { ...page, archived: [...previous, ...page.archived] };
+    }, true);
+  };
 
   const formatDate = (value: string) =>
     new Date(value).toLocaleString(locale, { dateStyle: 'medium', timeStyle: 'short' });
@@ -131,7 +147,7 @@ export function MemoryScopePanel({ repo }: { repo: string | null }) {
             checked={scope.enabled}
             onChange={(event) => {
               const enabled = event.target.checked;
-              void run((signal) => setMemoryEnabled(repo, enabled, signal));
+              void run((signal) => setMemoryEnabled(repo, enabled, signal), true);
             }}
             disabled={pending}
             className="h-4 w-4 accent-crimson"
@@ -259,7 +275,9 @@ export function MemoryScopePanel({ repo }: { repo: string | null }) {
         <details className="group mt-4 rounded-lg border border-border">
           <summary className="ui-focus-ring flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-lg px-3 text-sm font-medium text-foreground hover:bg-surface-hover [&::-webkit-details-marker]:hidden">
             <ChevronIcon className="h-4 w-4 shrink-0 text-muted transition-transform group-open:rotate-90" />
-            {t('settings.memory.archived', { count: scope.archived.length })}
+            {t('settings.memory.archived', {
+              count: `${scope.archived.length}${scope.archived_next_cursor ? '+' : ''}`,
+            })}
           </summary>
           <div className="border-t border-border p-3">
             <p className="text-xs leading-relaxed text-muted">
@@ -282,6 +300,16 @@ export function MemoryScopePanel({ repo }: { repo: string | null }) {
                 </li>
               ))}
             </ul>
+            {scope.archived_next_cursor ? (
+              <button
+                type="button"
+                disabled={pending}
+                onClick={() => void loadArchives()}
+                className="ui-button ui-button-secondary mt-2 min-h-11"
+              >
+                {t('sidebar.loadMore')}
+              </button>
+            ) : null}
           </div>
         </details>
       ) : null}

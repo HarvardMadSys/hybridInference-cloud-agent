@@ -15,16 +15,20 @@ selected unavailable Host keeps work waiting; it never triggers a fallback.
 ## What must remain on stable infrastructure
 
 Keep the control plane, Postgres, background worker, deployment profiles,
-provider credentials and compute encryption key on stable infrastructure. A
+provider credentials and the settings root key on stable infrastructure. A
 managed resource runs only the Host, sandbox manager, tunnels and sandboxes.
 Provider expiry remains a hard limit; renewal does not guarantee uptime.
 
-Stored API tokens and management SSH keys are encrypted with
-`AGENT_COMPUTE_SECRET_KEY`. The supported deployer generates a random 32-byte
-value in its persistent `.env` when none is configured; other deployment
-systems must provide equivalent stable key material. Back it up with the
-encrypted database: restoring the database without this key cannot recover
-compute connections. Do not reuse gateway, session, enrollment or sandbox manager keys.
+Stored API tokens and management SSH keys are encrypted with the compute
+credential encryption key. It is a setting kept in the database, itself
+encrypted under the settings root key (`AGENT_SETTINGS_ENCRYPTION_KEY`, or the
+legacy `AGENT_SESSION_SECRET`). The control plane generates a random one when
+it first creates its settings, unless `AGENT_COMPUTE_SECRET_KEY` supplies one
+then; a later `AGENT_COMPUTE_SECRET_KEY` is ignored. So the key travels with
+the database, and what must be kept with every database backup is the settings
+root key: restoring the database without it cannot recover compute
+connections, or any other saved secret. Do not reuse account, settings,
+enrollment or sandbox manager keys.
 Compute management credentials never enter sandboxes or the deployed Host.
 
 The Host separately needs purpose-scoped tunnel credentials and
@@ -89,7 +93,9 @@ selection. Profiles with a different hardware parameter can use
 
 When adding or creating a server, enter **Sandbox storage path**, for example
 `/mydata`. This must be an existing writable mounted data disk on the remote
-server.
+server. A new CloudLab server starts with `/mydata`, where the `small-lan`
+profile and the Cloud Agent profile mount their data disk by default; change it
+when the server template mounts its disk elsewhere.
 Bootstrap stores sandbox workspaces and native session data in `<path>/docker`
 and `<path>/containerd`, binding these directories to the daemons' standard
 `/var/lib/docker` and `/var/lib/containerd` paths. The server overview shows the
@@ -127,36 +133,32 @@ use the operator profile's `data_mount` configuration.
 Open **Admin → Servers → Server setup** and use **Automatic setup**. The
 control-plane image includes the Host source bundle for its own release; the
 application supplies the revision, environment and existing sandbox manager
-token, generates three separate tunnel keys per setup slot, and discovers the
+token, generates two separate tunnel keys per setup slot, and discovers the
 control-plane listener ports and Docker bridge.
 
 Supply the infrastructure inputs once:
 
-1. Add and validate management SSH connections for the stable gateway machine
-   and control-plane machine, including independently verified host keys.
-2. Select those connections and confirm the machines' SSH addresses and users.
-   The gateway address defaults to the saved Gateway API URL's hostname.
-   The supported control-plane deployer
-   supplies the service node's FQDN as the control-plane address. Override these
-   with `AGENT_GATEWAY_SSH_HOST` and `AGENT_CONTROL_PLANE_SSH_HOST` when SSH uses
-   different addresses; other deployers must supply the control-plane value.
-   Saved and pending setup inputs take precedence over these first-time defaults.
-   Both machines need Python 3 and passwordless `sudo`. The control machine
-   must run the supported Docker Compose deployment, and the gateway must
-   already listen on the selected inference port.
+1. Add and validate a management SSH connection for the stable control-plane
+   machine, including its independently verified host key.
+2. Select that connection and confirm the machine's SSH address and user. The
+   supported control-plane deployer supplies the service node's FQDN as the
+   address; override it with `AGENT_CONTROL_PLANE_SSH_HOST` when SSH uses a
+   different address. Other deployers must supply it. Saved and pending setup
+   inputs take precedence over this first-time default. The machine needs
+   Python 3 and passwordless `sudo`, and must run the supported Docker Compose
+   deployment.
 3. Enter an approved private IPv4 pool for chat networks, a reachable DNS
    resolver outside that pool, and the protected infrastructure CIDRs. These
    values depend on your network and require an administrator's decision.
 4. Choose the number of setup slots and prepare the setups. Two slots allow
    separate sandbox manager routes for a current node and its replacement.
 
-The application creates dedicated restricted SSH accounts on the two stable
-machines. Inference and MCP credentials permit only their respective local
-service destinations; the control credential permits the main API and its
-assigned reverse sandbox manager route. Management credentials stay in the control
-plane. Existing SSH policies must permit these restricted accounts; setup
-refuses incompatible policies instead of broadening them. Co-located gateway
-and control services must use separate inference, MCP and main API ports.
+The application creates dedicated restricted SSH accounts on the control-plane
+machine. The MCP credential permits only the MCP-only listener; the control
+credential permits the main API and its assigned reverse sandbox manager
+route. Management credentials stay in the control plane. Existing SSH
+policies must permit these restricted accounts; setup refuses incompatible
+policies instead of broadening them.
 
 Generated keys and configuration are encrypted in Postgres before remote
 authorization begins. A setup becomes selectable only after all its slots
@@ -166,13 +168,20 @@ defaults are saved for future setups. **Start new setup** retains those inputs
 and creates a new request on submission; it leaves an unfinished setup
 unavailable. Tunnel credentials, the install directory, and enrollment stay
 fixed. A control-plane release rolls managed hosts forward: stored profiles
-that share the previous commit and bundle, and the live allocations using
-them, advance together so a later node replacement still sees one revision.
+that share the previous commit and bundle, and the live allocations and
+autoscaling reservations using them, advance together so a later node
+replacement or new pool member still sees one revision.
 That rollout starts only once the new control plane runs, so the deployment's
 readiness check does not wait for managed hosts; they take new chats again
 when they report the new commit.
 A rollout that takes the running generation down and then fails restores the
 previous stored bundle. File-backed profile files are not rewritten.
+A rollout waits while the Host carries a deployment drain fence. If the fence
+stays for 30 minutes on a Host that is off the control plane's commit,
+`compute_host_release_blocked` alerts once per release: the Host takes no work
+and will not be rolled forward until the deployment that drained it releases
+the fence, or an administrator overrides it with
+`POST /admin/agent/runner-hosts/<host>/undrain?force=true`.
 
 When the registry named by `AGENT_COMPUTE_SANDBOX_IMAGE_REPOSITORY` (default
 `ghcr.io/harvardmadsys/cloud-agent-sandbox`) holds `sandbox-<commit>` for this
@@ -198,7 +207,7 @@ Host bundle, or use advanced manual setup.
 
 **Advanced manual setup** retains the existing form: upload a reviewed source
 archive, enter its exact 40-character revision and installation directory, paste the
-Host environment, and provide the three tunnel keys and verified known-hosts
+Host environment, and provide the two tunnel keys and verified known-hosts
 files. The control plane validates the archive, encrypts all environment and
 credential values, and stores them in Postgres. Profile read APIs expose only
 IDs and labels, never generated credentials. Create a new profile to replace
@@ -269,15 +278,15 @@ per-group nftables policy. Environment values must be single-line dotenv data;
 they are never sourced as shell code. Supported substitutions are
 `{deploy_root}`, `{host}`, `{node_id}` and `{allocation_id}`.
 
-### Three tunnels and the sandbox manager route
+### Two tunnels and the sandbox manager route
 
-Provision tunnel authorization on the stable gateway/control-plane machines
-before adding a server. Bootstrap cannot grant access to them. Use three
-distinct keys with no shell authority and narrowly permitted forwarding:
+Provision tunnel authorization on the stable control-plane machine before
+adding a server. Bootstrap cannot grant access to it. Use two distinct keys
+with no shell authority and narrowly permitted forwarding. There is no
+inference tunnel: model calls go to each owner's provider over public HTTPS.
 
 | Tunnel | Remote destination | Audience |
 | --- | --- | --- |
-| Inference | Gateway inference port, default `127.0.0.1:8080` | Runner and sandbox relay |
 | MCP | Control plane's **MCP-only** listener, default `127.0.0.1:8001` | Sandbox tool relay |
 | Host control | Main API, default `127.0.0.1:8000` | Trusted runner only |
 
@@ -327,7 +336,7 @@ experiments created by this control plane from the Cloud Agent profile:
    server template. Its node, image and data-disk parameters replace
    `small-lan`'s `phystype`, `osImage`, `dataMount` and `dataSize`.
 2. Provide a public HTTPS control-plane address through
-   `AGENT_SESSION_REDIRECT_URI` or `AGENT_COMPUTE_REGISTRATION_URL`.
+   `AGENT_PUBLIC_API_URL` or `AGENT_COMPUTE_REGISTRATION_URL`.
 3. Each acquisition sends a one-time token in experiment parameters. The control
    plane stores only its hash; it expires after two hours. At first boot, the
    node generates fresh SSH host keys and posts their public halves to
@@ -362,7 +371,6 @@ Set these values in the private deployment environment:
 
 ```text
 AGENT_COMPUTE_DIRECTORY=/private/compute
-AGENT_COMPUTE_SECRET_KEY=<leave blank for deploy.sh to generate, or supply a stable secret>
 AGENT_CLOUDLAB_API_URL=<operator-verified HTTPS Portal API base URL>
 ```
 
@@ -382,11 +390,16 @@ privilege. Apply database migrations before starting the worker.
 
 Existing-SSH deployments can leave `AGENT_CLOUDLAB_API_URL` unset. CloudLab has
 no guessed endpoint default: the public specification's development HTTP example
-is unsuitable for credentials. Verify the production HTTPS Portal API base
-with the provider or deployment documentation, then run **Connections →
-Validate**. Validation makes a read-only authenticated experiment-list request,
-checks its response shape and refuses redirects. Local downloaded tokens are
-never uploaded automatically.
+is unsuitable for credentials. CloudLab's
+[portal-api README](https://gitlab.flux.utah.edu/emulab/portal-api) gives the
+production HTTPS Portal API as `https://boss.emulab.net:43794`. Set that as the
+**CloudLab API URL** setting (or `AGENT_CLOUDLAB_API_URL`), then run
+**Connections → Validate**. The portal's web address, `www.cloudlab.us`, is
+another machine and does not serve the API: its port 43794 is filtered, so a URL
+naming it waits out the 60-second connect timeout and reports that CloudLab could
+not be reached. Validation makes a read-only authenticated experiment-list
+request, checks its response shape and refuses redirects. Local downloaded tokens
+are never uploaded automatically.
 
 Provider references:
 
@@ -432,13 +445,19 @@ active Host bindings and verified inventory.
 
 Reuse the recorded operation after browser disconnects or worker restarts. It
 persists request ID, exact parameters, step and resource ID. A new request ID
-creates a new command.
+creates a new command. **Activity**, and each server's **Activity** tab, list
+the 200 most recent operations and every one still pending, running, waiting or
+`unknown`, however old, so an operation waiting for an administrator stays
+there with its controls. So does a failed or blocked acquisition of a server
+not confirmed gone, which can still hold the server until a retry or
+**Nothing was created** settles it.
 
 | Result | Recovery |
 | --- | --- |
+| CloudLab could not be reached | The message names the endpoint it tried and why. A host name that does not resolve, a refused connection, or no connection within 60 seconds points at the **CloudLab API URL** setting or a firewall between the control plane and CloudLab: the URL is `https://boss.emulab.net:43794`, and the control plane must reach that port. A reset connection usually means a proxy or firewall in between. A failed TLS handshake usually means the URL names a port that does not speak HTTPS. An expired certificate is CloudLab's to replace: the Portal API has intermittently served one, so report it to CloudLab. The operation retries every 30 seconds on its own; **Connections → Validate** checks the setting immediately. |
 | SSH key or identity refused | Verify the machine/key, update the selected connection and retry the same operation. Existing-SSH and registered CloudLab connections keep host-key checks enabled. |
-| Cloud create outcome unknown, no UUID saved | Identify the actual experiment in the exact account/project and resolve explicitly. The worker never repeats POST or adopts an experiment by name. |
-| UUID saved, later observation failed | Repair access and resume the same resource. |
+| Cloud create outcome unknown, no UUID saved | Identify the actual experiment in the exact account/project and resolve explicitly. The worker never repeats POST or adopts an experiment by name. If the portal has no experiment for the request, **Nothing was created** closes it: the operation is cancelled, never retried, and the server shows as not created and can be removed. That is the administrator's statement, made without asking the provider, so check the portal first. A node of the request that registered refuses it, and so does any saved UUID, node or Host, or a provider diagnostic that names an experiment or says the create was accepted. Autoscaled acquisitions keep their own cancellation. |
+| UUID saved, later observation failed | Repair access and resume the same resource. Releasing the server instead deletes that experiment by its saved UUID. |
 | Installation or readiness failed | Inspect deployment checks, repair prerequisites/profile and retry the same resource. Failure does not destroy it. |
 | Extension pending or unknown | Check actual expiry. Retries retain the fixed absolute target; shorter extensions are not successful. The provider may reject or limit extensions. An expiry that has not moved ten minutes after the request blocks as `extension_unconfirmed`, so the server's other operations and a replacement can proceed; retry sends the same target again. |
 | Retained state remains | Keep the resource available or manage its chat lifecycle. Stopped containers and archived chats remain dependencies. |
@@ -468,11 +487,12 @@ Pool and resource actions have different effects:
 
 | Action | Effect |
 | --- | --- |
-| `Remove from pool` | Revokes the Host credential; leaves the machine intact. A Host still running turns stops taking new work and shows `removing` until they finish, and the reaper then revokes it. |
-| `Cancel removal` | Puts a `removing` Host back to work. |
-| `Remove now` | Revokes a `removing` Host at once and ends its running turns: they are requeued once, or a chat whose turn may already have run is marked lost. |
-| `Forget` | Removes an eligible history record. |
-| `Retire/release` | Releases the complete allocation; for CloudLab, the whole experiment. Existing SSH has no cloud-destruction capability. |
+| `Remove from pool` | Revokes the Host credential; leaves the machine intact. A Host still running sandboxes that can move to another Host moves them out first, as one does before its lease ends (below): it takes no new work and shows `removing`, each idle sandbox stops into a checkpoint and is handed over, and the reaper revokes the Host once none is left and its running turns have finished. A Host still running turns moves out the same way whenever another Host could take its sandboxes, since a turn it is restoring, or one it claimed before the removal, leaves its sandbox running there. A stopped sandbox its checkpoint covers moves when the Host is revoked. Before leaving any sandbox behind, because no other Host can take it or it can never move (its checkpoint failed, or its first turn failed before Docker created its container, say), the page asks; removing anyway leaves it on the Host until the Host returns. |
+| `Cancel removal` | Puts a `removing` Host back to work. Sandboxes already moved stay on their new Hosts. |
+| `Remove now` | Revokes a `removing` Host at once and ends its running turns: they are requeued once, or a chat whose turn may already have run is marked lost. Sandboxes not yet moved stay on the removed Host. |
+| `Forget` | Removes an eligible history record. A `cold` sandbox, which waits in its checkpoint for any Host, does not block it. |
+| `Retire/release` | Releases the complete allocation; for CloudLab, the whole experiment. An acquisition still waiting on the server, for its Host's first heartbeat say, is cancelled when the release commits, and so is an upgrade a control-plane release queued for it: nothing can run either afterwards. An autoscaled server's profile is then free for the pool once the release is confirmed, and later releases move its deployment profile as usual. Existing SSH has no cloud-destruction capability. |
+| `Remove server` | Deletes the server's records once its resource is released, was never created, or (attached without release) its Hosts are disabled; it calls no provider. An operation still running, still confirming a provider call, or whose outcome is `unknown` keeps them: [Removing a server](operations.md#removing-a-server) says what ends each. One that stopped while confirming a call no longer keeps a server whose provider confirmed the machine gone. |
 
 The page has no separate pause action. A Host held by a deployment drain shows
 `updating`; one drained through the `/drain` API shows `paused` and offers
@@ -485,6 +505,44 @@ and incomplete inventory block it. There is no force bypass. The only machine
 without an inventory is a CloudLab node whose host-key registration never
 completed: this control plane never connected to it.
 
+The machine inventory also counts every file under the Host's state directory
+as retained state, with three exceptions, each matched field by field against
+what the control plane recorded and passed on the inventory's standard input:
+- the Host's enrollment credential;
+- each sandbox's latest checkpoint receipt from that Host, whose data is in
+  object storage;
+- the finished receipts of each removal described below that the Host
+  confirmed.
+
+Anything else still blocks release, including the request directories that
+administrator sandbox deletions leave on a Host.
+
+Before taking inventory, release removes the stopped containers that groups
+which moved away left behind: a group handed over through its checkpoint, even
+one nobody has used since, one restored on another Host, or one whose deletion
+completed. A group handed over with a recorded checkpoint no longer counts as
+retained by its old Host. A container still needed stays and blocks release:
+its group's own, one whose group has no recorded checkpoint left, one whose
+group is being deleted, and one whose group was lost after its restores failed.
+Each removal is authorized in the database first, under the group's lock: a
+group lost before that keeps its container, and an authorization made before
+the group was lost still stands. The operation's result counts the removals
+the machine's Hosts confirmed in `superseded_removed`. A removal the Host does
+not answer is retried as the same request, even once the Host no longer lists
+the container, until the Host confirms it. A release that stopped for attention
+runs again once the provider confirms the machine is gone, and settles.
+
+Right before the machine inventory, release stops each node's runner with
+`docker stop`, so its restart policy leaves it stopped, and removes the
+runner's leftover self-test sandboxes. A self-test sandbox is one with the
+self-test label and the `preflight` runtime in this deployment's namespace.
+The sandbox manager keeps running. A released node never serves again, so the
+runner is not started again. The operation's result keeps what each node's
+inventory found under `inventory`. Release waits and retries only when Docker
+could not be read and nothing else was found; any finding stops it for
+attention. A runner whose Host credential is refused stops claiming and stays
+up, idle, until it is stopped, and does not exit into its restart policy.
+
 ## Moving sandboxes out before a lease ends
 
 A Host whose allocation does not use automatic replacement moves its sandbox
@@ -493,9 +551,11 @@ groups to other Hosts one at a time before its lease ends, through their
 The lead is **Move sandboxes to other servers before expiry** in the
 allocation's renewal settings: 120 minutes by default, 0 to turn it off.
 Replacement moves the whole Host instead, so the setting is not offered there.
-With renewal enabled, extension is tried before the window opens, and the
-window is capped ten minutes short of the extension horizon: an extension that
-succeeds ends a move rather than starting one.
+With renewal enabled, extension is tried 15 minutes before the window opens:
+longer than an extension the provider neither applies nor refuses is awaited,
+so by then it has been granted or given up, and only a lease it could not
+extend starts a move. The window is capped 25 minutes short of the extension
+horizon, so an extension that succeeds ends a move rather than starting one.
 
 Inside the window the Host gets a `move_out` admission hold only when its
 groups can really move:
@@ -507,7 +567,9 @@ groups can really move:
   current archive revision would pass claim admission for new groups now. A
   Host under a `new_groups` hold, in its own lease window or with a stale
   observation does not count, and of two Hosts entering their windows
-  together only one moves out.
+  together only one moves out. When an `untrusted-kata-v1` group would move,
+  that Host must also run the Kata runtime: no other Host is ever handed such
+  a chat, so without one the group would wait in its checkpoint for good.
 
 Without a target nothing changes, and the Host serves until its lease ends as
 before. A move that has started continues if its target goes away, and stops
@@ -515,12 +577,16 @@ if checkpoints do.
 
 While the hold is in place the Host claims nothing. Every 15 seconds the
 control plane asks it to stop each idle group, as an administrator's stop
-would; a group with a running turn, operation, snapshot or open terminal is
+would; a group with a running turn, operation or open terminal is
 left for the next pass, so running turns are never interrupted. The stop
 stores the group's final checkpoint, and once that checkpoint covers the group
 it becomes `cold` at once, without waiting for the Host to be removed. Each
 chat's next turn is claimed by another Host and restored there; to the user,
-that message waits a little longer than usual.
+that message waits a little longer than usual. A sandbox whose deletion failed
+before its archive still serves its chats, so it is counted, moved and, with a
+reclaimed machine, lost like any other; one whose deletion is pending or
+verified is left to that deletion. A pending deletion without an archive
+finishes without the Host once the machine is reclaimed, as below.
 
 In an autoscaled CloudLab pool a moving-out member stops counting toward
 `min_hosts`, so its replacement is acquired while it still serves. It still
@@ -530,6 +596,24 @@ shows such a member as _moving out_; it is released at its lease end as
 before. If groups are still unmoved five minutes before the lease ends (or the
 claim-stop lead, if longer), because a turn is still running, a checkpoint is
 missing or no Host can take them, `compute_move_out_unfinished` alerts once.
+
+So that there is still time to act, `compute_move_out_blocked` alerts once when
+the window opens and groups would stay. Its reason is either why the move
+cannot start, followed by how many groups would stay, or how many groups can
+never move because no checkpoint covers them or their image cannot be pulled
+elsewhere. The reasons are `archives_disabled`, `checkpoints_disabled`,
+`host_offline`, `host_without_checkpoints` (the Host runs a release from before
+checkpoints), `archive_settings_not_applied` and `no_restore_target`.
+
+When the provider confirms the machine is gone (`terminated`), covered stopped
+groups become `cold` as above. Every other group its Host still holds lost its
+only Docker copy with the machine: once the Host has been silent for 10
+minutes and no turn, claim or Fork of the group is in flight, the group and its
+chats become LOST, their queued turns fail with a reason, and
+`compute_groups_lost_with_server` reports how many. A group an administrator
+was already deleting without an archive is deleted instead, by the deletion
+worker's next attempt after those 10 minutes, without asking the Host. The
+Host row stays for **Remove from pool**.
 
 ## Automatic CloudLab node replacement
 
@@ -567,6 +651,10 @@ move cannot outlast its lease.
 Failed candidates are released before trying the next type. Configuration or
 credential errors stop immediately; the same failure class across three types
 stops with an alert. Retry resumes the saved operation.
+A create the provider refuses for capacity, before naming any resource, is
+released at once instead of waiting out the two-hour candidate limit; with
+no type left, the move then stops as above. Rate limits, unknown outcomes and
+a retry that created its node never count as a capacity refusal.
 
 The candidate installs the host recipe and receives a live pre-copy without
 enrolling or claiming. Once it is prepared, the source waits for an idle moment.

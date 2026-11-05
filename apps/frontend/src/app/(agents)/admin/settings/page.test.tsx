@@ -38,7 +38,7 @@ vi.mock('@/components/providers/AuthProvider', async () => {
   const actual = await vi.importActual<typeof import('@/components/providers/AuthProvider')>(
     '@/components/providers/AuthProvider',
   );
-  return { hasAgentPermission: actual.hasAgentPermission };
+  return { ...actual };
 });
 vi.mock('@/lib/api/admin', () => ({
   getAgentRunnerHosts: vi.fn(),
@@ -59,10 +59,10 @@ vi.mock('@/lib/api/adminRuntimeUpgrades', () => ({
   getRuntimeVersions: vi.fn(),
   requestRuntimeUpgrade: vi.fn(),
 }));
-vi.mock('@/lib/api/adminArchiveSettings', () => ({
+vi.mock('@/lib/api/adminArchiveSettings', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/api/adminArchiveSettings')>()),
   getSandboxArchiveSettings: vi.fn(),
   updateSandboxArchiveSettings: vi.fn(),
-  SANDBOX_ARCHIVE_SETTINGS_CAPABILITY: 'sandbox-archive-settings-v1',
 }));
 
 import { getAgentRunnerHosts, setAgentHostSettings, setAgentRuntimeVersion } from '@/lib/api/admin';
@@ -80,6 +80,8 @@ import { getCloudLabDefaults, saveCloudLabDefaults } from '@/lib/api/compute';
 
 import { categoryTabId } from './ApplicationSettings';
 import AdminSettingsPage from './page';
+import { applicationSnapshot } from './settingsTestFixtures';
+import { chooseOption, openSelect, optionNames } from '@/components/ui/__tests__/select';
 
 const list = vi.mocked(getAgentRunnerHosts);
 const setLimit = vi.mocked(setAgentHostSettings);
@@ -113,59 +115,14 @@ const archiveSettings: SandboxArchiveSettings = {
   updated_at: null,
 };
 
-function applicationSnapshot(over: Partial<AgentAdminSettings> = {}): AgentAdminSettings {
-  return {
-    revision: 1,
-    definitions: [
-      {
-        key: 'site.app_name',
-        label: 'Application name',
-        description: 'Name shown in the application.',
-        category: 'Appearance',
-        kind: 'string',
-        default: 'Cloud Agent',
-        secret: false,
-      },
-      {
-        key: 'identity.registration_enabled',
-        label: 'Registration enabled',
-        description: 'Allow new users to register.',
-        category: 'Identity & access',
-        kind: 'boolean',
-        default: true,
-        secret: false,
-      },
-      {
-        key: 'future.maximum',
-        label: 'Future limit',
-        description: 'A setting introduced by the server.',
-        category: 'Future / category ✓',
-        kind: 'integer',
-        default: 10,
-        minimum: 1,
-        maximum: 100,
-        secret: false,
-      },
-    ],
-    values: {
-      'site.app_name': 'Cloud Agent',
-      'identity.registration_enabled': true,
-      'future.maximum': 10,
-    },
-    secret_configured: {},
-    bootstrap: [],
-    ...over,
-  };
-}
-
 function organizedApplicationSnapshot(): AgentAdminSettings {
   const fields = [
     ['site.app_name', 'Appearance', 'Application name'],
     ['gateway_authorize_url', 'Sign-in', 'Sign-in authorization URL'],
     ['trust_proxy_headers', 'Security', 'Trust forwarded client addresses'],
     ['github_app_id', 'Source control', 'GitHub App ID'],
-    ['publish_base_branch', 'Publication', 'Default pull request base branch'],
-    ['publish_git_timeout_s', 'Publication', 'Publication Git timeout'],
+    ['github_coauthor', 'Source control', 'Agent commit co-author'],
+    ['github_request_timeout_s', 'Source control', 'GitHub request timeout'],
     ['sandbox_archive.bucket', 'Sandbox archives', 'Sandbox archive S3 bucket'],
     ['sandbox_archive.endpoint', 'Sandbox archives', 'Sandbox archive S3 endpoint'],
   ];
@@ -183,9 +140,9 @@ function organizedApplicationSnapshot(): AgentAdminSettings {
   });
 }
 
-function openAdvancedForField(field: HTMLElement) {
-  const details = field.closest('details')!;
-  if (!details.open) fireEvent.click(details.querySelector('summary')!);
+function expectVisibleSetting(field: HTMLElement) {
+  expect(field).toBeVisible();
+  expect(field.closest('details')).toBeNull();
 }
 
 function deferred<T>() {
@@ -348,7 +305,7 @@ function pool(over: Partial<AgentRunnerHostPool> = {}): AgentRunnerHostPool {
 
 function editField(label: string): HTMLElement {
   let field = screen.getByLabelText(label);
-  if (!field.matches('input,select,textarea')) {
+  if (!field.matches('input,select,textarea,[role="combobox"]')) {
     const group = field.closest('form')!.parentElement!;
     const edit = within(group).queryByRole('button', { name: /^Edit .* settings$/ });
     if (edit) fireEvent.click(edit);
@@ -595,9 +552,7 @@ describe('admin Settings', () => {
       target: { value: 'My agent' },
     });
     selectSettingsTab('Agent versions');
-    fireEvent.change(await screen.findByLabelText('Claude Code'), {
-      target: { value: '2.1.235' },
-    });
+    chooseOption(await screen.findByLabelText('Claude Code'), '2.1.235');
     selectSettingsTab('Sandbox');
     fireEvent.change(await screen.findByLabelText('Turn time limit for all servers'), {
       target: { value: '2' },
@@ -607,7 +562,7 @@ describe('admin Settings', () => {
     expect(screen.getByLabelText('Application name')).toHaveValue('My agent');
     expect(screen.getByRole('button', { name: 'Review Branding changes' })).toBeEnabled();
     selectSettingsTab('Agent versions');
-    expect(screen.getByLabelText('Claude Code')).toHaveValue('2.1.235');
+    expect(screen.getByLabelText('Claude Code')).toHaveTextContent('2.1.235');
     selectSettingsTab('Sandbox');
     expect(screen.getByLabelText('Turn time limit for all servers')).toHaveValue(2);
     expect(getAgentAdminSettings).toHaveBeenCalledTimes(1);
@@ -652,7 +607,7 @@ describe('application category tabs', () => {
 
   it.each([
     ['Sign-in', 'Identity & access', 'Sign-in authorization URL'],
-    ['Publication', 'Source control', 'Default pull request base branch'],
+    ['Security', 'Identity & access', 'Trust forwarded client addresses'],
   ])(
     'resolves an existing %s category URL to %s after definitions load',
     async (legacy, merged, label) => {
@@ -678,17 +633,17 @@ describe('application category tabs', () => {
     },
   );
 
-  it('opens Advanced and focuses a linked field from Publication in the merged Source control page', async () => {
+  it('focuses a linked Source control field beside the other GitHub settings', async () => {
     vi.mocked(getAgentAdminSettings).mockResolvedValue(organizedApplicationSnapshot());
     window.history.replaceState(
       null,
       '',
-      '/admin/settings#application-setting-publish_git_timeout_s',
+      '/admin/settings#application-setting-github_request_timeout_s',
     );
     renderSettings();
-    const input = await screen.findByLabelText('Publication Git timeout');
+    const input = await screen.findByLabelText('GitHub request timeout');
     await waitFor(() => expect(input).toHaveFocus());
-    expect(input.closest('details')).toHaveAttribute('open');
+    expectVisibleSetting(input);
     expect(screen.getByRole('tabpanel', { name: 'Source control' })).toBeVisible();
     expect(screen.getByLabelText('GitHub App ID')).toBeVisible();
     expect(new URLSearchParams(window.location.search).get('tab')).toBe(
@@ -696,7 +651,7 @@ describe('application category tabs', () => {
     );
   });
 
-  it('expands Advanced for a missing Security field beside the merged Sign-in settings', async () => {
+  it('focuses a missing Security field beside the merged Sign-in settings', async () => {
     vi.mocked(getAgentAdminSettings).mockResolvedValue({
       ...organizedApplicationSnapshot(),
       setup: {
@@ -720,7 +675,7 @@ describe('application category tabs', () => {
     expect(input).not.toBeVisible();
     fireEvent.click(link);
     await waitFor(() => expect(input).toHaveFocus());
-    expect(input.closest('details')).toHaveAttribute('open');
+    expectVisibleSetting(input);
     expect(screen.getByRole('tabpanel', { name: 'Identity & access' })).toBeVisible();
     expect(screen.getByLabelText('Sign-in authorization URL')).toBeVisible();
     expect(new URLSearchParams(window.location.search).get('tab')).toBe(
@@ -752,7 +707,7 @@ describe('application category tabs', () => {
       input,
     );
     expect(await screen.findByLabelText('Enable sandbox archives')).toBeVisible();
-    expect(screen.getByLabelText('S3 destination')).toHaveValue(archiveSettings.s3_uri);
+    expect(screen.getByLabelText('S3 bucket')).toHaveValue('freeinference');
     fireEvent.change(input, { target: { value: 'deletion-archive-bucket' } });
     submit(input);
     await waitFor(() =>
@@ -765,7 +720,7 @@ describe('application category tabs', () => {
     expect(updateArchiveSettings).not.toHaveBeenCalled();
   });
 
-  it('reveals an Advanced deletion archive link in the existing Sandbox tab', async () => {
+  it('reveals a deletion archive link in the existing Sandbox tab', async () => {
     vi.mocked(getAgentAdminSettings).mockResolvedValue(organizedApplicationSnapshot());
     window.history.replaceState(
       null,
@@ -775,7 +730,7 @@ describe('application category tabs', () => {
     renderSettings();
     const input = await screen.findByLabelText('Sandbox archive S3 endpoint');
     await waitFor(() => expect(input).toHaveFocus());
-    expect(input.closest('details')).toHaveAttribute('open');
+    expectVisibleSetting(input);
     expect(screen.getByRole('tabpanel', { name: 'Sandbox' })).toBeVisible();
     expect(new URLSearchParams(window.location.search).get('tab')).toBe('sandbox');
   });
@@ -1080,7 +1035,7 @@ describe('application category tabs', () => {
     fireEvent.change(editField('Future limit'), { target: { value: '25' } });
     selectSettingsTab('Identity & access');
     const registration = editField('Registration enabled');
-    fireEvent.change(registration, { target: { value: 'false' } });
+    chooseOption(registration, 'Disabled');
     const current = applicationSnapshot();
     vi.mocked(setAgentAdminSettings).mockResolvedValueOnce({
       ...current,
@@ -1110,7 +1065,7 @@ describe('application category tabs', () => {
     editField('Registration enabled');
     fireEvent.click(screen.getByLabelText('More actions for Registration enabled'));
     fireEvent.click(
-      screen.getByRole('button', { name: 'Restore default for Registration enabled' }),
+      screen.getByRole('menuitem', { name: 'Restore default for Registration enabled' }),
     );
     fireEvent.click(screen.getByRole('button', { name: 'Restore default' }));
     await waitFor(() =>
@@ -1124,7 +1079,9 @@ describe('application category tabs', () => {
       2,
       expect.any(AbortSignal),
     );
-    expect(screen.getByRole('combobox', { name: 'Registration enabled' })).toHaveValue('true');
+    expect(screen.getByRole('combobox', { name: 'Registration enabled' })).toHaveTextContent(
+      'Enabled',
+    );
     selectSettingsTab('Appearance');
     expect(screen.getByRole('textbox', { name: 'Application name' })).toHaveValue(
       'Draft application',
@@ -1143,9 +1100,7 @@ describe('application category tabs', () => {
     renderSettings();
     await screen.findByRole('tab', { name: 'Appearance' });
     selectSettingsTab('Identity & access');
-    fireEvent.change(editField('Registration enabled'), {
-      target: { value: 'false' },
-    });
+    chooseOption(editField('Registration enabled'), 'Disabled');
     selectSettingsTab('Appearance');
     const name = editField('Application name');
     fireEvent.change(name, { target: { value: 'Saved application' } });
@@ -1155,12 +1110,9 @@ describe('application category tabs', () => {
     expect(
       screen.getByRole('button', { name: 'Review Identity & access changes', hidden: true }),
     ).toBeDisabled();
-    expect(
-      screen.getByRole('button', {
-        name: 'Restore default for Registration enabled',
-        hidden: true,
-      }),
-    ).toBeDisabled();
+    // The action menu is closed and its trigger is the locked control.
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('More actions for Registration enabled')).toBeDisabled();
     submit(screen.getByLabelText('Registration enabled'));
     expect(setAgentAdminSettings).toHaveBeenCalledTimes(1);
     const current = applicationSnapshot();
@@ -1171,7 +1123,9 @@ describe('application category tabs', () => {
         values: { ...current.values, 'site.app_name': 'Saved application' },
       }),
     );
-    expect(screen.getByRole('combobox', { name: 'Registration enabled' })).toHaveValue('false');
+    expect(screen.getByRole('combobox', { name: 'Registration enabled' })).toHaveTextContent(
+      'Disabled',
+    );
     expect(screen.getByRole('button', { name: 'Review Identity & access changes' })).toBeEnabled();
   });
 
@@ -1252,34 +1206,30 @@ describe('application category tabs', () => {
 describe('agent versions', () => {
   it('offers the server default before every version the pool holds', async () => {
     renderSettings('Agent versions');
-    const select = await screen.findByLabelText<HTMLSelectElement>('Claude Code');
-    expect([...select.options].map((option) => option.textContent)).toEqual([
-      'Server default (2.1.220)',
-      '2.1.220',
-      '2.1.235',
-    ]);
-    expect(select).toHaveValue('');
+    const select = await screen.findByLabelText('Claude Code');
+    expect(optionNames(select)).toEqual(['Server default (2.1.220)', '2.1.220', '2.1.235']);
+    expect(select).toHaveTextContent(/^Server default/);
     expect(within(select.closest('form')!).getByRole('button', { name: 'Save' })).toBeDisabled();
   });
 
   it('shows the global selection rather than the installed server default', async () => {
     list.mockResolvedValue(pool({ runtime_versions: { 'claude-code': '2.1.235' } }));
     renderSettings('Agent versions');
-    expect(await screen.findByLabelText('Claude Code')).toHaveValue('2.1.235');
+    expect(await screen.findByLabelText('Claude Code')).toHaveTextContent('2.1.235');
   });
 
   it('waits for Save, sends the choice, and takes the returned snapshot', async () => {
     setVersion.mockResolvedValue(pool({ runtime_versions: { 'claude-code': '2.1.235' } }));
     renderSettings('Agent versions');
     const select = await screen.findByLabelText('Claude Code');
-    fireEvent.change(select, { target: { value: '2.1.235' } });
+    chooseOption(select, '2.1.235');
     expect(setVersion).not.toHaveBeenCalled();
     submit(select);
     await waitFor(() => expect(setVersion).toHaveBeenCalledWith('claude-code', '2.1.235'));
     expect(await screen.findByRole('status')).toHaveTextContent(
       'New Claude Code sandboxes use 2.1.235. Existing sessions keep their version.',
     );
-    expect(screen.getByLabelText('Claude Code')).toHaveValue('2.1.235');
+    expect(screen.getByLabelText('Claude Code')).toHaveTextContent('2.1.235');
     expect(
       within(screen.getByLabelText('Claude Code').closest('form')!).getByRole('button', {
         name: 'Save',
@@ -1292,7 +1242,7 @@ describe('agent versions', () => {
     setVersion.mockResolvedValue(pool());
     renderSettings('Agent versions');
     const select = await screen.findByLabelText('Claude Code');
-    fireEvent.change(select, { target: { value: '' } });
+    chooseOption(select, /^Server default/);
     submit(select);
     await waitFor(() => expect(setVersion).toHaveBeenCalledWith('claude-code', null));
   });
@@ -1305,11 +1255,9 @@ describe('agent versions', () => {
     expect(screen.queryByLabelText('Claude Code')).not.toBeInTheDocument();
     const inventory = screen.getByRole('table', {
       name: 'Agent versions installed on each server',
-      hidden: true,
     });
-    expect(inventory).not.toBeVisible();
-    openAdvancedForField(inventory);
     expect(inventory).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Installed versions' })).toBeVisible();
     const row = within(inventory).getByRole('row', {
       name: 'runner-a Claude Code 2.1.220 Not reported',
     });
@@ -1321,11 +1269,8 @@ describe('agent versions', () => {
       pool({ hosts: [host({ runtime_versions_available: { codex: ['0.145.0'] } })] }),
     );
     renderSettings('Agent versions');
-    const select = await screen.findByLabelText<HTMLSelectElement>('Codex');
-    expect([...select.options].map((option) => option.textContent)).toEqual([
-      'Server default',
-      '0.145.0',
-    ]);
+    const select = await screen.findByLabelText('Codex');
+    expect(optionNames(select)).toEqual(['Server default', '0.145.0']);
   });
 
   it('keeps an unavailable saved version visible and lets the admin clear it', async () => {
@@ -1333,9 +1278,9 @@ describe('agent versions', () => {
     setVersion.mockResolvedValue(pool({ hosts: [] }));
     renderSettings('Agent versions');
     const select = await screen.findByLabelText('Claude Code');
-    expect(select).toHaveValue('2.1.235');
+    expect(select).toHaveTextContent('2.1.235');
     expect(screen.getByText('2.1.235 (unavailable)')).toBeInTheDocument();
-    fireEvent.change(select, { target: { value: '' } });
+    chooseOption(select, /^Server default/);
     submit(select);
     await waitFor(() => expect(setVersion).toHaveBeenCalledWith('claude-code', null));
   });
@@ -1352,7 +1297,7 @@ describe('agent versions', () => {
     renderSettings('Agent versions');
     const select = await screen.findByLabelText('Claude Code');
     expect(screen.queryByText(/Not on runner-b/)).not.toBeInTheDocument();
-    fireEvent.change(select, { target: { value: '2.1.235' } });
+    chooseOption(select, '2.1.235');
     expect(
       screen.getByText('Not on runner-b: new sandboxes there would use 2.1.220.'),
     ).toBeInTheDocument();
@@ -1369,8 +1314,8 @@ describe('agent versions', () => {
       }),
     );
     renderSettings('Agent versions');
-    const select = await screen.findByLabelText<HTMLSelectElement>('Claude Code');
-    expect(select.options[0]).toHaveTextContent('Server default (varies by server)');
+    const select = await screen.findByLabelText('Claude Code');
+    expect(optionNames(select)[0]).toBe('Server default (varies by server)');
   });
 });
 
@@ -1394,9 +1339,7 @@ describe('global limits', () => {
       renderSettings('Sandbox');
 
       const input = await screen.findByLabelText(`${label} for all servers`);
-      fireEvent.change(screen.getByLabelText(`${label} for all servers unit`), {
-        target: { value: unit },
-      });
+      chooseOption(screen.getByLabelText(`${label} for all servers unit`), unit);
       fireEvent.change(input, { target: { value: amount } });
       submit(input);
 
@@ -1435,7 +1378,7 @@ describe('global limits', () => {
     renderSettings('Sandbox');
     const input = await screen.findByLabelText('Turn time limit for all servers');
     expect(screen.getAllByText('Deployment default: 1 h')).toHaveLength(1);
-    expect(screen.getByLabelText('Turn time limit for all servers unit')).toHaveValue('h');
+    expect(screen.getByLabelText('Turn time limit for all servers unit')).toHaveTextContent('h');
     fireEvent.change(input, { target: { value: '2' } });
     submit(input);
     await waitFor(() => expect(setLimit).toHaveBeenCalledWith({ agent_timeout_s: 7200 }));
@@ -1456,7 +1399,7 @@ describe('global limits', () => {
     list.mockResolvedValue(pool({ host_settings: { terminal_max_sessions: 16 } }));
     setLimit.mockResolvedValue(pool());
     renderSettings('Sandbox');
-    openAdvancedForField(await screen.findByLabelText('Terminals per server for all servers'));
+    expect(await screen.findByLabelText('Terminals per server for all servers')).toBeVisible();
     fireEvent.click(await screen.findByRole('button', { name: 'Use deployment default' }));
     await waitFor(() => expect(setLimit).toHaveBeenCalledWith({ terminal_max_sessions: null }));
   });
@@ -1470,7 +1413,7 @@ describe('global limits', () => {
     );
     renderSettings('Sandbox');
     await screen.findByLabelText('Turn time limit for all servers');
-    openAdvancedForField(screen.getByLabelText('Terminals per server for all servers'));
+    expect(screen.getByLabelText('Terminals per server for all servers')).toBeVisible();
     const sandboxCard = screen.getByRole('heading', { name: 'Sandbox' }).parentElement!;
     expect(within(sandboxCard).getAllByText(/runner-a needs a redeploy/)).toHaveLength(2);
   });
@@ -1493,9 +1436,7 @@ describe('global limits', () => {
     setLimit.mockResolvedValue(pool({ host_settings: { agent_timeout_s: 5400 } }));
     renderSettings('Sandbox');
     const input = await screen.findByLabelText('Turn time limit for all servers');
-    fireEvent.change(screen.getByLabelText('Turn time limit for all servers unit'), {
-      target: { value: 'min' },
-    });
+    chooseOption(screen.getByLabelText('Turn time limit for all servers unit'), 'min');
     expect(input).toHaveAttribute('placeholder', '60');
     fireEvent.change(input, { target: { value: '90' } });
     submit(input);
@@ -1505,7 +1446,7 @@ describe('global limits', () => {
   it('warns before a shorter terminal lifetime closes open terminals', async () => {
     renderSettings('Sandbox');
     const input = await screen.findByLabelText('Terminal max lifetime for all servers');
-    openAdvancedForField(input);
+    expect(input).toBeVisible();
     fireEvent.change(input, { target: { value: '4' } });
     expect(screen.getByText('Open terminals older than 4 h will close.')).toBeInTheDocument();
     fireEvent.change(input, { target: { value: '12' } });
@@ -1517,7 +1458,7 @@ describe('global limits', () => {
       pool({ hosts: [host({ settings_desired: { terminal_max_sessions: 128 } })] }),
     );
     renderSettings('Sandbox');
-    openAdvancedForField(await screen.findByLabelText('Terminals per server for all servers'));
+    expect(await screen.findByLabelText('Terminals per server for all servers')).toBeVisible();
     expect(await screen.findByText(/runner-a sets its own \(128\)/)).toBeInTheDocument();
   });
 
@@ -1531,6 +1472,7 @@ describe('global limits', () => {
     await waitFor(() =>
       expect(updateArchiveSettings).toHaveBeenCalledWith({
         enabled: true,
+        s3_uri: archiveSettings.s3_uri,
         checkpoints_enabled: true,
         region: archiveSettings.region,
         kms_key_arn: archiveSettings.kms_key_arn,
@@ -1568,10 +1510,8 @@ describe('global limits', () => {
     });
     renderSettings('Sandbox');
     const maximum = await screen.findByLabelText('Maximum archive bytes');
-    openAdvancedForField(maximum);
-    fireEvent.change(maximum, {
-      target: { value: '1073741824' },
-    });
+    expect(maximum).toBeVisible();
+    fireEvent.change(maximum, { target: { value: '1073741824' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save archive settings' }));
 
     expect(await screen.findByRole('status')).toHaveTextContent('Sandbox archive settings saved.');
@@ -1582,7 +1522,7 @@ describe('global limits', () => {
     renderSettings('Sandbox');
 
     const maximum = await screen.findByLabelText('Maximum archive bytes');
-    openAdvancedForField(maximum);
+    expect(maximum).toBeVisible();
     fireEvent.change(maximum, { target: { value: '02147483648' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save archive settings' }));
 
@@ -1641,26 +1581,28 @@ describe('settings search', () => {
     },
   );
 
-  it('opens an Advanced application result in its merged category and clears the query', async () => {
+  it('opens a related application result in its merged category and clears the query', async () => {
     vi.mocked(getAgentAdminSettings).mockResolvedValue(organizedApplicationSnapshot());
     renderSettings();
     await screen.findByRole('tab', { name: 'Appearance' });
-    const input = screen.getByLabelText('Publication Git timeout');
+    const input = screen.getByLabelText('Trust forwarded client addresses');
+    // The field is always rendered; its tab is inactive until search selects it.
     expect(input).not.toBeVisible();
+    expect(input.closest('details')).toBeNull();
 
-    const results = searchFor('PUBLICATION timeout');
+    const results = searchFor('SECURITY forwarded');
     expect(within(results).getAllByRole('button')).toHaveLength(1);
     fireEvent.click(
       within(results).getByRole('button', {
-        name: 'Open Publication Git timeout in Source control',
+        name: 'Open Trust forwarded client addresses in Identity & access',
       }),
     );
 
     await waitFor(() => expect(input).toHaveFocus());
-    expect(input.closest('details')).toHaveAttribute('open');
-    expect(screen.getByRole('tabpanel', { name: 'Source control' })).toBeVisible();
+    expectVisibleSetting(input);
+    expect(screen.getByRole('tabpanel', { name: 'Identity & access' })).toBeVisible();
     expect(new URLSearchParams(window.location.search).get('tab')).toBe(
-      categoryTabId('Source control'),
+      categoryTabId('Identity & access'),
     );
     expect(screen.getByRole('searchbox', { name: 'Search settings' })).toHaveValue('');
     expect(
@@ -1700,11 +1642,13 @@ describe('settings search', () => {
     expect(getAgentAdminSettings).toHaveBeenCalledTimes(1);
   });
 
-  it('opens an Advanced host setting by its environment key and preserves its draft across searches', async () => {
+  it('opens a host setting by its environment key and preserves its draft across searches', async () => {
     renderSettings();
     await screen.findByText('No application settings are available.');
     const input = await screen.findByLabelText('Terminals per server for all servers');
+    // The field is always rendered; its tab is inactive until search selects it.
     expect(input).not.toBeVisible();
+    expect(input.closest('details')).toBeNull();
 
     fireEvent.click(
       within(searchFor('AGENT_TERMINAL_MAX_SESSIONS')).getByRole('button', {
@@ -1713,7 +1657,7 @@ describe('settings search', () => {
     );
 
     await waitFor(() => expect(input).toHaveFocus());
-    expect(input.closest('details')).toHaveAttribute('open');
+    expectVisibleSetting(input);
     expect(screen.getByRole('tabpanel', { name: 'Sandbox' })).toBeVisible();
     fireEvent.change(input, { target: { value: '100' } });
     fireEvent.click(
@@ -1737,7 +1681,7 @@ describe('settings search', () => {
     expect(setVersion).not.toHaveBeenCalled();
   });
 
-  it('searches CloudLab before visiting it and focuses its Advanced field after defaults arrive', async () => {
+  it('searches CloudLab before visiting it and focuses its template field after defaults arrive', async () => {
     const pending = deferred<{ defaults: typeof cloudLabDefaults }>();
     vi.mocked(getCloudLabDefaults).mockReturnValueOnce(pending.promise);
     renderSettings();
@@ -1758,8 +1702,7 @@ describe('settings search', () => {
     await act(async () => pending.resolve({ defaults: cloudLabDefaults }));
     const input = await screen.findByLabelText('CloudLab SSH public key');
     await waitFor(() => expect(input).toHaveFocus());
-    expect(input.closest('details')).toHaveAttribute('open');
-    expect(input).toBeVisible();
+    expectVisibleSetting(input);
     expect(saveCloudLabDefaults).not.toHaveBeenCalled();
   });
 
@@ -1788,8 +1731,7 @@ describe('settings search', () => {
         name: 'Open Claude Code in Agent versions',
       }),
     ).toBeVisible();
-    expect(oldTarget.closest('details')).not.toHaveAttribute('open');
-    expect(oldTarget).not.toBeVisible();
+    expectVisibleSetting(oldTarget);
   });
 
   it('cancels delayed CloudLab result focus when the user chooses another tab', async () => {
@@ -1815,11 +1757,10 @@ describe('settings search', () => {
     act(() => cloudLabTab.focus());
     fireEvent.click(cloudLabTab);
     expect(cloudLabTab).toHaveFocus();
-    expect(oldTarget.closest('details')).not.toHaveAttribute('open');
-    expect(oldTarget).not.toBeVisible();
+    expectVisibleSetting(oldTarget);
   });
 
-  it('routes an Advanced archive policy result to Sandbox and focuses its editor', async () => {
+  it('routes an archive policy result to Sandbox and focuses its editor', async () => {
     renderSettings();
     await screen.findByText('No application settings are available.');
     await screen.findByLabelText('Maximum archive bytes');
@@ -1831,7 +1772,7 @@ describe('settings search', () => {
 
     const input = screen.getByLabelText('Maximum archive bytes');
     await waitFor(() => expect(input).toHaveFocus());
-    expect(input.closest('details')).toHaveAttribute('open');
+    expectVisibleSetting(input);
     expect(screen.getByRole('tabpanel', { name: 'Sandbox' })).toBeVisible();
     expect(new URLSearchParams(window.location.search).get('tab')).toBe('sandbox');
     expect(updateArchiveSettings).not.toHaveBeenCalled();
@@ -1849,7 +1790,7 @@ describe('settings search', () => {
 
     const input = screen.getByLabelText('Sandbox archive S3 endpoint');
     await waitFor(() => expect(input).toHaveFocus());
-    expect(input.closest('details')).toHaveAttribute('open');
+    expectVisibleSetting(input);
     expect(screen.getByRole('tabpanel', { name: 'Sandbox' })).toBeVisible();
     expect(screen.getByRole('region', { name: 'Deletion archive destination' })).toContainElement(
       input,
@@ -1857,7 +1798,7 @@ describe('settings search', () => {
     expect(screen.queryByRole('tab', { name: 'Sandbox archives' })).not.toBeInTheDocument();
   });
 
-  it('reveals and focuses deployment prerequisites from another settings section', async () => {
+  it('does not offer deployment notes as search results or a settings section', async () => {
     vi.mocked(getAgentAdminSettings).mockResolvedValue(
       applicationSnapshot({
         bootstrap: [
@@ -1869,19 +1810,15 @@ describe('settings search', () => {
         ],
       }),
     );
-    renderSettings('Sandbox');
+    renderSettings();
     await screen.findByRole('tab', { name: 'Appearance' });
-    fireEvent.click(
-      within(searchFor('agent_database_url')).getByRole('button', {
-        name: 'Open Database connection in Deployment setup',
-      }),
+    const results = searchFor('agent_database_url');
+    await waitFor(() =>
+      expect(within(results).getByRole('status')).toHaveTextContent('No settings found.'),
     );
-
-    const target = screen.getByText('Database connection').closest('div')!;
-    await waitFor(() => expect(target).toHaveFocus());
-    expect(target.closest('details')).toHaveAttribute('open');
-    expect(screen.getByRole('tabpanel', { name: 'Appearance' })).toBeVisible();
-    expect(target).toBeVisible();
+    expect(within(results).queryAllByRole('button')).toHaveLength(0);
+    expect(screen.queryByRole('tab', { name: 'Deployment' })).not.toBeInTheDocument();
+    expect(screen.queryByText('AGENT_DATABASE_URL')).not.toBeInTheDocument();
   });
 
   it('focuses the current value when an application result is read-only', async () => {
@@ -1944,13 +1881,13 @@ describe('polling and account boundaries', () => {
     vi.useFakeTimers();
     renderSettings('Agent versions');
     await vi.waitFor(() => expect(screen.getByLabelText('Claude Code')).toBeInTheDocument());
-    fireEvent.change(screen.getByLabelText('Claude Code'), { target: { value: '2.1.235' } });
+    chooseOption(screen.getByLabelText('Claude Code'), '2.1.235');
     selectSettingsTab('Sandbox');
     fireEvent.change(screen.getByLabelText('Turn time limit for all servers'), {
       target: { value: '2' },
     });
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(screen.getByLabelText('Claude Code')).toHaveValue('2.1.235');
+    expect(screen.getByLabelText('Claude Code')).toHaveTextContent('2.1.235');
     expect(screen.getByLabelText('Turn time limit for all servers')).toHaveValue(2);
 
     setLimit.mockResolvedValue(pool({ host_settings: { agent_timeout_s: 7200 } }));
@@ -1982,14 +1919,14 @@ describe('polling and account boundaries', () => {
     await vi.advanceTimersByTimeAsync(30_000);
     setVersion.mockResolvedValue(pool({ runtime_versions: { 'claude-code': '2.1.235' } }));
     const select = screen.getByLabelText('Claude Code');
-    fireEvent.change(select, { target: { value: '2.1.235' } });
+    chooseOption(select, '2.1.235');
     submit(select);
     await vi.waitFor(() =>
       expect(screen.getByRole('status')).toHaveTextContent('sandboxes use 2.1.235'),
     );
     finishPoll(pool());
     await vi.advanceTimersByTimeAsync(0);
-    expect(screen.getByLabelText('Claude Code')).toHaveValue('2.1.235');
+    expect(screen.getByLabelText('Claude Code')).toHaveTextContent('2.1.235');
   });
 
   it('keeps the last snapshot on a failed poll and labels the failure', async () => {
@@ -2032,14 +1969,16 @@ describe('polling and account boundaries', () => {
     );
     const view = renderSettings('Agent versions');
     const select = await screen.findByLabelText('Claude Code');
-    fireEvent.change(select, { target: { value: '2.1.235' } });
+    chooseOption(select, '2.1.235');
     submit(select);
     auth.id = 'admin-b';
     view.rerender(<AdminSettingsPage />);
     selectSettingsTab('Agent versions');
-    expect(await screen.findByLabelText('Claude Code')).toHaveValue('');
+    expect(await screen.findByLabelText('Claude Code')).toHaveTextContent(/^Server default/);
     finishSave(pool({ runtime_versions: { 'claude-code': '2.1.235' } }));
-    await waitFor(() => expect(screen.getByLabelText('Claude Code')).toHaveValue(''));
+    await waitFor(() =>
+      expect(screen.getByLabelText('Claude Code')).toHaveTextContent(/^Server default/),
+    );
     expect(screen.queryByText(/sandboxes use/)).not.toBeInTheDocument();
   });
 });
@@ -2219,13 +2158,14 @@ describe('agent updates', () => {
       renderSettings('Agent versions');
 
       const menu = await screen.findByLabelText('Claude Code');
-      await screen.findByRole('option', { name: '2.1.250' });
+      await waitFor(() => expect(optionNames(menu)).toContain('2.1.250'));
       // What the servers hold, then what npm has besides, newest first.
-      const groups = within(menu).getAllByRole('group');
-      expect(groups.map((group) => group.getAttribute('label'))).toEqual([
-        'On servers',
-        'Download from npm',
-      ]);
+      const groups = within(openSelect(menu)).getAllByRole('group');
+      expect(
+        groups.map(
+          (group) => document.getElementById(group.getAttribute('aria-labelledby')!)?.textContent,
+        ),
+      ).toEqual(['On servers', 'Download from npm']);
       expect(
         within(groups[1])
           .getAllByRole('option')
@@ -2233,7 +2173,7 @@ describe('agent updates', () => {
       ).toEqual(['2.1.300', '2.1.250']);
       expect(releases).toHaveBeenCalledWith('claude-code', expect.anything());
 
-      fireEvent.change(menu, { target: { value: '2.1.250' } });
+      chooseOption(menu, '2.1.250');
       expect(
         screen.getByText(
           '1 server downloads and checks 2.1.250 first; new sandboxes switch once every server has it.',
@@ -2253,8 +2193,8 @@ describe('agent updates', () => {
       renderSettings('Agent versions');
 
       const menu = await screen.findByLabelText('Claude Code');
-      await screen.findByRole('option', { name: '2.1.300' });
-      fireEvent.change(menu, { target: { value: '2.1.235' } });
+      await waitFor(() => expect(optionNames(menu)).toContain('2.1.300'));
+      chooseOption(menu, '2.1.235');
       fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
       await waitFor(() => expect(setVersion).toHaveBeenCalledWith('claude-code', '2.1.235'));
@@ -2302,9 +2242,7 @@ describe('agent updates', () => {
         await screen.findByText('Could not list npm releases: npm answered 503 for @openai/codex'),
       ).toBeInTheDocument();
       // Codex still offers what its servers have.
-      expect(
-        within(screen.getByLabelText('Codex')).getByRole('option', { name: '0.145.0' }),
-      ).toBeInTheDocument();
+      expect(optionNames(screen.getByLabelText('Codex'))).toContain('0.145.0');
     });
   });
 

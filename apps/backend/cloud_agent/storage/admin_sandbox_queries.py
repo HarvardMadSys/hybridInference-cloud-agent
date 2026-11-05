@@ -9,6 +9,7 @@ from cloud_agent.admin_sandboxes import (
     SANDBOX_TRAJECTORY_MEMBER_LIMIT,
     AdminSandbox,
     AdminSandboxCheckpoint,
+    AdminSandboxDeletionAttempt,
     AdminSandboxDetail,
     AdminSandboxList,
     AdminSandboxMember,
@@ -22,6 +23,7 @@ from cloud_agent.admin_sandboxes import (
     sandbox_trajectory_cursor_scope,
 )
 from cloud_agent.storage._sql.rows import load_json
+from cloud_agent.storage.admin_sandbox_inventory import AdminSandboxInventory
 
 if TYPE_CHECKING:
     import asyncpg
@@ -33,6 +35,7 @@ class AdminSandboxQueries:
     def __init__(self, pool: asyncpg.Pool) -> None:
         """Use the shared Agent database pool."""
         self._pool = pool
+        self.inventory = AdminSandboxInventory(pool)
 
     async def list_running(self, *, cursor: SandboxCursor | None, limit: int) -> AdminSandboxList:
         """Include retained idle groups and paginate before joining their members."""
@@ -65,7 +68,7 @@ class AdminSandboxQueries:
                     SELECT g.id, g.generation, g.stop_requested_at, g.archived_at,
                            g.deletion_state, g.deletion_discard, g.deletion_request_id, g.deletion_requested_at,
                            g.deletion_archive_key, g.deletion_archive_version_id,
-                           g.deletion_sha256, g.deletion_size_bytes, g.deletion_error, g.deleted_at,
+                           g.deletion_sha256, g.deletion_size_bytes, g.deletion_error, g.deletion_retry_exhausted_at, g.deleted_at,
                            g.origin_thread_id, g.user_id, g.host,
                            g.container_id, g.container_name,
                            g.runtime_id, g.runtime_version, g.execution_profile,
@@ -83,7 +86,7 @@ class AdminSandboxQueries:
                 SELECT g.id, g.generation, g.stop_requested_at, g.archived_at, g.origin_thread_id,
                        g.deletion_state, g.deletion_discard, g.deletion_request_id, g.deletion_requested_at,
                        g.deletion_archive_key, g.deletion_archive_version_id,
-                       g.deletion_sha256, g.deletion_size_bytes, g.deletion_error, g.deleted_at,
+                       g.deletion_sha256, g.deletion_size_bytes, g.deletion_error, g.deletion_retry_exhausted_at, g.deleted_at,
                        CASE WHEN t.title_source IN ('generated', 'manual')
                             THEN LEFT(t.title, 160) END AS title,
                        LEFT(t.repo, 256) AS repo, LEFT(g.user_id, 256) AS user_id,
@@ -95,7 +98,8 @@ class AdminSandboxQueries:
                        g.resource_snapshot, g.resource_sampled_at, g.resource_received_at,
                        members.member_count, members.active_attempt_count,
                        g.created_at, g.last_activity_at, g.idle_deadline, g.updated_at,
-                       h.last_heartbeat_at AS host_last_heartbeat_at
+                       h.last_heartbeat_at AS host_last_heartbeat_at,
+                       incident.last_incident, incident.last_incident_at
                 FROM page g
                 JOIN agent_threads t ON t.id = g.origin_thread_id AND t.user_id = g.user_id
                 LEFT JOIN agent_runner_hosts h ON h.host = g.host
@@ -105,6 +109,14 @@ class AdminSandboxQueries:
                     FROM agent_thread_sandbox_memberships m
                     WHERE m.sandbox_id = g.id
                 ) members
+                LEFT JOIN LATERAL (
+                    SELECT substr(e.event_type, 10) AS last_incident, e.created_at AS last_incident_at
+                    FROM agent_sandbox_events e
+                    WHERE e.sandbox_id = g.id AND starts_with(e.event_type, 'incident.')
+                      AND e.created_at > NOW() - INTERVAL '24 hours'
+                    ORDER BY e.id DESC
+                    LIMIT 1
+                ) incident ON TRUE
                 ORDER BY g.id
                 """,
                 cursor.after_id if cursor else None,
@@ -149,7 +161,7 @@ class AdminSandboxQueries:
                 SELECT g.id, g.generation, g.stop_requested_at, g.archived_at, g.origin_thread_id,
                        g.deletion_state, g.deletion_discard, g.deletion_request_id, g.deletion_requested_at,
                        g.deletion_archive_key, g.deletion_archive_version_id,
-                       g.deletion_sha256, g.deletion_size_bytes, g.deletion_error, g.deleted_at,
+                       g.deletion_sha256, g.deletion_size_bytes, g.deletion_error, g.deletion_retry_exhausted_at, g.deleted_at,
                        CASE WHEN t.title_source IN ('generated', 'manual')
                             THEN LEFT(t.title, 160) END AS title,
                        LEFT(t.repo, 256) AS repo, LEFT(g.user_id, 256) AS user_id,
@@ -190,6 +202,18 @@ class AdminSandboxQueries:
                 """,
                 sandbox_id,
             )
+            deletion_attempt_rows = await conn.fetch(
+                """
+                SELECT correlation_id, request_id, host_id, attempt_number, stage, outcome,
+                       failure_code, sandbox_manager_status, retry_class, retry_scheduled,
+                       cleanup_outcome, started_at, updated_at, finished_at
+                FROM agent_sandbox_deletion_attempts
+                WHERE sandbox_id=$1
+                ORDER BY started_at DESC, attempt_number DESC
+                LIMIT 50
+                """,
+                sandbox_id,
+            )
             latest_checkpoint = await _latest_checkpoint(conn, sandbox_id)
         item = dict(row)
         item["resource_usage"] = resource_usage_view(
@@ -203,6 +227,12 @@ class AdminSandboxQueries:
             members=[AdminSandboxMember.model_validate(dict(member)) for member in member_rows],
             observed_at=observed_at,
             latest_checkpoint=latest_checkpoint,
+            deletion_attempts=[
+                AdminSandboxDeletionAttempt.model_validate(
+                    {**dict(attempt), "correlation_id": str(attempt["correlation_id"])}
+                )
+                for attempt in deletion_attempt_rows
+            ],
         )
 
     async def trajectory(
@@ -224,7 +254,7 @@ class AdminSandboxQueries:
                 SELECT g.id, g.generation, g.stop_requested_at, g.archived_at, g.origin_thread_id,
                        g.deletion_state, g.deletion_discard, g.deletion_request_id, g.deletion_requested_at,
                        g.deletion_archive_key, g.deletion_archive_version_id,
-                       g.deletion_sha256, g.deletion_size_bytes, g.deletion_error, g.deleted_at,
+                       g.deletion_sha256, g.deletion_size_bytes, g.deletion_error, g.deletion_retry_exhausted_at, g.deleted_at,
                        CASE WHEN t.title_source IN ('generated', 'manual')
                             THEN LEFT(t.title, 160) END AS title,
                        LEFT(t.repo, 256) AS repo, LEFT(g.user_id, 256) AS user_id,

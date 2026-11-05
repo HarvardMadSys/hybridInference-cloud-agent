@@ -10,9 +10,11 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from tests.support.owners import launch_connection
 
 from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
 from cloud_agent_host.chat_sandbox import (
+    MEMBER_REAPER_TARGET,
     MEMBER_TMPFS_ROOT,
     MEMBER_UID_BASE,
     ChatSandboxManager,
@@ -20,6 +22,8 @@ from cloud_agent_host.chat_sandbox import (
     member_inference_env_path,
 )
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
+from cloud_agent_host.sandbox_browser import LAUNCHER
+from cloud_agent_host.sandbox_mcp import GATEWAY
 from cloud_agent_host.session_supervisor_client import (
     SessionSupervisorClient,
     SessionSupervisorError,
@@ -140,6 +144,8 @@ def _launch_context(environment: BoundEnvironment | None):
     manager = SimpleNamespace(
         backend=SimpleNamespace(gid=10001, base_env=lambda: {}),
         reap_member_processes=lambda spec, **kwargs: None,
+        # The sandbox's shared browser service, started before every CLI.
+        exec_capture=lambda spec, argv, **kwargs: subprocess.CompletedProcess(argv, 0, b"", b""),
         write_member_inference_env=lambda spec, script, **kwargs: events.append(
             ("write", script, kwargs)
         ),
@@ -159,10 +165,10 @@ def _launch_context(environment: BoundEnvironment | None):
         native_session_id=None,
         model="model",
         reasoning_effort=None,
-        gateway_base_url="http://gateway",
         credential="grant",
         slot_id=2,
         environment=environment,
+        **launch_connection("claude-code"),
     )
     context = ResidentTransportFactory(manager)._launch_context(spec, launch, credential="grant")
     return context, events
@@ -235,15 +241,23 @@ def test_a_launch_without_them_leaves_no_earlier_credentials_in_the_slot(tmp_pat
     """
     root = tmp_path / "members"
     (root / "1").mkdir(parents=True)
+    reaper = tmp_path / "reaper.py"
+    reaper.write_text("")
 
     def exec_capture(spec, argv, *, input_bytes=None, **kwargs):
+        if argv[0] in (LAUNCHER, GATEWAY):  # the browser service, sandbox MCP: not this test's
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
         # The member tmpfs, here a directory: run the container command locally.
+        # A member's preparation reaches its one exec as input, and the reap
+        # itself is the reaper's own tests' to exercise.
         local = [part.replace(MEMBER_TMPFS_ROOT, str(root)) for part in argv]
-        return subprocess.run(local, input=input_bytes or b"", capture_output=True, check=False)
+        stdin = (input_bytes or b"").replace(MEMBER_TMPFS_ROOT.encode(), str(root).encode())
+        stdin = stdin.replace(MEMBER_REAPER_TARGET.encode(), str(reaper).encode())
+        return subprocess.run(local, input=stdin, capture_output=True, check=False)
 
     manager = SimpleNamespace(
         exec_capture=exec_capture,
-        reap_member_processes_except=lambda spec, **kwargs: None,
+        ensure_member_process_reaper=lambda spec: None,
         backend=SimpleNamespace(gid=10001, base_env=lambda: {}),
         spawn=lambda spec, argv, **kwargs: object(),
     )
@@ -268,10 +282,10 @@ def test_a_launch_without_them_leaves_no_earlier_credentials_in_the_slot(tmp_pat
             native_session_id=None,
             model="model",
             reasoning_effort=None,
-            gateway_base_url="http://gateway",
             credential="grant",
             slot_id=1,
             environment=environment,
+            **launch_connection("codex"),
         )
         context = ResidentTransportFactory(manager)._launch_context(
             spec, resident, credential="grant"

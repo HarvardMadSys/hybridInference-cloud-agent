@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from time import monotonic
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -19,6 +21,7 @@ from cloud_agent.agent_memory import (
     memory_key,
     normalize_memory,
 )
+from cloud_agent.logging_utils import get_logger
 from cloud_agent.storage._sql.hosts import LIVE_ATTEMPT_HOST
 from cloud_agent.storage._sql.mcp_residency import lock_mcp_residency
 
@@ -33,6 +36,19 @@ _COLUMNS = (
     "id, repo, content, description, status, origin, source_job_ids, version, "
     "created_at, updated_at, last_used_at, archived_at"
 )
+_PURGE_BATCH_SIZE = 500
+_PURGE_MAX_BATCHES = 10
+logger = get_logger(__name__)
+
+
+def _archive_page_sql(*, has_cursor: bool) -> str:
+    """Keep the cursor as an index bound even for generic prepared plans."""
+    cursor = "AND (archived_at,id) < ($3,$4) " if has_cursor else ""
+    return (
+        f"SELECT {_COLUMNS} FROM agent_memories "
+        "WHERE user_id=$1 AND COALESCE(repo, '')=$2 AND status='archived' "
+        f"{cursor}ORDER BY archived_at DESC,id DESC LIMIT 51"
+    )
 
 
 def _memory(row: Mapping[str, Any]) -> AgentMemoryView:
@@ -202,23 +218,46 @@ class PostgresAgentMemoryRepository:
         """Share the existing pool."""
         self._pool = pool
 
-    async def list_memories(self, user_id: str, repo: str | None) -> dict[str, Any]:
-        """Read one scope's active and archived memories and its enabled setting."""
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
+    async def list_memories(
+        self, user_id: str, repo: str | None, *, archive_cursor: str | None = None
+    ) -> dict[str, Any]:
+        """Read active memories and at most 50 archives, newest first."""
+        before = None
+        before_id = ""
+        if archive_cursor is not None:
+            timestamp, separator, before_id = archive_cursor.partition("|")
+            before = datetime.fromisoformat(timestamp)
+            if not separator or not before.tzinfo or not before_id or len(before_id) > 128:
+                raise ValueError("Invalid archive cursor")
+        async with (
+            self._pool.acquire() as conn,
+            conn.transaction(isolation="repeatable_read", readonly=True),
+        ):
+            active = await conn.fetch(
                 f"SELECT {_COLUMNS} FROM agent_memories "
-                "WHERE user_id = $1 AND repo IS NOT DISTINCT FROM $2 "
-                "ORDER BY archived_at DESC NULLS FIRST, created_at DESC, id",
+                "WHERE user_id = $1 AND COALESCE(repo, '') = $2 AND status='active' "
+                "ORDER BY created_at DESC, id",
                 user_id,
-                repo,
+                repo or "",
+            )
+            archived = await conn.fetch(
+                _archive_page_sql(has_cursor=before is not None),
+                user_id,
+                repo or "",
+                *((before, before_id) if before is not None else ()),
             )
             enabled = await _enabled(conn, user_id, repo)
-        memories = [_memory(row) for row in rows]
+        page = archived[:50]
         return AgentMemoryScopeView(
             repo=repo,
             enabled=enabled,
-            memories=[memory for memory in memories if memory.status == "active"],
-            archived=[memory for memory in memories if memory.status == "archived"],
+            memories=[_memory(row) for row in active],
+            archived=[_memory(row) for row in page],
+            archived_next_cursor=(
+                f"{page[-1]['archived_at'].isoformat()}|{page[-1]['id']}"
+                if len(archived) > 50
+                else None
+            ),
         ).model_dump(mode="json")
 
     async def add_memory(self, user_id: str, repo: str | None, content: str) -> dict[str, Any]:
@@ -499,10 +538,35 @@ class PostgresAgentMemoryRepository:
         return row
 
     async def purge_memories(self) -> None:
-        """Forget archives older than the retention period."""
-        async with self._pool.acquire() as conn:
-            await conn.execute(
-                "DELETE FROM agent_memories WHERE status = 'archived' "
-                "AND archived_at < clock_timestamp() - make_interval(days => $1)",
-                ARCHIVE_RETENTION_DAYS,
-            )
+        """Forget expired archives in bounded transactions and a bounded pass."""
+        started = monotonic()
+        deleted = 0
+        for _ in range(_PURGE_MAX_BATCHES):
+            async with self._pool.acquire() as conn, conn.transaction():
+                await conn.execute("SET LOCAL statement_timeout = '5s'")
+                result = await conn.execute(
+                    """
+                    WITH expired AS MATERIALIZED (
+                        SELECT id FROM agent_memories
+                        WHERE status = 'archived'
+                          AND archived_at < statement_timestamp() - make_interval(days => $1)
+                        ORDER BY archived_at, id
+                        LIMIT $2 FOR UPDATE SKIP LOCKED
+                    )
+                    DELETE FROM agent_memories m USING expired e WHERE m.id = e.id
+                    """,
+                    ARCHIVE_RETENTION_DAYS,
+                    _PURGE_BATCH_SIZE,
+                )
+            batch = int(result.split()[-1])
+            deleted += batch
+            if batch < _PURGE_BATCH_SIZE:
+                break
+        logger.info(
+            "agent_memory_retention_pass",
+            extra={
+                "deleted": deleted,
+                "batch_limit_reached": batch == _PURGE_BATCH_SIZE,
+                "duration_seconds": monotonic() - started,
+            },
+        )

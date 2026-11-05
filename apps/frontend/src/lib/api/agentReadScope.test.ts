@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { getAgentJob, getAgentJobThread, type AgentJobApi, type AgentThreadApi } from './agents';
+import {
+  getAgentJob,
+  getAgentJobThread,
+  type AgentJobApi,
+  type AgentJobUsageApi,
+  type AgentThreadApi,
+} from './agents';
 import { createAgentReadScope } from './agentReadScope';
 
 vi.mock('./agents', () => ({ getAgentJob: vi.fn(), getAgentJobThread: vi.fn() }));
@@ -47,6 +53,24 @@ describe('owner-scoped pending reads', () => {
     expect(getAgentJobThread).toHaveBeenCalledTimes(2);
   });
 
+  it('coalesces matching history pages and invalidates only that job', async () => {
+    const held = deferred<AgentThreadApi | null>();
+    vi.mocked(getAgentJobThread).mockReturnValue(held.promise);
+    const reads = createAgentReadScope();
+    const anchor = reads.getAgentJobThread('job-a', { anchor: true });
+    expect(reads.getAgentJobThread('job-a', { anchor: true })).toBe(anchor);
+    const older = reads.getAgentJobThread('job-a', { cursor: 'older' });
+    const other = reads.getAgentJobThread('job-b', { anchor: true });
+    expect(getAgentJobThread).toHaveBeenCalledTimes(3);
+    reads.invalidate('job-a');
+    reads.getAgentJobThread('job-a', { anchor: true });
+    reads.getAgentJobThread('job-a', { cursor: 'older' });
+    expect(reads.getAgentJobThread('job-b', { anchor: true })).toBe(other);
+    expect(getAgentJobThread).toHaveBeenCalledTimes(5);
+    held.resolve(null);
+    await Promise.all([anchor, older, other]);
+  });
+
   it('lets both readers see an error and allows the next read to retry', async () => {
     const held = deferred<AgentJobApi>();
     vi.mocked(getAgentJob).mockReturnValueOnce(held.promise).mockResolvedValue(JOB);
@@ -87,5 +111,31 @@ describe('owner-scoped pending reads', () => {
     expect(getAgentJob).toHaveBeenCalledTimes(2);
     fresh.resolve(JOB);
     await second;
+  });
+});
+
+describe('owner-scoped usage snapshots', () => {
+  const USAGE = {
+    runtime: { source: 'runtime', input_tokens: 1, output_tokens: 1, cache_read_tokens: null },
+  } as AgentJobUsageApi;
+
+  it('keeps one snapshot per job and answers nothing before one is kept', () => {
+    const reads = createAgentReadScope();
+    expect(reads.getUsage('job-a')).toBeUndefined();
+    // A deployment without a ledger is an answer too, not a gap to re-read.
+    reads.setUsage('job-a', null);
+    expect(reads.getUsage('job-a')).toBeNull();
+    reads.setUsage('job-a', USAGE);
+    expect(reads.getUsage('job-a')).toBe(USAGE);
+    expect(reads.getUsage('job-b')).toBeUndefined();
+  });
+
+  it('never shares a snapshot across owner scopes', () => {
+    const alice = createAgentReadScope();
+    const bob = createAgentReadScope();
+    alice.setUsage('job-a', USAGE);
+    expect(bob.getUsage('job-a')).toBeUndefined();
+    bob.setUsage('job-a', null);
+    expect(alice.getUsage('job-a')).toBe(USAGE);
   });
 });

@@ -2,6 +2,14 @@
 
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
+import { Select } from '@/components/ui/Select';
+import {
+  MENU_POSITIONED,
+  MENU_ROW,
+  MENU_ROW_DESTRUCTIVE,
+  MENU_ACTIONS,
+} from '@/components/ui/menuStyles';
+import { usePopupMenu } from '@/components/ui/usePopupMenu';
 import { getAgentConfig } from '@/lib/api/agents';
 import {
   copyEnvironment,
@@ -14,7 +22,7 @@ import {
 import type { EnvironmentConfig, EnvironmentTeam } from '@/lib/api/environments';
 import { listTeams } from '@/lib/api/teams';
 import { EnvironmentDialog, OwnerSelect } from './EnvironmentDialog';
-import { Badge, SnapshotBadge, TeamBadge, TestBadge } from './EnvironmentStatus';
+import { ACTIVE_STATES, Badge, SnapshotBadge, TeamBadge, TestBadge } from './EnvironmentStatus';
 
 export function emptyEnvironment(repo: string | null): EnvironmentConfig {
   return {
@@ -47,19 +55,13 @@ function RowMenu({
   const trigger = useRef<HTMLButtonElement>(null);
   const menu = useRef<HTMLDivElement>(null);
   const id = useId();
-  useEffect(() => {
-    if (!open) return;
-    menu.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
-    const outside = (event: PointerEvent) => {
-      if (
-        !menu.current?.contains(event.target as Node) &&
-        !trigger.current?.contains(event.target as Node)
-      )
-        setOpen(false);
-    };
-    document.addEventListener('pointerdown', outside);
-    return () => document.removeEventListener('pointerdown', outside);
-  }, [open]);
+  const popup = usePopupMenu({
+    open,
+    onOpenChange: setOpen,
+    triggerRef: trigger,
+    menuRef: menu,
+    placement: { gap: 4, width: 176, maxWidth: 240, preferredHeight: 160, maxHeight: 320 },
+  });
   function close() {
     setOpen(false);
     trigger.current?.focus();
@@ -75,6 +77,7 @@ function RowMenu({
         aria-expanded={open}
         aria-controls={open ? id : undefined}
         onClick={() => setOpen(!open)}
+        onKeyDown={popup.triggerKeyDown}
         className="ui-icon-button ui-button-ghost"
       >
         <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
@@ -89,30 +92,9 @@ function RowMenu({
           ref={menu}
           role="menu"
           aria-label={label}
-          className="ui-popover absolute right-0 top-full z-20 mt-1 w-44 rounded-xl border border-border bg-surface-raised p-1.5 shadow-card"
-          onKeyDown={(event) => {
-            if (event.key === 'Escape') {
-              event.preventDefault();
-              event.stopPropagation();
-              close();
-            } else if (event.key === 'Tab') {
-              close();
-            } else if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
-              event.preventDefault();
-              const items = [
-                ...menu.current!.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
-              ];
-              const current = items.indexOf(document.activeElement as HTMLButtonElement);
-              const next =
-                event.key === 'Home'
-                  ? 0
-                  : event.key === 'End'
-                    ? items.length - 1
-                    : (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) %
-                      items.length;
-              items[next]?.focus();
-            }
-          }}
+          style={popup.style}
+          className={`${MENU_ACTIONS} ${MENU_POSITIONED} w-44`}
+          onKeyDown={popup.onKeyDown}
         >
           {actions.map(({ action, label: text }) => (
             <button
@@ -124,7 +106,7 @@ function RowMenu({
                 close();
                 onAction(action);
               }}
-              className={`block w-full rounded-md px-3 py-2 text-left text-sm hover:bg-surface-hover focus:bg-surface-hover focus:outline-none ${action === 'remove' ? 'text-status-error' : 'text-foreground'}`}
+              className={action === 'remove' ? MENU_ROW_DESTRUCTIVE : MENU_ROW}
             >
               {text}
             </button>
@@ -146,9 +128,9 @@ export async function editableTeams(): Promise<EnvironmentTeam[]> {
 /**
  * The Environments card in My Settings: personal global variables, then each
  * repository's environments, your own and your teams'. Editing happens in
- * `EnvironmentDialog`; copying and removing are confirmed in place under their
- * row. A team's environment is changed only by its owner and admins; other
- * members can view, test, copy and choose it.
+ * `EnvironmentDialog`; copying, removing and deleting a saved installation are
+ * confirmed in place under their row. A team's environment is changed only by
+ * its owner and admins; other members can view, test, copy and choose it.
  */
 export function EnvironmentManager() {
   const t = useT();
@@ -165,16 +147,31 @@ export function EnvironmentManager() {
   const [teams, setTeams] = useState<EnvironmentTeam[]>([]);
   const copyRequest = useRef<{ fingerprint: string; key: string } | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
+  const [discarding, setDiscarding] = useState<string | null>(null);
   const [snapshotsEnabled, setSnapshotsEnabled] = useState(false);
+  // Only the most recently sent read may land: a poll sent before an action
+  // must not put back the list that action changed.
+  const latest = useRef(0);
   const load = useCallback(async () => {
-    const result = await listEnvironments();
-    setItems(result.environments);
-    setGlobals(result.globals);
-    setSnapshotsEnabled(Boolean(result.snapshots_enabled));
+    const request = ++latest.current;
+    try {
+      const result = await listEnvironments();
+      if (request !== latest.current) return;
+      setItems(result.environments);
+      setGlobals(result.globals);
+      setSnapshotsEnabled(Boolean(result.snapshots_enabled));
+    } catch (e) {
+      // A newer read is on its way and reports for itself.
+      if (request === latest.current) throw e;
+    }
   }, []);
-  // A snapshot builds on some host for a few minutes; follow it until it settles.
+  // A snapshot builds, and a test runs, on some host for a few minutes; follow
+  // them until they settle.
   const building = (items ?? []).some(
-    (item) => item.snapshot?.state === 'queued' || item.snapshot?.state === 'building',
+    (item) =>
+      item.snapshot?.state === 'queued' ||
+      item.snapshot?.state === 'building' ||
+      ACTIVE_STATES.includes(item.latest_test?.state ?? ''),
   );
   useEffect(() => {
     if (!building) return;
@@ -332,6 +329,7 @@ export function EnvironmentManager() {
                       actions={menu}
                       onAction={(action) => {
                         setRemoving(null);
+                        setDiscarding(null);
                         setCopying(null);
                         if (action === 'copy') {
                           copyRequest.current = null;
@@ -346,13 +344,40 @@ export function EnvironmentManager() {
                         } else if (action === 'rebuild') {
                           void perform(() => rebuildEnvironmentSnapshot(item.id!));
                         } else if (action === 'discard') {
-                          void perform(() => deleteEnvironmentSnapshot(item.id!));
+                          setDiscarding(item.id);
                         } else {
                           setRemoving(item.id);
                         }
                       }}
                     />
                   </div>
+                  {discarding === item.id ? (
+                    <div className="flex flex-wrap items-center gap-2 border-t border-border bg-surface-muted/50 px-3 py-2.5">
+                      <p className="mr-auto text-sm">
+                        {t('environment.snapshot.deleteConfirm', { name: item.name })}
+                      </p>
+                      <button
+                        type="button"
+                        className="ui-button ui-button-ghost"
+                        onClick={() => setDiscarding(null)}
+                      >
+                        {t('environment.cancel')}
+                      </button>
+                      <button
+                        type="button"
+                        className="ui-button bg-status-error text-white hover:bg-status-error/90"
+                        disabled={busy}
+                        onClick={() =>
+                          void perform(async () => {
+                            await deleteEnvironmentSnapshot(item.id!);
+                            setDiscarding(null);
+                          })
+                        }
+                      >
+                        {t('environment.snapshot.delete')}
+                      </button>
+                    </div>
+                  ) : null}
                   {removing === item.id ? (
                     <div className="flex flex-wrap items-center gap-2 border-t border-border bg-surface-muted/50 px-3 py-2.5">
                       <p className="mr-auto text-sm">
@@ -395,17 +420,15 @@ export function EnvironmentManager() {
                         </label>
                         <label className="space-y-1 text-sm">
                           <span className="text-muted">{t('environment.repository')}</span>
-                          <select
-                            className="ui-input w-full"
+                          <Select
+                            className="ui-input block w-full"
                             value={copyRepo}
-                            onChange={(e) => setCopyRepo(e.target.value)}
-                          >
-                            {[...new Set([copyRepo, ...repos])].map((r) => (
-                              <option key={r} value={r}>
-                                {r}
-                              </option>
-                            ))}
-                          </select>
+                            onValueChange={setCopyRepo}
+                            options={[...new Set([copyRepo, ...repos])].map((r) => ({
+                              value: r,
+                              label: r,
+                            }))}
+                          />
                         </label>
                         {teams.length ? (
                           <OwnerSelect
@@ -482,7 +505,12 @@ export function EnvironmentManager() {
             if (next.repo === null) setGlobals(next);
             void load().catch(() => {});
           }}
-          onClose={() => setEditing(null)}
+          onClose={() => {
+            setEditing(null);
+            // A test run in the editor saves nothing, but changes the row's
+            // test result, and a pass can queue a prebuild.
+            void load().catch(() => {});
+          }}
         />
       ) : null}
     </section>

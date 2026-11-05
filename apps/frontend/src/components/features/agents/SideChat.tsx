@@ -1,5 +1,6 @@
 'use client';
 
+import { KEYBOARD_INPUT_SELECTOR } from '@/lib/keyboardShortcuts';
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 
 import { cancelAgentJob, type AgentConfigApi, type AgentJobApi } from '@/lib/api/agents';
@@ -9,17 +10,14 @@ import { hasLostContext, latestAttempt, latestJob, ownerRunNote } from './conver
 import { AttachmentStrip } from './attachments/AttachmentStrip';
 import { useAttachments } from './attachments/useAttachments';
 import { sideChatKeys } from './sideChatStorage';
-import {
-  composerModels,
-  composerOverrides,
-  ComposerTextarea,
-  ComposerSendButton,
-} from './ConversationComposer';
+import { composerOverrides, ComposerTextarea, ComposerSendButton } from './ConversationComposer';
 import { HistoryTurn } from './ChatMessages';
+import { ThreadHistoryButton } from './ThreadHistoryButton';
 import { codeReviewFixPrompt } from './codeReview';
 import { LiveAgentStatus } from './LiveAgentStatus';
 import { describeConversationTurns } from './conversationTurnNavigation';
 import { highestEffort, offeredEfforts } from './effort';
+import { choiceLabel, isModelUnavailable, turnChoice, turnModelPicker } from './modelSource';
 import { McpApprovalNotice } from './mcp/McpApprovalNotice';
 import { McpSessionPanel } from './mcp/McpSessionPanel';
 import { NativeQuestionPrompt } from './NativeQuestionPrompt';
@@ -31,16 +29,21 @@ import { useAgentJob } from './useAgentJobs';
 import { markConversationRead } from './useConversationReadState';
 import { useConversationScroll } from './useConversationScroll';
 import { usePendingMessages } from './usePendingMessages';
-import { useSideChatSession } from './useSideChatSession';
+import { useSideChatSession, type SideChatSource } from './useSideChatSession';
 import type { SideChatTab } from './useWorkspaceTabs';
 
 interface SideChatProps {
-  sourceJob: AgentJob;
+  sourceJob: SideChatSource &
+    Pick<AgentJob, 'model' | 'modelConnectionId' | 'reasoningEffort' | 'runtime'>;
   sourceJobs: AgentJobApi[];
   userId?: string;
   config: AgentConfigApi | null;
   active: boolean;
   tab?: SideChatTab;
+}
+
+function sideChatBusy(submitting: boolean, active: boolean, status: string): boolean {
+  return submitting || (active && status === 'preparing');
 }
 
 function SideChatBoundary(props: SideChatProps) {
@@ -73,7 +76,7 @@ function SideChatContent({
   const active = selected && visible;
   const t = useT();
   const attachments = useAttachments(t, config?.attachment_limits);
-  const { reset: resetAttachments } = attachments;
+  const { reset: resetAttachments, whileSending: sendingAttachments } = attachments;
   const { session, status, error, recoverable, retry, restart, advance } = useSideChatSession(
     sourceJob,
     userId,
@@ -84,6 +87,7 @@ function SideChatContent({
   const {
     job,
     threadJobs,
+    history,
     loading,
     error: loadError,
     reload,
@@ -106,7 +110,8 @@ function SideChatContent({
       return '';
     }
   });
-  const [model, setModel] = useState(sourceJob.model);
+  // The model with its source; the same name elsewhere is another choice.
+  const [model, setModel] = useState(() => turnChoice(sourceJob));
   const [effort, setEffort] = useState(sourceJob.reasoningEffort ?? '');
   const [submitting, setSubmitting] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -161,22 +166,23 @@ function SideChatContent({
   useEffect(() => {
     if (!current || modelInitialized.current) return;
     modelInitialized.current = true;
-    if (!pickedModel.current) setModel(current.model);
+    if (!pickedModel.current) setModel(turnChoice(current));
     if (!pickedEffort.current && !pickedModel.current) setEffort(current.reasoningEffort ?? '');
   }, [current]);
 
+  const runtime = current?.runtime ?? sourceJob.runtime;
   const efforts = useMemo(
-    () => offeredEfforts(config, current?.runtime ?? sourceJob.runtime, model || sourceJob.model),
-    [config, current?.runtime, model, sourceJob.runtime, sourceJob.model],
+    () => offeredEfforts(config, runtime, model.model, model.connectionId),
+    [config, runtime, model],
   );
   useEffect(() => {
     if (config && !efforts.includes(effort)) {
       setEffort(highestEffort(efforts));
     }
   }, [config, effort, efforts]);
-  const models = config?.models?.length
-    ? composerModels(config.models, current?.model ?? sourceJob.model)
-    : [];
+  const inheritedTurn = current ?? sourceJob;
+  const picker = turnModelPicker(config, runtime, model, setModel, t, turnChoice(inheritedTurn));
+  const modelUnavailable = isModelUnavailable(config, runtime, model);
 
   useEffect(() => {
     if (running) return;
@@ -294,17 +300,29 @@ function SideChatContent({
       return;
     }
     const threadId = current?.threadId ?? session?.threadId;
-    if (!current || !threadId || !body.prompt || unavailable || submission.current) return;
+    if (
+      !current ||
+      !threadId ||
+      !body.prompt ||
+      unavailable ||
+      modelUnavailable ||
+      submission.current
+    )
+      return;
     submission.current = true;
     setSubmitting(true);
     setActionError(null);
+    const sentDraft = draft;
     try {
-      const result = requestId
-        ? await submitThreadMessage(threadId, body, { requestId })
-        : await submitThreadMessage(threadId, body);
+      const result = await sendingAttachments(
+        requestId
+          ? submitThreadMessage(threadId, body, { requestId })
+          : submitThreadMessage(threadId, body),
+      );
       if (!mounted.current) return;
       if (clearDraft) {
-        setDraft('');
+        // Typed while this message was on its way, the box holds the next one.
+        setDraft((value) => (value === sentDraft ? '' : value));
         resetAttachments();
       }
       queue.apply(result);
@@ -358,7 +376,7 @@ function SideChatContent({
         event.repeat ||
         event.defaultPrevented ||
         !ownsFocus ||
-        target?.closest('input, textarea, select, [contenteditable="true"]')
+        target?.closest(KEYBOARD_INPUT_SELECTOR)
       )
         return;
       event.preventDefault();
@@ -386,8 +404,7 @@ function SideChatContent({
           event.key !== 'Escape' ||
           event.repeat ||
           event.defaultPrevented ||
-          (event.target instanceof Element &&
-            event.target.closest('input, textarea, select, [contenteditable="true"]'))
+          (event.target instanceof Element && event.target.closest(KEYBOARD_INPUT_SELECTOR))
         )
           return;
         event.preventDefault();
@@ -423,6 +440,7 @@ function SideChatContent({
           className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-y-none [overflow-anchor:none] focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-crimson/40"
         >
           <div className="flex-1 px-5 pt-3">
+            <ThreadHistoryButton history={history} />
             {active && turns.map((turn) => <HistoryTurn key={turn.key} turn={turn} busy={false} />)}
             {turns.length && current && ownerRunNote(current) ? (
               <p className="py-2 text-xs text-gray-500 dark:text-gray-400">
@@ -465,6 +483,11 @@ function SideChatContent({
               onSubmit={(event) => void send(event)}
               className="rounded-xl border border-gray-200 bg-white focus-within:border-crimson/30 dark:border-white/10 dark:bg-gray-900"
             >
+              <AttachmentStrip
+                entries={attachments.entries}
+                onRemove={attachments.remove}
+                disabled={unavailable || submitting}
+              />
               <ComposerTextarea
                 aria-label={t('sideChat.message')}
                 placeholder={t('sideChat.message')}
@@ -478,21 +501,15 @@ function SideChatContent({
                 }}
                 className="w-full resize-none rounded-t-xl border-0 bg-transparent px-4 pt-3 text-sm leading-relaxed text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-0 dark:text-gray-50 dark:placeholder:text-gray-500"
               />
-              <AttachmentStrip
-                entries={attachments.entries}
-                onRemove={attachments.remove}
-                disabled={unavailable || submitting}
-              />
               <div className="flex flex-wrap items-center gap-0.5 px-2.5 pb-1.5">
-                {models.length ? (
+                {picker ? (
                   <>
                     <Picker
                       label={t('sideChat.model')}
-                      value={model}
-                      options={models}
+                      {...picker}
                       onChange={(value) => {
                         pickedModel.current = true;
-                        setModel(value);
+                        picker.onChange(value);
                       }}
                     />
                     <Picker
@@ -507,7 +524,7 @@ function SideChatContent({
                   </>
                 ) : (
                   <span className="min-w-0 flex-1 truncate text-xs text-gray-500 dark:text-gray-400">
-                    {model}
+                    {choiceLabel(config, model, t, { runtime, unavailable: modelUnavailable })}
                   </span>
                 )}
                 {running ? (
@@ -530,9 +547,14 @@ function SideChatContent({
                   <ComposerSendButton
                     label={t('sideChat.send')}
                     title={t('sideChat.sendHint')}
-                    busy={submitting || (active && status === 'preparing')}
+                    busy={sideChatBusy(submitting, active, status)}
                     disabled={
-                      !ready || unavailable || !draft.trim() || submitting || attachments.uploading
+                      !ready ||
+                      unavailable ||
+                      modelUnavailable ||
+                      !draft.trim() ||
+                      submitting ||
+                      attachments.uploading
                     }
                   />
                 </div>

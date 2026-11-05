@@ -6,7 +6,7 @@ import { listMcpInvocations, type McpInvocationApi } from '@/lib/api/mcp';
 import { onAgentRecordsChanged, PUSH_FALLBACK_POLL_MS, useAgentPushLive } from './agentPush';
 import { useMcpApprovals } from './mcp/McpApprovalsProvider';
 import type { AgentJob } from './types';
-import { useNativeQuestions } from './useNativeQuestions';
+import { QUESTION_BACKGROUND_POLL_MS, useNativeQuestions } from './useNativeQuestions';
 
 export type SessionReview = 'question' | 'approval';
 
@@ -37,11 +37,14 @@ export function useSessionReview(job: ReviewJob): SessionReview | null {
   const { state } = useAuth();
   const ownerId = state.user?.id;
   const active = job.state === 'running' && !job.cancelRequested;
+  // A row marks a question on the slower clock; the conversation on screen
+  // reads faster, and the row shares those reads.
   const questions = useNativeQuestions({
     threadId: job.threadId ?? '',
     jobId: job.id,
     attemptId: job.currentAttemptId,
     active,
+    intervalMs: QUESTION_BACKGROUND_POLL_MS,
   });
   const approvals = useMcpApprovals();
   const pushLive = useAgentPushLive();

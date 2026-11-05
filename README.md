@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Python 3.12 | 3.13](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue.svg)
 
-[Documentation](https://doc.agent.hybridinference.org/) | [Join Slack](https://join.slack.com/t/hybridinference/shared_invite/zt-4a6csrbu8-JgrTHo_CgcK6G0FnejGwfw)
+[Documentation](https://doc.agent.hybridinference.org/) | [中文文档](https://doc.agent.hybridinference.org/zh_CN/) | [Join Slack](https://join.slack.com/t/hybridinference/shared_invite/zt-4a6csrbu8-JgrTHo_CgcK6G0FnejGwfw)
 
 Self-hosted coding agents that work on your repositories in isolated, retained
 sandboxes.
@@ -12,10 +12,11 @@ sandboxes.
 Users give tasks from a web interface. Enrolled hosts run Claude Code, Codex,
 pi, OpenCode, or Kilo against the repository, each in its own native session
 inside a sandbox that survives between turns. The control plane schedules the
-work, streams it to the browser, and publishes the result as a pull request.
-Model access, quotas, and account identity come from a
-[HybridInference gateway](https://github.com/HarvardMadSys/hybridInference),
-reached over HTTP only.
+work and streams it to the browser; when asked, the agent opens a pull request
+as its owner.
+Accounts are Cloud Agent's own, admitted through a waiting list, and every task
+runs on a model connection its owner adds with their own provider key (for
+example a FreeInference key).
 
 <!-- TODO: add a screenshot of a chat with its workspace pane. -->
 
@@ -29,10 +30,10 @@ reached over HTTP only.
   replaying a transcript.
 - **Fork.** Branch a chat into a second chat that shares the workspace and runs
   in parallel with its own process and credentials.
-- **Pull requests.** When the owner asks, never on its own, the platform
-  publishes a workspace to its branch as a draft pull request, after a secret
-  scan and path checks; asking again updates it. Agents can also push
-  and open pull requests themselves with a short-lived, repository-scoped token.
+- **Pull requests.** Ask in the chat and the agent commits, pushes a branch and
+  opens the pull request itself, as you. Its git and `gh` reach GitHub through
+  a relay that keeps your GitHub token in the control plane and lets the agent
+  act only on the conversation's repository.
   **Review** starts an independent reviewer; **Watch PR and merge** follows
   checks and reviews until the pull request merges.
 - **Reusable environments.** Configure a repository's variables, secrets, setup
@@ -65,15 +66,17 @@ Run the complete stack on one machine with Docker 28+, Docker Compose,
 ./deploy/local/dev.sh smoke
 ```
 
-Open <http://127.0.0.1:13002>. The stack includes the web app, OAuth flow,
-control plane, database, an enrolled host, and all five pinned agent CLIs.
+Open <http://127.0.0.1:13002>. The stack includes the web app, the account
+system, control plane, database, an enrolled host, and all five pinned agent
+CLIs. Create the first administrator at `/setup/administrator` with the code the
+control plane logs (`./deploy/local/dev.sh smoke` does it for you).
 `./deploy/local/dev.sh stop` stops it and keeps its database and sandboxes for
 the next start.
 
-The local stack uses a gateway fixture that returns deterministic responses, so
-it needs no gateway or provider key. It verifies integration and the session
-lifecycle, not model quality or production isolation. To run agents against
-real models, deploy Cloud Agent against a HybridInference gateway: follow
+The local stack ships no model provider: a task runs once its owner adds a
+model connection to a provider the sandbox can reach over public HTTPS. It
+verifies integration and the account and session lifecycle, not model quality
+or production isolation. To deploy for real, follow
 [Running self-hosted](docs/developer/operations.md#running-self-hosted) and
 [Before a job can run for real](docs/developer/operations.md#before-a-job-can-run-for-real).
 The [local guide](deploy/local/README.md) covers configuration, logs, and
@@ -95,13 +98,14 @@ the checks for each area.
 ```mermaid
 flowchart TD
     Browser[Browser] --> Web[Next.js web app and BFF]
-    Web --> Control[Control plane: API, scheduling, publication]
+    Web --> Control[Control plane: API, scheduling, relays]
     Control --> Database[(Agent-owned PostgreSQL)]
-    Control <-->|HTTP contracts| Gateway[HybridInference gateway]
     Host[Enrolled host: runner and sandbox manager] <-->|Claims, heartbeats, workspace| Control
     Host -->|Container lifecycle| Sandbox[Retained sandbox group: shared workspace, native CLI sessions]
-    Sandbox -->|Scoped inference credential via relay| Gateway
+    Sandbox -->|The owner's provider key, over public HTTPS| Provider[The owner's model provider]
     Sandbox -->|Scoped tool credential via relay| MCP[Control plane MCP-only listener]
+    Sandbox -->|git and gh with a placeholder credential| GitHubRelay[Control plane GitHub relay]
+    GitHubRelay -->|The owner's GitHub token| GitHub[GitHub]
     Sandbox -->|TCP 80 and 443 under host rules| Public[Public IPv4 destinations]
 ```
 
@@ -117,14 +121,12 @@ member to the same group. See
 [native conversation recall](docs/developer/context-recall.md) for the context
 states and their limits.
 
-The gateway owns accounts, model permissions, and inference quotas; there is no
-per-task dollar budget. Cloud Agent shares no database, code, or signing secret
-with it and uses only the
-[documented contracts](gateway_contracts/README.md). Sandboxes never hold a
-long-lived credential: they receive short-lived inference grants, a scoped MCP
-token, and, when the GitHub App is configured, an hour-long token for the job's
-repository. A grant can still be replayed until it expires or is revoked, within
-the owner's model permissions and quota. Read [SECURITY.md](SECURITY.md) and the
+Cloud Agent keeps its own accounts and admission; the owner's provider keeps
+the API key's quota and bill, and there is no per-task dollar budget. The Usage
+pages show the tokens agents reported, not a provider bill. A member sandbox
+holds the owner's provider key for the turn it runs, a scoped MCP token, and,
+when the GitHub App is configured, an hour-long token for the job's repository;
+it never holds a platform credential. Read [SECURITY.md](SECURITY.md) and the
 [sandbox network runbook](docs/developer/operations.md#the-sandbox-network)
 before deploying for untrusted users.
 
@@ -137,10 +139,11 @@ before deploying for untrusted users.
 | Deploy and operate a self-hosted instance | [Operations runbook](docs/developer/operations.md) |
 | Look up a configuration value | [ENVIRONMENT.md](ENVIRONMENT.md) |
 | Build and deploy a release | [Release guide](deploy/release/README.md) |
-| Learn how a user feature works | [User notes](docs/user/) |
+| Learn the rules and APIs behind a web app feature | [The owner web app](docs/developer/web-app.md) |
 | Browse everything, including designs and reviews | [Documentation index](docs/README.md) |
 
-Read the [developer documentation online](https://doc.agent.hybridinference.org/).
+Read the [developer documentation online](https://doc.agent.hybridinference.org/), also in
+[Simplified Chinese](https://doc.agent.hybridinference.org/zh_CN/).
 The [sources](docs/developer/index.md) live in this repository; `make docs` builds
 the site locally.
 
@@ -150,9 +153,9 @@ the site locally.
 apps/backend/cloud_agent/         FastAPI control plane and PostgreSQL storage
 apps/backend/cloud_agent_host/    Host runner, sandboxes, sandbox manager, CLI adapters
 apps/backend/cloud_agent_shared/  Shared protocols, pins, errors, Git and archive helpers
+apps/backend/migrations/          Alembic revisions for the Agent database
+apps/backend/openapi.json         The committed snapshot of this service's OpenAPI
 apps/frontend/                    Next.js user interface and admin dashboard
-gateway_contracts/                Gateway contract mirrors and control-plane API snapshot
-migrations/                       Alembic revisions for the Agent database
 deploy/                           Control-plane, host, sandbox, local, and release recipes
 tests/                            Unit, API, integration, and external verification
 docs/                             Developer guides, user notes, and agent records
@@ -172,5 +175,5 @@ Report vulnerabilities privately, as described in [SECURITY.md](SECURITY.md).
 ## License
 
 [MIT](LICENSE). Cloud Agent was extracted from HybridInference in August 2026
-and keeps that project's copyright and license; [MIGRATION.md](MIGRATION.md)
+and keeps that project's copyright and license; [the repository extraction record](docs/agents/reviews/2026-08-09-repository-extraction-record.md)
 records the split.

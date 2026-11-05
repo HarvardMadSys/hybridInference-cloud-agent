@@ -95,6 +95,10 @@ export function SandboxManagement({
 
   const sandbox = detail?.sandbox;
   const busy = pendingAction !== null;
+  const retryError =
+    sandbox?.deletion_state !== 'failed' && !sandbox?.deletion_retry_exhausted_at
+      ? sandbox?.deletion_error
+      : null;
   const actionState = sandboxActionState(detail, observedAtMs, nowMs);
   const {
     stopBlocked,
@@ -104,6 +108,7 @@ export function SandboxManagement({
     forceDelete,
     staleInventoryEntry,
     deletionComplete,
+    deletionRetryExhausted,
   } = actionState;
 
   async function applyAction(kind: SandboxAction) {
@@ -120,8 +125,9 @@ export function SandboxManagement({
       return;
     if (kind === 'delete' || kind === 'discard') {
       const sessions = `${sandbox.member_count} ${sandbox.member_count === 1 ? 'session' : 'sessions'}`;
-      const confirmation =
-        kind === 'discard'
+      const confirmation = deletionRetryExhausted
+        ? `Resume the existing deletion request for sandbox ${sandbox.id}, shared by ${sessions}? Its original archive/discard choice and any verified archive receipt will be retained.`
+        : kind === 'discard'
           ? sandbox.state === 'running'
             ? `Verify the exact retained container shared by ${sessions} is stopped or dead, and idle, then delete it without an S3 archive? The server refuses if that exact container is still running or has activity; this action does not stop a running container. Workspace files and native session history on the host will be destroyed and will not be uploaded. Live native resume will no longer be available. Chat history remains.`
             : `Permanently delete the stopped sandbox shared by ${sessions} without uploading it to S3? Workspace files and native session history on the host will be destroyed and cannot be restored. Live native resume will no longer be available. Chat history remains.`
@@ -251,14 +257,14 @@ export function SandboxManagement({
                   : 'Workspace files, native sessions, and chat history are retained.'}
             </p>
           )}
-          {sandbox.deletion_state === 'pending' && (
+          {sandbox.deletion_state === 'pending' && !sandbox.deletion_retry_exhausted_at && (
             <p role="status" className="mt-2 text-sm text-amber-700 dark:text-amber-400">
               {sandbox.deletion_discard
                 ? 'Deleting the retained container without an S3 archive. Workspace files will not be uploaded.'
                 : 'Archiving to S3. Waiting for the archive to be uploaded and verified before deletion.'}
             </p>
           )}
-          {sandbox.deletion_state === 'archived' && (
+          {sandbox.deletion_state === 'archived' && !sandbox.deletion_retry_exhausted_at && (
             <p role="status" className="mt-2 text-sm text-amber-700 dark:text-amber-400">
               Archive verified in S3. Waiting for the host to delete the retained container.
             </p>
@@ -271,15 +277,19 @@ export function SandboxManagement({
               {sandbox.deleted_at && <> Deleted {dateTime(sandbox.deleted_at)}.</>}
             </p>
           )}
+          {sandbox.deletion_retry_exhausted_at && (
+            <ErrorNotice>
+              Automatic deletion retries stopped. Resume deletion to continue the same request and
+              retain any verified archive receipt.
+            </ErrorNotice>
+          )}
           {sandbox.deletion_state === 'failed' && (
             <ErrorNotice>
               Deletion failed:{' '}
               {sandbox.deletion_error ?? 'The host could not complete the archive and deletion.'}
             </ErrorNotice>
           )}
-          {sandbox.deletion_state !== 'failed' && sandbox.deletion_error && (
-            <ErrorNotice>Deletion is waiting to retry: {sandbox.deletion_error}</ErrorNotice>
-          )}
+          {retryError && <ErrorNotice>Deletion is waiting to retry: {retryError}</ErrorNotice>}
           {sandbox.deletion_archive_key && (
             <div className="mt-2 break-all text-xs text-gray-500 dark:text-gray-400">
               <p>
@@ -294,6 +304,48 @@ export function SandboxManagement({
                 <p>Archive size: {sandbox.deletion_size_bytes.toLocaleString()} bytes</p>
               )}
             </div>
+          )}
+          {(detail.deletion_attempts?.length ?? 0) > 0 && (
+            <section aria-label="Deletion attempts" className="mt-3 space-y-2">
+              <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-100">
+                Deletion attempts
+              </h3>
+              {detail.deletion_attempts?.map((attempt) => (
+                <article
+                  key={attempt.correlation_id}
+                  className="rounded border border-gray-200 p-2 text-xs text-gray-600 dark:border-white/10 dark:text-gray-300"
+                >
+                  <p>
+                    Attempt {attempt.attempt_number} · {attempt.outcome.replaceAll('_', ' ')} ·{' '}
+                    {attempt.stage.replaceAll('_', ' ')} · {dateTime(attempt.started_at)}
+                  </p>
+                  <p>
+                    Correlation: <code>{attempt.correlation_id}</code>
+                  </p>
+                  {(attempt.failure_code || attempt.sandbox_manager_status != null) && (
+                    <p>
+                      {attempt.failure_code && (
+                        <>
+                          Failure: <code>{attempt.failure_code}</code>
+                        </>
+                      )}
+                      {attempt.failure_code && attempt.sandbox_manager_status != null && ' · '}
+                      {attempt.sandbox_manager_status != null &&
+                        `Sandbox manager HTTP ${attempt.sandbox_manager_status}`}
+                    </p>
+                  )}
+                  <p>
+                    Retry class: {attempt.retry_class ?? 'none'} · Retry scheduled:{' '}
+                    {attempt.retry_scheduled == null
+                      ? 'unknown'
+                      : attempt.retry_scheduled
+                        ? 'yes'
+                        : 'no'}
+                    {' · '}Cleanup: {attempt.cleanup_outcome.replaceAll('_', ' ')}
+                  </p>
+                </article>
+              ))}
+            </section>
           )}
           <ul
             aria-label="Sandbox sessions"
@@ -381,9 +433,11 @@ export function SandboxManagement({
                 ? forceDelete
                   ? 'Verifying stopped state…'
                   : 'Requesting deletion…'
-                : forceDelete
-                  ? 'Verify stopped and force delete'
-                  : 'Archive to S3 and delete'}
+                : deletionRetryExhausted
+                  ? 'Resume deletion'
+                  : forceDelete
+                    ? 'Verify stopped and force delete'
+                    : 'Archive to S3 and delete'}
             </button>
             {!controlsBlocked && (forceDelete || deleteBlocked !== stopBlocked) && (
               <p className="text-xs text-gray-500 dark:text-gray-400">
@@ -398,7 +452,7 @@ export function SandboxManagement({
             <button
               type="button"
               className={`${BUTTON} text-red-700 dark:text-red-400`}
-              disabled={busy || loading || deleteBlocked !== null}
+              disabled={busy || loading || deleteBlocked !== null || deletionRetryExhausted}
               onClick={() => void applyAction('discard')}
             >
               {pendingAction === 'discard' ? 'Requesting deletion…' : 'Delete without archive'}

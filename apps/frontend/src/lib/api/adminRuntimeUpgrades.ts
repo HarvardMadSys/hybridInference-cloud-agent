@@ -47,6 +47,11 @@ export interface RuntimeUpgradeItem {
 
 export interface RuntimeUpgrades {
   runtimes: RuntimeUpgradeItem[];
+  /**
+   * Online servers, by host name, not yet reporting the saved agent package
+   * registry. No update starts until this is empty. Absent from an older API.
+   */
+  registry_waiting_on?: string[];
 }
 
 /** The npm releases one agent can move to. */

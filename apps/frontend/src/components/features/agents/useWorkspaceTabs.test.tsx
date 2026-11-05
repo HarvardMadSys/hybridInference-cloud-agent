@@ -64,3 +64,17 @@ it('isolates open tabs and selection by account and main conversation, restoring
   expect(result.current.chats).toHaveLength(1);
   expect(result.current.selected).toBe(created);
 });
+
+it('recovers a Context selection saved when Context was a workspace tab', () => {
+  // Context is a main view beside Chat and Trajectory now, not a workspace tab.
+  const key = 'agents.workspace.tabs.owner:main';
+  const chat = { id: 'side-chat', number: 1, anchor: { jobId: 'main-1', sandboxId: 'group' } };
+  sessionStorage.setItem(
+    key,
+    JSON.stringify({ selected: 'context', chats: [chat], nextNumber: 2 }),
+  );
+  const { result } = renderHook(() => useWorkspaceTabs('owner', source, [row]));
+  expect(result.current.selected).toBe('git');
+  // The rest of what was saved is kept.
+  expect(result.current.chats).toEqual([chat]);
+});

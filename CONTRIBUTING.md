@@ -25,8 +25,8 @@ becomes the commit subject on `dev`. `main` advances through the manual
 
 Treat every commit as public. Never commit secrets, tokens, or keys. Before
 submitting, use the [PR checklist](.github/pull_request_template.md) to review
-the diff. [MIGRATION.md](MIGRATION.md) documents the completed repository
-extraction. Its move-only restrictions are historical, but the service and
+the diff. The [repository extraction record](docs/agents/reviews/2026-08-09-repository-extraction-record.md)
+documents the completed repository extraction. Its move-only restrictions are historical, but the service and
 security boundaries in `AGENTS.md` still apply.
 
 ## Checks before review
@@ -98,14 +98,7 @@ Release publication has its own
 
 ## Contracts
 
-`gateway_contracts/*.openapi.yaml` records the Gateway HTTP APIs that this
-service consumes. Check changes against the corresponding Gateway source. If
-you change a client's endpoints or fields, update the relevant contract in the
-same PR. Identify the Gateway change that it tracks. Tests pin this service's
-side of the contract, but they cannot verify the current implementation in
-another repository.
-
-`gateway_contracts/agent-control-plane.openapi.json` records this service's own
+`apps/backend/openapi.json` records this service's own
 API. For an intentional change, regenerate it with
 [the developer-guide command](docs/developer/development.md#changing-an-api). Review the
 diff, and explain the compatibility implications in the PR.

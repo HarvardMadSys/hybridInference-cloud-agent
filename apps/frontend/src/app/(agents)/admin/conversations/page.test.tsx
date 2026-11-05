@@ -59,6 +59,7 @@ import PreviousEntry from '../runs/page';
 import ActivityList from '../activity/page';
 import SessionList from '../sessions/page';
 import SessionDetail from '../sessions/[threadId]/page';
+import { chooseOption } from '@/components/ui/__tests__/select';
 
 const since = '2026-09-10T08:00:00Z';
 const until = '2026-09-17T08:00:00Z';
@@ -189,7 +190,7 @@ describe('session navigation', () => {
     render(<List />);
     const link = await screen.findByRole('link', { name: 'Fix login' });
     // A linked window is no preset, so the toolbar names its days.
-    expect(screen.getByLabelText('Turn created')).toHaveValue('custom');
+    expect(screen.getByLabelText('Turn created')).toHaveTextContent('Custom');
     expect(screen.getByText('Sep 10 – Sep 17')).toBeInTheDocument();
     // No control shows the identities the link arrived with, so they are stated.
     expect(
@@ -226,7 +227,7 @@ describe('session navigation', () => {
     render(<List />);
     await screen.findByRole('link', { name: 'Fix login' });
     fireEvent.click(screen.getByRole('button', { name: 'Load more sessions' }));
-    fireEvent.change(screen.getByLabelText('Turn result'), { target: { value: 'failed' } });
+    chooseOption(screen.getByLabelText('Turn result'), 'failed');
     await screen.findByRole('link', { name: 'Failed conversation' });
     expect(vi.mocked(getAdminConversations).mock.lastCall![0]).toMatchObject({
       since,
@@ -289,8 +290,8 @@ describe('level switch', () => {
     render(<List />);
     await screen.findByRole('link', { name: 'Fix login' });
     expect(screen.getByRole('button', { name: 'Sessions', pressed: true })).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText('Turn result'), { target: { value: 'failed' } });
-    fireEvent.change(screen.getByLabelText('Turn created'), { target: { value: '30' } });
+    chooseOption(screen.getByLabelText('Turn result'), 'failed');
+    chooseOption(screen.getByLabelText('Turn created'), 'Last 30 days');
     await waitFor(() => expect(getAdminConversations).toHaveBeenCalledTimes(3));
     const selection = vi.mocked(getAdminConversations).mock.lastCall![0];
     expect(getAdminRuns).not.toHaveBeenCalled();
@@ -304,8 +305,8 @@ describe('level switch', () => {
     await waitFor(() => expect(getAdminRuns).toHaveBeenCalledTimes(1));
     // The same turns, read one per row: the window and the result carry over.
     expect(vi.mocked(getAdminRuns).mock.lastCall![0]).toEqual(selection);
-    expect(screen.getByLabelText('Turn result')).toHaveValue('failed');
-    expect(screen.getByLabelText('Turn created')).toHaveValue('30');
+    expect(screen.getByLabelText('Turn result')).toHaveTextContent('failed');
+    expect(screen.getByLabelText('Turn created')).toHaveTextContent('Last 30 days');
 
     fireEvent.click(screen.getByRole('button', { name: 'Sessions' }));
     await waitFor(() => expect(getAdminConversations).toHaveBeenCalledTimes(4));

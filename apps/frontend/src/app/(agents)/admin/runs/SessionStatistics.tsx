@@ -23,10 +23,10 @@ export function SessionStatistics({ statistics }: { statistics?: AdminSessionSta
         'Estimated from recorded tool calls and results. Overlapping intervals are counted once.',
     },
     {
-      label: 'Avg time to first token (TTFT)',
-      value: duration(statistics?.ttft_seconds),
+      label: 'Avg time to first output',
+      value: duration(statistics?.first_output_seconds),
       description:
-        'Time from the turn starting to its first recorded output event, including startup overhead; averaged over runs with a recorded sample when the turn restarted.',
+        'Time from the turn starting to its first recorded output event, including sandbox, workspace and agent startup and the wait for a whole message block; averaged over runs with a recorded sample when the turn restarted. Not time to first token.',
     },
     {
       label: 'Tokens per second (TPS)',

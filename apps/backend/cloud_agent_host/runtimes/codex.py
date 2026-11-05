@@ -1,153 +1,176 @@
-"""Codex invocation and observed JSON event normalization."""
+"""Codex app-server invocation: provider flags, the MCP relay entry and effort."""
 
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 
+from cloud_agent_host.sandbox import RUNTIME_BIN_ROOT
 from cloud_agent_shared.runtime_catalog import CODEX
+from cloud_agent_shared.sandbox_mcp import SANDBOX_MCP_SERVER_NAME
 
 from .base import (
+    COMPAT_ORIGIN,
     EMPTY_RUNTIME_MCP_CONFIG,
     MCP_TOKEN_ENV,
     AgentRuntime,
+    ResponsesViaChatUrl,
     RuntimeCapabilities,
     RuntimeMCPConfig,
+    compat_cli_credential,
+    compat_launch,
+    openai_base_url,
 )
-from .events import (
-    DIFF,
-    ERROR,
-    LIFECYCLE,
-    MESSAGE,
-    THINKING,
-    TOOL_RESULT,
-    TOOL_USE,
-    NormalizedEvent,
-    _clipped,
-    _truncate,
+
+
+@dataclass(frozen=True)
+class ReviewedShim:
+    """One ``bin/codex.js`` of the npm package, whose work :data:`NATIVE_LAUNCH` does.
+
+    ``sha256`` names the file's exact bytes and ``releases`` the first and last
+    release that shipped them when they were read. Each of these shims picks
+    the binary the same way, adds nothing to ``PATH``, and gives the binary its
+    inherited environment plus ``CODEX_MANAGED_PACKAGE_ROOT`` and one
+    ``CODEX_MANAGED_BY_*`` flag. They differ only in the inherited flags they
+    remove first, ``clears``.
+    """
+
+    sha256: str
+    releases: tuple[str, str]
+    clears: tuple[str, ...]
+
+
+_MANAGED_BY = (
+    "CODEX_MANAGED_BY_NPM",
+    "CODEX_MANAGED_BY_BUN",
+    "CODEX_MANAGED_BY_PNPM",
+    "CODEX_MANAGED_BY_VITE_PLUS",
 )
+
+#: The shims the launch replaces. None of them touches ``PATH``: the binary
+#: puts its bundled ripgrep there itself, found beside its own executable
+#: (``codex-rs/arg0`` and ``install-context`` at 0.145.0), so it does the same
+#: when started directly. Before 0.138.0 the shim did that instead, and those
+#: releases keep their shim. To add a shim, read its ``bin/codex.js`` against
+#: the newest one here: if it still picks ``vendor/<triple>/bin/codex`` from
+#: the platform package, leaves ``PATH`` alone and sets only these variables,
+#: add its digest; otherwise change the launch first. An unlisted shim keeps
+#: running as it always has.
+REVIEWED_SHIMS = (
+    ReviewedShim(
+        "d3be844c45c4fd89392536e56e1010963f94785592596b50cd0c45bb8a341406",
+        ("0.138.0", "0.143.0"),
+        clears=(),
+    ),
+    ReviewedShim(
+        "134063e133f0b4244fa3b251acf973d4fe4b4aeeacbdc135211bf480f59f1477",
+        ("0.144.0", "0.152.1"),
+        clears=_MANAGED_BY[:3],
+    ),
+    ReviewedShim(
+        "61b0194f3bb6534439c8d26a3ed57d0805f84b884588b761795323eeb92fcf70",
+        ("0.153.0", "0.165.0"),
+        clears=_MANAGED_BY,
+    ),
+    ReviewedShim(
+        "e14fc83739c13c1074b12bd1acce4010c893c7f6fbfc1593b4a31d74cabb57af",
+        ("0.166.0", "0.166.0"),
+        clears=_MANAGED_BY,
+    ),
+)
+
+_NATIVE_LAUNCH = r"""CODEX_LAUNCH_PREFIX=__PREFIX__
+CODEX_LAUNCH_SHIM=$(command -v "$0") \
+&& CODEX_LAUNCH_SHIM=$(readlink -f -- "$CODEX_LAUNCH_SHIM") || exec "$0" "$@"
+CODEX_LAUNCH_ROOT=${CODEX_LAUNCH_SHIM#"$CODEX_LAUNCH_PREFIX"}
+CODEX_LAUNCH_ROOT=$CODEX_LAUNCH_PREFIX${CODEX_LAUNCH_ROOT%%/*}/lib/node_modules/@openai/codex
+[ "$CODEX_LAUNCH_SHIM" = "$CODEX_LAUNCH_ROOT/bin/codex.js" ] || exec "$0" "$@"
+case $(uname -m) in
+x86_64) CODEX_LAUNCH_TARGET=x64/x86_64-unknown-linux-musl ;;
+aarch64) CODEX_LAUNCH_TARGET=arm64/aarch64-unknown-linux-musl ;;
+*) exec "$0" "$@" ;;
+esac
+CODEX_LAUNCH_PACKAGE=$CODEX_LAUNCH_ROOT/node_modules/@openai/codex-linux-${CODEX_LAUNCH_TARGET%/*}
+CODEX_LAUNCH_NATIVE=$CODEX_LAUNCH_PACKAGE/vendor/${CODEX_LAUNCH_TARGET#*/}/bin/codex
+[ -f "$CODEX_LAUNCH_PACKAGE/package.json" ] && [ -f "$CODEX_LAUNCH_NATIVE" ] \
+&& [ -x "$CODEX_LAUNCH_NATIVE" ] || exec "$0" "$@"
+CODEX_LAUNCH_SUM=$(sha256sum < "$CODEX_LAUNCH_SHIM") || exec "$0" "$@"
+case ${CODEX_LAUNCH_SUM%% *} in
+__REVIEWED__*) exec "$0" "$@" ;;
+esac
+case ${npm_config_user_agent-} in
+bun/* | *[!0-9A-Z_a-z]bun/*) export CODEX_MANAGED_BY_BUN=1 ;;
+*) case ${npm_execpath-} in
+    *bun*) export CODEX_MANAGED_BY_BUN=1 ;;
+    *) export CODEX_MANAGED_BY_NPM=1 ;;
+    esac ;;
+esac
+export CODEX_MANAGED_PACKAGE_ROOT="$CODEX_LAUNCH_ROOT"
+exec "$CODEX_LAUNCH_NATIVE" "$@"
+"""
+
+
+def _reviewed_case(shim: ReviewedShim) -> str:
+    """The launch's ``case`` arm for one reviewed shim's digest."""
+    clears = f"unset {' '.join(shim.clears)} " if shim.clears else ""
+    return f"{shim.sha256}) {clears};;\n"
+
+
+#: How a Codex member starts: ``sh`` resolves ``codex`` on ``PATH`` as before,
+#: so the directory the runner prepends still selects the version, then execs
+#: that version's native binary in place of the npm package's Node shim, which
+#: cost every member start a Node process and about 44 ms.
+#:
+#: It does so only when ``codex`` resolves into the npm install both the image
+#: (``deploy/sandbox/install-runtimes.sh``) and an admin's download
+#: (``runtime_downloads``) make under ``/opt/runtimes/codex/<version>``, the
+#: shim there is byte for byte one in :data:`REVIEWED_SHIMS`, and the binary
+#: that shim would pick for this machine is in place: the platform package's
+#: ``vendor/<triple>/bin/codex``, chosen by the same architecture table. Then
+#: the binary gets what that shim would have given it: the same path and
+#: arguments, the inherited environment less the flags the shim clears, the
+#: package root, and the npm flag, or the Bun one when the shim's own test of
+#: ``npm_config_user_agent`` and ``npm_execpath`` says so. The shims' pnpm and
+#: Vite+ tests look for those managers' record of this very install, which an
+#: npm install never has, and their Bun path test cannot match under this
+#: prefix. Anything else -- an older image's install, an unknown machine, an
+#: unread shim, a missing binary -- execs ``codex`` exactly as before.
+#:
+#: Exec, not a child: the binary keeps the process the runner started as the
+#: member's session leader, so the PID file, the group signals that stop it
+#: and its exit status are the binary's own, with no forwarding in between.
+#: The script's own variables are named ``CODEX_LAUNCH_*`` because an owner's
+#: environment can never hold a ``CODEX_`` name (``environment.validate_name``
+#: in ``cloud_agent_shared``), so none of them shadows a variable the binary
+#: would see.
+NATIVE_LAUNCH = _NATIVE_LAUNCH.replace("__PREFIX__", f"{RUNTIME_BIN_ROOT}/{CODEX.name}/").replace(
+    "__REVIEWED__", "".join(_reviewed_case(shim) for shim in REVIEWED_SHIMS)
+)
+#: What every Codex launch starts with; the binary's name follows as ``$0``.
+NATIVE_LAUNCHER = ("/bin/sh", "-c", NATIVE_LAUNCH)
 
 
 class CodexRuntime(AgentRuntime):
-    """OpenAI Codex headless (``codex exec --json``).
+    """OpenAI Codex's ``app-server``, over stdio.
 
     Speaks the OpenAI surface, configured through command-line provider flags
-    so nothing writes to or depends on the operator's own Codex config.
+    so nothing writes to or depends on the operator's own Codex config. Its
+    events are read by ``drivers.CodexAppServerSession``, not here.
     """
 
     name = CODEX.name
     binary = "codex"
 
     def __init__(self) -> None:
-        """Remember the native thread locator announced by ``--json``."""
+        """Remember the native thread locator the app-server announces."""
         self.session_id: str | None = None
-
-    def prepare(
-        self,
-        *,
-        workdir: str,
-        task_prompt: str,
-        model: str,
-        gateway_base_url: str,
-        credential: str,
-        provides_isolation: bool = False,
-        mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
-        reasoning_effort: str | None = None,
-        session_state_dir: str | None = None,
-        resume_session_id: str | None = None,
-        activation_dir: str | None = None,
-    ) -> tuple[list[str], dict[str, str]]:
-        """Build the headless invocation and its environment.
-
-        ``reasoning_effort`` becomes ``-c model_reasoning_effort="<level>"``
-        among the provider flags below. Verified against the pinned
-        ``CODEX_VERSION`` (0.145.0) rather than assumed: the CLI puts it on the
-        wire as ``reasoning.effort`` in the ``/v1/responses`` body, which is
-        exactly where the gateway's Responses translation reads it. See the
-        recorded capture in ``tests/fixtures/agent_runtime_streams``.
-
-        MCP uses the merged session relay, authenticated through the member's
-        environment. The trusted host installs the exact relay URL into the
-        root-owned system requirements before the CLI starts, for both exec
-        and app-server. Repository configuration cannot admit another server.
-
-        Mirrors the invocation the gateway's Codex on-call workflow ran in
-        production, because that one was known to work against this gateway.
-        Three things it gets right that the first pass here did not:
-
-        - the model rides ``--model``. The previous version set ``CODEX_MODEL``,
-          which is not a variable the CLI reads, so the owner's model choice was
-          silently dropped and Codex used whatever its own default was.
-        - ``wire_api = "responses"``, not ``"chat"``. Codex removed chat wire
-          support upstream (openai/codex#7782); our gateway serves
-          ``/v1/responses`` and translates southbound.
-        - the provider is configured with ``-c`` flags rather than a config file.
-          ``--ignore-user-config`` keeps the operator's own config out, while a
-          supplied ``session_state_dir`` becomes ``CODEX_HOME`` so Codex's
-          rollout files survive a process exit and ``exec resume`` can find
-          them on the next turn.
-        """
-        _ = activation_dir
-        base = gateway_base_url.rstrip("/").removesuffix("/v1")
-        provider = "hybridinference"
-        argv = [
-            self.binary,
-            "exec",
-            "--json",
-            "--skip-git-repo-check",
-            # The operator's own Codex config must not reach a sandbox run.
-            "--ignore-user-config",
-            # A container backend is already the boundary. Running Codex's
-            # bubblewrap sandbox inside that non-root, capability-dropped
-            # container cannot create its user namespace, so every shell
-            # command fails before it starts. The process backend has no such
-            # outer boundary and must retain Codex's workspace sandbox.
-            "--sandbox",
-            "danger-full-access" if provides_isolation else "workspace-write",
-            "--model",
-            model,
-            # Beside the other -c overrides, and built by the dialect helper so
-            # every resident launch uses exactly the same spelling.
-            *self.effort_args(reasoning_effort),
-            *self._mcp_args(mcp_config, gateway_base_url=gateway_base_url),
-            "-c",
-            f'model_provider="{provider}"',
-            "-c",
-            f'model_providers.{provider}.name="HybridInference"',
-            "-c",
-            f'model_providers.{provider}.base_url="{base}/v1"',
-            "-c",
-            f'model_providers.{provider}.env_key="CODEX_API_KEY"',
-            "-c",
-            f'model_providers.{provider}.wire_api="responses"',
-        ]
-        # 0.145.0 accepts the exec-wide flags above before its ``resume``
-        # subcommand. Keeping one option list prevents fresh and resumed turns
-        # from drifting in provider, model, sandbox, or reasoning behaviour.
-        if resume_session_id:
-            argv += ["resume", resume_session_id, task_prompt]
-        else:
-            argv.append(task_prompt)
-        env = {
-            "CODEX_API_KEY": credential,
-            MCP_TOKEN_ENV: mcp_config.credential,
-            # Some code paths still read the OpenAI names; keep them consistent
-            # rather than leaving a second, stale credential source.
-            "OPENAI_BASE_URL": f"{base}/v1",
-            "OPENAI_API_KEY": credential,
-        }
-        if session_state_dir:
-            # Codex requires CODEX_HOME itself to exist. /agent-state is made
-            # by the image (or is the state mount), so use that exact root
-            # rather than naming a child the CLI would refuse to create.
-            env["CODEX_HOME"] = session_state_dir
-        return argv, env
 
     def prepare_live(
         self,
         *,
         workdir: str,
         model: str,
-        gateway_base_url: str,
+        model_base_url: str,
         credential: str,
         provides_isolation: bool = False,
         mcp_config: RuntimeMCPConfig = EMPTY_RUNTIME_MCP_CONFIG,
@@ -161,23 +184,34 @@ class CodexRuntime(AgentRuntime):
         Thread creation/resume is an RPC after the initialize handshake, so
         ``model``, ``workdir`` and ``resume_session_id`` intentionally do not
         become positional CLI arguments here.  Provider configuration remains
-        command-line overrides, exactly as in :meth:`prepare`, and the root-owned
+        command-line overrides, and the root-owned
         managed MCP allowlist installed before launch remains the final policy
         layer for app-server (which has no ``--ignore-user-config`` flag).
+        The argv starts with :data:`NATIVE_LAUNCHER`, which runs the version's
+        native binary without its npm shim when it can.
         """
-        _ = (workdir, model, provides_isolation, resume_session_id, activation_dir)
-        base = gateway_base_url.rstrip("/").removesuffix("/v1")
+        _ = (workdir, provides_isolation, resume_session_id, activation_dir)
+        # An owner connection's exact URL, or the Gateway's normalized one. The
+        # provider id stays the one ``CodexAppServerSession`` names in its
+        # thread RPC; only where it points changes. Both speak Responses,
+        # which is the only wire Codex has -- on a Chat Completions connection
+        # through the member's compatibility helper, which this URL then names.
+        translated = isinstance(model_base_url, ResponsesViaChatUrl)
+        base_url = f"{COMPAT_ORIGIN}/v1" if translated else openai_base_url(model_base_url)
+        cli_credential = compat_cli_credential(credential) if translated else credential
         provider = "hybridinference"
         argv = [
+            *NATIVE_LAUNCHER,
             self.binary,
             *self.effort_args(reasoning_effort),
-            *self._mcp_args(mcp_config, gateway_base_url=gateway_base_url),
+            *(self.TRANSLATED_ARGS if translated else ()),
+            *self._mcp_args(mcp_config, model_base_url=model_base_url),
             "-c",
             f'model_provider="{provider}"',
             "-c",
             f'model_providers.{provider}.name="HybridInference"',
             "-c",
-            f'model_providers.{provider}.base_url="{base}/v1"',
+            f"model_providers.{provider}.base_url={json.dumps(base_url)}",
             "-c",
             f'model_providers.{provider}.env_key="CODEX_API_KEY"',
             "-c",
@@ -185,93 +219,43 @@ class CodexRuntime(AgentRuntime):
             "app-server",
         ]
         env = {
-            "CODEX_API_KEY": credential,
+            "CODEX_API_KEY": cli_credential,
             MCP_TOKEN_ENV: mcp_config.credential,
-            "OPENAI_BASE_URL": f"{base}/v1",
-            "OPENAI_API_KEY": credential,
+            "OPENAI_BASE_URL": base_url,
+            "OPENAI_API_KEY": cli_credential,
         }
         if session_state_dir:
             env["CODEX_HOME"] = session_state_dir
+        if isinstance(model_base_url, ResponsesViaChatUrl):
+            return compat_launch(argv, env, model_base_url, credential, model=model)
         return argv, env
 
-    def _mcp_args(self, config: RuntimeMCPConfig, *, gateway_base_url: str) -> list[str]:
-        """Use the same authenticated relay configuration in exec and app-server."""
-        endpoints = self.relay_urls(config, gateway_base_url=gateway_base_url)
+    #: What a translated Codex leaves out of its requests: 0.145.0 otherwise
+    #: offers the hosted ``web_search`` tool, which only a Responses provider
+    #: runs; a Chat Completions upstream has no such tool, and the helper
+    #: refuses a request carrying one rather than dropping it. Every function
+    #: tool stays, namespaced ones (sub-agents, MCP) included.
+    TRANSLATED_ARGS = ("-c", 'web_search="disabled"')
+
+    def _mcp_args(self, config: RuntimeMCPConfig, *, model_base_url: str) -> list[str]:
+        """The authenticated relay entry, as a ``-c`` override; empty without servers."""
+        endpoints = self.relay_urls(config, model_base_url=model_base_url)
         entries = []
         for name, url in endpoints.items():
+            # The sandbox gateway is optional: a server the user chose that
+            # fails to start must not stop the turn, and its first start may
+            # install a package.
+            startup = (
+                "required = false, startup_timeout_sec = 180"
+                if name == SANDBOX_MCP_SERVER_NAME
+                else "required = true, startup_timeout_sec = 30"
+            )
             entries.append(
                 f"{name} = {{ url = {json.dumps(url)}, "
                 f'bearer_token_env_var = "{MCP_TOKEN_ENV}", '
-                "required = true, startup_timeout_sec = 30, tool_timeout_sec = 1560 }"
+                f"{startup}, tool_timeout_sec = 1560 }}"
             )
         return ["-c", "mcp_servers = { " + ", ".join(entries) + " }"]
-
-    def parse_event(self, line: str) -> NormalizedEvent | None:
-        """Normalize one ``codex exec --json`` line."""
-        line = line.strip()
-        if not line:
-            return None
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            return self._raw(line, "not json")
-        if not isinstance(event, dict):
-            return self._raw(line, "not an object")
-
-        kind = event.get("type") or ""
-        item = event.get("item") or {}
-        item_type = item.get("type") or item.get("item_type")
-
-        if kind == "thread.started":
-            captured = str(event.get("thread_id") or "").strip()
-            if captured:
-                self.session_id = captured
-            return NormalizedEvent(
-                LIFECYCLE,
-                {"phase": "init", "session_id": self.session_id},
-            )
-
-        if kind.startswith("item.") and item_type:
-            if item_type == "command_execution" and kind == "item.completed":
-                output = (
-                    item.get("aggregated_output") or item.get("output") or item.get("stdout") or ""
-                )
-                exit_code = item.get("exit_code")
-                return NormalizedEvent(
-                    TOOL_RESULT,
-                    {
-                        "tool_use_id": item.get("id"),
-                        "is_error": isinstance(exit_code, int) and exit_code != 0,
-                        "content": _truncate(output),
-                        "exit_code": exit_code,
-                    },
-                )
-            if item_type in ("command_execution", "function_call", "tool_call"):
-                return NormalizedEvent(
-                    TOOL_USE,
-                    {
-                        "name": item.get("name") or item_type,
-                        "id": item.get("id"),
-                        "input": item.get("command") or item.get("arguments"),
-                    },
-                )
-            if item_type in ("agent_message", "assistant_message"):
-                return NormalizedEvent(
-                    MESSAGE,
-                    {
-                        "text": _truncate(item.get("text")),
-                        "truncated": _clipped(item.get("text")),
-                    },
-                )
-            if item_type in ("reasoning", "thinking"):
-                return NormalizedEvent(THINKING, {"text": _truncate(item.get("text"))})
-            if item_type in ("patch", "file_change"):
-                return NormalizedEvent(DIFF, {"text": _truncate(item.get("changes"))})
-        if kind in ("turn.completed", "session.completed", "thread.completed"):
-            return NormalizedEvent(LIFECYCLE, {"phase": "result", "usage": event.get("usage")})
-        if kind in ("error", "turn.failed"):
-            return NormalizedEvent(ERROR, {"text": _truncate(event.get("error") or event)})
-        return self._raw(line, f"unknown type {kind!r}")
 
     #: What ``model_reasoning_effort`` may be set to. Codex 0.145.0 does **not**
     #: validate this locally -- ``--strict-config`` checks the key's name and
@@ -289,11 +273,5 @@ class CodexRuntime(AgentRuntime):
         return ["-c", f'model_reasoning_effort="{effort}"']
 
     def capabilities(self) -> RuntimeCapabilities:
-        """Codex is Tier 1 for events; cost comes from the gateway ledger."""
-        return RuntimeCapabilities(
-            cost_report=False,
-            normalized_events=True,
-            tier=1,
-            reasoning_efforts=self.EFFORT_LEVELS,
-            mcp=CODEX.mcp,
-        )
+        """Codex takes the platform's MCP relay and an effort level."""
+        return RuntimeCapabilities(reasoning_efforts=self.EFFORT_LEVELS, mcp=CODEX.mcp)

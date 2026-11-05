@@ -37,6 +37,7 @@ the upload queue inside every duration it displays.
 from __future__ import annotations
 
 import dataclasses
+import math
 import os
 import pathlib
 import re
@@ -365,6 +366,16 @@ class ToolWindowTracker:
         return self._dropped > 0
 
 
+def _milliseconds(seconds: float) -> int | None:
+    """``seconds`` in whole milliseconds, or ``None`` when that is no number.
+
+    A legacy mark's clock is whatever the agent-writable file says, and one
+    too far from the window has no lag a report can carry.
+    """
+    value = seconds * 1000
+    return round(value) if math.isfinite(value) else None
+
+
 def _adopt(
     window: ToolWindow,
     call_seq: int,
@@ -393,11 +404,12 @@ def _adopt(
     if not pres or not posts:
         return outcome("unpaired"), None
     pre, post = pres[0], posts[0]
-    open_lag_ms = round((window.opened_mono - pre.host_mono) * 1000)
+    open_lag_ms = _milliseconds(window.opened_mono - pre.host_mono)
     close_lag_ms = (
-        None if window.closed_mono is None else round((window.closed_mono - post.host_mono) * 1000)
+        None if window.closed_mono is None else _milliseconds(window.closed_mono - post.host_mono)
     )
     guest_bounds: tuple[int, int] | None = None
+    exact_ms: int | None
     if pre.guest_mono_ns is not None and post.guest_mono_ns is not None:
         # Ordered on the clock the pair was taken from: the guest's own.
         elapsed_ns = post.guest_mono_ns - pre.guest_mono_ns
@@ -407,7 +419,7 @@ def _adopt(
     else:
         elapsed_s = post.host_mono - pre.host_mono
         misordered = elapsed_s < 0
-        exact_ms = round(elapsed_s * 1000)
+        exact_ms = _milliseconds(elapsed_s)
     if misordered:
         return outcome("misordered", open_lag_ms=open_lag_ms, close_lag_ms=close_lag_ms), None
     if window.closed_mono is None:
@@ -650,6 +662,9 @@ class ToolMarkReader:
             try:
                 wall = float(fields[0])
             except ValueError:
+                continue
+            if not math.isfinite(wall):
+                # ``float`` also reads "nan" and "inf", which no clock wrote.
                 continue
             phase: Literal["pre", "post"] = "pre" if fields[1] == "pre" else "post"
             marks.append(

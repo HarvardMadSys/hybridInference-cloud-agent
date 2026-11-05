@@ -10,6 +10,7 @@ import { writeGoal } from './goalApi';
 import { useGoalWrite } from './useGoalWrite';
 import { GoalActionsMenu } from './GoalActionsMenu';
 import { DEFAULT_GOAL_LIMITS, type GoalLimits } from '@/lib/goalLimits';
+import { hasPrimaryModifier } from '@/lib/keyboardShortcuts';
 
 /** What the band needs that the goal row does not carry. */
 export interface GoalBandState {
@@ -22,7 +23,8 @@ export interface GoalBandState {
 /**
  * The objective leads the composer; status and round accounting sit beneath it.
  * Pause/resume stays visible, while editing and clearing share the action menu.
- * The editor keeps its draft across reloads and only closes once a write lands.
+ * The editor keeps its draft across reloads and only closes once a write lands;
+ * clearing asks first, on the band, and names the revision it is clearing.
  */
 export function GoalBar({
   threadId,
@@ -46,7 +48,9 @@ export function GoalBar({
 }) {
   const t = useT();
   const [editing, setEditing] = useState(false);
+  const [confirmingClear, setConfirmingClear] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const clearPrompt = useId();
   const trigger = useRef<HTMLButtonElement>(null);
   const wasEditing = useRef(false);
   const { busy, error, run, clearError } = useGoalWrite(onChanged);
@@ -78,13 +82,17 @@ export function GoalBar({
       ? t('goal.completeReported')
       : null;
   const resumeHint = spent ? t('goal.limitResumeLiftsHint') : t('goal.resumeHint');
+  const cancelClear = () => {
+    setConfirmingClear(false);
+    trigger.current?.focus();
+  };
 
   return (
     <section
       aria-label={t('goal.region')}
       className={`bg-gray-50/80 px-3 py-2 text-gray-600 dark:bg-gray-950/40 dark:text-gray-300 ${
         attached
-          ? 'rounded-t-xl border-b border-gray-200/80 dark:border-white/10'
+          ? 'rounded-t-2xl border-b border-gray-200/80 dark:border-white/10'
           : 'mb-2 rounded-xl border border-gray-200 dark:border-white/10'
       }`}
     >
@@ -161,16 +169,63 @@ export function GoalBar({
             disabled={busy || editing}
             onEdit={() => {
               clearError();
+              setConfirmingClear(false);
               setEditing(true);
             }}
             onClear={() => {
-              void run(() => clearAgentGoal(threadId)).then((landed) => {
-                if (landed) onCleared?.();
-              });
+              clearError();
+              setConfirmingClear(true);
             }}
           />
         </div>
       </div>
+      {confirmingClear ? (
+        // Asked in place, like the other destructive rows. Escape belongs to
+        // the question here: unhandled, it would reach the page's Stop.
+        <div
+          role="group"
+          aria-labelledby={clearPrompt}
+          onKeyDown={(event) => {
+            if (event.key !== 'Escape' || event.nativeEvent.isComposing) return;
+            event.preventDefault();
+            event.stopPropagation();
+            if (!busy) cancelClear();
+          }}
+          className="mt-2 flex flex-wrap items-center justify-end gap-2 sm:ml-[26px]"
+        >
+          <p
+            id={clearPrompt}
+            className="mr-auto text-xs leading-relaxed text-gray-600 dark:text-gray-300"
+          >
+            {t('goal.clearConfirm')}
+          </p>
+          <button
+            type="button"
+            autoFocus
+            disabled={busy}
+            onClick={cancelClear}
+            className="inline-flex min-h-8 items-center rounded-lg px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-200/60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-crimson disabled:cursor-not-allowed disabled:opacity-40 dark:text-gray-300 dark:hover:bg-white/10 [@media(pointer:coarse)]:min-h-11"
+          >
+            {t('goal.editCancel')}
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              // The revision on screen is the goal the owner agreed to remove;
+              // one changed from another tab since is refused, not cleared.
+              void run(() => clearAgentGoal(threadId, goal.revision)).then((landed) => {
+                setConfirmingClear(false);
+                if (landed) onCleared?.();
+                else trigger.current?.focus();
+              });
+            }}
+            className="inline-flex min-h-8 items-center rounded-lg bg-status-error px-3 py-1.5 text-xs font-medium text-white hover:bg-status-error/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-crimson disabled:cursor-not-allowed disabled:opacity-40 [@media(pointer:coarse)]:min-h-11"
+          >
+            {t('goal.clear')}
+          </button>
+        </div>
+      ) : null}
       {editing ? (
         <div className="mt-3 sm:ml-[26px]">
           <GoalEditor
@@ -272,8 +327,8 @@ function GoalEditor({
           // The composers' own guard reads the same two fields for Enter.
           if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
           // The objective is prose and may run to several lines, so Enter is a
-          // newline here. Cmd/Ctrl+Enter is the chord that saves.
-          if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+          // newline here. Cmd+Enter (Ctrl+Enter off Apple platforms) saves.
+          if (event.key === 'Enter' && hasPrimaryModifier(event)) {
             event.preventDefault();
             if (canSave) onSave(trimmed);
           }
@@ -442,5 +497,6 @@ const PAUSE_KEYS: Record<string, TranslationKey> = {
 
 /** An unrecognised reason is still a reason: say it stopped, not what it was. */
 function pauseKey(reason: string | null | undefined): TranslationKey {
-  return (reason && PAUSE_KEYS[reason]) || 'goal.pauseUnknown';
+  // Own entries only: a reason named `constructor` must not find Object.prototype's.
+  return reason && Object.hasOwn(PAUSE_KEYS, reason) ? PAUSE_KEYS[reason] : 'goal.pauseUnknown';
 }

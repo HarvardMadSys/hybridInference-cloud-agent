@@ -16,17 +16,21 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import gc
 import logging
 import threading
+import weakref
 from typing import TYPE_CHECKING, Any
 
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI
+from tests.support.owners import use_session_secret
 
 from cloud_agent import github_app
 from cloud_agent.github_app import AppConfig, GitHubAppCredentials
+from cloud_agent.settings import number_setting
 from cloud_agent.source_control_runtime import (
     GitHubAppProvider,
     GitHubAppState,
@@ -417,6 +421,45 @@ async def test_saved_provider_settings_replace_credentials_and_close_retired_poo
     await runtime.aclose()
 
 
+async def test_unused_rotated_generations_are_collectable_but_held_ones_still_work(
+    monkeypatch: pytest.MonkeyPatch, private_pem: str
+) -> None:
+    from cloud_agent import source_control_runtime
+
+    values = {"AGENT_GITHUB_APP_ID": "first", "AGENT_GITHUB_APP_PRIVATE_KEY": private_pem}
+    monkeypatch.setattr(source_control_runtime, "settings_environment", lambda: dict(values))
+    provider = GitHubAppProvider()
+    first = provider.get()
+    assert first is not None
+    async with first._http() as original_pool:
+        values["AGENT_GITHUB_APP_ID"] = "second"
+        provider.get()
+        await asyncio.sleep(0)
+        assert not original_pool.is_closed
+    assert original_pool.is_closed
+    async with first._http() as later_pool:
+        assert later_pool is not original_pool and not later_pool.is_closed
+    assert later_pool.is_closed
+
+    generations = []
+    for index in range(20):
+        previous = provider.get()
+        assert previous is not None
+        generations.append(weakref.ref(previous))
+        async with previous._http():
+            pass
+        values["AGENT_GITHUB_APP_ID"] = str(index)
+        provider.get()
+        del previous
+        # Retirement is scheduled thread-safely and closure gets its own task.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+    gc.collect()
+    assert all(generation() is None for generation in generations)
+    assert list(provider._retired) == [first]
+    await provider.aclose()
+
+
 def test_failed_app_reload_uses_current_interval_setting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, private_pem: str
 ) -> None:
@@ -426,7 +469,7 @@ def test_failed_app_reload_uses_current_interval_setting(
     monkeypatch.setattr(
         source_control_runtime,
         "number_setting",
-        lambda name, default=None: values.get(name, default),
+        lambda name: values.get(name, number_setting(name)),
     )
     path = tmp_path / "later.pem"
     clock = _Clock()
@@ -471,7 +514,7 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
 ) -> None:
     """The half of issue #47 a fix to ``app.state`` alone would have missed.
 
-    The publisher and the reaper were given the credentials the lifespan had at
+    The pending-message maintenance and the reaper were given the credentials the lifespan had at
     startup and kept them for as long as they ran. Asserted on the real
     lifespan, because the bug was in the wiring and nowhere else.
     """
@@ -481,17 +524,18 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
     import asyncpg
 
     from cloud_agent.app import lifespan
+    from cloud_agent.bootstrap.lifespan import _SHUTDOWN_TASK_ATTRS
 
     key = tmp_path / "github-app.pem"
     key.write_text(private_pem)
     for name, value in _app_env(key).items():
         monkeypatch.setenv(name, value)
     monkeypatch.setenv("AGENT_DATABASE_URL", "postgresql://test-only")
-    monkeypatch.delenv("GATEWAY_BASE_URL", raising=False)
-    monkeypatch.delenv("GATEWAY_ISSUER", raising=False)
+    use_session_secret(monkeypatch)
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "lifespan-wiring-encryption-key")
     monkeypatch.setattr(asyncpg, "create_pool", AsyncMock(return_value=AsyncMock()))
     monkeypatch.setattr(
-        "cloud_agent.identity_namespace.ensure_gateway_namespace", AsyncMock(return_value=None)
+        "cloud_agent.identity_namespace.ensure_local_namespace", AsyncMock(return_value=None)
     )
     monkeypatch.setattr("cloud_agent.settings.initialize_settings", AsyncMock(return_value=None))
 
@@ -508,11 +552,12 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
         await asyncio.Event().wait()
 
     monkeypatch.setattr("cloud_agent.bootstrap.lifespan.reap_expired_attempts", recording("reaper"))
-    monkeypatch.setattr("cloud_agent.publish_worker.publish_loop", recording("publisher"))
+    monkeypatch.setattr(
+        "cloud_agent.bootstrap.lifespan.run_pending_message_maintenance", recording("queue")
+    )
     monkeypatch.setattr(
         "cloud_agent.bootstrap.lifespan.coordinate_sandbox_deletions", recording("sandbox_deletion")
     )
-    monkeypatch.setattr("cloud_agent.workers.pr_archive.pr_archive_loop", recording("archiver"))
     monkeypatch.setattr(
         "cloud_agent.bootstrap.lifespan.maintain_agent_memories", recording("memory")
     )
@@ -521,8 +566,6 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
         # This wiring test uses a fake pool; its notification listener must
         # also stay idle instead of resolving the test-only database hostname.
         "cloud_agent.bootstrap.lifespan.listen",
-        "cloud_agent.bootstrap.lifespan.coordinate_shared_snapshots",
-        "cloud_agent.ledger.collect_usage_snapshots",
         "cloud_agent.capacity_history.prune_host_capacity_history",
         "cloud_agent.operational_health.monitor_queue",
         "cloud_agent.mcp.runtime.maintain_host_sessions",
@@ -562,10 +605,9 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
         assert "memory" in started
         assert not app.state.agent_memory_task.done()
         assert not hasattr(app.state, "app_credentials")
-        assert started["reaper"]["github_app"] is runtime.github
-        assert started["publisher"]["github_app"] is runtime.github
-        assert started["archiver"]["github_app"] is runtime.github
-        assert started["archiver"]["client"] is app.state.http
+        # Waiting messages are settled outside the reaper now, and the App
+        # went with them to the task that asks for it.
+        assert started["queue"]["github_app"] is runtime.github
         credentials = runtime.github.get()
         assert credentials is not None
         async with credentials._http() as client:
@@ -575,7 +617,6 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
     assert compute_stopped.is_set()
     assert app.state.compute_resource_task.cancelled()
     assert app.state.sandbox_deletion_task.cancelled()
-    assert app.state.pr_archive_task.cancelled()
     assert app.state.agent_memory_task.cancelled()
 
     # The MCP listener shares the database but must not start another scheduler.
@@ -587,15 +628,19 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
         "cloud_agent.source_control_runtime.SourceControlRuntime.from_env",
         relay_runtime_builder,
     )
+    started.clear()
     relay = FastAPI()
     async with lifespan(relay, background=False):
         await asyncio.sleep(0)
+        assert not started, f"the relay listener started {sorted(started)}"
+        # Its own three: settings, the MCP sessions this process holds, and the
+        # channel its held tool calls are decided on. Every other task is None.
+        running = {
+            name for name in _SHUTDOWN_TASK_ATTRS if getattr(relay.state, name, None) is not None
+        }
+        assert running == {"settings_task", "mcp_maintenance_task", "notification_listener_task"}
         assert relay.state.source_control is None
         assert relay.state.compute_commands is None
-        assert relay.state.compute_resource_task is None
-        assert relay.state.sandbox_deletion_task is None
-        assert relay.state.pr_archive_task is None
-        assert relay.state.agent_memory_task is None
         compute_builder.assert_not_called()
         relay_runtime_builder.assert_not_called()
 

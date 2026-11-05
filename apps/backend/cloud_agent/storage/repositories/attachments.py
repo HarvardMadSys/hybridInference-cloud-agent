@@ -14,7 +14,6 @@ from cloud_agent.attachments.models import (
     attachment_size_label,
     current_uploads,
 )
-from cloud_agent.storage._sql.attachments import THREAD_UPLOADS_SQL
 
 if TYPE_CHECKING:
     import asyncpg
@@ -155,25 +154,6 @@ class PostgresAttachmentRepository:
                 thread_id,
             )
         return int(total or 0)
-
-    async def list_thread_attachments(self, *, thread_id: str) -> list[dict[str, Any]]:
-        """What a conversation's ``/uploads`` holds: the newest upload at each path."""
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(THREAD_UPLOADS_SQL, thread_id)
-        return current_uploads([dict(row) for row in rows])
-
-    async def read_attachment_content(
-        self, *, thread_id: str, attachment_id: int
-    ) -> tuple[bytes, str] | None:
-        """Read one claimed upload's bytes for a trusted thread-scoped caller."""
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT content, content_type FROM agent_job_attachments "
-                "WHERE id = $1 AND thread_id = $2",
-                attachment_id,
-                thread_id,
-            )
-        return (bytes(row["content"]), str(row["content_type"])) if row else None
 
     async def list_worker_attachments(
         self, *, job_id: str, attempt_id: int, lease_generation: int

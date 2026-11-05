@@ -36,3 +36,10 @@ it('shows an installation kept through a restore without calling it a snapshot',
   expect(screen.getByText('environment.keptAfterRestore')).toBeInTheDocument();
   expect(screen.queryByText('environment.fromSnapshot')).toBeNull();
 });
+
+it('shows a phase and state it does not know as sent, even one named like a built-in', () => {
+  // `__proto__` found Object.prototype in the label tables, and the phase label
+  // handed React that object to draw.
+  render(<EnvironmentSteps steps={[{ phase: '__proto__', state: '__proto__', output: '' }]} />);
+  expect(screen.getAllByText('__proto__')).toHaveLength(2);
+});

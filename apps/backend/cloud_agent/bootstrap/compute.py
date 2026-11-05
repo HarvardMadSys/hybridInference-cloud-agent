@@ -35,7 +35,7 @@ def build_compute_runtime(
     secrets = ComputeSecretStore(repository)
     resolver = ComputeSecretResolver(secrets, configuration)
     transport = OpenSshTransport(resolver)
-    registry = build_registry(configuration, resolver=resolver, transport=transport)
+    registry = build_registry(configuration, resolver=resolver, transport=transport, client=http)
     automatic_setup = AutomaticComputeSetup(
         repository=repository,
         secrets=secrets,

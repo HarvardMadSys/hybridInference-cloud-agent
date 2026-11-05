@@ -6,6 +6,7 @@ import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
+import { Select } from '@/components/ui/Select';
 import type { AgentJobApiState } from '@/lib/api/agents';
 import type { AdminRunFilters } from '@/lib/api/adminRuns';
 import {
@@ -19,7 +20,6 @@ import { getErrorMessage } from '@/lib/utils/errors';
 import { AdminNavigation } from '../AdminNavigation';
 import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
 import { TurnResults } from '../runs/AllRuns';
-import { StepResults } from '../runs/StepResults';
 import { SandboxResults } from '../sandboxes/SandboxResults';
 import { presetKey } from '../usage/present';
 import {
@@ -87,8 +87,8 @@ function windowFilters(
 /**
  * The levels Activity lists, one selection at a time.
  *
- * A session is made of turns, and a turn of steps (its model requests), so
- * those levels share a turn selection. Sandboxes show the current fleet.
+ * A session is made of turns, so those levels share a turn selection.
+ * Sandboxes show the current fleet.
  */
 const LEVELS = [
   {
@@ -107,12 +107,6 @@ const LEVELS = [
     label: 'Turns',
     description: 'Turns created in the selected window from every session, newest first.',
   },
-  {
-    key: 'steps',
-    label: 'Steps',
-    description:
-      'Model requests of the turns created in the selected window, newest first, read a few turns at a time.',
-  },
 ] as const;
 
 type Level = (typeof LEVELS)[number]['key'];
@@ -130,7 +124,7 @@ export default function AdminConversationsPage() {
 /**
  * Read the linked filters once, keyed by the query so a new link remounts.
  *
- * `level=sandboxes`, `level=turns` or `level=steps` opens that level. It chooses
+ * `level=sandboxes` or `level=turns` opens that level. It chooses
  * what is listed rather than which turns match, so it is taken off before the
  * filters are read.
  */
@@ -247,49 +241,40 @@ function ConversationsList({
                   {shortDay(filters.since)} – {shortDay(filters.until)}
                 </span>
               )}
-              <label className="shrink-0">
-                <span className="sr-only">Turn created</span>
-                <select
-                  className={TOOLBAR_SELECT}
-                  value={windowDays}
-                  onChange={(e) => {
-                    // Choosing a preset is the only action that re-anchors the
-                    // window, and it keeps every other filter, including the
-                    // identity a usage link arrived with.
-                    const nextDays = Number(e.target.value);
-                    setLinkedWindow(false);
-                    setFilters((current) => windowFilters(nextDays, current));
-                  }}
-                >
-                  <option value={7}>Last 7 days</option>
-                  <option value={30}>Last 30 days</option>
-                  <option value={90}>Last 90 days</option>
-                  {windowDays === 'custom' && <option value="custom">Custom</option>}
-                </select>
-              </label>
-              <label className="shrink-0">
-                <span className="sr-only">Turn result</span>
-                <select
-                  className={TOOLBAR_SELECT}
-                  value={filters.state ?? ''}
-                  onChange={(e) =>
-                    // Status is not part of the window. Changing it keeps the exact
-                    // since/until on screen: re-deriving them from a preset here
-                    // widened a one-day link back to seven days.
-                    setFilters((current) => ({
-                      ...current,
-                      state: (e.target.value || undefined) as AgentJobApiState | undefined,
-                    }))
-                  }
-                >
-                  <option value="">All results</option>
-                  {STATES.map((value) => (
-                    <option key={value} value={value}>
-                      {value}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <Select
+                aria-label="Turn created"
+                className={`${TOOLBAR_SELECT} shrink-0`}
+                value={windowDays}
+                onValueChange={(next) => {
+                  // Choosing a preset is the only action that re-anchors the
+                  // window, and it keeps every other filter, including the
+                  // identity a usage link arrived with.
+                  const nextDays = Number(next);
+                  setLinkedWindow(false);
+                  setFilters((current) => windowFilters(nextDays, current));
+                }}
+                options={[
+                  { value: '7', label: 'Last 7 days' },
+                  { value: '30', label: 'Last 30 days' },
+                  { value: '90', label: 'Last 90 days' },
+                  ...(windowDays === 'custom' ? [{ value: 'custom', label: 'Custom' }] : []),
+                ]}
+              />
+              <Select
+                aria-label="Turn result"
+                className={`${TOOLBAR_SELECT} shrink-0`}
+                value={filters.state ?? ''}
+                onValueChange={(next) =>
+                  // Status is not part of the window. Changing it keeps the exact
+                  // since/until on screen: re-deriving them from a preset here
+                  // widened a one-day link back to seven days.
+                  setFilters((current) => ({ ...current, state: next || undefined }))
+                }
+                options={[
+                  { value: '', label: 'All results' },
+                  ...STATES.map((value) => ({ value, label: value })),
+                ]}
+              />
               <button
                 className={ICON_BUTTON}
                 type="button"
@@ -331,10 +316,8 @@ function ConversationsList({
           <SandboxResults onDenied={onDenied} />
         ) : level === 'sessions' ? (
           <SessionResults filters={filters} onLoading={setLoading} onDenied={onDenied} />
-        ) : level === 'turns' ? (
-          <TurnResults filters={filters} onLoading={setLoading} onDenied={onDenied} />
         ) : (
-          <StepResults filters={filters} onLoading={setLoading} onDenied={onDenied} />
+          <TurnResults filters={filters} onLoading={setLoading} onDenied={onDenied} />
         )}
       </section>
     </div>

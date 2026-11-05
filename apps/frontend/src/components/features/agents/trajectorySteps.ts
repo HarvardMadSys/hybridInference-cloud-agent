@@ -14,6 +14,7 @@ import { isActiveJobState } from './conversationJob';
 
 import type { AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import { preview, toTrajectory, type TrajectoryLane, type TrajectoryRow } from './trajectory';
+import { growAnswer } from './streamedAnswer';
 import {
   rawNotification,
   notificationHasError,
@@ -154,6 +155,8 @@ export interface TrajectoryStep {
   /** Tool steps: the call identity and the message that issued it. */
   callId?: string;
   toolName?: string;
+  /** Tool steps: the MCP server a Codex call went to; Claude names it in `toolName`. */
+  mcpServer?: string;
   parentKey?: string;
   /** The tool that delegated this agent, separate from model-message ownership. */
   delegationParentKey?: string;
@@ -475,6 +478,8 @@ export function buildTrajectorySteps(
 
   const steps: TrajectoryStep[] = [];
   const byKey = new Map<string, TrajectoryStep>();
+  // Answers whose one-line preview is already cut (see growAnswer).
+  const cutPreviews = new WeakSet<TrajectoryStep>();
   const toolStepByKey = new Map<string, TrajectoryStep>();
 
   const pushUser = (
@@ -611,6 +616,9 @@ export function buildTrajectorySteps(
       timing,
       callId,
       toolName: asText(payload.name || payload.tool) || 'tool',
+      ...(typeof payload.mcp_server === 'string' && payload.mcp_server
+        ? { mcpServer: payload.mcp_server }
+        : {}),
       ...(hasInput ? { payloadValue: payload.input } : {}),
       ...(!hasInput && payload.detail !== undefined
         ? { payloadPreview: preview(payload.detail, 200) }
@@ -663,13 +671,8 @@ export function buildTrajectorySteps(
     if (previewId && typeof payload.stream_state === 'string') {
       const current = byKey.get(previewKey);
       if (current?.blocks) {
-        const text =
-          payload.stream_state === 'reset'
-            ? asText(payload.text)
-            : (current.blocks[0]?.text ?? '') + asText(payload.text);
         current.sourceEvents.push(event);
-        current.blocks = [{ type: 'text', text, channel: 'summary' }];
-        current.detail = preview(text);
+        growAnswer(current, asText(payload.text), payload.stream_state === 'reset', cutPreviews);
         continue;
       }
       const step = pushAssistant(event, '');

@@ -9,6 +9,7 @@ import { highlightCode, TOKEN_CLASS, type CodeToken } from '@/lib/codeHighlight'
 import type { AgentJob } from './types';
 import { useWorkspaceFiles, type WorkspaceDirectory } from './useAgentJobs';
 import { PANE_RESIZE_EVENT } from './useResizablePane';
+import { deletedWorkspacePaths } from './workspaceGitMetadata';
 
 /** Rows rendered at once; the API already caps a preview at 512 KB. */
 const MAX_PREVIEW_LINES = 4000;
@@ -191,7 +192,9 @@ function glyphFor(name: string): GlyphName {
   const byName = GLYPH_BY_NAME.find(([prefix]) => lower.startsWith(prefix));
   if (byName) return byName[1];
   const dot = lower.lastIndexOf('.');
-  return (dot > 0 ? GLYPH_BY_EXTENSION[lower.slice(dot + 1)] : undefined) ?? 'plain';
+  const extension = dot > 0 ? lower.slice(dot + 1) : '';
+  // Own entries only: `x.constructor` must not find Object.prototype's.
+  return Object.hasOwn(GLYPH_BY_EXTENSION, extension) ? GLYPH_BY_EXTENSION[extension] : 'plain';
 }
 
 function FileGlyph({ name }: { name: string }) {
@@ -275,11 +278,20 @@ function TreeLevel({
       </p>
     ) : null;
   }
+  // The host leaves out entries past its limit and names that are not UTF-8,
+  // and says so; without this a partial folder reads as the whole of it.
+  const incomplete = state.truncated ? (
+    <p style={indent} className="py-1 pr-2 text-[11px] text-gray-400 dark:text-gray-500">
+      {t('workspaceFiles.listingIncomplete')}
+    </p>
+  ) : null;
   if (state.entries.length === 0) {
     return (
-      <p style={indent} className="py-1 pr-2 text-[11px] text-gray-400 dark:text-gray-500">
-        Empty
-      </p>
+      incomplete ?? (
+        <p style={indent} className="py-1 pr-2 text-[11px] text-gray-400 dark:text-gray-500">
+          Empty
+        </p>
+      )
     );
   }
 
@@ -325,6 +337,7 @@ function TreeLevel({
           </div>
         );
       })}
+      {incomplete}
     </>
   );
 }
@@ -334,7 +347,7 @@ function ChangedList({
   selected,
   onOpen,
 }: {
-  job: AgentJob;
+  job: Pick<AgentJob, 'diffFiles' | 'diffFileDetails'>;
   selected: string | null;
   onOpen: (path: string) => void;
 }) {
@@ -568,7 +581,7 @@ export function WorkspaceFiles({
   requestedPath,
   requestToken,
 }: {
-  job: AgentJob;
+  job: Pick<AgentJob, 'id' | 'state' | 'diffFiles' | 'diffFileDetails' | 'workspaceGitChanges'>;
   active: boolean;
   requestedPath?: string | null;
   /** Increment to reopen the same path after a new conversation action. */
@@ -584,6 +597,7 @@ export function WorkspaceFiles({
     file,
     fileLoading,
     fileError,
+    fileMissing,
     source,
     toggleDirectory,
     retryDirectory,
@@ -593,6 +607,13 @@ export function WorkspaceFiles({
     closeFile,
     reload,
   } = useWorkspaceFiles(job.id, active, `${job.state}:${settledDiffCount}`);
+  // The live workspace has nothing at a path the run deleted, so its read
+  // finds nothing there. The diff says why, and no retry would find it.
+  const deletedPaths = useMemo(
+    () => deletedWorkspacePaths(job.diffFileDetails, job.workspaceGitChanges),
+    [job.diffFileDetails, job.workspaceGitChanges],
+  );
+  const selectedDeleted = Boolean(fileMissing && selected && deletedPaths.has(selected));
   const assets = useFileAssets(file?.kind === 'file' ? file : null);
   const processedRequest = useRef<{
     jobId: string;
@@ -1003,6 +1024,8 @@ export function WorkspaceFiles({
         >
           {fileLoading ? (
             <PaneMessage>Loading file…</PaneMessage>
+          ) : fileError && selectedDeleted ? (
+            <PaneMessage>This file was deleted by the run.</PaneMessage>
           ) : fileError ? (
             <PaneMessage>
               <span className="flex flex-col items-center gap-3">

@@ -362,7 +362,11 @@ export function EnvironmentPicker({
             if (next.repo !== null && !editing.config.id) created.current = next.id;
             setReload((v) => v + 1);
           }}
-          onClose={() => setEditing(null)}
+          onClose={() => {
+            setEditing(null);
+            // A test run in the editor saves nothing, but changes its result here.
+            setReload((v) => v + 1);
+          }}
         />
       ) : null}
     </div>,

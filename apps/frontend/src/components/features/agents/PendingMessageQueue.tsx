@@ -8,6 +8,7 @@ import { formatBytes } from '@/lib/attachmentLimits';
 import type { PendingMessageApi } from '@/lib/api/pendingMessages';
 
 import { isComposerSubmit } from './composerKeys';
+import { sameChoice, turnChoice } from './modelSource';
 import type { PendingQueue } from './usePendingMessages';
 
 type Translate = ReturnType<typeof useT>;
@@ -91,8 +92,32 @@ function sendNowRefusal(code: string, error: string, t: Translate): string {
   if (code === 'not_running') return t('queue.sendNowRefused.notRunning');
   if (code === 'mid_turn_input_unsupported') return t('queue.sendNowRefused.unsupported');
   if (code === 'send_now_has_attachments') return t('queue.sendNowFiles');
+  if (code === 'send_now_model_mismatch') return t('modelSource.sendNowMismatch');
   if (code === 'revision_conflict') return t('queue.conflict');
   return error;
+}
+
+/** Whether ``message`` named a model, or source, other than the live turn's. */
+function choosesOtherModel(
+  message: PendingMessageApi,
+  liveTurn: { model: string; modelConnectionId?: string | null } | undefined,
+): boolean {
+  if (!message.model || !liveTurn) return false;
+  return !sameChoice(turnChoice(liveTurn), {
+    model: message.model,
+    connectionId: message.model_connection_id ?? null,
+  });
+}
+
+function sendNowTitle(
+  message: PendingMessageApi,
+  files: unknown,
+  liveTurn: { model: string; modelConnectionId?: string | null } | undefined,
+  t: Translate,
+): string {
+  if (files) return t('queue.sendNowFiles');
+  if (choosesOtherModel(message, liveTurn)) return t('modelSource.sendNowMismatch');
+  return t('queue.sendNow');
 }
 
 /** How long a "not taken" note stays under its message. */
@@ -128,10 +153,18 @@ const OUTLINE_BUTTON =
 export function PendingMessageQueue({
   queue,
   disabled = false,
+  liveTurn,
 }: {
   queue: PendingQueue;
   /** The conversation cannot take changes (archived, context lost). */
   disabled?: boolean;
+  /**
+   * The model and source of the turn a message would be sent into. A message
+   * that chose another is not offered "Send now": the running turn would
+   * answer it on its own model and source, billed where the owner did not
+   * choose. It runs as its own turn instead (the server refuses it too).
+   */
+  liveTurn?: { model: string; modelConnectionId?: string | null };
 }) {
   const t = useT();
   const listId = useId();
@@ -476,8 +509,14 @@ export function PendingMessageQueue({
                       type="button"
                       data-action="send-now"
                       aria-label={t('queue.sendNowLabel')}
-                      title={files ? t('queue.sendNowFiles') : t('queue.sendNow')}
-                      disabled={locked || busy || message.state !== 'queued' || Boolean(files)}
+                      title={sendNowTitle(message, files, liveTurn, t)}
+                      disabled={
+                        locked ||
+                        busy ||
+                        message.state !== 'queued' ||
+                        Boolean(files) ||
+                        choosesOtherModel(message, liveTurn)
+                      }
                       onClick={() => void sendNow(message)}
                       className={ICON_BUTTON}
                     >

@@ -26,6 +26,7 @@ import pytest
 import uvicorn
 from tests.external.test_agent_mcp_end_to_end import (
     _ENCRYPTION_KEY,
+    _LOCAL_SESSION_SECRET,
     _MCP_TOKEN_SECRET,
     _RESOURCE_TEXT,
     _TOOL_TEXT,
@@ -38,15 +39,17 @@ from tests.external.test_agent_mcp_end_to_end import (
 )
 from tests.support.claude_cli import sse
 from tests.support.migrations import apply_migrations
+from tests.support.one_shot import one_shot_argv, one_shot_env
 
 from cloud_agent.mcp.protocol import presented_name
 from cloud_agent.settings import initialize_settings
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import SCOPE_MCP, mint_worker_token, parse_worker_token
 from cloud_agent_host.chat_sandbox import ChatSandboxManager
-from cloud_agent_host.codex_mcp import INSTALL_POLICY
+from cloud_agent_host.codex_mcp import install_policy_argv
+from cloud_agent_host.docker_engine import run_docker
 from cloud_agent_host.drivers import LaunchContext, TurnInput, get_driver
-from cloud_agent_host.kilo_mcp import ensure_kilo_runtime
+from cloud_agent_host.kilo_mcp import KILO_MCP_VERSION, ensure_kilo_runtime
 from cloud_agent_host.mcp_helpers import install_mcp_helpers
 from cloud_agent_host.runtimes import RuntimeMCPConfig, get_runtime
 from cloud_agent_host.sandbox import _PopenProcess
@@ -320,11 +323,7 @@ def _resident_turns(
         "--user",
         "0:0",
         container,
-        "python3",
-        "-I",
-        "-c",
-        INSTALL_POLICY,
-        relay + "/v1/agent/mcp",
+        *install_policy_argv(relay + "/v1/agent/mcp", python="python3"),
     )
     _docker(
         "exec",
@@ -435,7 +434,7 @@ for directory in (".kilo", ".kilocode"):
 
     context = LaunchContext(
         workdir="/workspace",
-        gateway_base_url=f"http://{host}:{model_port}",
+        model_base_url=f"http://{host}:{model_port}",
         credential="test-model-key",
         provides_isolation=True,
         state_dir="/agent-state/mcp-test",
@@ -493,11 +492,13 @@ for directory in (".kilo", ".kilocode"):
             answers.append(result.final_output)
             session.close()
         if runtime in {"codex", "kilo"}:
-            argv, env = get_runtime(runtime).prepare(
+            # The platform launches only resident processes, but a headless
+            # `codex exec` or `kilo run` in the same container is held to the
+            # same MCP policy, so the test starts one itself.
+            live_argv, env = get_runtime(runtime).prepare_live(
                 workdir=context.workdir,
-                task_prompt="Read issue 7 through exec/run",
                 model="test-model",
-                gateway_base_url=context.gateway_base_url,
+                model_base_url=context.model_base_url,
                 credential=context.credential,
                 provides_isolation=True,
                 mcp_config=replace(context.mcp_config, credential=rotate()),
@@ -505,7 +506,15 @@ for directory in (".kilo", ".kilocode"):
                 activation_dir=context.activation_dir,
                 resume_session_id=native_id,
             )
-            process = spawn(argv, env)
+            argv = one_shot_argv(
+                runtime,
+                live_argv,
+                prompt="Read issue 7 through exec/run",
+                model="test-model",
+                session_state_dir=context.session_state_dir,
+                resume_session_id=native_id,
+            )
+            process = spawn(argv, one_shot_env(env))
             process.close_stdin()
             output = "".join(process.lines())
             assert process.wait() == 0, process.stderr_text()
@@ -554,6 +563,7 @@ async def test_resident_mcp_call_followup_resume_and_fork(
     for name, value in {
         "AGENT_DATABASE_URL": f"postgresql://{db['user']}:{db['password']}@{db['host']}:{db['port']}/{db['database']}",
         "AGENT_CONTROL_TOKEN_SECRET": _MCP_TOKEN_SECRET,
+        "AGENT_LOCAL_SESSION_SECRET": _LOCAL_SESSION_SECRET,
         "AGENT_SETTINGS_ENCRYPTION_KEY": "e2e-admin-settings-secret-32-bytes-long",
         "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY": _ENCRYPTION_KEY,
         "AGENT_MCP_ALLOW_PRIVATE_TARGETS": "1",
@@ -588,6 +598,12 @@ async def test_resident_mcp_call_followup_resume_and_fork(
     approver = None
     decisions = []
     try:
+        # The relay's own startup binds the empty database to accounts, as a
+        # deployment's does before anyone signs up; it refuses a database that
+        # already holds owner rows without that binding. So seed once it is up.
+        while not server.started:
+            assert not serving.done(), "the relay exited before it started"
+            await asyncio.sleep(0.02)
         token = await _seed(
             pool,
             upstream_url=f"http://127.0.0.1:{upstream_port}/mcp",
@@ -683,9 +699,11 @@ async def test_resident_mcp_call_followup_resume_and_fork(
 
         manager = SimpleNamespace(
             _require=lambda spec: SimpleNamespace(container_id=container),
-            backend=SimpleNamespace(docker_binary="docker", image=image),
+            backend=SimpleNamespace(
+                docker_binary="docker", image=image, sandbox_namespace="resident-mcp-parity"
+            ),
             exec_capture=capture,
-            _run=ChatSandboxManager._run,
+            _run=run_docker,
             _run_bytes=ChatSandboxManager._run_bytes,
         )
         await asyncio.to_thread(install_mcp_helpers, manager, None, runtime)
@@ -697,9 +715,9 @@ async def test_resident_mcp_call_followup_resume_and_fork(
                 "0:0",
                 container,
                 "rm",
-                "/opt/runtimes/kilo/7.4.17/mcp-isolation-patch.sha256",
+                f"/opt/runtimes/kilo/{KILO_MCP_VERSION}/mcp-isolation-patch.sha256",
             )
-            await asyncio.to_thread(ensure_kilo_runtime, manager, None, "7.4.17")
+            await asyncio.to_thread(ensure_kilo_runtime, manager, None, KILO_MCP_VERSION)
         answers = await asyncio.wait_for(
             asyncio.to_thread(
                 _resident_turns,

@@ -10,9 +10,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from cloud_agent.settings import integer_setting
 
 MAX_SKILL_BYTES = 64 * 1024
-MAX_SELECTION_BYTES = 128 * 1024
-MAX_SELECTED_SKILLS = 16
-MAX_LIBRARY_SKILLS = 100
 MAX_SKILL_NAME_LENGTH = 80
 MAX_SKILL_DESCRIPTION_LENGTH = 1024
 
@@ -29,22 +26,22 @@ class SkillLimits(BaseModel):
 
 def skill_max_bytes() -> int:
     """Read the active editor/import byte limit within the fixed schema cap."""
-    return integer_setting("skills.max_skill_bytes", MAX_SKILL_BYTES)
+    return integer_setting("skills.max_skill_bytes")
 
 
 def skill_max_selection_bytes() -> int:
     """Read the combined instruction quota for one turn and account defaults."""
-    return integer_setting("skills.max_selection_bytes", MAX_SELECTION_BYTES)
+    return integer_setting("skills.max_selection_bytes")
 
 
 def skill_max_selected() -> int:
     """Read how many skills one turn may select."""
-    return integer_setting("skills.max_selected", MAX_SELECTED_SKILLS)
+    return integer_setting("skills.max_selected")
 
 
 def skill_max_library() -> int:
     """Read the quota for live entries in an owner's library."""
-    return integer_setting("skills.max_library", MAX_LIBRARY_SKILLS)
+    return integer_setting("skills.max_library")
 
 
 def skill_size_label(size: int) -> str:

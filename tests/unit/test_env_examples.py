@@ -147,6 +147,13 @@ FRONTENDS = {
 _SCRIPT_READ = re.compile(r"(?:env_or_dotenv|from_env)\s+([A-Z_][A-Z0-9_]*)")
 
 
+#: Required by a compose file, but exported by the script that runs it rather
+#: than written by an operator: deploy.sh exports the commit it deploys, and
+#: the release deployer the one its manifest names. A Compose command run by
+#: hand still fails on it with its own message.
+EXPORTED_BY_DEPLOYER = {"AGENT_DEPLOYMENT_SHA"}
+
+
 def _assigned(example: Path) -> set[str]:
     """Variable names the example file assigns, commented lines excluded."""
     return {
@@ -161,11 +168,17 @@ def test_every_required_variable_is_in_the_example(compose: Path, example: Path)
     """An operator copying the example gets a file that names every blocker."""
     required = set(_REQUIRED.findall(compose.read_text()))
     assert required, f"no required variables found in {compose.name} — regex drift?"
-    missing = required - _assigned(example)
+    missing = required - _assigned(example) - EXPORTED_BY_DEPLOYER
     assert not missing, (
         f"{example.relative_to(REPO)} is missing {sorted(missing)}; an operator "
         "copying it hits the failure one variable at a time"
     )
+
+
+def test_the_deployer_exports_what_the_examples_leave_out() -> None:
+    script = (REPO / "deploy/control-plane/deploy.sh").read_text()
+    for name in EXPORTED_BY_DEPLOYER:
+        assert f"export {name}" in script, name
 
 
 @pytest.mark.parametrize(("compose", "example"), STACKS)

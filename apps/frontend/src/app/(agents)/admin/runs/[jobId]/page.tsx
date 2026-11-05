@@ -14,7 +14,6 @@ import { getErrorMessage } from '@/lib/utils/errors';
 
 import { AdminNavigation } from '../../AdminNavigation';
 import { ADMIN_PAGE, AdminPageHeader } from '../../AdminPageHeader';
-import { LLMRequests } from '../LLMRequests';
 import { Resources } from '../Resources';
 import { SessionStatistics } from '../SessionStatistics';
 import {
@@ -48,7 +47,7 @@ function earlierRun(attempt: AdminAttempt): string {
 
 /** Which sections describe the latest run and which the whole turn. */
 const RESTART_SCOPE =
-  'Resources and startup show the latest run; turn statistics, token usage and LLM requests cover every run.';
+  'Resources and startup show the latest run; turn statistics and token usage cover every run.';
 
 /**
  * Said only when the turn ran more than once.
@@ -258,22 +257,6 @@ function RunDetails({ jobId }: { jobId: string }) {
             )}
             <SessionStatistics statistics={detail.session_statistics} />
             <UsageSnapshot usage={detail.usage} />
-            {detail.capabilities.llm_requests ? (
-              <LLMRequests
-                refreshKey={revision}
-                jobId={jobId}
-                running={latest?.finished_at == null}
-                skipAttemptIds={attempts
-                  .filter((attempt) => attempt.status === 'aborted')
-                  .map((attempt) => attempt.attempt_id)}
-                onAccessDenied={onAccessDenied}
-              />
-            ) : (
-              <p className="mt-4 text-xs text-gray-500 dark:text-gray-400">
-                Per-request LLM records are not served by this build. Gateway usage above is an
-                aggregate snapshot.
-              </p>
-            )}
           </>
         )}
       </section>

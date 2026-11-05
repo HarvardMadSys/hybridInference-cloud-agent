@@ -5,14 +5,13 @@ Ten endpoints behind the session credential. Everything is scoped to
 account can never read or mutate another's job, and a job that belongs to
 somebody else is a 404 rather than a 403 so ids cannot be probed for existence.
 
-``_job_usage``, ``_set_agent_thread_archived`` and ``_set_agent_thread_pinned``
+``_set_agent_thread_archived`` and ``_set_agent_thread_pinned``
 travel with it: each has callers only here, and a helper whose only caller moves
 has to move with it.
 """
 
 from __future__ import annotations
 
-import contextlib
 from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query
@@ -24,24 +23,24 @@ from cloud_agent.api._job_views import (
     _iso,
     _job_response,
 )
-from cloud_agent.api._owner_auth import _owned_job, require_agent_owner
+from cloud_agent.api._owner_auth import _owned_job, _require_owned_job, require_agent_owner
 from cloud_agent.api._project_filter import TemporaryFilter, require_single_project_filter
 from cloud_agent.api._workspace_access import _sandbox_manager_for_job, _workspace_id
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_gateway_client,
-    get_log_store,
+    get_owner_directory,
     get_source_control,
     get_storage,
     require_store,
 )
-from cloud_agent.application.job_admission import _create_job_as
+from cloud_agent.application.job_admission import create_job_as
 from cloud_agent.application.pending_messages import settle_queue_when_possible
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.entitlement import REPO_PATTERN
 from cloud_agent.goals.models import GoalConflict
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import (
+    MAX_TRAJECTORY_TIMING_ATTEMPTS,
     AgentAttemptTelemetry,
     AgentJobCancelResponse,
     AgentJobCreate,
@@ -49,9 +48,12 @@ from cloud_agent.schemas import (
     AgentJobResponse,
     AgentThreadArchiveResponse,
     AgentThreadPinResponse,
-    AgentThreadPublicationResponse,
     AgentThreadRenameRequest,
     AgentThreadRenameResponse,
+    AgentTrajectoryAttemptTiming,
+    AgentTrajectoryJobTiming,
+    AgentTrajectoryTimingRequest,
+    AgentTrajectoryTimingResponse,
     GoalClearedResponse,
     GoalRequest,
     GoalResponse,
@@ -72,16 +74,16 @@ if TYPE_CHECKING:
         GoalRepository,
         HostPoolRepository,
         McpConnectionRepository,
+        ModelConnectionRepository,
         PendingMessageRepository,
         SandboxRepository,
         SkillRepository,
-        SnapshotRepository,
         SourceControlRepository as SourceControlPort,
     )
     from cloud_agent.source_control_runtime import GitHubAppSource
 
 
-from cloud_agent.api.environments import CredentialSafeRoute
+from cloud_agent.api._environment_route_policy import EnvironmentSensitiveRoute
 
 router = APIRouter(prefix="/v1/agent")
 
@@ -95,14 +97,14 @@ class _JobsStorage(Protocol):
     """The capabilities the job surface reaches the store for.
 
     Ten of them, and four are reached through a helper rather than spelled
-    here: `application.job_admission._create_job_as` is typed against
+    here: `application.job_admission.create_job_as` is typed against
     `_JobCreationStorage`, which names `attachments` among them.
 
     Four of these are reached through a helper rather than spelled here,
     and leaving them out is not a narrowing: `cancel_agent_job` hands the whole
     store (through `_resume_terminals_after_cancel`) to
     `_workspace_access._sandbox_manager_for_job`, and `create_agent_job`
-    hands it to `application.job_admission._create_job_as`, which is typed against
+    hands it to `application.job_admission.create_job_as`, which is typed against
     `_JobCreationStorage` (`conversation_commands`, `mcp`, `skills`,
     `source_control`). mypy says so at the call site, which is the point of
     declaring capabilities rather than trusting a reader to trace them.
@@ -116,10 +118,11 @@ class _JobsStorage(Protocol):
     goals: GoalRepository
     host_pool: HostPoolRepository
     mcp: McpConnectionRepository
+    model_connections: ModelConnectionRepository
     pending_messages: PendingMessageRepository
     sandbox: SandboxRepository
     skills: SkillRepository
-    snapshot: SnapshotRepository
+
     source_control: SourceControlPort
 
 
@@ -128,36 +131,12 @@ def _require_store(store: _JobsStorage | None) -> _JobsStorage:
     return require_store(store)
 
 
-async def _job_usage(log_store: Any, job_id: str) -> dict[str, Any]:
-    """Read one job's spend and token totals from the billing ledger.
-
-    Deliberately the ledger and not the agent's own report: a run that
-    misstates its usage — which is a thing models do — cannot change what the
-    owner is shown, and it is the same source the budget check already trusts.
-    Absent on a deployment with no log store, rather than a fabricated zero.
-    """
-    usage: dict[str, Any] = {}
-    cost_getter = getattr(log_store, "get_agent_job_cost", None)
-    if cost_getter is not None:
-        with contextlib.suppress(Exception):
-            usage["spent_usd"] = await cost_getter(job_id)
-    usage_getter = getattr(log_store, "get_agent_job_usage", None)
-    if usage_getter is not None:
-        with contextlib.suppress(Exception):
-            totals = await usage_getter(job_id)
-            usage["tokens_in"] = int(totals.get("tokens_in", 0))
-            usage["tokens_out"] = int(totals.get("tokens_out", 0))
-            usage["model_calls"] = int(totals.get("calls", 0))
-    return usage
-
-
 async def create_agent_job(
     body: AgentJobCreate,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key", max_length=256),
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _JobsStorage | None = Depends(get_storage),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
-    gateway: Any = Depends(get_gateway_client),
 ) -> AgentJobResponse:
     """Queue a new agent job for the authenticated user.
 
@@ -166,12 +145,11 @@ async def create_agent_job(
     different content is a 409 ``idempotency_conflict``.
     """
     job_store = _require_store(store)
-    job = await _create_job_as(
+    job = await create_job_as(
         body,
         user,
         job_store=job_store,
         app_credentials=app_credentials,
-        gateway=gateway,
         client_request_id=idempotency_key,
     )
     return _job_response(job)
@@ -201,13 +179,49 @@ async def list_agent_jobs(
     return AgentJobListResponse(jobs=[_job_response(job) for job in jobs])
 
 
+@router.post("/jobs/trajectory-telemetry", response_model=AgentTrajectoryTimingResponse)
+async def get_agent_trajectory_telemetry(
+    body: AgentTrajectoryTimingRequest,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _JobsStorage | None = Depends(get_storage),
+) -> AgentTrajectoryTimingResponse:
+    """Read compact timing for a bounded set of the caller's turns."""
+    job_store = _require_store(store)
+    result = await job_store.execution_queries.trajectory_timings(
+        job_ids=body.job_ids,
+        user_id=user["user_id"],
+        max_attempts=MAX_TRAJECTORY_TIMING_ATTEMPTS,
+    )
+    if result["owned_count"] != len(body.job_ids):
+        raise HTTPException(status_code=404, detail="Job not found")
+    if result["attempt_count"] > MAX_TRAJECTORY_TIMING_ATTEMPTS:
+        raise HTTPException(status_code=413, detail="Too many attempts in trajectory batch")
+    attempts_by_job: dict[str, list[AgentTrajectoryAttemptTiming]] = {
+        job_id: [] for job_id in body.job_ids
+    }
+    for timing in result["attempts"]:
+        attempts_by_job[timing["job_id"]].append(
+            AgentTrajectoryAttemptTiming(
+                **_attempt_summary_response(timing).model_dump(),
+                tool_time_ms=timing.get("tool_time_ms"),
+                tool_calls_truncated=bool(timing.get("tool_calls_truncated")),
+                tool_timing_exact=bool(timing.get("tool_timing_exact")),
+            )
+        )
+    return AgentTrajectoryTimingResponse(
+        jobs=[
+            AgentTrajectoryJobTiming(job_id=job_id, attempts=attempts_by_job[job_id])
+            for job_id in body.job_ids
+        ]
+    )
+
+
 @router.get("/jobs/{job_id}", response_model=AgentJobResponse)
 async def get_agent_job(
     job_id: str,
     include_resources: bool = Query(True),
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _JobsStorage | None = Depends(get_storage),
-    log_store: Any | None = Depends(get_log_store),
 ) -> AgentJobResponse:
     """Fetch one of the caller's agent jobs, with what it has spent so far."""
     job_store = _require_store(store)
@@ -228,7 +242,6 @@ async def get_agent_job(
         )
     return _job_response(
         job,
-        await _job_usage(log_store, job_id),
         telemetry,
         attempt_telemetry,
     )
@@ -243,7 +256,7 @@ async def get_agent_attempt_telemetry(
 ) -> AgentAttemptTelemetry:
     """Read measurements for one attempt belonging to the caller's job."""
     job_store = _require_store(store)
-    await _owned_job(job_store.conversation_queries, job_id, user)
+    await _require_owned_job(job_store.conversation_queries, job_id, user)
     telemetry = await job_store.execution_queries.job_turn_telemetry(
         job_id=job_id, attempt_id=attempt_id
     )
@@ -261,7 +274,7 @@ async def cancel_agent_job(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _JobsStorage | None = Depends(get_storage),
     source_control: SourceControlRuntime | None = Depends(get_source_control),
-    gateway: Any = Depends(get_gateway_client),
+    owners: Any = Depends(get_owner_directory),
 ) -> AgentJobCancelResponse:
     """Request cancellation of one of the caller's agent jobs.
 
@@ -278,7 +291,7 @@ async def cancel_agent_job(
     await _settle_after_cancel(
         job_store,
         owned,
-        gateway=gateway,
+        owners=owners,
         github_app=None if source_control is None else source_control.github,
     )
     if state in TERMINAL_STATES:
@@ -295,7 +308,7 @@ async def _settle_after_cancel(
     job_store: _JobsStorage,
     job: dict[str, Any],
     *,
-    gateway: Any,
+    owners: Any,
     github_app: GitHubAppSource | None,
 ) -> None:
     """Act on a cancel that may already have ended a turn.
@@ -312,7 +325,7 @@ async def _settle_after_cancel(
         await settle_queue_when_possible(
             job_store,
             thread_id=str(thread_id),
-            gateway=gateway,
+            owners=owners,
             github_app=github_app,
         )
     except Exception:
@@ -656,6 +669,7 @@ async def resume_agent_goal(
 @router.delete("/threads/{thread_id}/goal", response_model=GoalClearedResponse)
 async def clear_agent_goal(
     thread_id: str,
+    body: GoalRevisionRequest | None = None,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _JobsStorage | None = Depends(get_storage),
 ) -> GoalClearedResponse:
@@ -663,9 +677,20 @@ async def clear_agent_goal(
 
     The revision moves and the identity is cleared, so a report written about
     the removed objective can never match whatever the owner sets next.
+
+    ``revision`` is the goal the owner confirmed removing: one that has moved
+    past it since, edited or replaced from another tab, is refused with a 409
+    rather than removed unseen. Omitted means "whatever it currently says".
     """
     job_store = _require_store(store)
-    cleared = await job_store.goals.clear_goal(thread_id=thread_id, user_id=user["user_id"])
+    try:
+        cleared = await job_store.goals.clear_goal(
+            thread_id=thread_id,
+            user_id=user["user_id"],
+            expected_revision=body.revision if body is not None else None,
+        )
+    except GoalConflict as exc:
+        raise _goal_conflict_error() from exc
     state = await job_store.goals.get_thread_goal_state(
         user_id=user["user_id"], thread_id=thread_id
     )
@@ -702,79 +727,11 @@ async def unpin_agent_thread(
     return await _set_agent_thread_pinned(job_id=job_id, pinned=False, user=user, store=store)
 
 
-#: Why a publication request was refused, by the store's error code: the
-#: response type and the sentence an owner reads.
-_PUBLICATION_REFUSALS = {
-    "temporary_workspace": (
-        "publication_unavailable",
-        "This workspace has no repository to publish to.",
-    ),
-    "nothing_to_publish": (
-        "nothing_to_publish",
-        "This conversation has no finished turn to publish yet.",
-    ),
-    "workspace_unavailable": (
-        "workspace_unavailable",
-        "The workspace cannot be published right now. Send a message or try again shortly.",
-    ),
-    "turn_running": ("turn_running", "Publish after the running turn finishes."),
-    "workspace_busy": ("workspace_busy", "The workspace is busy. Try again in a moment."),
-}
-
-
-@router.post(
-    "/threads/{thread_id}/publish",
-    response_model=AgentThreadPublicationResponse,
-    status_code=202,
-)
-async def publish_agent_thread(
-    thread_id: str,
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _JobsStorage | None = Depends(get_storage),
-) -> AgentThreadPublicationResponse:
-    """Push the conversation's workspace to its branch and open or update its draft PR.
-
-    The platform never publishes on its own: a finished turn stays in the
-    workspace until its owner asks. This opens the workspace's next snapshot
-    and returns at once; capture, the secret scan, the push and the draft PR
-    follow as the job's ``workspace_publication_state``. Every conversation
-    sharing the workspace is published together, to its origin's branch. A
-    publication already on its way is returned instead of a second one.
-    """
-    job_store = _require_store(store)
-    result = await job_store.snapshot.request_snapshot_publication(
-        thread_id=thread_id, user_id=user["user_id"]
-    )
-    error = result.get("error")
-    if error == "not_found":
-        raise _no_such_thread_error(thread_id)
-    if error is not None:
-        error_type, message = _PUBLICATION_REFUSALS[error]
-        raise HTTPException(
-            status_code=409, detail={"error": {"type": error_type, "message": message}}
-        )
-    logger.info(
-        "agent_thread_publication_requested",
-        extra={
-            "event": "agent_thread_publication_requested",
-            "thread_id": thread_id,
-            "snapshot_id": result["snapshot_id"],
-            "requested": result["requested"],
-        },
-    )
-    return AgentThreadPublicationResponse(
-        thread_id=thread_id,
-        snapshot_id=int(result["snapshot_id"]),
-        state=result["state"],
-        requested=bool(result["requested"]),
-    )
-
-
 router.add_api_route(
     "/jobs",
     create_agent_job,
     methods=["POST"],
     response_model=AgentJobResponse,
     status_code=201,
-    route_class_override=CredentialSafeRoute,
+    route_class_override=EnvironmentSensitiveRoute,
 )

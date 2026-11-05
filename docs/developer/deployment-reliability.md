@@ -107,15 +107,32 @@ returns `network_verified`. The runner may rely on that proof for up to one
 minute, matching the network guard's existing freshness window. Commands after
 that minute verify again, including after a long setup script or at turn end.
 Terminals and sandbox manager workspace operations always check, as does every command
-when the sandbox manager did not supply that proof. The turn child still installs and
-reads back host rules before acceptance.
+when the sandbox manager did not supply that proof.
 
-Network-rule reads share a disposable helper; route reads use a separate helper
-without capabilities. Reconciliation caches inspections only within one
-command, rereads after mutations, and verifies the final bridge identity,
-membership and relay addresses. It skips unchanged guest hosts/resolver writes
-while retaining ownership, mode and symlink checks. These optimizations preserve
-the network policy and freshness requirements.
+The turn child normally does not install and read back the host rules itself.
+The host service keeps the network guard its startup preflight verified, and
+renews that verification between claims once it is 35 seconds old, so handing a
+turn over does not wait for it; a verification still 45 seconds old at a
+handover, after a failed renewal say, is renewed then. It
+adds the verification time and its own helper image to the child's stdin
+payload, after stripping claim-supplied underscore keys, as it does for the
+qualification verdict. The child declines the turn, before accepting it, unless
+that verification is present, well formed and successful. It still checks the
+Docker version and the relay network itself, but starts no helper container
+before it accepts its turn. A child that starts so slowly that the verification
+is already past the network guard's one-minute window uses nothing from it: it
+logs `network_guard_verification_aged_out`, installs and reads back the rules
+itself, as every child did before the host handed its verification over, and
+accepts the turn only if that check passes. The sandbox manager still installs
+and reads back the rules before any group joins its bridge.
+
+Network-rule reads share one helper request, which the runner's or the
+sandbox manager's long-lived helper takes when it is free; route reads use a
+separate disposable helper without capabilities. Reconciliation caches
+inspections only within one command, rereads after mutations, and verifies the
+final bridge identity, membership and relay addresses. It skips unchanged guest
+hosts/resolver writes while retaining ownership, mode and symlink checks. These
+optimizations preserve the network policy and freshness requirements.
 
 A new chat's repository is cloned, scrubbed and archived on the host while the
 container starts. Its `checkout` measurement includes the remaining clone wait
@@ -123,7 +140,9 @@ container starts. Its `checkout` measurement includes the remaining clone wait
 stage; an earlier stop discards prepared source. Startup measurements attribute
 qualification to `preflight` and cover claim request through prompt dispatch,
 excluding queue wait and model response time. Declined children do not publish a
-successful startup. A host at capacity checks completed children every second.
+successful startup. A host at capacity claims again as soon as a turn's child
+exits or an environment test ends. Failing that, it checks again after a
+second, or after five seconds while an environment test holds one of its slots.
 
 ### Empty-queue waits and CI evidence
 
@@ -180,7 +199,7 @@ minutes old:
 
 | Event | Meaning |
 | --- | --- |
-| `queued_without_host` | Waiting work has no enrolled, fresh, compatible host, accounting for retained ownership and the new-chat placement pin. |
+| `queued_without_host` | Waiting work has no enrolled, fresh, compatible host, accounting for retained ownership and the new-chat placement pin. A turn of a `cold` sandbox counts any Host that restores, but not the Host it left while that one still holds its container. |
 | `queue_not_starting` | Old queue heads remain and no job is running, even if host heartbeats look healthy. |
 | `queue_health_unavailable` | Repeated database observations failed. |
 | `queue_recovered` | A reported problem cleared. |
@@ -228,23 +247,14 @@ new work queued until the retry succeeds. The queue monitor detects this state.
 These checks protect and expose interrupted deployments; activation still spans
 two machines and PostgreSQL without a single transaction.
 
-### Snapshot publication failures
+### Push and pull-request failures
 
-A publication that fails — a refused patch, an unavailable GitHub credential,
-a failed Git or PR request — leaves its snapshot `failed` with a reason and its
-sandbox group `dirty`; the included agent turns stay successful. It does not
-hold the workspace back: the owner's next **Create PR** / **Update PR** request
-captures a new snapshot of the whole diff since the last published commit,
-which supersedes the failed one. If the failed attempt had already pushed its
-commit, the publisher recorded that commit as the snapshot's
-`pushed_commit_sha` before pushing, and the next snapshot builds on it rather
-than treating it as a moved branch. GitHub rate limits and transient
-draft-PR refusals are retried automatically. The full rules are in
-[Resume, Fork, and publication](operations.md#resume-fork-and-publication).
-
-To investigate one, read the snapshot's `last_error`, the anchor job's event
-whose phase is `shared_snapshot_publish_rejected`, and GitHub's branch and PR
-state.
-Do not edit snapshot or group state in the database: marking a snapshot
-published or clearing `dirty` bypasses the ordered publication lineage. Fix
-the cause — access, network, or the refused content — and publish again.
+The platform does not publish workspaces, so there is no publication to retry
+or repair. A push or pull request the agent could not make is part of its
+turn: the transcript shows what git or `gh` printed, and the owner asks again
+once the cause is fixed. The GitHub relay logs each request it refuses itself
+as `agent_github_relay_refused`, or `agent_github_relay_push_refused` for a
+push, with the conversation and job, and each pull request it records as
+`agent_github_relay_pull_request_recorded`. A refusal from GitHub itself, such
+as branch protection, push protection or a missing App permission, appears
+only in the transcript. See [the GitHub relay](operations.md#the-github-relay).

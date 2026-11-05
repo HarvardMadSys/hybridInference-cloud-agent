@@ -31,10 +31,6 @@ const job = {
   metadata: null,
   created_at: null,
   updated_at: null,
-  spent_usd: null,
-  tokens_in: null,
-  tokens_out: null,
-  model_calls: null,
 } satisfies AgentJobApi;
 
 function event(
@@ -449,6 +445,30 @@ describe('task and delegation activity in the conversation', () => {
       expect(within(reply).getByText('No issues').tagName).toBe('STRONG');
       expect(within(cards).getAllByText('Completed')).toHaveLength(1);
     });
+  });
+
+  it('shows a Codex MCP tool named like a delegation as an ordinary call', () => {
+    // As the Codex driver records one: the tool's own name, and the server it went to.
+    const events = [
+      event(1, 'tool_use', {
+        id: 'mcp-1',
+        name: 'review__task',
+        input: { description: 'Review the change', prompt: 'Review.' },
+        mcp_server: 'session',
+      }),
+      event(2, 'tool_result', { tool_use_id: 'mcp-1', is_error: false, content: 'Looks good.' }),
+    ];
+    const rows = toDisplayJob(job, { events }).events;
+    render(<EventRow event={rows[0]} />);
+    expect(screen.queryByRole('region', { name: 'Subagent activity' })).not.toBeInTheDocument();
+    expect(screen.getByText('review__task: Review the change')).toBeInTheDocument();
+    expect(buildActivityOverview(rows).subagents).toEqual([]);
+    cleanup();
+
+    const step = buildTrajectorySteps(events).find((item) => item.callId === 'mcp-1')!;
+    render(<ToolStepDetails step={step} tab="summary" onSelectTab={vi.fn()} />);
+    expect(screen.queryByRole('region', { name: 'Subagent reply' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/The agent.s reply was not recorded/)).not.toBeInTheDocument();
   });
 
   it('shows missing results as waiting only for the current active attempt', () => {

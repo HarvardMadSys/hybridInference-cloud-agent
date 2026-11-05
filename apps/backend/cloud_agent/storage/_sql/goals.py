@@ -143,11 +143,29 @@ EDITED_WHILE_PAUSED_DETAIL = "the goal was edited while paused; resume it to con
 #: goal just stopped, was replaced or was cleared. Takes a ``text[]`` of thread
 #: ids, so one statement serves a single round, a whole conversation, or a page
 #: of them.
+#:
+#: Withdrawing a round is not the owner's Stop. A settlement reads a newest turn
+#: that ended ``cancelled`` as one, and pauses a waiting queue for it, so the
+#: withdrawn round's ending is recorded here as already acted on: the message
+#: the owner left waiting behind it is the next turn, not one held in a queue
+#: marked ``stopped``. A turn queued behind the round keeps its own ending to be
+#: judged. Every caller holds the conversations' locks already.
 CANCEL_QUEUED_GOAL_ROUNDS_SQL = """
-UPDATE agent_jobs
-SET state = 'cancelled', cancel_requested = TRUE,
-    terminal_resume_pending = TRUE, updated_at = NOW()
-WHERE thread_id = ANY($1::text[]) AND state = 'queued' AND turn_source = 'goal'
+WITH withdrawn AS (
+    UPDATE agent_jobs
+    SET state = 'cancelled', cancel_requested = TRUE,
+        terminal_resume_pending = TRUE, updated_at = NOW()
+    WHERE thread_id = ANY($1::text[]) AND state = 'queued' AND turn_source = 'goal'
+    RETURNING id, thread_id, turn_no
+)
+UPDATE agent_threads t
+SET queue_settled_job_id = withdrawn.id
+FROM withdrawn
+WHERE t.id = withdrawn.thread_id
+  AND NOT EXISTS (
+        SELECT 1 FROM agent_jobs newer
+        WHERE newer.thread_id = withdrawn.thread_id AND newer.turn_no > withdrawn.turn_no
+  )
 """
 
 #: Pause the active goals behind several threads, in the caller's transaction:
@@ -282,6 +300,14 @@ async def goal_after_terminal(
     Only an automatic round pauses a goal this way. A person's own turn failing
     is reported to the person, and is not by itself a reason to stop their goal.
 
+    And only the goal the round was created for, by the identity rule the round
+    count uses (``j.goal_id = t.goal_id``). Replacing the objective withdraws
+    the queued rounds, but one already running carries on under the old
+    identity, and its ending is no verdict on the goal that replaced it. An
+    active goal always has an identity, so a round that carries none -- left
+    from before identities, on a conversation that had no goal then -- pauses
+    nothing.
+
     Unlike the owner-facing ``pause_goal``, this is not revision-fenced: a
     reaper has no revision to offer, and a revision it invented would be a
     fence it could not check.
@@ -301,6 +327,7 @@ async def goal_after_terminal(
             WHERE t.id = $1 AND j.id = $2 AND j.thread_id = t.id
               AND t.goal_state = 'active'
               AND j.turn_source = 'goal'
+              AND j.goal_id = t.goal_id
             RETURNING t.id
             """,
             thread_id,

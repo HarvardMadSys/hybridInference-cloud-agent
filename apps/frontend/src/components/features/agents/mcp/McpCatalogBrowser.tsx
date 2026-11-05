@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState, type ReactNode } from 'react';
+import { Select } from '@/components/ui/Select';
 import { McpImportStep } from './McpImportStep';
 import { McpServerIcon } from './McpServerIcon';
 import {
@@ -9,6 +10,9 @@ import {
   type McpCatalogEntryApi,
   type McpConnectionApi,
 } from '@/lib/api/mcp';
+
+const FIELD =
+  'mt-1 w-full rounded-lg border border-gray-200 bg-transparent px-3 py-2 text-sm dark:border-white/10';
 
 const BUTTON =
   'rounded-lg border border-gray-200 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50 dark:border-white/10 dark:text-gray-300 dark:hover:bg-white/5';
@@ -118,37 +122,36 @@ export function McpCatalogBrowser({
         {selected.configurations.length > 1 ? (
           <label className="mt-4 block text-xs font-medium text-gray-700 dark:text-gray-300">
             Connection method
-            <select
+            <Select
               aria-label="Connection method"
-              value={option}
+              value={String(option)}
               disabled={blocked}
-              onChange={(event) => {
-                setOption(Number(event.target.value));
+              onValueChange={(next) => {
+                setOption(Number(next));
                 setUseToken(false);
               }}
-              className="mt-1 w-full rounded-lg border border-gray-200 bg-transparent px-3 py-2 text-sm dark:border-white/10"
-            >
-              {selected.configurations.map((item, index) => (
-                <option key={index} value={index}>
-                  {item.label}
-                </option>
-              ))}
-            </select>
+              className={FIELD}
+              options={selected.configurations.map((item, index) => ({
+                value: String(index),
+                label: item.label,
+              }))}
+            />
           </label>
         ) : null}
         {canUseToken ? (
           <label className="mt-4 block text-xs font-medium text-gray-700 dark:text-gray-300">
             Authentication
-            <select
+            <Select
               aria-label="Authentication"
               value={useToken ? 'token' : 'auto'}
               disabled={blocked}
-              onChange={(event) => setUseToken(event.target.value === 'token')}
-              className="mt-1 w-full rounded-lg border border-gray-200 bg-transparent px-3 py-2 text-sm dark:border-white/10"
-            >
-              <option value="auto">Detect from server</option>
-              <option value="token">Bearer access token</option>
-            </select>
+              onValueChange={(next) => setUseToken(next === 'token')}
+              className={FIELD}
+              options={[
+                { value: 'auto', label: 'Detect from server' },
+                { value: 'token', label: 'Bearer access token' },
+              ]}
+            />
           </label>
         ) : null}
         {configuration ? (

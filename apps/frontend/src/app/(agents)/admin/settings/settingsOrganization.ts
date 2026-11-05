@@ -1,11 +1,9 @@
 import type { AdminSettingDefinition } from '@/lib/api/adminSettings';
 
-export type ApplicationSettingPriority = 'important' | 'advanced';
-
 const CATEGORY_NAMES = new Map([
+  ['Accounts', 'Identity & access'],
   ['Sign-in', 'Identity & access'],
   ['Security', 'Identity & access'],
-  ['Publication', 'Source control'],
   ['Attachments', 'Content'],
   ['Skills', 'Content'],
   ['Task titles', 'Content'],
@@ -16,8 +14,7 @@ const CATEGORY_NAMES = new Map([
 
 interface SettingGroup {
   title: string;
-  important: string[];
-  advanced: string[];
+  keys: string[];
 }
 
 // Keys are listed explicitly so a new setting remains visible until its
@@ -26,66 +23,37 @@ interface SettingGroup {
 const SETTING_GROUPS: SettingGroup[] = [
   {
     title: 'Branding',
-    important: ['site.app_name', 'site.org_name', 'site.org_url', 'site.feature_rag'],
-    advanced: [],
+    keys: ['site.app_name', 'site.org_name', 'site.org_url'],
   },
   {
     title: 'Navigation links',
-    important: ['site.status_url', 'site.docs_url', 'site.contact_url', 'site.gateway_url'],
-    advanced: [],
+    keys: ['site.status_url', 'site.docs_url', 'site.contact_url'],
   },
   {
-    title: 'Gateway connection',
-    important: ['gateway_base_url', 'gateway_dispatch_token'],
-    advanced: [
-      'gateway_grant_base_path',
-      'gateway_grant_binding_id',
-      'gateway_request_timeout_s',
-      'gateway_connect_timeout_s',
-    ],
-  },
-  {
-    title: 'Sign-in',
-    important: [
-      'gateway_authorize_url',
-      'session_redirect_uri',
-      'web_base_url',
-      'gateway_issuer',
-      'gateway_jwks_url',
-    ],
-    advanced: [],
+    title: 'Public addresses',
+    keys: ['web_base_url', 'public_api_url'],
   },
   {
     title: 'Signing and encryption keys',
-    important: [
-      'session_signing_secret',
-      'control_signing_secret',
-      'source_control_encryption_key',
-      'compute_encryption_key',
-    ],
-    advanced: [],
+    keys: ['control_signing_secret', 'source_control_encryption_key', 'compute_encryption_key'],
   },
   {
     title: 'Session security',
-    important: ['session_cookie_secure'],
-    advanced: ['trust_proxy_headers'],
+    keys: ['session_cookie_secure', 'trust_proxy_headers'],
   },
   {
     title: 'Repository access',
-    important: ['repo_allowlist'],
-    advanced: [],
+    keys: ['repo_allowlist'],
   },
   {
     title: 'GitHub',
-    important: [
+    keys: [
       'github_app_id',
       'github_app_client_id',
       'github_app_client_secret',
       'github_app_private_key',
       'github_app_install_url',
-      'github_publish_token',
-    ],
-    advanced: [
+      'github_coauthor',
       'github_api_url',
       'github_reload_interval_s',
       'github_repository_cache_s',
@@ -94,34 +62,17 @@ const SETTING_GROUPS: SettingGroup[] = [
   },
   {
     title: 'GitLab',
-    important: ['gitlab_client_id', 'gitlab_client_secret', 'gitlab_redirect_uri'],
-    advanced: ['gitlab_request_timeout_s'],
-  },
-  {
-    title: 'Pull requests',
-    important: ['publish_base_branch', 'git_author_name', 'git_author_email'],
-    advanced: [
-      'publish_poll_seconds',
-      'publish_idle_seconds',
-      'publish_git_timeout_s',
-      'publish_pr_timeout_s',
-    ],
-  },
-  {
-    title: 'Archive after merge',
-    important: ['pr_archive_enabled'],
-    advanced: [
-      'pr_archive_poll_s',
-      'pr_archive_timeout_s',
-      'pr_archive_batch_size',
-      'pr_archive_retry_max_s',
-      'pr_archive_max_failures',
+    keys: [
+      'gitlab_client_id',
+      'gitlab_client_secret',
+      'gitlab_redirect_uri',
+      'gitlab_request_timeout_s',
     ],
   },
   {
     title: 'MCP catalog',
-    important: ['mcp_registry_url'],
-    advanced: [
+    keys: [
+      'mcp_registry_url',
       'mcp_catalog_sync_seconds',
       'mcp_catalog_retry_seconds',
       'mcp_catalog_sync_timeout_s',
@@ -131,8 +82,8 @@ const SETTING_GROUPS: SettingGroup[] = [
   },
   {
     title: 'MCP connections',
-    important: ['mcp_public_base_url'],
-    advanced: [
+    keys: [
+      'mcp_public_base_url',
       'mcp_request_timeout_s',
       'mcp_connect_timeout_s',
       'mcp_metadata_timeout_s',
@@ -142,55 +93,51 @@ const SETTING_GROUPS: SettingGroup[] = [
   },
   {
     title: 'GitHub sign-in',
-    important: ['mcp_github_client_id', 'mcp_github_client_secret'],
-    advanced: [],
+    keys: ['mcp_github_client_id', 'mcp_github_client_secret'],
   },
   {
     title: 'Compute services',
-    important: ['compute.cloudlab_api_url', 'compute.registration_url'],
-    advanced: ['compute.poll_seconds', 'compute.observation_seconds'],
+    keys: [
+      'compute.cloudlab_api_url',
+      'compute.registration_url',
+      'compute.poll_seconds',
+      'compute.observation_seconds',
+    ],
   },
   {
     title: 'Sandbox execution',
-    important: ['default_execution_profile'],
-    advanced: ['sandbox_manager_token', 'sandbox_manager_url_allowed_hosts'],
+    keys: [
+      'default_execution_profile',
+      'sandbox_manager_token',
+      'sandbox_manager_url_allowed_hosts',
+    ],
   },
   {
     title: 'Logging',
-    important: [],
-    advanced: ['log_level', 'log_format'],
+    keys: ['log_level', 'log_format'],
   },
   {
     title: 'Alerts',
-    important: [
+    keys: [
       'alert_webhook_url',
-      'oncall_user_id',
-      'oncall_dispatch_token',
       'queue_alert_after_s',
+      'queue_monitor_interval_s',
+      'queue_alert_cooldown_s',
     ],
-    advanced: ['queue_monitor_interval_s', 'queue_alert_cooldown_s'],
   },
   {
     title: 'Job recovery',
-    important: ['max_attempts'],
-    advanced: ['residency_ttl_s', 'grant_renewal_concurrency'],
+    keys: ['max_attempts', 'residency_ttl_s'],
   },
   {
     title: 'Usage and history',
-    important: [],
-    advanced: [
-      'ledger_refresh_concurrency',
-      'ledger_refresh_timeout_s',
-      'ledger_idle_s',
-      'snapshot_idle_s',
-      'snapshot_capture_interval_s',
-      'capacity_history_retention_s',
-    ],
+    keys: ['ledger_idle_s', 'capacity_history_retention_s'],
   },
   {
     title: 'Goals',
-    important: ['goals.arm_after_seconds', 'goals.stalled_after_seconds'],
-    advanced: [
+    keys: [
+      'goals.arm_after_seconds',
+      'goals.stalled_after_seconds',
       'goals.max_wakeup_attempts',
       'goals.wakeup_backoff_seconds',
       'goals.wakeup_backoff_max_seconds',
@@ -198,52 +145,131 @@ const SETTING_GROUPS: SettingGroup[] = [
   },
   {
     title: 'Database tools',
-    important: [],
-    advanced: ['pgadmin_url', 'pgadmin_public_url'],
+    keys: ['pgadmin_url', 'pgadmin_public_url'],
   },
   {
     title: 'Attachments',
-    important: [
-      'attachments.max_file_bytes',
-      'attachments.max_total_bytes',
-      'attachments.max_files',
-    ],
-    advanced: [],
+    keys: ['attachments.max_file_bytes', 'attachments.max_total_bytes', 'attachments.max_files'],
   },
   {
     title: 'Skills',
-    important: [
+    keys: [
       'skills.max_skill_bytes',
       'skills.max_selection_bytes',
       'skills.max_selected',
       'skills.max_library',
     ],
-    advanced: [],
   },
   {
     title: 'Task titles',
-    important: ['task_titles.max_chars'],
-    advanced: [
-      'task_titles.input_max_chars',
-      'task_titles.timeout_seconds',
-      'task_titles.total_timeout_seconds',
-      'task_titles.max_attempts',
-      'task_titles.max_tokens',
+    keys: ['task_titles.max_chars'],
+  },
+  {
+    title: 'Sign-up and approval',
+    keys: [
+      'accounts.signup_enabled',
+      'accounts.require_email_verification',
+      'accounts.approval_policy',
+      'accounts.signup_admin_notify',
+      'accounts.signup_notify_emails',
+      'accounts.terms_url',
+      'accounts.terms_text',
+      'accounts.admin_emails',
+      'accounts.session_ttl_days',
     ],
   },
   {
+    title: 'Sign-in and sign-up limits',
+    keys: [
+      'accounts.login_per_15min',
+      'accounts.login_account_per_15min',
+      'accounts.login_ip_per_hour',
+      'accounts.signup_per_hour',
+      'accounts.signup_per_day',
+      'accounts.signup_require_resolved_ip',
+      'accounts.unresolved_signup_per_hour',
+      'accounts.unresolved_signup_per_day',
+    ],
+  },
+  {
+    title: 'Account email',
+    keys: [
+      'accounts.email_provider',
+      'accounts.smtp_host',
+      'accounts.smtp_port',
+      'accounts.smtp_username',
+      'accounts.smtp_password',
+      'accounts.smtp_from',
+      'accounts.smtp_security',
+      'accounts.tencent_ses_region',
+      'accounts.tencent_ses_from_email',
+      'accounts.tencent_ses_from_name',
+      'accounts.tencent_ses_template_verification',
+      'accounts.tencent_ses_template_password_reset',
+      'accounts.tencent_ses_template_approval',
+      'accounts.tencent_ses_template_rejection',
+      'accounts.tencent_ses_template_admin_signup',
+      'accounts.tencent_ses_template_notice',
+    ],
+  },
+  {
+    title: 'Phone sign-in',
+    keys: [
+      'accounts.sms_enabled',
+      'accounts.sms_provider',
+      'accounts.sms_default_country_code',
+      'accounts.sms_allowed_prefixes',
+      'accounts.sms_code_ttl_s',
+      'accounts.sms_send_cooldown_s',
+      'accounts.sms_send_per_phone_hour',
+      'accounts.sms_send_per_phone_day',
+      'accounts.sms_send_per_ip_hour',
+      'accounts.sms_send_per_ip_day',
+      'accounts.sms_max_attempts',
+      'accounts.sms_verify_per_phone_15min',
+      'accounts.sms_verify_per_ip_hour',
+      'accounts.tencent_sms_region',
+      'accounts.tencent_sms_app_id',
+      'accounts.tencent_sms_sign_name',
+      'accounts.tencent_sms_template_id',
+    ],
+  },
+  {
+    title: 'Tencent Cloud credentials',
+    keys: ['accounts.tencent_secret_id', 'accounts.tencent_secret_key', 'accounts.tencent_token'],
+  },
+  {
+    title: 'Captcha',
+    keys: ['accounts.turnstile_site_key', 'accounts.turnstile_secret_key'],
+  },
+  {
     title: 'Deletion archive storage',
-    important: ['sandbox_archive.bucket', 'sandbox_archive.region', 'sandbox_archive.prefix'],
-    advanced: ['sandbox_archive.endpoint'],
+    keys: [
+      'sandbox_archive.bucket',
+      'sandbox_archive.region',
+      'sandbox_archive.prefix',
+      'sandbox_archive.endpoint',
+    ],
   },
 ];
 
-const SETTINGS_BY_KEY = new Map<string, { group: string; priority: ApplicationSettingPriority }>(
-  SETTING_GROUPS.flatMap(({ title, important, advanced }) => [
-    ...important.map((key) => [key, { group: title, priority: 'important' as const }] as const),
-    ...advanced.map((key) => [key, { group: title, priority: 'advanced' as const }] as const),
-  ]),
+const SETTINGS_BY_KEY = new Map<string, string>(
+  SETTING_GROUPS.flatMap(({ title, keys }) => keys.map((key) => [key, title] as const)),
 );
+
+/**
+ * Application settings categories shown on another tab rather than their own,
+ * because that tab already describes what they configure.
+ */
+export const HOSTED_CATEGORIES: ReadonlyMap<string, { tab: string; section: string }> = new Map([
+  ['Sandbox archives', { tab: 'sandbox', section: 'Sandbox' }],
+  ['Agent versions', { tab: 'versions', section: 'Agent versions' }],
+]);
+
+/** The settings tab that shows an application settings category. */
+export function applicationCategoryTab(category: string): string {
+  return HOSTED_CATEGORIES.get(category)?.tab ?? `application-${encodeURIComponent(category)}`;
+}
 
 export function applicationCategoryName(category: string): string {
   return CATEGORY_NAMES.get(category) ?? (category || 'General');
@@ -254,15 +280,5 @@ export function applicationCategory(definition: AdminSettingDefinition): string 
 }
 
 export function applicationSettingGroup(definition: AdminSettingDefinition): string {
-  return SETTINGS_BY_KEY.get(definition.key)?.group ?? (definition.category || 'General');
-}
-
-export function applicationSettingPriority(
-  definition: AdminSettingDefinition,
-): ApplicationSettingPriority {
-  const organization = SETTINGS_BY_KEY.get(definition.key);
-  if (!organization) return 'important';
-  // Configuring an identity/key is ordinary setup. Once the backend locks it,
-  // move its migration information into Advanced without hiding missing setup.
-  return definition.read_only ? 'advanced' : organization.priority;
+  return SETTINGS_BY_KEY.get(definition.key) ?? (definition.category || 'General');
 }

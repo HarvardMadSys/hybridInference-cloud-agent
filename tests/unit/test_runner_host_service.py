@@ -12,10 +12,13 @@ a number, changing their mind, and typing another.
 from __future__ import annotations
 
 import json
+import threading
 from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
+from tests.support.owners import connection_access
+from tests.support.runner_fakes import NoRuntimeDownloads as _NoRuntimeDownloads
 
 from cloud_agent_host import runner as runner_mod
 from cloud_agent_host.enrollment import HostIdentity
@@ -28,7 +31,10 @@ from cloud_agent_host.host_runtime import (
 )
 from cloud_agent_host.sandbox import ProcessBackend
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
-from cloud_agent_shared.shared_protocol import HOST_SETTINGS_CAPABILITY
+from cloud_agent_shared.shared_protocol import (
+    HOST_SETTINGS_CAPABILITY,
+    PROFILING_CONTROL_CAPABILITY,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -112,25 +118,6 @@ class FakeHeartbeat:
         self.wakes += 1
 
 
-class _NoRuntimeDownloads:
-    """A download worker with nothing to hold and no thread."""
-
-    def __init__(self, **_kwargs: Any) -> None:
-        pass
-
-    def start(self) -> None:
-        pass
-
-    def stop(self) -> None:
-        pass
-
-    def apply(self, _targets: object) -> None:
-        pass
-
-    def report(self) -> list[dict[str, object]]:
-        return []
-
-
 def _no_wait_endpoint(**_kwargs: Any) -> str:
     raise runner_mod.WorkWaitUnsupported("404")
 
@@ -175,8 +162,6 @@ def service(monkeypatch):
     monkeypatch.setattr(runner_mod, "_shared_live_deployment_ready", lambda _b, _s: True)
     # The service is a loop that idles rather than exiting, which is what a
     # host does. A test drives it by scripting the queue and lets this stop it
-    # once it has gone quiet, so a full host — which idles by design — ends the
-    # test instead of spinning in it.
     idle = {"n": 0}
 
     def sleep(_seconds: float) -> None:
@@ -185,6 +170,11 @@ def service(monkeypatch):
             runner_mod._STOPPING.set()
 
     monkeypatch.setattr(runner_mod.time, "sleep", sleep)
+    # A wait at capacity ends early only when a slot comes free; these fakes free
+    # none, so it is one more scripted sleep (see test_runner_host_slot_wait).
+    monkeypatch.setattr(
+        runner_mod.TurnPool, "wait_for_slot", lambda _p, s: runner_mod.time.sleep(s)
+    )
     # A control plane without the wait endpoint, so an idle host sleeps its
     # interval as these tests expect. The waiting itself is tested below.
     monkeypatch.setattr(runner_mod, "wait_for_work", _no_wait_endpoint)
@@ -195,7 +185,9 @@ def service(monkeypatch):
     monkeypatch.setattr(
         runner_mod,
         "release_turn",
-        lambda *, base_url, worker_token, job_id, reason: released.append((job_id, reason)) or True,
+        lambda *, base_url, worker_token, job_id, reason, client=None: (
+            released.append((job_id, reason)) or True
+        ),
     )
     yield identity, backend, released
     runner_mod._STOPPING.clear()
@@ -205,7 +197,6 @@ def _serve(backend, *, launch: Callable[[dict], LaunchResult]) -> int:
     """Run the host service against a scripted queue and scripted launches."""
     return runner_mod.run_forever(
         base_url="http://control",
-        gateway_url="http://gateway",
         worker_id="runner-a",
         backend=backend,
         host="host-a",
@@ -244,73 +235,7 @@ def _delivered_job() -> dict[str, Any]:
         "task_prompt": "do it",
         "runtime": "claude-code",
         "model": "m",
-        "sandbox_token": "grant",
     }
-
-
-@pytest.mark.parametrize("verdict", ["adopted", "unusable", "updating", "network_failure"])
-def test_a_child_with_the_hosts_verdict_checks_only_the_network(monkeypatch, verdict):
-    import io
-    import os
-
-    from cloud_agent_host.sandbox import ContainerBackend, SandboxError
-
-    events = []
-    read_fd, write_fd = os.pipe()
-    backend = ContainerBackend(image="sandbox", runtime="io.containerd.kata.v2")
-    handed = {"guest_kernel": "guest-kernel", "epoch": {"generation": "g"}}
-    payload = {**_delivered_job(), runner_mod.VERDICT_KEY: handed}
-    monkeypatch.setattr(runner_mod, "build_backend_from_env", lambda: backend)
-    monkeypatch.setattr(backend, "preflight", lambda: events.append("full"))
-    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(payload)))
-
-    def adopt(actual, received):
-        assert actual is backend
-        assert received == handed
-        events.append("adopt")
-        if verdict == "updating":
-            raise SandboxError("Kata runtime is being updated; refusing to accept a turn")
-        return verdict != "unusable"
-
-    def network():
-        events.append("network")
-        if verdict == "network_failure":
-            raise SandboxError("network changed")
-
-    def run(_job, **_kwargs):
-        events.append("run")
-        assert os.read(read_fd, 256).decode().startswith("accepted")
-        return 0
-
-    monkeypatch.setattr(runner_mod, "adopt_verdict", adopt)
-    monkeypatch.setattr(backend, "check_network", network)
-    monkeypatch.setattr(runner_mod, "run_turn", run)
-    try:
-        code = runner_mod._serve_turn(
-            handover_fd=write_fd,
-            base_url="http://control",
-            gateway_url="http://gateway",
-            worker_id="runner-a",
-            lease_ttl=120.0,
-            agent_timeout_s=3600.0,
-            host="host-a",
-        )
-        if verdict in {"updating", "network_failure"}:
-            assert code == 2
-            assert os.read(read_fd, 256).decode().startswith("declined")
-        else:
-            assert code == 0
-        assert (
-            events
-            == {
-                "adopted": ["adopt", "network", "run"],
-                "unusable": ["adopt", "full", "run"],
-                "updating": ["adopt"],
-                "network_failure": ["adopt", "network"],
-            }[verdict]
-        )
-    finally:
-        os.close(read_fd)
 
 
 @pytest.mark.parametrize("raw", ["", "{", "[]"])
@@ -332,7 +257,6 @@ def test_the_deployment_canary_always_runs_the_full_probe(monkeypatch, raw):
             runner_mod._serve_turn(
                 handover_fd=write_fd,
                 base_url="http://control",
-                gateway_url="http://gateway",
                 worker_id="runner-a",
                 lease_ttl=120.0,
                 agent_timeout_s=3600.0,
@@ -344,56 +268,6 @@ def test_the_deployment_canary_always_runs_the_full_probe(monkeypatch, raw):
         assert os.read(read_fd, 256).decode().startswith("declined")
     finally:
         os.close(read_fd)
-
-
-def test_only_this_host_can_hand_a_child_a_runtime_verdict(monkeypatch):
-    """A claim's own underscore keys never reach the child; the host's verdict does."""
-    import io
-    import os
-    from types import SimpleNamespace
-
-    delivered: list[dict[str, Any]] = []
-
-    class Stdin(io.BytesIO):
-        def close(self) -> None:
-            delivered.append(json.loads(self.getvalue()))
-            super().close()
-
-    class Qualification:
-        def __init__(self, verdict):
-            self._verdict = verdict
-
-        def verdict(self):
-            return self._verdict
-
-    def popen(argv, **_kwargs):
-        assert "ajt.1" not in argv and "grant" not in argv
-        return SimpleNamespace(stdin=Stdin(), wait=lambda timeout=None: 0, kill=lambda: None)
-
-    def read(fd):
-        os.close(fd)
-        return "declined for the test"
-
-    monkeypatch.setattr(runner_mod.subprocess, "Popen", popen)
-    monkeypatch.setattr(runner_mod, "read_handover", read)
-    forged = {**_delivered_job(), runner_mod.VERDICT_KEY: {"guest_kernel": "forged"}}
-    for qualification in (None, Qualification(None), Qualification({"guest_kernel": "proved"})):
-        runner_mod._spawn_turn(
-            forged,
-            base_url="http://control",
-            gateway_url="http://gateway",
-            worker_id="runner-a",
-            lease_ttl=120.0,
-            agent_timeout_s=3600.0,
-            host="host-a",
-            qualification=qualification,
-        )
-    assert [payload.get(runner_mod.VERDICT_KEY) for payload in delivered] == [
-        None,
-        None,
-        {"guest_kernel": "proved"},
-    ]
-    assert all(payload["worker_token"] == "ajt.1" for payload in delivered)
 
 
 def test_a_handover_read_error_keeps_the_spawned_child_tracked(monkeypatch):
@@ -420,7 +294,6 @@ def test_a_handover_read_error_keeps_the_spawned_child_tracked(monkeypatch):
     result = runner_mod._spawn_turn(
         _delivered_job(),
         base_url="http://control",
-        gateway_url="http://gateway",
         worker_id="runner-a",
         lease_ttl=120.0,
         agent_timeout_s=3600.0,
@@ -444,7 +317,6 @@ def test_a_handover_pipe_failure_is_not_started(monkeypatch):
     result = runner_mod._spawn_turn(
         _delivered_job(),
         base_url="http://control",
-        gateway_url="http://gateway",
         worker_id="runner-a",
         lease_ttl=120.0,
         agent_timeout_s=3600.0,
@@ -484,7 +356,6 @@ def test_handover_eof_keeps_the_spawned_child_tracked(monkeypatch):
     result = runner_mod._spawn_turn(
         _delivered_job(),
         base_url="http://control",
-        gateway_url="http://gateway",
         worker_id="runner-a",
         lease_ttl=120.0,
         agent_timeout_s=3600.0,
@@ -527,7 +398,6 @@ def test_ctrl_c_during_handover_kills_and_reaps_the_untracked_child(monkeypatch)
         runner_mod._spawn_turn(
             _delivered_job(),
             base_url="http://control",
-            gateway_url="http://gateway",
             worker_id="runner-a",
             lease_ttl=120.0,
             agent_timeout_s=3600.0,
@@ -558,6 +428,14 @@ class FakeQualification:
     def verdict(self) -> None:
         return None
 
+    def handover(self) -> dict[str, Any]:
+        return {}
+
+
+def _qualifications(answers: list[Any], events: list[str]) -> Any:
+    """Stands in for ``HostQualification``: a scripted fake, however ``run_forever`` asks."""
+    return lambda backend, **_asked: FakeQualification(backend, answers, events)
+
 
 def _qualified_backend(monkeypatch, events: list[str]):
     from cloud_agent_host.sandbox import ContainerBackend
@@ -566,7 +444,6 @@ def _qualified_backend(monkeypatch, events: list[str]):
     monkeypatch.setattr(backend, "preflight", lambda: events.append("full"))
     monkeypatch.setattr(backend, "check_network", lambda: events.append("network"))
     monkeypatch.setattr(backend, "version_stamp", lambda: {})
-    monkeypatch.setattr(backend, "check_gateway_reachable", lambda _url: None)
     return backend
 
 
@@ -579,11 +456,7 @@ def test_the_host_proves_its_runtime_once_at_start(service, monkeypatch, qualifi
     """
     events: list[str] = []
     backend = _qualified_backend(monkeypatch, events)
-    monkeypatch.setattr(
-        runner_mod,
-        "HostQualification",
-        lambda actual: FakeQualification(actual, [qualified], events),
-    )
+    monkeypatch.setattr(runner_mod, "HostQualification", _qualifications([qualified], events))
     monkeypatch.setattr(runner_mod, "claim_payload", lambda **_k: runner_mod._STOPPING.set())
     assert (
         runner_mod.run_forever(
@@ -594,6 +467,23 @@ def test_the_host_proves_its_runtime_once_at_start(service, monkeypatch, qualifi
     assert events[:2] == (["refresh", "network"] if qualified else ["refresh", "full"])
 
 
+def test_a_menu_too_long_to_report_keeps_what_this_host_was_told_to_hold(service, monkeypatch):
+    """The version stamp leaves the least needed versions off; targets are needed."""
+    events: list[str] = []
+    backend = _qualified_backend(monkeypatch, events)
+    monkeypatch.setattr(runner_mod, "HostQualification", _qualifications([True], events))
+    monkeypatch.setattr(runner_mod, "claim_payload", lambda **_k: runner_mod._STOPPING.set())
+    held = frozenset({("claude-code", "2.1.300")})
+    monkeypatch.setattr(_NoRuntimeDownloads, "targets", lambda _self: held)
+
+    runner_mod.run_forever(
+        base_url="http://control", worker_id="runner-a", backend=backend, host="host-a"
+    )
+
+    assert backend.downloaded_versions.targets is not None
+    assert backend.downloaded_versions.targets() == held
+
+
 def test_runtime_qualification_failure_pauses_claims_until_recovered(service, monkeypatch):
     from cloud_agent_host.sandbox import SandboxError
 
@@ -602,7 +492,7 @@ def test_runtime_qualification_failure_pauses_claims_until_recovered(service, mo
     qualification = FakeQualification(
         backend, [True, SandboxError("runtime updating"), True], events
     )
-    monkeypatch.setattr(runner_mod, "HostQualification", lambda _backend: qualification)
+    monkeypatch.setattr(runner_mod, "HostQualification", lambda _backend, **_k: qualification)
 
     def sleep(seconds):
         assert seconds == 5
@@ -645,11 +535,8 @@ def test_a_persisting_qualification_failure_is_reported_once(service, monkeypatc
     events: list[str] = []
     backend = _qualified_backend(monkeypatch, events)
     failure = SandboxError("observer self-test failed")
-    monkeypatch.setattr(
-        runner_mod,
-        "HostQualification",
-        lambda actual: FakeQualification(actual, [True, failure, failure, failure, True], events),
-    )
+    answers = [True, failure, failure, failure, True]
+    monkeypatch.setattr(runner_mod, "HostQualification", _qualifications(answers, events))
     warnings: list[str] = []
     monkeypatch.setattr(runner_mod.logger, "warning", lambda event, *a, **k: warnings.append(event))
     monkeypatch.setattr(runner_mod, "claim_payload", lambda **_k: runner_mod._STOPPING.set())
@@ -663,40 +550,6 @@ def test_a_persisting_qualification_failure_is_reported_once(service, monkeypatc
     assert FakeHeartbeat.last.wakes == 2, "one beat reports the failure and one clears it"
 
 
-@pytest.mark.parametrize("full", [False, True])
-def test_freed_slots_are_detected_without_faster_empty_queue_polling(service, monkeypatch, full):
-    _identity, backend, _released = service
-    waits = []
-    launched = []
-
-    def sleep(seconds):
-        waits.append(seconds)
-        runner_mod._STOPPING.set()
-
-    def launch(_payload):
-        launched.append(FakeHandle())
-        return LaunchResult(LAUNCH_STARTED, launched[-1])
-
-    monkeypatch.setattr(runner_mod.time, "sleep", sleep)
-    monkeypatch.setattr(
-        runner_mod, "claim_payload", lambda **_k: _job(len(launched)) if full else None
-    )
-    assert (
-        runner_mod.run_forever(
-            base_url="http://control",
-            worker_id="runner-a",
-            backend=backend,
-            host="host-a",
-            spawn_turn=launch,
-        )
-        == 0
-    )
-    # Shutdown may sleep while draining live handles; the service's first
-    # sleep is the relevant interval and never triggers an extra API claim.
-    assert waits[0] == (1.0 if full else 5.0)
-    assert len(launched) == (3 if full else 0)
-
-
 @pytest.mark.parametrize("reusable", [False, True])
 def test_repaired_image_is_refreshed_but_claims_always_require_current_attestation(
     service, monkeypatch, reusable
@@ -704,7 +557,7 @@ def test_repaired_image_is_refreshed_but_claims_always_require_current_attestati
     events: list[str] = []
     backend = _qualified_backend(monkeypatch, events)
     qualification = FakeQualification(backend, [reusable] * 3, events)
-    monkeypatch.setattr(runner_mod, "HostQualification", lambda _backend: qualification)
+    monkeypatch.setattr(runner_mod, "HostQualification", lambda _backend, **_k: qualification)
     monkeypatch.setattr(backend, "version_stamp", lambda: {"compatible": qualification.calls >= 3})
 
     def ready(_backend, stamp):
@@ -786,6 +639,26 @@ def test_a_saved_limit_is_taken_up_and_reported_back(service, monkeypatch):
     assert beat.kwargs["slots_total"]() == 5
     assert HOST_CONCURRENCY_CAPABILITY in beat.kwargs["capabilities"]()
     assert beat.wakes >= 1, "a limit this host adopted is told to the scheduler now"
+
+
+def test_enrollment_advertises_what_every_heartbeat_advertises(service, monkeypatch):
+    """A newly enrolled host is not shown without a capability its first beat adds."""
+    identity, backend, _released = service
+    enrolled: dict[str, Any] = {}
+
+    def ensure_enrolled(**kwargs: Any) -> HostIdentity:
+        enrolled.update(kwargs)
+        return identity
+
+    monkeypatch.setattr(runner_mod, "ensure_enrolled", ensure_enrolled)
+    monkeypatch.setattr(runner_mod, "claim_payload", _queue([]))
+
+    _serve(backend, launch=lambda _payload: LaunchResult(LAUNCH_NOT_STARTED, None))
+
+    beat = FakeHeartbeat.last
+    assert beat is not None
+    assert enrolled["capabilities"] == beat.kwargs["capabilities"]()
+    assert PROFILING_CONTROL_CAPABILITY in enrolled["capabilities"]
 
 
 def test_each_turn_is_handed_the_admin_settings_from_the_latest_beat(service, monkeypatch):
@@ -1121,19 +994,46 @@ def test_an_unreachable_control_plane_does_not_end_the_service(service, monkeypa
     assert beat is not None and beat.stopped
 
 
-def test_a_rejected_credential_stops_the_service(service, monkeypatch):
+def test_a_rejected_credential_stops_claiming_and_stays_down_until_stopped(service, monkeypatch):
+    """Exiting would let the restart policy start it, and a fresh self-test, again."""
     _identity, backend, _released = service
-    monkeypatch.setattr(runner_mod, "claim_payload", _queue([_job(1)], stop_after=1))
-    handle = FakeHandle()
+    claims = {"n": 0}
 
     def claim(**_kwargs: Any) -> dict | None:
+        claims["n"] += 1
         beat = FakeHeartbeat.last
         assert beat is not None
         beat.removed.set()
         return None
 
     monkeypatch.setattr(runner_mod, "claim_payload", claim)
-    assert _serve(backend, launch=lambda _p: LaunchResult(LAUNCH_STARTED, handle)) == 0
+    # Until the service builds its own, the last heartbeat is an earlier
+    # test's, which has stopped already.
+    monkeypatch.setattr(FakeHeartbeat, "last", None)
+    served: list[int] = []
+    thread = threading.Thread(
+        target=lambda: served.append(
+            _serve(backend, launch=lambda _p: LaunchResult(LAUNCH_STARTED, FakeHandle()))
+        ),
+        daemon=True,
+    )
+    thread.start()
+    # Not time.sleep: the fixture turns that into the service's stop signal.
+    pause = threading.Event()
+    for _ in range(500):
+        if FakeHeartbeat.last is not None and FakeHeartbeat.last.stopped:
+            break
+        pause.wait(0.01)
+    beat = FakeHeartbeat.last
+    assert beat is not None and beat.stopped, "it stops heartbeating"
+    thread.join(timeout=0.2)
+    assert thread.is_alive(), "it stays up rather than exiting into a restart"
+    assert claims["n"] == 1, "and claims nothing more"
+
+    runner_mod._STOPPING.set()  # what `docker stop` sends
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert served == [0]
 
 
 def test_a_bad_default_limit_is_a_startup_error_naming_the_variable(service, monkeypatch):
@@ -1197,6 +1097,91 @@ def test_an_idle_host_waits_for_work_instead_of_sleeping(service, monkeypatch):
     ]
     assert {w["timeout_s"] for w in waits} == {5.0}, "never longer than the poll it replaces"
     assert {w["base_url"] for w in waits} == {"http://control"}
+
+
+def test_claims_waits_and_releases_share_one_client_the_loop_closes(service, monkeypatch):
+    """Each of these used to open a connection: with the environment claim, three a cycle."""
+    _identity, backend, _released = service
+    used: list[tuple[str, Any]] = []
+    jobs = [_job(1)]
+
+    def claim(**kwargs: Any) -> dict | None:
+        used.append(("claim", kwargs["client"]))
+        if jobs:
+            return jobs.pop()
+        runner_mod._STOPPING.set()
+        return None
+
+    def wait(**kwargs: Any) -> str:
+        used.append(("wait", kwargs["client"]))
+        return "token"
+
+    def release(**kwargs: Any) -> bool:
+        used.append(("release", kwargs["client"]))
+        return True
+
+    monkeypatch.setattr(runner_mod, "claim_payload", claim)
+    monkeypatch.setattr(runner_mod, "wait_for_work", wait)
+    monkeypatch.setattr(runner_mod, "release_turn", release)
+
+    assert (
+        runner_mod.run_forever(
+            base_url="http://control",
+            worker_id="runner-a",
+            backend=backend,
+            host="host-a",
+            spawn_turn=lambda _p: LaunchResult(LAUNCH_NOT_STARTED, None, "could not start"),
+        )
+        == 0
+    )
+    assert [call for call, _client in used] == ["claim", "release", "claim", "wait"]
+    [client] = {id(client): client for _call, client in used}.values()
+    assert isinstance(client, httpx.Client)
+    assert client.is_closed, "the host's client outlived the loop that owned it"
+
+
+def test_an_empty_claims_proof_is_the_one_its_environment_poll_presents(service, monkeypatch):
+    """Built once a pass: the environment-test claim used to build a second one."""
+    _identity, _process_backend, _released = service
+    backend = runner_mod.ContainerBackend(image="img")
+    monkeypatch.setattr(backend, "preflight", lambda **_kw: None)
+    monkeypatch.setattr(
+        backend, "version_stamp", lambda: {"sandbox_image_digest": "sha256:" + "a" * 64}
+    )
+    attest = runner_mod._claim_attestation
+    built: list[dict[str, Any]] = []
+    sent: list[dict[str, Any]] = []
+    polled: list[tuple[str, Any]] = []
+
+    def counted(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        built.append(attest(*args, **kwargs))
+        return built[-1]
+
+    def claim(**kwargs: Any) -> None:
+        sent.append(kwargs["attestation"])
+        if len(sent) == 2:
+            runner_mod._STOPPING.set()
+
+    class _Worker:
+        busy = False
+
+        def __init__(self, _base_url: str, _backend: Any, **_kwargs: Any) -> None:
+            pass
+
+        def poll(self, credential: str, attestation: Any = None) -> None:
+            polled.append((credential, attestation))
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(runner_mod, "_claim_attestation", counted)
+    monkeypatch.setattr(runner_mod, "claim_payload", claim)
+    monkeypatch.setattr("cloud_agent_host.environment_tests.EnvironmentTestWorker", _Worker)
+
+    assert _serve(backend, launch=lambda _p: LaunchResult(LAUNCH_STARTED, FakeHandle())) == 0
+    assert len(built) == len(sent) == 2, "one proof a pass"
+    assert [credential for credential, _proof in polled] == ["host-cred", "host-cred"]
+    assert all(proof is claimed for (_credential, proof), claimed in zip(polled, sent, strict=True))
 
 
 def test_a_control_plane_without_the_wait_is_polled_and_asked_again_later(monkeypatch):
@@ -1317,7 +1302,6 @@ def test_a_turn_process_declines_an_empty_delivery_and_runs_nothing(monkeypatch,
     code = runner_mod._serve_turn(
         handover_fd=write_fd,
         base_url="http://control",
-        gateway_url="http://gateway",
         worker_id="runner-a",
         lease_ttl=120.0,
         agent_timeout_s=3600.0,
@@ -1348,7 +1332,6 @@ def test_a_turn_process_accepts_before_it_runs_the_turn(monkeypatch):
         "runtime": "claude-code",
         "model": "m",
         "worker_token": "ajt.a.b",
-        "sandbox_token": "grant",
     }
     monkeypatch.setattr("sys.stdin", io.StringIO(encode_turn(payload).decode()))
     answered: list[str] = []
@@ -1368,7 +1351,6 @@ def test_a_turn_process_accepts_before_it_runs_the_turn(monkeypatch):
         runner_mod._serve_turn(
             handover_fd=write_fd,
             base_url="http://control",
-            gateway_url="http://gateway",
             worker_id="runner-a",
             lease_ttl=120.0,
             agent_timeout_s=3600.0,
@@ -1406,7 +1388,6 @@ def test_a_turn_process_declines_when_its_backend_is_not_usable(monkeypatch, emp
         "runtime": "claude-code",
         "model": "m",
         "worker_token": "ajt.a.b",
-        "sandbox_token": "grant",
     }
     monkeypatch.setattr(
         "sys.stdin", io.StringIO("" if empty_delivery else encode_turn(payload).decode())
@@ -1429,7 +1410,6 @@ def test_a_turn_process_declines_when_its_backend_is_not_usable(monkeypatch, emp
         runner_mod._serve_turn(
             handover_fd=write_fd,
             base_url="http://control",
-            gateway_url="http://gateway",
             worker_id="runner-a",
             lease_ttl=120.0,
             agent_timeout_s=3600.0,
@@ -1461,7 +1441,6 @@ def test_a_turn_process_declines_a_payload_it_cannot_use(monkeypatch):
         runner_mod._serve_turn(
             handover_fd=write_fd,
             base_url="http://control",
-            gateway_url="http://gateway",
             worker_id="runner-a",
             lease_ttl=120.0,
             agent_timeout_s=3600.0,
@@ -1488,7 +1467,6 @@ def test_the_cli_routes_turn_mode_and_hides_its_flags(monkeypatch):
     monkeypatch.setattr(
         runner_mod, "run_forever", lambda **kw: calls.setdefault("service", kw) and 0
     )
-
     runner_mod.main(["--turn", "--handover-fd", "9", "--host", "host-a"])
     runner_mod.main(["--host", "host-a"])
 
@@ -1500,7 +1478,6 @@ def test_turn_mode_without_a_handover_descriptor_is_refused(monkeypatch):
     """The host service supplies both flags; one alone is a hand-built command."""
     monkeypatch.setenv("AGENT_CONTROL_PLANE_URL", "http://control")
     monkeypatch.setattr(runner_mod, "configure_process_logging", lambda: None)
-
     with pytest.raises(SystemExit):
         runner_mod.main(["--turn", "--host", "host-a"])
 
@@ -1534,7 +1511,7 @@ def _run_descriptor(monkeypatch, **overrides: Any) -> dict[str, Any]:
 
 
 def test_the_host_hands_its_selection_to_the_child(monkeypatch):
-    """The deployed path measures startups, not only the single-process one.
+    """The deployed path measures startups.
 
     The host claims, then starts a child to run the turn -- so a selection made
     in the parent is worthless unless it crosses that boundary. Without this
@@ -1555,7 +1532,6 @@ def test_the_host_hands_its_selection_to_the_child(monkeypatch):
         "runtime": "claude-code",
         "model": "m",
         "worker_token": "ajt.a.b",
-        "sandbox_token": "grant",
         "execution_profile": "default",
     }
     measurement = operation_profiling.start_operation(
@@ -1594,6 +1570,112 @@ def test_the_host_hands_its_selection_to_the_child(monkeypatch):
     operation_profiling.reset_cache()
 
 
+def test_a_poll_with_no_job_does_not_spend_the_only_profiling_slot(service, monkeypatch):
+    """An empty claim must leave a one-operation experiment able to measure.
+
+    Regression: the budget was consumed when the measurement was created, so a
+    single empty claim -- the normal result of polling an idle queue -- used up
+    a ``max_operations: 1`` run before it measured anything.
+    """
+    from cloud_agent_shared import operation_profiling
+
+    _identity, backend, _released = service
+    _run_descriptor(monkeypatch, max_operations=1)
+    answers: list[dict | None] = [None, _delivered_job()]
+
+    def claim(**_kwargs: Any) -> dict | None:
+        if not answers:
+            runner_mod._STOPPING.set()
+            return None
+        return answers.pop(0)
+
+    monkeypatch.setattr(runner_mod, "claim_payload", claim)
+    handed: list[dict] = []
+
+    def launch(payload: dict) -> LaunchResult:
+        handed.append(payload)
+        return LaunchResult(LAUNCH_STARTED, FakeHandle())
+
+    _serve(backend, launch=launch)
+
+    assert len(handed) == 1
+    assert "_profiling" in handed[0], "the claimed attempt was not measured"
+    operation_profiling.reset_cache()
+
+
+def test_profiling_off_hands_over_no_selection_and_writes_no_record(
+    service, monkeypatch, caplog, tmp_path
+):
+    """The default deployment must not pay for, or emit, any of this.
+
+    Both sides of the handover: the host hands its child no selection, and the
+    turn the child then runs is unmeasured and writes no record.
+    """
+    from cloud_agent_shared import operation_profiling
+
+    _identity, backend, _released = service
+    monkeypatch.delenv(operation_profiling.ENV_PROFILING_ENABLED, raising=False)
+    monkeypatch.delenv(operation_profiling.ENV_PROFILING_RUN, raising=False)
+    sink = tmp_path / "startup.jsonl"
+    monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
+    operation_profiling.reset_cache()
+    caplog.set_level("INFO", logger=operation_profiling.__name__)
+    monkeypatch.setattr(runner_mod, "claim_payload", _queue([_delivered_job()]))
+    handed: list[dict] = []
+
+    def launch(payload: dict) -> LaunchResult:
+        handed.append(payload)
+        return LaunchResult(LAUNCH_STARTED, FakeHandle())
+
+    _serve(backend, launch=launch)
+
+    assert len(handed) == 1
+    assert "_profiling" not in handed[0]
+
+    # The child's side: the selection it attaches from that payload, and the
+    # turn it runs with it.
+    dispatched: list[dict] = []
+
+    class Control:
+        job_id = ""
+
+        def __getattr__(self, _name):
+            return lambda *_args, **_kwargs: None
+
+    class Heart:
+        lease_lost = False
+        cancel_requested = False
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(runner_mod, "ControlPlane", lambda *_args, **_kwargs: Control())
+    monkeypatch.setattr(runner_mod, "Heartbeater", lambda *_args, **_kwargs: Heart())
+    monkeypatch.setattr(
+        runner_mod, "_run_shared_live_attempt", lambda **kwargs: dispatched.append(kwargs) or 0
+    )
+    measurement = operation_profiling.attach_selection(handed[0].get("_profiling"))
+    job = runner_mod.ClaimedJob.from_response(handed[0])
+    assert (
+        runner_mod.run_turn(
+            job,
+            base_url="http://control",
+            worker_id="runner-1",
+            backend=backend,
+            host="host-a",
+            measurement=measurement,
+        )
+        == 0
+    )
+
+    assert dispatched[0]["measurement"] is None
+    assert not sink.exists()
+    assert "agent_operation_profile" not in caplog.text
+
+
 def test_the_spawn_payload_keeps_only_the_profiling_handoff():
     """The deployed child must receive the selection the parent paid for."""
     handed = runner_mod._child_turn_payload(
@@ -1626,7 +1708,6 @@ def test_a_parent_side_handover_failure_delivers_its_measurement(monkeypatch, ou
         "runtime": "claude-code",
         "model": "m",
         "worker_token": "ajt.a.b",
-        "sandbox_token": "grant",
     }
     measurement = operation_profiling.start_operation(
         operation=operation_profiling.STARTUP_OPERATION, host="host-a"
@@ -1675,7 +1756,6 @@ def test_an_expired_selection_is_delivered_by_the_parent_before_handoff(monkeypa
         "runtime": "claude-code",
         "model": "m",
         "worker_token": "ajt.a.b",
-        "sandbox_token": "grant",
     }
     measurement = operation_profiling.start_operation(
         operation=operation_profiling.STARTUP_OPERATION
@@ -1735,7 +1815,6 @@ def test_a_turn_process_reattaches_the_selection_it_was_handed(monkeypatch):
         "runtime": "claude-code",
         "model": "m",
         "worker_token": "ajt.a.b",
-        "sandbox_token": "grant",
         "_profiling": {
             "run_id": "run-1",
             "measurement_id": "msm_handed",
@@ -1773,7 +1852,6 @@ def test_a_turn_process_reattaches_the_selection_it_was_handed(monkeypatch):
     code = runner_mod._serve_turn(
         handover_fd=write_fd,
         base_url="http://control",
-        gateway_url="http://gateway",
         worker_id="runner-a",
         lease_ttl=120.0,
         agent_timeout_s=3600.0,
@@ -1823,7 +1901,6 @@ def test_a_child_never_refuses_a_turn_over_an_unusable_selection(monkeypatch, se
         "runtime": "claude-code",
         "model": "m",
         "worker_token": "ajt.a.b",
-        "sandbox_token": "grant",
         "_profiling": selection,
     }
     if selection == "another_run":
@@ -1850,7 +1927,6 @@ def test_a_child_never_refuses_a_turn_over_an_unusable_selection(monkeypatch, se
     code = runner_mod._serve_turn(
         handover_fd=write_fd,
         base_url="http://control",
-        gateway_url="http://gateway",
         worker_id="runner-a",
         lease_ttl=120.0,
         agent_timeout_s=3600.0,
@@ -1890,7 +1966,6 @@ def test_a_declining_child_does_not_emit_or_refund_the_parent_selection(monkeypa
         "runtime": "claude-code",
         "model": "m",
         "worker_token": "ajt.a.b",
-        "sandbox_token": "grant",
     }
     assert runner_mod._bound_measurement(parent, payload) is parent
     payload["_profiling"] = operation_profiling.handoff_context(parent)
@@ -1926,7 +2001,6 @@ def test_a_declining_child_does_not_emit_or_refund_the_parent_selection(monkeypa
     code = runner_mod._serve_turn(
         handover_fd=write_fd,
         base_url="http://control",
-        gateway_url="http://gateway",
         worker_id="runner-a",
         lease_ttl=120.0,
         agent_timeout_s=3600.0,
@@ -2035,6 +2109,8 @@ def _frozen(measurement_id: str = "msm_1", **overrides: Any) -> dict[str, Any]:
 class _StubControl:
     """A control plane that answers measurements with a scripted verdict."""
 
+    lease_lost = False
+
     def __init__(self, answers: list[Any]) -> None:
         self.answers = answers
         self.sent: list[tuple[str, dict[str, Any]]] = []
@@ -2044,6 +2120,9 @@ class _StubControl:
     def append_event(self, event: Any) -> None:
         """Record execution milestones separately from measurement delivery."""
         self.events.append((event.event_type, event.payload))
+
+    def flush(self) -> None:
+        """Each milestone is recorded as it is appended, so nothing is left to deliver."""
 
     def record_measurement(self, job_id: str, body: dict[str, Any]) -> Any:
         """Record the body and return the next scripted answer."""
@@ -2183,6 +2262,7 @@ def _claimed(job_id: str = "ajob_1") -> Any:
     from cloud_agent_host.runner import ClaimedJob
 
     return ClaimedJob(
+        model_connection=connection_access("claude-code"),
         job_id=job_id,
         thread_id="athr_1",
         attempt_id=7,
@@ -2193,7 +2273,6 @@ def _claimed(job_id: str = "ajob_1") -> Any:
         runtime="claude-code",
         model="m",
         worker_token="ajt.a.b",
-        sandbox_token="grant",
     )
 
 

@@ -12,17 +12,20 @@ requires the retained container and native CLI state.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
-from fastapi import FastAPI, Request, Response
-from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
+from fastapi import Depends, FastAPI, Request, Response
+from fastapi.encoders import jsonable_encoder
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse, PlainTextResponse
 
+from cloud_agent.api._parameters import refuse_unstorable_parameters
+from cloud_agent.api._sensitive_routes import no_store
 from cloud_agent.entitlement import RepoAccessUnavailable
 from cloud_agent.logging_utils import configure_process_logging, get_logger
+from cloud_agent_shared.storable_text import encodable_json
 
 logger = get_logger(__name__)
 
@@ -64,8 +67,10 @@ def install_admin_no_store(
     A route dependency can set a header on a response the route returns, but
     FastAPI builds a fresh response for a raised refusal and for its own
     validation errors. These handlers wrap the defaults instead of replacing
-    them, and are registered here rather than as middleware: middleware would
-    also sit in front of the event streams, which are long-lived by design.
+    them (the validation answer keeps the default's shape, with what it repeats
+    made encodable), and are registered here rather than as middleware:
+    middleware would also sit in front of the event streams, which are
+    long-lived by design.
     """
     normalized = tuple(prefix.rstrip("/") for prefix in prefixes)
 
@@ -90,14 +95,20 @@ def install_admin_no_store(
                     },
                 )
             else:
-                response = await request_validation_exception_handler(request, exc)
+                # FastAPI's own answer, which repeats each refused input. Half
+                # a surrogate pair is replaced in what it repeats: Starlette
+                # writes UTF-8, which has none, and the 422 would be a 500.
+                response = JSONResponse(
+                    status_code=422,
+                    content={"detail": encodable_json(jsonable_encoder(exc.errors()))},
+                )
         else:
             response = await http_exception_handler(request, exc)  # type: ignore[arg-type]
         if any(
             request.url.path == prefix or request.url.path.startswith(f"{prefix}/")
             for prefix in normalized
         ):
-            response.headers["Cache-Control"] = "no-store"
+            no_store(response)
         return response
 
     async def unexpected_with_no_store(request: Request, exc: Exception) -> Response:
@@ -123,53 +134,95 @@ def install_admin_no_store(
 
 from cloud_agent.bootstrap.lifespan import lifespan
 
-#: Serves ``/docs``, ``/redoc`` and ``/openapi.json`` on the main listener when
-#: set to ``true``. Off by default: the schema describes every route to anyone
-#: who asks, and the two pages load their scripts from a CDN at a floating
-#: major version with no integrity check, on the origin the web app shares.
-ENV_API_DOCS = "AGENT_API_DOCS"
-
-#: What FastAPI needs to serve none of the three. ``app.openapi()`` still
-#: builds the schema; only the routes that publish it are left out.
+#: What FastAPI needs to serve none of its documentation routes.
+#: ``app.openapi()`` still builds the schema; only publishing it is left out.
 _NO_DOCS: dict[str, Any] = {"docs_url": None, "redoc_url": None, "openapi_url": None}
 
 
-def _api_docs() -> dict[str, Any]:
-    """Return the main listener's docs arguments: FastAPI's own only on request."""
-    enabled = (os.environ.get(ENV_API_DOCS) or "").strip().lower() in {"1", "true", "yes"}
-    return {} if enabled else _NO_DOCS
+def _install_api_docs(app: FastAPI) -> None:
+    """Serve ``/docs``, ``/redoc`` and ``/openapi.json`` while ``api_docs`` is on.
+
+    The admin setting is read on every request, so turning it on or off takes
+    effect within one settings synchronization, with no restart. Off by
+    default: the schema describes every route to anyone who asks, and the two
+    pages load their scripts from a CDN at a floating major version with no
+    integrity check, on the origin the web app shares.
+    """
+    from fastapi.openapi.docs import (
+        get_redoc_html,
+        get_swagger_ui_html,
+        get_swagger_ui_oauth2_redirect_html,
+    )
+    from fastapi.responses import JSONResponse
+
+    from cloud_agent.settings import boolean_setting
+
+    def require_docs() -> None:
+        try:
+            enabled = boolean_setting("api_docs")
+        except ValueError:
+            enabled = False
+        if not enabled:
+            raise StarletteHTTPException(status_code=404, detail="Not Found")
+
+    @app.get("/openapi.json", include_in_schema=False, dependencies=[Depends(require_docs)])
+    def openapi_schema() -> JSONResponse:
+        return JSONResponse(app.openapi())
+
+    @app.get("/docs", include_in_schema=False, dependencies=[Depends(require_docs)])
+    def swagger_ui() -> Any:
+        return get_swagger_ui_html(
+            openapi_url="/openapi.json",
+            title=f"{app.title} - Swagger UI",
+            oauth2_redirect_url="/docs/oauth2-redirect",
+        )
+
+    @app.get("/docs/oauth2-redirect", include_in_schema=False, dependencies=[Depends(require_docs)])
+    def swagger_ui_redirect() -> Any:
+        return get_swagger_ui_oauth2_redirect_html()
+
+    @app.get("/redoc", include_in_schema=False, dependencies=[Depends(require_docs)])
+    def redoc() -> Any:
+        return get_redoc_html(openapi_url="/openapi.json", title=f"{app.title} - ReDoc")
 
 
-def create_app() -> FastAPI:
+def create_app() -> FastAPI:  # noqa: PLR0915 complexity baseline, #771
     """Build the control plane application."""
     configure_process_logging()
 
     from cloud_agent.api import (
         _cross_site,
+        admin_account_mail,
+        admin_accounts,
         admin_audit,
         admin_compute,
         admin_conversations,
         admin_database,
         admin_database_browser,
         admin_hosts,
-        admin_llm_requests,
         admin_measurements,
         admin_profiling_control,
         admin_runs,
         admin_runtime_upgrades,
         admin_sandboxes,
         admin_settings,
-        admin_steps,
+        admin_teams,
         admin_usage,
         agent_memory,
+        auth,
+        auth_account,
+        auth_browser,
+        auth_phone,
         compute_registration,
+        context,
         environments,
+        file_activity,
         host_profiling,
         hosts,
         mcp_connections,
+        model_connections,
         owner_usage,
         routes,
-        service_jobs,
         session,
         site_config,
         skills,
@@ -178,6 +231,7 @@ def create_app() -> FastAPI:
         uploads,
         usage,
         user_profile,
+        waitlist,
         work_insights,
     )
 
@@ -186,8 +240,12 @@ def create_app() -> FastAPI:
         description="Cloud coding agents on sandboxed hosts",
         version="0.1.0",
         lifespan=lifespan,
-        **_api_docs(),
+        # Every route, before its own dependencies: a NUL or an integer no
+        # column holds is refused here rather than by the first query.
+        dependencies=[Depends(refuse_unstorable_parameters)],
+        **_NO_DOCS,
     )
+    _install_api_docs(app)
     # Every browser-facing write carries the session cookie, and SameSite=Lax
     # admits it from any page on the same site. Machine callers send bearers
     # and pass untouched; see the module for the exact rule.
@@ -195,6 +253,8 @@ def create_app() -> FastAPI:
     app.include_router(routes.router)
     app.include_router(usage.router)
     app.include_router(owner_usage.router)
+    app.include_router(context.router)
+    app.include_router(file_activity.router)
     # Owner-facing, and never on the relay's own listener: adding a connection
     # or approving a call is not sandbox work. The relay itself is the reverse
     # — only ``create_mcp_app`` serves it. This application sits behind the
@@ -239,6 +299,7 @@ def create_app() -> FastAPI:
     app.include_router(work_insights.router)
     app.include_router(agent_memory.router)
     app.include_router(user_profile.router)
+    app.include_router(model_connections.router)
     app.include_router(teams.router)
     app.include_router(uploads.router)
     app.include_router(mcp_connections.router)
@@ -267,16 +328,10 @@ def create_app() -> FastAPI:
     # transaction and audit imports do not load on the read-only page's route
     # table. Same guard, same prefix, same no-store: it is one surface.
     app.include_router(admin_profiling_control.router)
-    # Per-request LLM detail reads a second service and stays in its own module
-    # for the same reason it is a separate page load: the default run detail
-    # must not acquire a gateway I/O path.
-    app.include_router(admin_llm_requests.router)
-    # Steps read the same gateway detail across a page of turns, so they sit
-    # beside it rather than in the runs list's module.
-    app.include_router(admin_steps.router)
     # Read-only, and its own module: the audit trail is written by every admin
     # handler and read by this one page.
     app.include_router(admin_audit.router)
+    app.include_router(admin_teams.router)
     install_admin_no_store(
         app,
         prefixes=(
@@ -284,17 +339,26 @@ def create_app() -> FastAPI:
             "/v1/agent/memories",
             "/v1/agent/insights",
             "/v1/agent/profile",
+            "/v1/agent/conversations/read-receipts",
         ),
     )
     install_repository_access_errors(app)
-    # The gateway alert relay's way in: machine-to-machine on-call jobs, pinned
-    # to one configured service account. Its own module because its caller is a
-    # service holding a dispatch token, not a browser holding a session.
-    app.include_router(service_jobs.router)
-    # The web app's way in. Mounted alongside the others rather than inside
-    # ``routes.py`` because it authenticates nothing on entry — it is the route
-    # that *creates* the credential every other route requires.
+    # The session's own reads (``/me``, sign-out). Mounted alongside the
+    # others rather than inside ``routes.py`` because sign-out authenticates
+    # nothing on entry.
     app.include_router(session.router)
+    # The account system: sign-in, phone codes, the browser's accounts, the
+    # owner's own account, the waiting list and their administration.
+    for local_router in (
+        auth.router,
+        auth_account.router,
+        auth_browser.router,
+        auth_phone.router,
+        waitlist.router,
+        admin_accounts.router,
+        admin_account_mail.router,
+    ):
+        app.include_router(local_router)
     app.include_router(site_config.router)
 
     @app.get("/healthz")
@@ -302,7 +366,7 @@ def create_app() -> FastAPI:
         """Liveness only — deliberately not readiness.
 
         A readiness probe here would have to decide what a degraded control
-        plane is (no gateway? no git credential?), and every answer to that
+        plane is (no mail transport? no git credential?), and every answer to that
         belongs to whoever operates it.
         """
         return {"status": "ok"}
@@ -348,10 +412,12 @@ def create_mcp_app() -> FastAPI:
         title="Cloud Agent — MCP relay",
         description="The only surface a sandbox may reach",
         version="0.1.0",
-        # No reaper and no publisher: they belong to the control-plane process,
-        # and a second copy would renew every grant twice and race the same
-        # publish. This listener still maintains its own upstream MCP sockets.
+        # No reaper and no maintenance loops: they belong to the control-plane
+        # process, and a second copy would renew every grant twice and race the
+        # other's passes. This listener still maintains its own upstream MCP
+        # sockets.
         lifespan=lambda app: lifespan(app, background=False),
+        dependencies=[Depends(refuse_unstorable_parameters)],
         # Never, whatever the main listener does: a sandbox reaches this one,
         # and its contract is the relay, not a description of it.
         **_NO_DOCS,
@@ -363,4 +429,35 @@ def create_mcp_app() -> FastAPI:
         """Liveness, so the tunnel's health check has something to ask."""
         return {"status": "ok"}
 
+    return app
+
+
+def create_github_relay_app() -> FastAPI:
+    """Build a listener that serves the GitHub relay and nothing else.
+
+    The third sandbox-reachable listener, separate for the reason the MCP
+    relay is: a sandbox's tunnel ends here, and this application contains the
+    GitHub relay's one catch-all route and no other. A catch-all is exactly
+    what must never sit in front of the control plane's own routes, and an
+    ``agh.`` placeholder is accepted nowhere else.
+
+    It answers for ``github.com`` and ``api.github.com`` (the listener holds a
+    certificate for those two names that only this deployment's CA signs), so
+    it has no health route of its own: every path is GitHub's. Its liveness is
+    the TLS handshake, which is what the tunnel's health check asks.
+    """
+    configure_process_logging()
+
+    from cloud_agent.api import github_relay
+
+    app = FastAPI(
+        title="Cloud Agent — GitHub relay",
+        description="git and gh in a sandbox, as the conversation's owner",
+        version="0.1.0",
+        # No reaper and no maintenance loops, as for the MCP relay; but the
+        # GitHub App's credentials, which renew an owner's GitHub token.
+        lifespan=lambda app: lifespan(app, background=False, source_control=True),
+        **_NO_DOCS,
+    )
+    app.include_router(github_relay.router)
     return app

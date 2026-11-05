@@ -33,6 +33,10 @@ class HostPoolRepository(Protocol):
         requirements leave this projection. The result also carries raw host
         telemetry for conservative per-host slot sizing; callers must not
         treat a stale sample as evidence for an increase.
+
+        A turn in claim backoff is not in the queue count either: no claim
+        hands it out until the backoff ends. ``backoff_new_group_jobs`` counts
+        those apart, because the pool is not idle while one waits.
         """
         ...
 
@@ -158,6 +162,7 @@ class HostPoolRepository(Protocol):
         sandbox_archive_settings_applied_revision: int | None = None,
         sandbox_archive_settings_revision_reported: bool = False,
         runtime_downloads: Sequence[Mapping[str, Any]] | None = None,
+        config_reports: Mapping[str, str] | None = None,
     ) -> dict[str, Any] | None:
         """Record a heartbeat, promoting the host to ``online`` when it may.
 
@@ -212,9 +217,25 @@ class HostPoolRepository(Protocol):
             settings_applied: The runtime settings the host is applying now.
             settings_local: Legacy environment observations, imported once as
                 per-host overrides. Either ``None`` leaves the report in place.
+            sandbox_archive_settings_applied_revision: The archive-policy
+                revision the host's sandbox manager confirmed, ``None`` for none.
+            sandbox_archive_settings_revision_reported: Whether the heartbeat
+                carried that revision at all; when it did not, the stored one
+                stays.
+            runtime_downloads: This host's progress on each agent version it
+                was asked to hold, already validated. ``None`` leaves it.
+            config_reports: Non-numeric configuration the host says it uses
+                now, such as its npm registry. ``None`` leaves the report.
 
         Returns:
             The updated host row, or ``None`` when the host no longer exists.
+            The row also carries ``runner_policy``, what the heartbeat answer
+            needs of the deployment's policy, read under the lock this write
+            takes on it: the global ``host_settings``, the
+            ``sandbox_archive_settings``, the ``runtime_download_targets`` and
+            whether an agent update waits to switch
+            (``runtime_upgrade_waiting``). Each is ``None`` when its stored
+            value does not decode; the answer reads that part again.
         """
         ...
 
@@ -296,13 +317,20 @@ class HostPoolRepository(Protocol):
         """
         ...
 
-    async def remove_host(self, *, host: str, force: bool = False) -> str:
-        """Revoke a host's credential and take it out of the pool.
+    async def remove_host(
+        self, *, host: str, force: bool = False, allow_unmoved: bool = False
+    ) -> str:
+        """Take a host out of the pool, moving its groups out first when they can.
 
-        Returns ``"ok"``, ``"unknown"``, ``"fenced"``, ``"draining"`` or
-        ``"busy"``. A host still holding slots is drained instead of revoked:
-        it claims nothing more, the request is recorded, and
-        :meth:`finish_host_removals` revokes it once its running attempts end.
+        Returns ``"ok"``, ``"unknown"``, ``"fenced"``, ``"moving_out"``,
+        ``"draining"``, ``"no_move_target"`` or ``"busy"``. ``"moving_out"``
+        drains the host, moves its groups to other hosts through their
+        checkpoints, and :meth:`finish_host_removals` revokes it once none is
+        left and its running attempts end. A host whose groups cannot move is
+        refused with ``"no_move_target"`` unless ``allow_unmoved``; then a host
+        still holding slots is drained instead of revoked: it claims nothing
+        more, the request is recorded, and :meth:`finish_host_removals`
+        revokes it once its running attempts end.
         ``"busy"`` is the busy host whose status cannot move to ``draining``.
         ``force`` revokes now and ends that work — the lease expiry *is* the
         recovery path. A retained activation cannot be replayed safely after
@@ -441,8 +469,9 @@ class HostPoolRepository(Protocol):
     async def runtime_download_targets(self) -> list[dict[str, str]]:
         """The agent versions every heartbeat answer tells hosts to hold.
 
-        At most two per runtime: the update's version and, until it switches
-        new chats, the downloaded version they use now.
+        At most two per runtime: the record's version, and the downloaded
+        version an update replaced, which new chats use until it switches them
+        and Roll back returns to after.
         """
         ...
 
@@ -526,10 +555,13 @@ class HostPoolRepository(Protocol):
         ``"retained_groups_present"``, ``"resource_bound"``,
         ``"active_attempts_present"`` and ``"pending_compute_operations"``.
         A sandbox whose deletion has completed is an audit row: it keeps the
-        host name and does not block forgetting. A live group, or one whose
-        deletion failed or is still in progress, does. A disabled attached
-        machine without external release capability may be deregistered after
-        dependency checks; this never shuts it down.
+        host name and does not block forgetting. Nor does a ``cold`` group,
+        which any restore-capable host may claim; it keeps naming this host
+        as the last it ran on until a claim moves it. A live or stopped
+        group, or one whose deletion failed or is still in progress, does
+        block. A disabled attached machine without external release
+        capability may be deregistered after dependency checks; this never
+        shuts it down.
 
         The active-host refusal lives here rather than in the caller because
         checking there is a read the switch can outrun: the endpoint sees the

@@ -15,6 +15,7 @@ import asyncpg
 
 from cloud_agent.capacity_protocol import FRESH_AFTER_SECONDS
 from cloud_agent.domain.compute import (
+    acquisition_absence_confirmable,
     autoscaling_acquire_can_cancel,
     autoscaling_operation_is_terminal,
     autoscaling_retirement_needs_settlement,
@@ -22,16 +23,38 @@ from cloud_agent.domain.compute import (
     fingerprint as operation_fingerprint,
     move_out_window_seconds,
     provider_resource_absent,
+    retirement_cancellable,
 )
-from cloud_agent.sandbox_archive_credentials import load_stored_archive_policy
-from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_entry
-from cloud_agent.storage._sql.hosts import release_covered_sandboxes, revoke_host_credentials
+from cloud_agent.ports.compute_resources import ComputeSchedulingSnapshot
+from cloud_agent.storage._sql import environment_runs
+from cloud_agent.storage._sql.compute_admission import lock_compute_entry
+from cloud_agent.storage._sql.compute_inventory import (
+    load_allocations,
+    load_hosts,
+    load_scheduling_operations,
+)
+from cloud_agent.storage._sql.compute_observation import (
+    release_terminated_groups,
+    resume_blocked_retirement,
+    terminal_proof_stands,
+)
+from cloud_agent.storage._sql.hosts import (
+    GROUP_TURN_CLAIMED_SQL,
+    HANDED_OVER_GROUP_SQL,
+    HOST_RETAINED_GROUP,
+    authorize_superseded_removals,
+    lock_hosts_for_revocation,
+    revoke_host_credentials,
+)
+from cloud_agent.storage._sql.jobs import fail_unrunnable_follow_ups
+from cloud_agent.storage._sql.move_out import (
+    UNMOVABLE_GROUP_SQL,
+    UNMOVED_GROUP_SQL,
+    move_out_blocker,
+    move_out_possible,
+)
+from cloud_agent.storage._sql.rotation_candidates import candidate_work_stoppable
 from cloud_agent.storage._sql.rows import load_json
-from cloud_agent_shared.sandbox_archive_settings import (
-    SANDBOX_ARCHIVE_CAPABILITY,
-    SANDBOX_CHECKPOINT_CAPABILITY,
-)
-from cloud_agent_shared.sandbox_restore import SANDBOX_RESTORE_CAPABILITY
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -49,6 +72,26 @@ _JSON_FIELDS = {
     "last_decision",
 }
 _JSON_ARRAY_FIELDS = {"slot_status"}
+
+#: A group whose only Docker copy went with a machine its provider reclaimed:
+#: still bound to that machine's Host, not handed over through a checkpoint,
+#: and with no turn, claim or Fork in flight. ``g`` is the group and ``h`` its
+#: Host; ``$2`` is how long the Host must have been silent.
+_RECLAIMED_GROUP_SQL = f"""(
+    {UNMOVED_GROUP_SQL}
+    AND (h.last_heartbeat_at IS NULL
+         OR h.last_heartbeat_at < NOW() - make_interval(secs => $2))
+    AND NOT EXISTS (
+        SELECT 1 FROM agent_thread_sandbox_memberships busy
+        WHERE busy.sandbox_id = g.id
+          AND (busy.active_attempt_id IS NOT NULL OR busy.fork_operation_id IS NOT NULL)
+    )
+    AND NOT {GROUP_TURN_CLAIMED_SQL}
+)"""
+
+_RECLAIMED_DETAIL = (
+    "not run because the server holding this conversation's sandbox was reclaimed by its provider"
+)
 
 
 def _in_move_out_window(member: dict[str, Any]) -> bool:
@@ -151,7 +194,8 @@ class PostgresComputeResourceRepository:
         """Move every stored profile of one release, and the live hosts using it.
 
         A profile another deployment is currently installing is left unchanged.
-        The calling allocation must end on the new revision.
+        An autoscaling route's snapshot moves with its stored profile. The
+        calling allocation must end on the new revision.
         """
         if previous_sha == deployment_sha and previous_digest == source_sha256:
             return
@@ -184,6 +228,26 @@ class PostgresComputeResourceRepository:
                 source_sha256,
                 deployment_sha,
                 operation_id,
+            )
+            # A reserved route deploys its next pool member from this snapshot.
+            # It names the stored bundle, so it moves only with that profile.
+            await conn.execute(
+                """UPDATE agent_cloudlab_autoscaling_profile_reservations AS reservation
+                SET profile_snapshot=reservation.profile_snapshot
+                      || jsonb_build_object('deployment_sha',$3::text,'source_sha256',$4::text),
+                    updated_at=NOW()
+                FROM agent_compute_deployment_profiles AS profile
+                WHERE profile.id=reservation.deployment_profile
+                  AND reservation.profile_snapshot->>'source_bundle'
+                      ='stored-profile:'||profile.id||':bundle'
+                  AND reservation.profile_snapshot->>'deployment_sha'=$1
+                  AND reservation.profile_snapshot->>'source_sha256'=$2
+                  AND profile.configuration->>'deployment_sha'=$3
+                  AND profile.source_sha256=$4""",
+                previous_sha,
+                previous_digest,
+                deployment_sha,
+                source_sha256,
             )
             await conn.execute(
                 """UPDATE agent_compute_allocations AS allocation
@@ -546,7 +610,7 @@ class PostgresComputeResourceRepository:
                     and allocation["revision"] != expected_revision
                 ):
                     raise ValueError("revision_conflict")
-                if allocation["release_committed_at"] is not None:
+                if allocation["release_committed_at"] is not None and kind != "inspect":
                     raise ValueError("release_committed")
                 if kind == "retire":
                     existing = await self._existing_request(conn, request_id, fingerprint)
@@ -581,13 +645,15 @@ class PostgresComputeResourceRepository:
         async with self._pool.acquire() as conn:
             return await self._allocation(conn, allocation_id)
 
-    async def remove_allocation(self, *, allocation_id: str, expected_revision: int) -> None:
+    async def remove_allocation(self, *, allocation_id: str, expected_revision: int) -> None:  # noqa: PLR0912, PLR0915 complexity baseline, #771
         """Forget an unused server and its inventory after rechecking dependencies.
 
         This performs no provider or filesystem action. A releasable resource
         must already be confirmed absent; an acquisition that never submitted
         and a disabled attached machine can instead be deregistered locally.
-        User jobs and deleted sandbox audit rows survive the inventory cleanup.
+        User jobs and deleted sandbox audit rows survive the inventory cleanup,
+        and so do ``cold`` groups, which no longer need the machine: any
+        restore-capable host may claim them (``HOST_RETAINED_GROUP``).
         """
         async with self._pool.acquire() as conn, conn.transaction():
             active = await conn.fetchval(
@@ -677,9 +743,17 @@ class PostgresComputeResourceRepository:
                 allocation_id,
             ):
                 raise ValueError("rotation_in_progress")
+            # Only an operation that can still act holds the records: one a
+            # worker runs, one whose outcome is unknown, or one still confirming
+            # a provider call, as the dispatcher and release count them. One
+            # that stopped keeps the flag of the call it last confirmed, since
+            # finishing merges results and a release cancels the rest as they
+            # stand. Once the provider confirms the machine gone, that call can
+            # change nothing; until then a resource must be released anyway,
+            # and without one the flag is a provider receipt like those below.
             if any(
                 operation["state"] in {"running", "unknown"}
-                or operation["result"].get("external_pending")
+                or (operation["state"] == "waiting" and operation["result"].get("external_pending"))
                 for operation in operations
             ):
                 raise ValueError("external_operation_unresolved")
@@ -705,8 +779,8 @@ class PostgresComputeResourceRepository:
             if any(host["drain_fence_active"] for host in host_rows):
                 raise ValueError("deployment_drain_active")
             if await conn.fetchval(
-                "SELECT 1 FROM agent_sandboxes WHERE host=ANY($1::text[]) "
-                "AND deletion_state<>'deleted' LIMIT 1",
+                "SELECT 1 FROM agent_sandboxes g WHERE g.host=ANY($1::text[]) "
+                f"AND {HOST_RETAINED_GROUP} LIMIT 1",
                 hosts,
             ):
                 raise ValueError("retained_groups_present")
@@ -723,6 +797,7 @@ class PostgresComputeResourceRepository:
                         operation["result"].get("resource_ref")
                         or operation["result"].get("external_id")
                         or operation["result"].get("resolved_external_id")
+                        or operation["result"].get("external_pending")
                         or (
                             operation["kind"] in {"acquire", "add", "import"}
                             and operation["step"] != "pending"
@@ -818,8 +893,8 @@ class PostgresComputeResourceRepository:
             result["hosts"] = [
                 dict(r)
                 for r in await conn.fetch(
-                    """SELECT h.host,h.status,h.compute_node_id,
-                (h.slots_used+(SELECT COUNT(*) FROM agent_environment_runs r WHERE r.host=h.host AND NOT r.cleanup_complete AND r.lease_expires_at>NOW() AND r.started_at>NOW()-INTERVAL '30 minutes')) AS slots_used,h.last_heartbeat_at,h.broker_url AS sandbox_manager_url,h.drain_fence_active,
+                    f"""SELECT h.host,h.status,h.compute_node_id,
+                (h.slots_used+{environment_runs.env_runs_holding_slots("h.host")}) AS slots_used,h.last_heartbeat_at,h.broker_url AS sandbox_manager_url,h.drain_fence_active,
                 (SELECT count(*) FROM agent_sandboxes g
                  WHERE g.host=h.host AND g.deletion_state<>'deleted') AS retained_groups
                 FROM agent_runner_hosts h JOIN agent_compute_nodes n ON n.id=h.compute_node_id
@@ -850,9 +925,22 @@ class PostgresComputeResourceRepository:
             self._pool.acquire() as conn,
             conn.transaction(isolation="repeatable_read", readonly=True),
         ):
-            ids = await conn.fetch("SELECT id FROM agent_compute_allocations ORDER BY created_at")
-            results = [await self._allocation(conn, r["id"]) for r in ids]
-            return [r for r in results if r is not None]
+            return await load_allocations(conn, _row)
+
+    async def scheduling_inventory(self) -> ComputeSchedulingSnapshot:
+        """Read the scheduler's allocation and operation views in six bulk queries."""
+        async with (
+            self._pool.acquire() as conn,
+            conn.transaction(isolation="repeatable_read", readonly=True),
+        ):
+            allocations = await load_allocations(conn, _row)
+            ids = [
+                row["id"]
+                for row in allocations
+                if row.get("observed_state") not in {"terminated", "absent"}
+            ]
+            operations, lifecycle = await load_scheduling_operations(conn, ids, _row)
+            return ComputeSchedulingSnapshot(allocations, operations, lifecycle)
 
     async def server_inventory(self) -> dict[str, Any]:
         """Read global placement and resource/Host distribution in one snapshot."""
@@ -860,35 +948,13 @@ class PostgresComputeResourceRepository:
             self._pool.acquire() as conn,
             conn.transaction(isolation="repeatable_read", readonly=True),
         ):
-            allocations = [
-                await self._allocation(conn, r["id"])
-                for r in await conn.fetch(
-                    "SELECT id FROM agent_compute_allocations ORDER BY created_at"
-                )
-            ]
-            hosts = [
-                dict(r)
-                for r in await conn.fetch("""SELECT h.host,h.status,h.drain_fence_active,
-                (h.removal_requested_at IS NOT NULL) AS removal_pending,h.compute_node_id,
-                n.allocation_id,(h.slots_used+(SELECT COUNT(*) FROM agent_environment_runs r WHERE r.host=h.host AND NOT r.cleanup_complete AND r.lease_expires_at>NOW() AND r.started_at>NOW()-INTERVAL '30 minutes')) AS slots_used,h.slots_total,h.slots_desired,h.last_heartbeat_at,
-                h.labels->>'physical_host' AS physical_host,h.broker_url AS sandbox_manager_url,
-                (SELECT count(*) FROM agent_sandboxes g
-                 WHERE g.host=h.host AND g.deletion_state<>'deleted') AS retained_groups
-                FROM agent_runner_hosts h LEFT JOIN agent_compute_nodes n ON n.id=h.compute_node_id
-                ORDER BY h.host""")
-            ]
-            for host in hosts:
-                new, claims = await host_compute_admission(conn, host["host"])
-                host["allows_new_groups"] = new
-                host["allows_claims"] = claims
-            return {
-                "allocations": allocations,
-                "hosts": hosts,
-                "active_host": await conn.fetchval(
-                    "SELECT active_host FROM agent_runner_policy WHERE id"
-                ),
-                "observed_at": await conn.fetchval("SELECT NOW()"),
-            }
+            allocations = await load_allocations(conn, _row)
+            hosts = await load_hosts(conn, allocations)
+            metadata = await conn.fetchrow(
+                "SELECT (SELECT active_host FROM agent_runner_policy WHERE id) AS active_host,"
+                " NOW() AS observed_at"
+            )
+            return {"allocations": allocations, "hosts": hosts, **dict(metadata)}
 
     @staticmethod
     def _autoscaling_policy_view(row: dict[str, Any]) -> dict[str, Any]:
@@ -1073,7 +1139,7 @@ class PostgresComputeResourceRepository:
             )
         return [row["deployment_profile"] for row in rows]
 
-    async def update_cloudlab_autoscaling(
+    async def update_cloudlab_autoscaling(  # noqa: PLR0912 complexity baseline, #771
         self,
         *,
         expected_revision: int,
@@ -1529,9 +1595,8 @@ class PostgresComputeResourceRepository:
             ):
                 raise ValueError("autoscaling_member_not_retirable")
             hosts = await conn.fetch(
-                """SELECT h.host,(h.slots_used+(SELECT COUNT(*) FROM agent_environment_runs r WHERE r.host=h.host AND NOT r.cleanup_complete AND r.lease_expires_at>NOW() AND r.started_at>NOW()-INTERVAL '30 minutes')) AS slots_used FROM agent_compute_nodes n
-                   JOIN agent_runner_hosts h ON h.compute_node_id=n.id
-                   WHERE n.allocation_id=$1 FOR UPDATE OF h""",
+                f"""SELECT h.host,(h.slots_used+{environment_runs.env_runs_holding_slots("h.host")}) AS slots_used
+                   FROM agent_compute_nodes n JOIN agent_runner_hosts h ON h.compute_node_id=n.id WHERE n.allocation_id=$1 FOR UPDATE OF h""",
                 allocation_id,
             )
             if len(hosts) != 1 or any(host["slots_used"] != 0 for host in hosts):
@@ -1633,7 +1698,7 @@ class PostgresComputeResourceRepository:
             await lock_compute_entry(conn, exclusive=True)
             await self._fence(conn, operation_id, generation, worker_id, allocation_id)
             await conn.execute(
-                "UPDATE agent_compute_allocations SET observation_error=$2,updated_at=NOW() WHERE id=$1",
+                "UPDATE agent_compute_allocations SET observation_error=$2,updated_at=NOW() WHERE id=$1 AND NOT (observed_state IN ('terminated','absent') AND external_id IS NOT NULL)",
                 allocation_id,
                 message,
             )
@@ -1691,7 +1756,18 @@ class PostgresComputeResourceRepository:
         request_id: str | None = None,
         kinds: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Find recent operation state, including recovery by request ID."""
+        """Find recent operation state, including recovery by request ID.
+
+        Newest first: the 200 newest matches, every match not yet settled
+        however old, and every failed or blocked acquisition of a server not
+        confirmed gone. Each live server is inspected every few minutes, so
+        newer rows soon push an acquisition out of the window. One whose
+        outcome is unknown holds its server until an administrator adopts or
+        retries it, and one that stopped past its first step holds it until a
+        retry or "Nothing was created" settles it; the Servers page reaches
+        either only through this listing. A server has one acquisition, so
+        this stays small, unlike its stream of inspections.
+        """
         async with self._pool.acquire() as conn:
             return [
                 _row(r)
@@ -1699,7 +1775,18 @@ class PostgresComputeResourceRepository:
                     """SELECT * FROM agent_compute_operations
                 WHERE ($1::text IS NULL OR allocation_id=$1) AND ($2::text IS NULL OR request_id=$2)
                   AND ($3::text[] IS NULL OR kind=ANY($3::text[]))
-                ORDER BY created_at DESC LIMIT 200""",
+                  AND (state IN ('pending','running','waiting','unknown')
+                       OR (state IN ('failed','blocked') AND kind IN ('acquire','add','import')
+                           AND allocation_id IN (
+                               SELECT id FROM agent_compute_allocations
+                               WHERE observed_state NOT IN ('terminated','absent')))
+                       OR id IN (
+                      SELECT id FROM agent_compute_operations
+                      WHERE ($1::text IS NULL OR allocation_id=$1)
+                        AND ($2::text IS NULL OR request_id=$2)
+                        AND ($3::text[] IS NULL OR kind=ANY($3::text[]))
+                      ORDER BY created_at DESC LIMIT 200))
+                ORDER BY created_at DESC""",
                     allocation_id,
                     request_id,
                     kinds,
@@ -1776,15 +1863,18 @@ class PostgresComputeResourceRepository:
             allocation_id,
         ):
             return False
+        # Read under the exclusive compute fence, which every binding change
+        # takes; the revocation's rows are locked before the host rows.
         hosts = [
             row["host"]
             for row in await conn.fetch(
                 """SELECT h.host FROM agent_compute_nodes n
                    JOIN agent_runner_hosts h ON h.compute_node_id=n.id
-                   WHERE n.allocation_id=$1 FOR UPDATE OF h""",
+                   WHERE n.allocation_id=$1 ORDER BY h.host""",
                 allocation_id,
             )
         ]
+        await lock_hosts_for_revocation(conn, hosts)
         await conn.execute(
             """UPDATE agent_compute_allocations
                SET desired_state='absent',
@@ -1833,13 +1923,12 @@ class PostgresComputeResourceRepository:
         generation: int | None = None,
         worker_id: str | None = None,
     ) -> dict[str, Any]:
-        """Save a fenced observation, preserving a known deadline when renewal is unknown."""
+        """Save a fenced observation, keeping a known deadline and any terminal proof."""
         async with self._pool.acquire() as conn, conn.transaction():
             await lock_compute_entry(conn, exclusive=True)
             await self._fence(conn, operation_id, generation, worker_id, allocation_id)
             allocation = await conn.fetchrow(
-                "SELECT external_id,desired_state,release_committed_at FROM agent_compute_allocations WHERE id=$1 FOR UPDATE",
-                allocation_id,
+                "SELECT * FROM agent_compute_allocations WHERE id=$1 FOR UPDATE", allocation_id
             )
             if allocation is None:
                 raise ValueError("allocation_not_found")
@@ -1849,6 +1938,8 @@ class PostgresComputeResourceRepository:
                 current_identity,
             ):
                 raise ValueError("resource_identity_changed")
+            if terminal_proof_stands(allocation, observation):
+                return _row(allocation)
             nodes = observation.get("nodes")
             if nodes is not None and observation.get("observed_state") not in (
                 "terminated",
@@ -1923,53 +2014,13 @@ class PostgresComputeResourceRepository:
             if row["observed_state"] in {"terminated", "absent"}:
                 await self._release_terminal_autoscaling_reservation(conn, allocation_id)
                 if row["observed_state"] == "terminated":
-                    await self._release_terminated_groups(conn, allocation_id)
+                    await release_terminated_groups(conn, allocation_id)
+                if row["desired_state"] == "absent" and row["release_committed_at"] is None:
+                    await resume_blocked_retirement(conn, allocation_id)
                 row = await conn.fetchrow(
                     "SELECT * FROM agent_compute_allocations WHERE id=$1", allocation_id
                 )
             return _row(row)
-
-    @staticmethod
-    async def _release_terminated_groups(conn: Any, allocation_id: str) -> None:
-        """The provider ended this machine: hand each covered stopped group elsewhere.
-
-        Its Hosts keep their rows, credentials and any deployment fence for
-        the administrator's removal. Only the groups move: a group can never
-        start again on a machine that is gone, and the claim of a ``cold``
-        group refuses the Host that still names its container.
-        """
-        hosts = [
-            row["host"]
-            for row in await conn.fetch(
-                """SELECT h.host FROM agent_compute_nodes n
-                   JOIN agent_runner_hosts h ON h.compute_node_id=n.id
-                   WHERE n.allocation_id=$1 ORDER BY h.host""",
-                allocation_id,
-            )
-        ]
-        if hosts:
-            await release_covered_sandboxes(conn, hosts)
-
-    async def upsert_node(
-        self,
-        *,
-        allocation_id: str,
-        node: dict[str, Any],
-        operation_id: str | None = None,
-        generation: int | None = None,
-        worker_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Observe an immutable node identity without rebinding retained execution state."""
-        async with self._pool.acquire() as conn, conn.transaction():
-            await lock_compute_entry(conn, exclusive=True)
-            await self._fence(conn, operation_id, generation, worker_id, allocation_id)
-            allocation = await conn.fetchrow(
-                "SELECT desired_state FROM agent_compute_allocations WHERE id=$1 FOR UPDATE",
-                allocation_id,
-            )
-            if allocation is None or allocation["desired_state"] != "present":
-                raise ValueError("resource_retiring")
-            return await self._upsert_node(conn, allocation_id, node)
 
     async def _upsert_node(
         self, conn: Any, allocation_id: str, node: dict[str, Any]
@@ -2295,13 +2346,27 @@ class PostgresComputeResourceRepository:
             if generation is not None:
                 await self._fence(conn, operation_id, generation, worker_id)
             node = await conn.fetchrow(
-                """SELECT n.*,a.desired_state,a.release_committed_at
+                """SELECT n.*,a.desired_state,
+                          a.release_committed_at,a.observed_state,a.observation_error,
+                          a.scope_complete,a.observed_at,
+                          (a.observed_at >= NOW() - INTERVAL '5 minutes'
+                           AND a.observed_at <= NOW() + INTERVAL '30 seconds') AS observation_fresh,
+                          (SELECT COUNT(*) FROM agent_compute_nodes current_nodes
+                           WHERE current_nodes.allocation_id=a.id) AS allocation_node_count
                 FROM agent_compute_nodes n JOIN agent_compute_allocations a ON a.id=n.allocation_id
                 WHERE n.id=$1 FOR UPDATE OF a""",
                 node_id,
             )
             if node is None or node["desired_state"] != "present" or node["release_committed_at"]:
                 raise ValueError("resource_retiring")
+            if (
+                not node["scope_complete"]
+                or node["observed_state"] not in {"ready", "active", "running"}
+                or node["observation_error"] is not None
+                or not node["observation_fresh"]
+                or node["allocation_node_count"] != 1
+            ):
+                raise ValueError("resource_observation_not_ready")
             existing = await conn.fetchrow(
                 "SELECT * FROM agent_runner_hosts WHERE host=$1 FOR UPDATE", host
             )
@@ -2376,7 +2441,7 @@ class PostgresComputeResourceRepository:
             )
             return True
 
-    async def apply_cloudlab_autoscaling_slot_target(
+    async def apply_cloudlab_autoscaling_slot_target(  # noqa: C901, PLR0912 complexity baseline, #771
         self,
         *,
         expected_revision: int,
@@ -2624,73 +2689,248 @@ class PostgresComputeResourceRepository:
 
     @staticmethod
     async def _move_out_possible(conn: Any, allocation_id: str) -> bool:
-        policy = await conn.fetchrow(
-            "SELECT sandbox_archive_settings, sandbox_archive_revision FROM agent_runner_policy WHERE id"
-        )
-        if policy is None:
-            return False
-        try:
-            archive = load_stored_archive_policy(
-                {
-                    **(load_json(policy["sandbox_archive_settings"]) or {}),
-                    "revision": policy["sandbox_archive_revision"],
-                }
+        hosts = [
+            row["host"]
+            for row in await conn.fetch(
+                """SELECT h.host FROM agent_compute_nodes n
+                   JOIN agent_runner_hosts h ON h.compute_node_id=n.id
+                   WHERE n.allocation_id=$1 ORDER BY h.host""",
+                allocation_id,
             )
-        except ValueError:
-            return False
-        if not (archive.enabled and archive.checkpoints_enabled):
-            return False
-        hosts = await conn.fetch(
-            """SELECT h.host,h.capabilities,h.sandbox_archive_settings_applied_revision
-               FROM agent_compute_nodes n JOIN agent_runner_hosts h ON h.compute_node_id=n.id
-               WHERE n.allocation_id=$1""",
-            allocation_id,
+        ]
+        started = bool(
+            await conn.fetchval(
+                "SELECT 1 FROM agent_host_admission_holds "
+                "WHERE allocation_id=$1 AND purpose='move_out' LIMIT 1",
+                allocation_id,
+            )
         )
-        if not hosts or any(
-            SANDBOX_CHECKPOINT_CAPABILITY not in (load_json(host["capabilities"]) or [])
-            or host["sandbox_archive_settings_applied_revision"] != archive.revision
-            for host in hosts
-        ):
-            return False
-        if await conn.fetchval(
-            "SELECT 1 FROM agent_host_admission_holds "
-            "WHERE allocation_id=$1 AND purpose='move_out' LIMIT 1",
-            allocation_id,
-        ):
-            return True
-        candidates = await conn.fetch(
-            """SELECT h.host FROM agent_runner_hosts h
-               LEFT JOIN agent_compute_nodes n ON n.id=h.compute_node_id
-               WHERE h.status='online' AND h.credential_hash IS NOT NULL
-                 AND h.capabilities @> $2::jsonb
-                 AND h.sandbox_archive_settings_applied_revision=$3
-                 AND n.allocation_id IS DISTINCT FROM $1
-               ORDER BY h.host""",
-            allocation_id,
-            json.dumps([SANDBOX_RESTORE_CAPABILITY, SANDBOX_ARCHIVE_CAPABILITY]),
-            archive.revision,
-        )
-        for candidate in candidates:
-            # Restoring creates the group's container there, which needs the
-            # same admission a new group does.
-            may_create, may_claim = await host_compute_admission(conn, candidate["host"])
-            if may_create and may_claim:
-                return True
-        return False
+        # A started move continues without a target, but never once its
+        # checkpoints stop.
+        return await move_out_possible(conn, hosts, need_target=not started)
 
     async def unmoved_groups(self, *, allocation_id: str) -> int:
         """Count the groups still held only by this allocation's Hosts."""
         async with self._pool.acquire() as conn:
             return int(
                 await conn.fetchval(
-                    """SELECT count(*) FROM agent_sandboxes g
+                    f"""SELECT count(*) FROM agent_sandboxes g
                        JOIN agent_runner_hosts h ON h.host=g.host
                        JOIN agent_compute_nodes n ON n.id=h.compute_node_id
-                       WHERE n.allocation_id=$1 AND g.deletion_state='none'
-                         AND g.state NOT IN ('cold','restoring','lost')""",
+                       WHERE n.allocation_id=$1 AND {UNMOVED_GROUP_SQL}""",
                     allocation_id,
                 )
             )
+
+    async def authorize_superseded_removals(
+        self, *, host: str, containers: list[dict[str, Any]], operation_id: str
+    ) -> list[dict[str, Any]]:
+        """Record which containers ``host`` reports its moved groups left behind.
+
+        See :func:`~cloud_agent.storage._sql.hosts.authorize_superseded_removals`.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            return await authorize_superseded_removals(conn, host, containers, operation_id)
+
+    async def record_superseded_removal(self, *, request_id: str) -> None:
+        """Record that the Host confirmed an authorized removal."""
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE agent_superseded_container_removals SET removed_at = NOW() "
+                "WHERE request_id = $1 AND removed_at IS NULL",
+                request_id,
+            )
+
+    async def superseded_removals(self, *, hosts: list[str]) -> int:
+        """Count the confirmed removals of containers left behind on ``hosts``."""
+        async with self._pool.acquire() as conn:
+            return int(
+                await conn.fetchval(
+                    "SELECT count(*) FROM agent_superseded_container_removals "
+                    "WHERE host = ANY($1::text[]) AND removed_at IS NOT NULL",
+                    hosts,
+                )
+            )
+
+    async def recorded_host_state(self, *, host: str) -> dict[str, Any]:
+        """The receipts ``host`` keeps on disk that the control plane recorded.
+
+        Each sandbox's latest checkpoint captured there, and each confirmed
+        removal of a container left behind there. See ``RecordedHostState``.
+        """
+        async with self._pool.acquire() as conn:
+            checkpoints = await conn.fetch(
+                """SELECT DISTINCT ON (sandbox_id)
+                          id AS checkpoint_id, sandbox_id, generation, container_id,
+                          base_image, runtime_id, runtime_version, object_key,
+                          object_version_id AS version_id, sha256, size_bytes,
+                          new_layer_bytes, layer_count, format_version, start_seq
+                   FROM agent_sandbox_checkpoints WHERE host = $1
+                   ORDER BY sandbox_id, captured_at DESC, recorded_at DESC""",
+                host,
+            )
+            removals = await conn.fetch(
+                "SELECT request_id, origin_thread_id, sandbox_id, generation, container_id "
+                "FROM agent_superseded_container_removals "
+                "WHERE host = $1 AND removed_at IS NOT NULL ORDER BY request_id",
+                host,
+            )
+        return {
+            "checkpoints": {str(row["sandbox_id"]): dict(row) for row in checkpoints},
+            "removals": {
+                str(row["request_id"]): {
+                    "thread_id": str(row["origin_thread_id"]),
+                    "sandbox_id": str(row["sandbox_id"]),
+                    "generation": int(row["generation"]),
+                    "container_id": str(row["container_id"]),
+                }
+                for row in removals
+            },
+        }
+
+    async def move_out_report(self, *, allocation_id: str) -> dict[str, Any]:
+        """Whether this allocation's groups are moving out, why not, and what stays.
+
+        ``moving`` is whether its ``move_out`` hold is in place, ``blocker`` the
+        reason code a move could not start or continue with now (``None`` when
+        it can), ``unmoved`` the groups still held only by its Hosts, and
+        ``unmovable`` those that will stay whatever happens: no checkpoint
+        covers them, or their image cannot be pulled elsewhere.
+        """
+        async with self._pool.acquire() as conn:
+            hosts = [
+                row["host"]
+                for row in await conn.fetch(
+                    """SELECT h.host FROM agent_compute_nodes n
+                       JOIN agent_runner_hosts h ON h.compute_node_id=n.id
+                       WHERE n.allocation_id=$1 ORDER BY h.host""",
+                    allocation_id,
+                )
+            ]
+            moving = bool(
+                await conn.fetchval(
+                    "SELECT 1 FROM agent_host_admission_holds "
+                    "WHERE allocation_id=$1 AND purpose='move_out' LIMIT 1",
+                    allocation_id,
+                )
+            )
+            blocker = await move_out_blocker(conn, hosts, need_target=not moving)
+            counts = await conn.fetchrow(
+                f"""SELECT count(*) FILTER (WHERE {UNMOVED_GROUP_SQL}) AS unmoved,
+                           count(*) FILTER (WHERE {UNMOVABLE_GROUP_SQL}) AS unmovable
+                    FROM agent_sandboxes g
+                    JOIN agent_runner_hosts h ON h.host=g.host
+                    JOIN agent_compute_nodes n ON n.id=h.compute_node_id
+                    WHERE n.allocation_id=$1""",
+                allocation_id,
+            )
+        return {
+            "moving": moving,
+            "blocker": blocker,
+            "unmoved": int(counts["unmoved"]),
+            "unmovable": int(counts["unmovable"]),
+        }
+
+    async def lose_reclaimed_groups(self, *, allocation_id: str, quiet_seconds: int) -> list[str]:
+        """Mark LOST each group that went with a machine its provider reclaimed.
+
+        Once the provider confirms the allocation ``terminated``, its disk is
+        gone, and with it the only Docker copy of every group its Hosts still
+        hold. Covered stopped groups were already handed over through their
+        checkpoints; the rest can never continue. Leaving them bound to the
+        Host would queue their chats' messages forever and keep the Host from
+        being removed, so each becomes ``lost`` as a confirmed Docker data loss
+        does, and its queued turns fail with a reason.
+
+        A group is left alone while its Host beat within ``quiet_seconds`` or
+        it has a turn, claim or Fork in flight; the attempt reaper settles
+        those first, and a later pass takes the group. Returns the groups
+        marked lost.
+        """
+        async with self._pool.acquire() as conn:
+            candidates = await conn.fetch(
+                f"""SELECT g.id FROM agent_compute_allocations a
+                    JOIN agent_compute_nodes n ON n.allocation_id=a.id
+                    JOIN agent_runner_hosts h ON h.compute_node_id=n.id
+                    JOIN agent_sandboxes g ON g.host=h.host
+                    WHERE a.id=$1 AND a.observed_state='terminated'
+                      AND {_RECLAIMED_GROUP_SQL}
+                    ORDER BY g.id""",
+                allocation_id,
+                quiet_seconds,
+            )
+        lost = []
+        for candidate in candidates:
+            if await self._lose_reclaimed_group(
+                sandbox_id=candidate["id"],
+                allocation_id=allocation_id,
+                quiet_seconds=quiet_seconds,
+            ):
+                lost.append(str(candidate["id"]))
+        return lost
+
+    async def _lose_reclaimed_group(
+        self, *, sandbox_id: str, allocation_id: str, quiet_seconds: int
+    ) -> bool:
+        # Conversations, then memberships, then the group: the order every
+        # writer of these rows keeps.
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "SELECT t.id FROM agent_threads t "
+                "JOIN agent_thread_sandbox_memberships m ON m.thread_id = t.id "
+                "WHERE m.sandbox_id = $1 ORDER BY t.id FOR UPDATE OF t",
+                sandbox_id,
+            )
+            members = await conn.fetch(
+                "SELECT thread_id FROM agent_thread_sandbox_memberships "
+                "WHERE sandbox_id = $1 ORDER BY thread_id FOR UPDATE",
+                sandbox_id,
+            )
+            group = await conn.fetchrow(
+                f"""SELECT g.id, g.generation, g.state, g.host FROM agent_sandboxes g
+                    JOIN agent_runner_hosts h ON h.host=g.host
+                    JOIN agent_compute_nodes n ON n.id=h.compute_node_id
+                    JOIN agent_compute_allocations a ON a.id=n.allocation_id
+                    WHERE g.id=$1 AND a.id=$3 AND a.observed_state='terminated'
+                      AND {_RECLAIMED_GROUP_SQL}
+                    FOR UPDATE OF g""",
+                sandbox_id,
+                quiet_seconds,
+                allocation_id,
+            )
+            if group is None:
+                return False
+            await conn.execute(
+                """UPDATE agent_sandboxes
+                   SET state='lost', idle_deadline=NULL, stop_requested_at=NULL,
+                       last_error='the server holding this sandbox was reclaimed by its provider',
+                       updated_at=NOW()
+                   WHERE id=$1""",
+                sandbox_id,
+            )
+            await conn.execute(
+                """UPDATE agent_thread_sandbox_memberships
+                   SET native_state='lost', context_status='lost', resident_state='lost',
+                       updated_at=NOW()
+                   WHERE sandbox_id=$1""",
+                sandbox_id,
+            )
+            await conn.execute(
+                """INSERT INTO agent_sandbox_events (
+                       sandbox_id, generation, event_type, from_state, to_state,
+                       source, actor_id, details
+                   ) VALUES ($1, $2, 'server_reclaimed', $3, 'lost', 'system',
+                             'compute-reconciler', $4::jsonb)""",
+                sandbox_id,
+                group["generation"],
+                group["state"],
+                json.dumps({"allocation_id": allocation_id, "host": group["host"]}),
+            )
+            for member in members:
+                await fail_unrunnable_follow_ups(
+                    conn, thread_id=member["thread_id"], detail=_RECLAIMED_DETAIL
+                )
+        return True
 
     async def running_attempts(self, *, host: str) -> int:
         """Count the turns a Host is executing now."""
@@ -2784,11 +3024,12 @@ class PostgresComputeResourceRepository:
         operation_id: str,
         generation: int,
         worker_id: str,
+        refused_acquisition_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Stop a replacement node's pending work and queue its release.
 
-        Returns the release operation, or None while the candidate's own work is
-        executing or its outcome is unknown and it cannot be stopped safely.
+        Returns the release operation, or None while the candidate's own work
+        cannot be stopped safely (``candidate_work_stoppable``).
         """
         async with self._pool.acquire() as conn, conn.transaction():
             await lock_compute_entry(conn, exclusive=True)
@@ -2805,11 +3046,7 @@ class PostgresComputeResourceRepository:
             existing = await self._existing_request(conn, request_id, fingerprint)
             if existing is not None:
                 return existing
-            if await conn.fetchval(
-                """SELECT 1 FROM agent_compute_operations
-                WHERE allocation_id=$1 AND state IN ('running','unknown') LIMIT 1""",
-                allocation_id,
-            ):
+            if not await candidate_work_stoppable(conn, allocation_id, refused_acquisition_id):
                 return None
             await conn.execute(
                 """UPDATE agent_compute_operations
@@ -3034,12 +3271,17 @@ class PostgresComputeResourceRepository:
             reasons.append("placement_pinned")
         if any(host["drain_fence_active"] for host in allocation["hosts"]):
             reasons.append("deployment_drain_active")
+        # A group handed over lives in its checkpoint, whatever host it still
+        # names; the container it left here goes before the inventory below.
         groups = await conn.fetch(
-            "SELECT id,host,state,active_operation_count FROM agent_sandboxes "
-            "WHERE host=ANY($1::text[]) AND deletion_state<>'deleted'",
+            f"""SELECT g.id,g.host,g.state,g.active_operation_count,
+                       {HANDED_OVER_GROUP_SQL} AS handed_over
+                FROM agent_sandboxes g
+                WHERE g.host=ANY($1::text[]) AND g.deletion_state<>'deleted'""",
             hosts,
         )
-        if groups:
+        retained = [g for g in groups if not g["handed_over"]]
+        if retained:
             reasons.append("retained_groups_present")
         if any(g["active_operation_count"] for g in groups):
             reasons.append("workspace_operations_present")
@@ -3093,7 +3335,10 @@ class PostgresComputeResourceRepository:
             "deployment_profile_configured": bool(allocation["deployment_profile"]),
             "nodes": allocation["nodes"],
             "hosts": allocation["hosts"],
-            "retained_groups": [dict(g) for g in groups],
+            "retained_groups": [
+                {key: g[key] for key in ("id", "host", "state", "active_operation_count")}
+                for g in retained
+            ],
             "active_attempts": attempts,
             "active_forks": forks,
             "blocked_reasons": list(dict.fromkeys(reasons)),
@@ -3122,11 +3367,19 @@ class PostgresComputeResourceRepository:
                 raise ValueError("allocation_not_found")
             if allocation["release_committed_at"] is not None:
                 return {"release_committed": True, "blocked_reasons": []}
-            await conn.fetch(
-                """SELECT h.host FROM agent_compute_nodes n
-                   JOIN agent_runner_hosts h ON h.compute_node_id=n.id
-                   WHERE n.allocation_id=$1 FOR UPDATE OF h""",
-                allocation_id,
+            # The rows the revocation below writes, then the host rows: a
+            # provider-terminal release proceeds past attempts still running.
+            await lock_hosts_for_revocation(
+                conn,
+                [
+                    row["host"]
+                    for row in await conn.fetch(
+                        """SELECT h.host FROM agent_compute_nodes n
+                           JOIN agent_runner_hosts h ON h.compute_node_id=n.id
+                           WHERE n.allocation_id=$1 ORDER BY h.host""",
+                        allocation_id,
+                    )
+                ],
             )
             impact = await self._retirement_impact(conn, allocation_id)
             provider_terminal = allocation["desired_state"] == "absent" and allocation[
@@ -3167,25 +3420,43 @@ class PostgresComputeResourceRepository:
                     allocation_id,
                     operation_id,
                 )
+            else:
+                # An acquisition between its checks -- waiting for its Host's
+                # first heartbeat, or blocked on a deployment given up on -- is
+                # never claimed again after this commit. Left waiting, it kept
+                # an autoscaled server's route reserved for good. The release
+                # deletes the resource by the allocation's own identity.
+                await conn.execute(
+                    """UPDATE agent_compute_operations
+                    SET state='cancelled',message='release_committed',
+                        completed_at=NOW(),updated_at=NOW()
+                    WHERE allocation_id=$1 AND id<>$2
+                      AND kind IN ('acquire','import')
+                      AND state IN ('pending','waiting','blocked')""",
+                    allocation_id,
+                    operation_id,
+                )
             await conn.execute(
                 "UPDATE agent_compute_allocations SET release_committed_at=NOW(),updated_at=NOW() WHERE id=$1",
                 allocation_id,
             )
             await revoke_host_credentials(conn, [h["host"] for h in impact["hosts"]])
-            # Later pending extensions must never escape after the commit.
+            # Later pending extensions must never escape after the commit. Nor
+            # is an upgrade claimed after it (claim_operation), and one left
+            # waiting would hold its deployment profile back from every later
+            # host release, as if it were still being installed.
             await conn.execute(
                 """UPDATE agent_compute_operations SET state='cancelled',message='release_committed',completed_at=NOW()
-                WHERE allocation_id=$1 AND id<>$2 AND kind='extend' AND state IN ('pending','waiting','blocked')""",
+                WHERE allocation_id=$1 AND id<>$2 AND kind IN ('extend','upgrade') AND state IN ('pending','waiting','blocked')""",
                 allocation_id,
                 operation_id,
             )
             return {**impact, "release_committed": True}
 
-    async def cancel_operation(self, operation_id: str) -> dict[str, Any]:
+    async def cancel_operation(self, operation_id: str) -> dict[str, Any]:  # noqa: C901, PLR0912 complexity baseline, #771
         """Cancel a safe pre-submit acquisition, retirement or rotation intent.
 
-        A rotation can be cancelled until the old node stops: its claim pause
-        is lifted and its replacement node, if any, is queued for release.
+        A retirement only until it stops its runners; a rotation until its old node stops.
         """
         async with self._pool.acquire() as conn, conn.transaction():
             await lock_compute_entry(conn, exclusive=True)
@@ -3281,7 +3552,7 @@ class PostgresComputeResourceRepository:
                 return await self._cancel_rotation(conn, row)
             if (load_json(row["result"]) or {}).get("external_pending"):
                 raise ValueError("external_operation_unresolved")
-            if row["kind"] != "retire" or row["state"] not in ("pending", "waiting", "blocked"):
+            if not retirement_cancellable(row["kind"], row["state"], load_json(row["result"])):
                 raise ValueError("operation_not_cancellable")
             await conn.execute(
                 "DELETE FROM agent_host_admission_holds WHERE allocation_id=$1 AND purpose='retirement' AND source_id=$2",
@@ -3420,6 +3691,69 @@ class PostgresComputeResourceRepository:
                 WHERE id=$1 RETURNING *""",
                     operation_id,
                     external_id,
+                )
+            )
+
+    async def confirm_acquisition_absent(self, *, operation_id: str) -> dict[str, Any]:
+        """Close an acquisition an administrator confirmed created nothing.
+
+        Nothing here asks the provider: the administrator checked its portal,
+        and ``acquisition_absence_confirmable`` names the acquisitions whose
+        records cannot contradict them. A node that registered can, since only
+        a created machine runs one. The operation is cancelled, so nothing
+        retries it into a new request, and the allocation becomes absent,
+        which lets its records be removed.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            await lock_compute_entry(conn, exclusive=True)
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended('compute-dispatch',0))"
+            )
+            operation = await conn.fetchrow(
+                "SELECT * FROM agent_compute_operations WHERE id=$1 FOR UPDATE", operation_id
+            )
+            if operation is None:
+                raise ValueError("operation_not_found")
+            await conn.execute(
+                "SELECT 1 FROM agent_compute_allocations WHERE id=$1 FOR UPDATE",
+                operation["allocation_id"],
+            )
+            allocation = await self._allocation(conn, operation["allocation_id"])
+            if not acquisition_absence_confirmable(_row(operation), allocation):
+                raise ValueError("absence_not_confirmable")
+            assert allocation is not None
+            # A node's first boot registers under its registration row alone,
+            # without the compute fence. Taking the open rows waits for one
+            # still in flight, which the check below then sees, and leaves a
+            # node that boots later no token to register with.
+            await conn.execute(
+                "DELETE FROM agent_compute_node_registrations "
+                "WHERE allocation_id=$1 AND registered_at IS NULL",
+                allocation["id"],
+            )
+            if await conn.fetchval(
+                "SELECT 1 FROM agent_compute_node_registrations "
+                "WHERE allocation_id=$1 AND registered_at IS NOT NULL LIMIT 1",
+                allocation["id"],
+            ):
+                raise ValueError("provider_node_registered")
+            await conn.execute(
+                """UPDATE agent_compute_allocations
+                   SET desired_state='absent',observed_state='absent',
+                       scope_complete=TRUE,observation_error=NULL,observed_at=NOW(),
+                       revision=revision+1,updated_at=NOW()
+                   WHERE id=$1""",
+                allocation["id"],
+            )
+            return _row(
+                await conn.fetchrow(
+                    """UPDATE agent_compute_operations
+                       SET state='cancelled',
+                           message='An administrator confirmed the provider created nothing for this request.',
+                           result=result || jsonb_build_object('confirmed_absent',TRUE),
+                           completed_at=NOW(),updated_at=NOW()
+                       WHERE id=$1 RETURNING *""",
+                    operation_id,
                 )
             )
 

@@ -11,6 +11,7 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
+from tests.support.owners import connection_access, residency_connection
 
 from cloud_agent_host import runner as runner_mod
 from cloud_agent_host.chat_sandbox import CHAT_UPLOADS_DIR, ChatSandboxManager
@@ -20,6 +21,7 @@ from cloud_agent_host.runtimes import get_runtime
 from cloud_agent_host.sandbox import ContainerBackend, ProcessBackend
 
 _JOB = ClaimedJob(
+    model_connection=connection_access("claude-code"),
     job_id="ajob_1",
     attempt_id=7,
     attempt_no=1,
@@ -29,7 +31,6 @@ _JOB = ClaimedJob(
     runtime="claude-code",
     model="model",
     worker_token="ajt.a.b",
-    sandbox_token="grant",
     thread_id="athr_1",
     runtime_version=runner_mod.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
 )
@@ -44,7 +45,13 @@ _PAYLOAD = {
     "runtime": "claude-code",
     "model": "m",
     "worker_token": "ajt.a.b",
-    "sandbox_token": "grant",
+    "model_connection": {
+        "connection_id": _JOB.model_connection.connection_id,
+        "revision": _JOB.model_connection.revision,
+        "base_url": _JOB.model_connection.base_url,
+        "protocol": _JOB.model_connection.protocol,
+        "api_key": _JOB.model_connection.api_key,
+    },
 }
 
 
@@ -96,7 +103,6 @@ def _serve(monkeypatch, payload: dict[str, Any]) -> dict[str, Any]:
             runner_mod._serve_turn(
                 handover_fd=write_fd,
                 base_url="http://control",
-                gateway_url="http://gateway",
                 worker_id="runner-a",
                 lease_ttl=120.0,
                 agent_timeout_s=3600.0,
@@ -146,7 +152,7 @@ def test_a_turn_handed_no_settings_runs_with_the_hosts_own(monkeypatch):
     assert kwargs["host_settings"] == {}
 
 
-def _stamp() -> dict[str, Any]:
+def _stamp(**_: object) -> dict[str, Any]:
     return {
         "sandbox_image_digest": "sha256:shared-image",
         "runtime_versions": dict(runner_mod.SHARED_SANDBOX_RUNTIME_PINS),
@@ -157,7 +163,12 @@ def _stamp() -> dict[str, Any]:
     }
 
 
-def test_claimed_github_write_token_reaches_only_the_resident_launch(monkeypatch):
+def test_github_reaches_the_resident_launch_from_its_residency_not_its_claim(monkeypatch):
+    """The relay placeholder and the owner's identity come with the residency.
+
+    A claim from an older control plane that still carries a sandbox write
+    token has it ignored: no token GitHub accepts reaches a member.
+    """
     claim = ClaimedJob.from_response(
         {
             **_PAYLOAD,
@@ -170,13 +181,24 @@ def test_claimed_github_write_token_reaches_only_the_resident_launch(monkeypatch
 
     assert run.result == 0
     assert run.launches
-    assert all(launch.github_token == "sandbox-write-token" for launch in run.launches)
     assert all(launch.github_repo == claim.repo for launch in run.launches)
-    assert "sandbox-write-token" not in repr(claim)
-    assert (
-        ClaimedJob.from_response({**_PAYLOAD, "clone_token": "host-clone-token"}).github_token
-        is None
-    )
+    # The probe names none; a live process keeps the one its residency gave it.
+    assert all(not launch.github_credential for launch in run.launches)
+    assert "sandbox-write-token" not in repr(run.launches)
+
+    residency = {
+        "github_credential": "agh.residency.signature",
+        "git_author_name": "octo",
+        "git_author_email": "7+octo@users.noreply.github.com",
+        "git_coauthor": "FreeInference <9+freeinference[bot]@users.noreply.github.com>",
+    }
+    assert runner_mod.residency_github_launch(claim.repo, residency) == residency
+    # Without a repository there is nothing for the relay to act on, but the
+    # owner still authors the commits.
+    assert runner_mod.residency_github_launch(None, residency) == {
+        **residency,
+        "github_credential": "",
+    }
 
 
 def _run_new_chat(
@@ -187,6 +209,9 @@ def _run_new_chat(
     reservation_change: dict[str, Any] | None = None,
     reservation_omits_disk: bool = False,
     initial_archive_status: dict[str, object] | None = None,
+    container_action: str | None = None,
+    initial_archive: dict[str, object] | None = None,
+    fails_after_acquire: bool = False,
 ) -> SimpleNamespace:
     """Drive a first turn of a new chat to its settlement, with collaborators mocked."""
     backend = ContainerBackend(image="img")
@@ -208,8 +233,20 @@ def _run_new_chat(
     )
     control = Mock(spec=runner_mod.ControlPlane)
     control.mark_chat_sandbox_running.return_value = {}
+    control.establish_shared_residency.return_value = {
+        "credential": _JOB.model_connection.api_key,
+        "generation": 1,
+        "model": job.model,
+        "github_credential": "agh.residency.signature",
+        "git_author_name": "octo",
+        "git_author_email": "7+octo@users.noreply.github.com",
+        "git_coauthor": "",
+        **residency_connection("claude-code"),
+    }
     if job.thread_attachment_count:
-        control.list_attachments.return_value = [{"id": 17}]
+        control.list_attachments.return_value = [
+            {"id": 17, "path": "replacement.txt", "size_bytes": len(b"replacement")}
+        ]
         control.read_attachment.return_value = ("replacement.txt", b"replacement")
 
     def reserve(seed):
@@ -233,6 +270,7 @@ def _run_new_chat(
         "activation_generation": 3,
         "context_status": "new",
         "resident_state": "live",
+        **({} if container_action is None else {"container_action": container_action}),
     }
     supervisor.initial_archive_status.return_value = (
         {
@@ -243,7 +281,7 @@ def _run_new_chat(
         if initial_archive_status is None
         else initial_archive_status
     )
-    supervisor.capture_initial_archive.return_value = {
+    supervisor.capture_initial_archive.return_value = initial_archive or {
         "enabled": False,
         "stored": False,
     }
@@ -267,14 +305,13 @@ def _run_new_chat(
         heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
-        gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=finish,
         host_settings=host_settings,
     )
     reserved = control.reserve_chat_sandbox.call_args.args[0]
     if result != 0:
-        assert not supervisor.acquire_shared.called
+        assert supervisor.acquire_shared.called is fails_after_acquire
         assert not control.settle_chat_sandbox.called
         return SimpleNamespace(
             result=result,
@@ -302,7 +339,10 @@ def _run_new_chat(
     )
 
 
-def test_recovered_initial_archive_imports_a_replacement_jobs_new_uploads(monkeypatch):
+def test_recovered_initial_archive_imports_a_replacement_jobs_new_uploads(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "cloud_agent_host.upload_import.credential_path", lambda: tmp_path / "host.json"
+    )
     recovered_base = "c" * 40
     replacement = replace(
         _JOB,
@@ -331,6 +371,92 @@ def test_recovered_initial_archive_imports_a_replacement_jobs_new_uploads(monkey
     [upload] = run.manager.import_archive.call_args_list
     assert upload.args[1] == CHAT_UPLOADS_DIR
     assert run.finish.call_args.kwargs["base_sha"] == recovered_base
+
+
+def _initial_archive_events(run: SimpleNamespace) -> list[dict[str, Any]]:
+    return [
+        call.args[0].payload
+        for call in run.control.append_event.call_args_list
+        if call.args[0].payload.get("phase") == "initial_archive"
+    ]
+
+
+def test_a_container_this_acquire_created_skips_the_marker_probe(monkeypatch):
+    """A new container holds no marker of its own, so there is nothing to resolve."""
+    run = _run_new_chat(monkeypatch, None, container_action="create")
+
+    assert run.result == 0
+    run.supervisor.initial_archive_status.assert_not_called()
+    # The capture still happens, and is where a carried or foreign marker is handled.
+    assert run.supervisor.capture_initial_archive.call_args.kwargs["defer_upload"] is True
+
+
+@pytest.mark.parametrize("container_action", ["start", "reuse", "unknown", None])
+def test_a_container_that_may_hold_a_marker_is_probed_first(monkeypatch, container_action):
+    """Only ``create`` proves the container new; anything else, or no answer, probes."""
+    run = _run_new_chat(monkeypatch, None, container_action=container_action)
+
+    assert run.result == 0
+    run.supervisor.initial_archive_status.assert_called_once()
+
+
+def test_a_pending_initial_upload_admits_the_prompt(monkeypatch):
+    """The bundle is durable on the host; S3 follows in the background."""
+    run = _run_new_chat(
+        monkeypatch,
+        None,
+        container_action="create",
+        initial_archive={
+            "enabled": True,
+            "stored": False,
+            "upload": "pending",
+            "size_bytes": 10,
+            "sha256": "a" * 64,
+        },
+    )
+
+    assert run.result == 0
+    assert run.supervisor.ensure_shared_resident.called
+    assert _initial_archive_events(run) == [
+        {"phase": "initial_archive", "enabled": True, "stored": False, "upload": "pending"}
+    ]
+
+
+def test_an_older_sandbox_managers_stored_receipt_is_still_accepted(monkeypatch):
+    run = _run_new_chat(
+        monkeypatch,
+        None,
+        container_action="create",
+        initial_archive={"enabled": True, "stored": True},
+    )
+
+    assert run.result == 0
+    assert _initial_archive_events(run) == [
+        {"phase": "initial_archive", "enabled": True, "stored": True}
+    ]
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        {"enabled": True, "stored": False},
+        {"enabled": True, "stored": False, "upload": "failed"},
+        {"enabled": False, "stored": False, "upload": "pending"},
+    ],
+)
+def test_an_initial_receipt_that_is_neither_stored_nor_pending_stops_the_turn(monkeypatch, receipt):
+    run = _run_new_chat(
+        monkeypatch,
+        None,
+        container_action="create",
+        initial_archive=receipt,
+        fails_after_acquire=True,
+    )
+
+    assert run.result != 0
+    assert "invalid initial archive receipt" in str(run.failure)
+    run.supervisor.ensure_shared_resident.assert_not_called()
+    assert _initial_archive_events(run) == []
 
 
 def test_new_sandbox_resource_settings_reach_the_docker_limits(monkeypatch):
@@ -441,7 +567,6 @@ def test_an_existing_untrusted_sandbox_without_a_quota_is_not_warned_about(monke
             heart=SimpleNamespace(),
             backend=backend,
             host="host-a",
-            gateway_base_url="http://gateway",
             agent_timeout_s=30,
             finish_attempt=finish,
             host_settings={"sandbox_disk_mib": 0},
@@ -596,7 +721,6 @@ def test_an_existing_sandbox_keeps_the_capacity_and_resources_it_was_created_wit
         heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
-        gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=finish,
         host_settings=settings,
@@ -621,7 +745,6 @@ def test_a_turn_with_tools_reaches_them_through_this_hosts_own_mcp_relay(monkeyp
         {
             **_PAYLOAD,
             "runtime_version": _JOB.runtime_version,
-            "mcp_token": "mcp-token",
             "mcp_bindings": ["deepwiki"],
             "mcp_base_url": "http://stale-copy:9000",
         }
@@ -657,11 +780,7 @@ def test_a_host_without_a_relay_runs_a_turn_that_carries_only_platform_tools(mon
     platform's tools are left out of that turn instead.
     """
     monkeypatch.delenv("AGENT_SANDBOX_MCP_URL", raising=False)
-    job = replace(
-        _JOB,
-        mcp_token="mcp-token",
-        mcp_bindings=[":platform:memory", ":platform:web-search"],
-    )
+    job = replace(_JOB, mcp_bindings=[":platform:memory", ":platform:web-search"])
 
     run = _run_new_chat(monkeypatch, None, job)
 
@@ -692,12 +811,11 @@ def test_a_turn_with_tools_on_a_host_without_a_relay_says_the_site_is_misconfigu
 
     result = runner_mod._run_shared_live_attempt(
         runtime=get_runtime("claude-code"),
-        job=replace(_JOB, mcp_token="mcp-token", mcp_bindings=["deepwiki", ":platform:memory"]),
+        job=replace(_JOB, mcp_bindings=["deepwiki", ":platform:memory"]),
         control=control,
         heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
-        gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=finish,
     )

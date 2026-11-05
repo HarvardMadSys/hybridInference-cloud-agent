@@ -7,6 +7,7 @@ closes it before the storage and HTTP clients it uses are released.
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict
 from typing import TYPE_CHECKING, Protocol
 
 from cloud_agent.logging_utils import get_logger
@@ -41,37 +42,34 @@ _HOST_MAINTENANCE_INTERVAL_S = 30.0
 
 async def reap_host_sessions(store: McpRuntimeStorage) -> None:
     """Reclaim sockets whose job or selected connection is no longer live."""
+    live_connections: dict[tuple[str, str, int], set[str]] = {}
+    locks: defaultdict[tuple[str, str, int], asyncio.Lock] = defaultdict(asyncio.Lock)
 
     async def is_live(key: SessionKey) -> bool:
         job_id, attempt_id = key.job_attempt
-        identity = await store.credential_queries.resolve_model_credential(
-            job_id=job_id,
-            attempt_id=int(attempt_id),
-            lease_generation=key.owner_lease_generation,
-        )
-        if identity is None:
-            return False
-        binding = next(
-            (
-                row
-                for row in identity.get("mcp_bindings") or []
-                if str(row["connection_id"]) == key.connection_id
-            ),
-            None,
-        )
-        if (
-            binding is None
-            or not binding.get("enabled", True)
-            or binding.get("deleted_at") is not None
-            or binding.get("owner_id") != identity["user_id"]
-        ):
-            return False
-        connection = await store.mcp.get_mcp_connection(connection_id=int(key.connection_id))
-        return (
-            connection is not None
-            and connection.get("status") != "disabled"
-            and connection.get("deleted_at") is None
-        )
+        owner = (job_id, attempt_id, key.owner_lease_generation)
+        # Share a fresh authority snapshot only within this maintenance pass.
+        # The lookup already joins each binding's connection status/ownership.
+        async with locks[owner]:
+            if owner not in live_connections:
+                identity = await store.credential_queries.resolve_model_credential(
+                    job_id=job_id,
+                    attempt_id=int(attempt_id),
+                    lease_generation=key.owner_lease_generation,
+                )
+                live_connections[owner] = (
+                    {
+                        str(row["connection_id"])
+                        for row in (identity.get("mcp_bindings") or [])
+                        if row.get("enabled", True)
+                        and row.get("deleted_at") is None
+                        and row.get("owner_id") == identity["user_id"]
+                        and row.get("connection_status") != "disabled"
+                    }
+                    if identity is not None
+                    else set()
+                )
+        return key.connection_id in live_connections[owner]
 
     if _HOST_INSTANCE is not None:
         await _HOST_INSTANCE.reap_inactive(is_live)

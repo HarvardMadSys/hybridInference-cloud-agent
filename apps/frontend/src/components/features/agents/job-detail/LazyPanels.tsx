@@ -26,6 +26,10 @@ export const TrajectoryView = dynamic(
   () => import('../TrajectoryView').then((module) => module.TrajectoryView),
   { loading: () => <PanelLoading>Loading trajectory…</PanelLoading> },
 );
+export const ContextView = dynamic(
+  () => import('../context/ContextView').then((module) => module.ContextView),
+  { loading: () => <PanelLoading>Loading context…</PanelLoading> },
+);
 export const TrajectoryInspector = dynamic(
   () => import('../TrajectoryInspector').then((module) => module.TrajectoryInspector),
   { loading: () => <PanelLoading>Loading details…</PanelLoading> },
@@ -39,4 +43,9 @@ export const SideChat = dynamic(() => import('../SideChat').then((module) => mod
 });
 export const SkillSelectionDialog = lazy(() =>
   import('../skills/SkillPicker').then((module) => ({ default: module.SkillSelectionDialog })),
+);
+export const PluginSelectionDialog = lazy(() =>
+  import('../plugins/PluginSelectionDialog').then((module) => ({
+    default: module.PluginSelectionDialog,
+  })),
 );

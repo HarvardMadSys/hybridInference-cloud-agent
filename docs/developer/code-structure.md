@@ -12,9 +12,9 @@ apps/
     cloud_agent/          Control plane and its HTTP APIs
     cloud_agent_host/     Host execution and retained sandbox management
     cloud_agent_shared/   Contracts and algorithms shipped in both images
+    migrations/           Agent-owned database schema, managed by Alembic
+    openapi.json          The committed snapshot of this service's OpenAPI
   frontend/              Next.js browser UI and backend-for-frontend routes
-gateway_contracts/       Gateway HTTP contracts and control-plane OpenAPI
-migrations/              Agent-owned database schema, managed by Alembic
 deploy/                  Image builds and deployment entry points
 scripts/                 Development, qualification, and release tooling
 tests/                   Backend behavior, integration, and boundary checks
@@ -23,8 +23,8 @@ docs/                    Maintained guides and dated design evidence
 
 The control plane and host are independently deployed implementations. Neither
 imports the other. Shared code provides the facts and contracts they agree on;
-it imports neither implementation. Gateway integration uses HTTP contracts.
-The agent database and Gateway database remain separate.
+it imports neither implementation. Accounts, admission and usage live in the
+agent database; model calls go from the sandbox to the owner's provider.
 
 ## Follow a control-plane request
 
@@ -43,7 +43,13 @@ flowchart TD
 ```
 
 `app.py` mounts the owner/admin API and the separate MCP-only listener. It
-installs shared HTTP response and exception policies. `bootstrap/lifespan.py`
+installs shared HTTP response and exception policies, and on both listeners a
+dependency that runs ahead of every route's own (`api/_parameters.py`): a path
+or query parameter holding NUL, or a route's integer parameter too wide for a
+`bigint`, is refused with a 422 before any query reads it. So is a JSON body
+holding NUL or half a surrogate pair, on a route an owner, an administrator or
+the on-call relay calls; host and sandbox reports keep their own models, which
+replace those characters instead. `bootstrap/lifespan.py`
 constructs the resources and starts and stops background work; route modules
 do not own service startup or shutdown.
 
@@ -56,7 +62,7 @@ do not own service startup or shutdown.
 | `ports/` | Narrow typed capabilities | A caller needs a new operation from an adapter |
 | `storage/assembly.py` | Construction of Postgres repository capabilities | A storage capability is wired into the service |
 | `storage/repositories/` | SQL and transaction/fencing behavior | A durable query or mutation changes |
-| `workers/` | Scheduled work and recovery loops | Work continues independently of a request |
+| `workers/` | Scheduled work and recovery loops | Work continues independently of a request; queue and goal recovery cannot hold up attempt lease recovery |
 | `bootstrap/` | Resources and lifecycle | A component must be constructed, started, or closed |
 | `mcp/` | MCP hosting, transport, policy, and process-local runtime | Protocol or upstream session behavior changes |
 | `goals/` | Goal orchestration and retry policy | Goal scheduling or progress policy changes |
@@ -89,7 +95,7 @@ than importing the facade back into themselves.
 | `runtime_upgrades` | Agent CLI updates started from the admin Settings page |
 | `integrations`, `mcp`, `session` | Source control, MCP selection, identity, and user preferences |
 | `teams` | Teams, members, invitations, and join requests |
-| `_host_reports`, `_sandbox_manager_wire`, `_prompts` | Private helpers: bounds for host and worker reports, Sandbox Manager field-name compatibility, and the prompt text rule |
+| `_host_reports`, `_prompts` | Private helpers: bounds for host and worker reports, and the prompt text rule |
 
 Keep model names and serialized behavior stable during structural refactors.
 Cross-domain annotations must resolve immediately after import. Intentional
@@ -101,7 +107,9 @@ wire changes require the contract update described in the developer guide.
 `claimed_job.py` defines claim payloads and lease errors;
 `control_plane_client.py` owns attempt-scoped worker HTTP calls, request
 deadlines, and event replay. The runner explicitly re-exports their existing
-public names and keeps client construction at its orchestration boundary.
+public names and keeps client construction at its orchestration boundary. The
+client queues a turn's events on the ordered sender in `event_sender.py`, which
+uploads them in batches.
 
 `chat_sandbox_models.py` holds retained-container specs, inspection/status
 values, ownership labels, and identity bounds. Group bridges, relay membership,
@@ -127,8 +135,9 @@ The runtime adapters are a package under `cloud_agent_host/runtimes/`:
 | `base.py` | Adapter contracts, capabilities, MCP configuration, and runtime errors |
 | `events.py` | Normalized event vocabulary and bounded payload helpers |
 | `preview.py` | Partial-reply preview batching |
-| `claude.py`, `codex.py`, `pi.py`, `opencode.py`, `kilo.py` | One CLI dialect's commands and event parsing |
-| `generic.py` | The generic line-oriented adapter |
+| `claude.py`, `codex.py`, `pi.py` | One CLI's live launch; Claude's and pi's event parsing |
+| `http_bridge.py` | The live launch OpenCode and Kilo share, behind the HTTP bridge |
+| `opencode.py`, `kilo.py` | One CLI's name, wrapper binary and catalog entry |
 | `registry.py` | Adapter lookup and construction |
 
 Existing callers use `cloud_agent_host.runtimes`; the package explicitly
@@ -175,7 +184,7 @@ implementation lives under `job-detail/`:
 | `JobDetailHeader` | Page header and conversation actions |
 | `JobTranscript` | Transcript projection and navigation |
 | `JobComposer`, `useJobComposerSettings` | Message input and composer settings |
-| `RunOutcome`, `GitPanel` | Outcome, publication, and Git interaction |
+| `RunOutcome`, `GitPanel` | Outcome, pull request, and Git interaction |
 | `JobDetailSidePanels`, `LazyPanels` | Workspace/inspector rendering and lazy loading |
 | `useJobDetailPanels` | Panel selection, focus, resizing, and retained panel state |
 | `useJobConversation` | Turn navigation, transcript scrolling, and reading position |

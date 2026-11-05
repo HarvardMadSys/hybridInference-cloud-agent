@@ -7,20 +7,25 @@ type ParsedValue =
   | { value: AdminSettingValue; additionalChanges?: Record<string, AdminSettingValue> }
   | { error: string };
 
+/** Whether S3 accepts `bucket` as the name of a general purpose bucket. */
+export function isS3BucketName(bucket: string): boolean {
+  return (
+    /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket) &&
+    !/^\d{1,3}(?:\.\d{1,3}){3}$/.test(bucket) &&
+    !/\.\.|\.-|-\./.test(bucket) &&
+    // Prefixes and suffixes S3 reserves for names it gives out itself.
+    !/^(?:xn--|sthree-|amzn-s3-demo-)/.test(bucket) &&
+    !/(?:-s3alias|--ol-s3|\.mrap|--x-s3|--table-s3)$/.test(bucket)
+  );
+}
+
 function parseArchiveBucket(draft: string): ParsedValue {
   if (!draft) return { value: '' };
   const uri = draft.startsWith('s3://');
   // Keep raw components: URL parsers can silently normalize unsafe path segments.
   const components = uri ? /^s3:\/\/([^/]+)(?:\/(.*))?$/.exec(draft) : null;
   const bucket = uri ? (components?.[1] ?? '') : draft;
-  if (
-    /\s/.test(draft) ||
-    !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket) ||
-    /^\d{1,3}(?:\.\d{1,3}){3}$/.test(bucket) ||
-    /\.\.|\.-|-\./.test(bucket) ||
-    /^(?:xn--|sthree-|amzn-s3-demo-)/.test(bucket) ||
-    /(?:-s3alias|--ol-s3|\.mrap|--x-s3|--table-s3)$/.test(bucket)
-  ) {
+  if (/\s/.test(draft) || !isS3BucketName(bucket)) {
     return { error: 'Enter a valid S3 bucket name or an S3 URI such as s3://bucket/prefix.' };
   }
   if (!uri) return { value: bucket };
@@ -44,6 +49,38 @@ function parseArchiveBucket(draft: string): ParsedValue {
 
 export function displayValue(value: AdminSettingValue): string {
   return typeof value === 'boolean' ? (value ? 'Enabled' : 'Disabled') : String(value);
+}
+
+interface SettingOption {
+  value: string;
+  label: string;
+}
+
+// Named choices for free-text settings whose usual values are internal names.
+// The server still accepts any value (a registered email provider, say), so a
+// saved value outside this list stays selectable instead of being replaced.
+const NAMED_OPTIONS = new Map<string, SettingOption[]>([
+  [
+    'accounts.email_provider',
+    [
+      { value: 'smtp', label: 'SMTP' },
+      { value: 'tencent_ses', label: 'Tencent SES' },
+    ],
+  ],
+]);
+
+/** The dropdown for a setting with named choices, keeping its saved value; else `null`. */
+export function namedOptions(key: string, saved: string): SettingOption[] | null {
+  const options = NAMED_OPTIONS.get(key);
+  if (!options) return null;
+  if (options.some((option) => option.value === saved)) return options;
+  return [...options, { value: saved, label: `${saved || '(empty)'} (current value)` }];
+}
+
+/** How a saved value reads: its named choice where it has one. */
+export function valueLabel(key: string, value: AdminSettingValue): string {
+  const named = NAMED_OPTIONS.get(key)?.find((option) => option.value === value);
+  return named?.label ?? displayValue(value);
 }
 
 export function parseValue(definition: AdminSettingDefinition, draft: string): ParsedValue {

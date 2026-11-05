@@ -60,3 +60,43 @@ async def test_a_notification_or_a_reset_of_the_listener_releases_parked_waits()
         await asyncio.sleep(0)
         wake()
         assert await asyncio.wait_for(parked, 1) != current
+
+
+async def test_work_only_one_host_can_take_wakes_only_that_host():
+    """A retained conversation's turn costs the other hosts no claim."""
+    signal = WorkSignal()
+    held = {host: signal.token_for(host) for host in ("runner-a", "runner-b")}
+    parked = {
+        host: asyncio.create_task(signal.wait(token, 30, host=host)) for host, token in held.items()
+    }
+    await asyncio.sleep(0)
+
+    signal.notified("runner-a")
+
+    assert await asyncio.wait_for(parked["runner-a"], 1) != held["runner-a"]
+    await asyncio.sleep(0)
+    assert not parked["runner-b"].done()
+    assert signal.token_for("runner-b") == held["runner-b"]
+
+    signal.notified("")
+
+    assert await asyncio.wait_for(parked["runner-b"], 1) != held["runner-b"]
+
+
+async def test_work_for_a_host_queued_while_it_claimed_answers_its_next_wait():
+    signal = WorkSignal()
+    held_before_claim = signal.token_for("runner-a")
+    signal.notify("runner-a")
+    assert (
+        await asyncio.wait_for(signal.wait(held_before_claim, 30, host="runner-a"), 1)
+        != held_before_claim
+    )
+
+
+async def test_a_wait_that_names_no_host_is_released_by_every_change():
+    signal = WorkSignal()
+    current = signal.token
+    parked = asyncio.create_task(signal.wait(current, 30))
+    await asyncio.sleep(0)
+    signal.notify("runner-a")
+    assert await asyncio.wait_for(parked, 1) != current

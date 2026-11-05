@@ -85,12 +85,19 @@ try:
         if directory_fd != parent_fd:
             opened.append(directory_fd)
         children = []
+        omitted = False
         try:
             names = os.listdir(directory_fd)
         except OSError:
             fail(49, "workspace directory cannot be read")
         for child_name in names:
             if child_name == ".git":
+                continue
+            try:
+                child_name.encode("utf-8")
+            except UnicodeEncodeError:
+                # Not UTF-8: no reply can name it, nor a request name it back.
+                omitted = True
                 continue
             try:
                 child = os.stat(child_name, dir_fd=directory_fd, follow_symlinks=False)
@@ -120,6 +127,8 @@ try:
             "path": relative,
             "kind": "directory",
             "entries": entries,
+            # Some entries are not listed: past the limit, or unnameable.
+            "truncated": omitted or len(children) > max_entries,
             "writable": True,
             "source": "workspace",
         })

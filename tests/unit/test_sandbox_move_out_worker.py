@@ -64,9 +64,10 @@ async def test_each_idle_group_is_asked_to_stop_and_a_busy_one_waits() -> None:
         ({}, 7200),
         ({"move_out_before_seconds": 0}, 0),
         ({"rotation_enabled": True}, 0),
-        # A granted extension reaches four hours; the window stays inside it.
+        # A granted extension reaches four hours; the window, and the renewal
+        # 15 minutes before it, stay inside it.
         ({"enabled": True, "extend_to_horizon_seconds": 14400}, 7200),
-        ({"enabled": True, "extend_to_horizon_seconds": 3600}, 3000),
+        ({"enabled": True, "extend_to_horizon_seconds": 3600}, 2100),
     ],
 )
 def test_the_move_out_window_never_reopens_after_an_extension(policy, expected) -> None:

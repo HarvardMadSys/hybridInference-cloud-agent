@@ -63,9 +63,9 @@
 
 1. 锁住所选对话，拒绝 `fork_in_progress` 和 `publication_pending`。
 2. 设置 `deleted_at = NOW()`。已有的 `deleted_at IS NULL` 检查会拒绝这个对话之后的新轮次、Fork 和归档操作。
-3. 取消排队中的任务：`state = 'cancelled'`，写法与取消 goal 轮次的 `CANCEL_QUEUED_GOAL_ROUNDS_SQL` 相同。这一步是必需的：`claim_job` 不检查 `deleted_at`，任务如果留在队列里，仍然会被领走执行。
+3. 取消排队中的任务：`state = 'cancelled'`，写法与取消 goal 轮次的 `CANCEL_QUEUED_GOAL_ROUNDS_SQL` 相同。这一步是必需的：`claim_job` 只在复查自动 goal 轮次时检查 `deleted_at`，其他任务如果留在队列里，仍然会被领走执行。
 4. 对运行中的任务设置 `cancel_requested`，由 worker 在下一次心跳时完成受 fence 保护的终止。
-5. 暂停 goal，暂停原因记为 `cancelled`，说明为“the conversation was deleted”。
+5. 暂停 goal，暂停原因记为 `cancelled`，说明为“the conversation was deleted”。已经暂停的 goal 保持原样；在删除之后才写入的 resume 会在写入时检查 `deleted_at`，不会让已删除对话的 goal 重新开始。
 6. 删除附件和待发送消息（原有行为）。
 7. 释放这个成员的 residency：把 `residency_status` 置为 `'none'`，返回每一代 residency 的 thread、generation、host 和 grant id。
 

@@ -3,13 +3,17 @@
 // from the component so the arithmetic is tested directly.
 
 import type { AdminUsageAggregate, AdminUsageDay } from '@/lib/api/adminUsage';
-import type { ContainerState, OwnerResourceDay, OwnerResourceTotals } from '@/lib/api/ownerUsage';
+import type {
+  ContainerState,
+  OwnerResourceDay,
+  OwnerResourceTotals,
+  UsageBucket,
+  UsageRange,
+} from '@/lib/api/ownerUsage';
 
-export const USAGE_PERIODS = [7, 30] as const;
-export type UsagePeriod = (typeof USAGE_PERIODS)[number];
-
-export const CHART_METRICS = ['cost', 'tokens', 'running', 'cpu', 'memory'] as const;
-export type ChartMetric = (typeof CHART_METRICS)[number];
+export type ChartMetric = 'cost' | 'tokens' | 'running' | 'cpu' | 'memory';
+/** What the chart offers: not cost, which each owner's provider keeps. */
+export const CHART_METRICS: readonly ChartMetric[] = ['tokens', 'running', 'cpu', 'memory'];
 
 /** States in the order the summary names them; a zero count is left out. */
 export const STATE_ORDER: ContainerState[] = [
@@ -93,14 +97,42 @@ export function tokenTotal(usage: AdminUsageAggregate): number | null {
   return tokensIn === null || tokensOut === null ? null : tokensIn + tokensOut;
 }
 
-/** Turns whose usage the Gateway has not reported yet. */
-export function unrecordedTurns(usage: AdminUsageAggregate): number {
-  return Math.max(0, usage.run_count - usage.runs_with_snapshot);
+/**
+ * The share of input tokens read from the cache, as the Admin Usage page's
+ * `cachedShare` reads it.
+ *
+ * Only a ratio both sides fully report is shown: a call that did not report
+ * one of the two would make it a guess, and a cache read larger than the input
+ * means the two were not counted the same way. Input already includes cached
+ * input, so the cache read is a part of it and is never added to it.
+ */
+export function cachedShare(usage: AdminUsageAggregate): number | null {
+  const totals = usage.totals;
+  const unknown = usage.unknown_rows;
+  if (!totals || totals.tokens_in == null || totals.cache_read == null) return null;
+  if (unknown && (unknown.tokens_in > 0 || unknown.cache_read > 0)) return null;
+  if (totals.tokens_in <= 0 || totals.cache_read > totals.tokens_in) return null;
+  return totals.cache_read / totals.tokens_in;
+}
+
+/** `42%`; a share above zero that rounds to none reads `<1%`, and an unknown one a dash. */
+export function formatShare(share: number | null): string {
+  if (share === null || !Number.isFinite(share)) return '—';
+  const percent = Math.round(share * 100);
+  return share > 0 && percent === 0 ? '<1%' : `${percent}%`;
+}
+
+/**
+ * Whether a known reasoning total leaves out calls that did not report one.
+ * An unknown total already reads as a dash and needs no such note.
+ */
+export function reasoningPartly(usage: AdminUsageAggregate): boolean {
+  return usage.totals?.reasoning != null && (usage.unknown_rows?.reasoning ?? 0) > 0;
 }
 
 export interface ChartDay {
   date: string;
-  /** False for today, which has not ended. */
+  /** False for the bucket that ends now, which is still going. */
   whole: boolean;
   tokens: AdminUsageDay | null;
   resources: OwnerResourceDay | null;
@@ -116,7 +148,8 @@ export function chartDays(
   const dates = resources?.length ? resources : (tokens ?? []);
   return dates.map((day) => ({
     date: day.date,
-    whole: Date.parse(day.until) - Date.parse(day.since) >= 86_400_000,
+    // A bucket clipped by the range's start is still whole; one clipped by now is not.
+    whole: Date.parse(day.until) % 86_400_000 === 0,
     tokens: tokensByDate.get(day.date) ?? null,
     resources: resourcesByDate.get(day.date) ?? null,
   }));
@@ -153,15 +186,56 @@ export function formatDayValue(metric: ChartMetric, value: number | null): strin
   return metric === 'tokens' ? compactCount(value) : decimal(value);
 }
 
-/** `Oct 9`, for a UTC calendar date. */
-export function shortDay(date: string, locale: string): string {
+/** `Oct 9`, for a UTC calendar date; `Oct 9, 2025` with ``withYear``. */
+export function shortDay(date: string, locale: string, withYear = false): string {
   const time = Date.parse(`${date}T00:00:00Z`);
   if (!Number.isFinite(time)) return date;
   return new Date(time).toLocaleDateString(locale, {
     month: 'short',
     day: 'numeric',
+    ...(withYear ? { year: 'numeric' } : {}),
     timeZone: 'UTC',
   });
+}
+
+/**
+ * A bucket's name: its day, the Monday its week starts, or its month. The year
+ * is named once the bars cross one, so `Jan` cannot be read as the wrong one.
+ */
+export function bucketLabel(
+  date: string,
+  bucket: UsageBucket,
+  locale: string,
+  withYear: boolean,
+): string {
+  if (bucket !== 'month') return shortDay(date, locale, withYear);
+  const time = Date.parse(`${date}T00:00:00Z`);
+  if (!Number.isFinite(time)) return date;
+  return new Date(time).toLocaleDateString(locale, {
+    month: 'short',
+    ...(withYear ? { year: 'numeric' } : {}),
+    timeZone: 'UTC',
+  });
+}
+
+/** Whether a chart's buckets span more than one calendar year. */
+export function crossesYear(dates: string[]): boolean {
+  return dates.length > 1 && dates[0].slice(0, 4) !== dates[dates.length - 1].slice(0, 4);
+}
+
+/** The range's first and last UTC days, as the reader's language writes dates. */
+export function rangeSpan(period: UsageRange, locale: string): { since: string; until: string } {
+  const sinceDay = period.since.slice(0, 10);
+  // ``until`` is now, or a midnight that ends the previous day.
+  const untilMs = Date.parse(period.until) - 1;
+  const untilDay = Number.isFinite(untilMs)
+    ? new Date(untilMs).toISOString().slice(0, 10)
+    : sinceDay;
+  const withYear = sinceDay.slice(0, 4) !== untilDay.slice(0, 4) || period.preset === 'all';
+  return {
+    since: shortDay(sinceDay, locale, withYear),
+    until: shortDay(untilDay, locale, withYear),
+  };
 }
 
 /**

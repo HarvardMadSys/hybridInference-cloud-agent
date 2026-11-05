@@ -106,7 +106,7 @@ def remote(tmp_path: Path) -> tuple[str, str, str, str]:
     return f"file://{tmp_path / 'remotes'}", "owner/name", first, head
 
 
-def test_initial_chat_checkout_is_populated_and_has_no_push_remote(tmp_path: Path, remote):
+def test_initial_chat_checkout_records_origin_without_a_credential(tmp_path: Path, remote):
     base, repo, _first, head = remote
     workdir = tmp_path / "job"
     workdir.mkdir()
@@ -115,7 +115,9 @@ def test_initial_chat_checkout_is_populated_and_has_no_push_remote(tmp_path: Pat
 
     assert resolved == head
     assert (workdir / "hello.py").read_text() == "def hello():\n    return 1\n"
-    assert _git("remote", cwd=workdir).strip() == ""
+    # origin is the plain URL: what a push buys is the GitHub relay's to decide.
+    assert _git("remote", cwd=workdir).strip() == "origin"
+    assert _git("remote", "get-url", "origin", cwd=workdir).strip() == f"{base}/{repo}.git"
 
 
 def test_a_pinned_commit_is_the_one_streamed_into_the_container(tmp_path: Path, remote):
@@ -301,15 +303,20 @@ def _child_started(child_pid: Path) -> bool:
 
 
 def _still_running(pid: int) -> bool:
-    """Whether ``pid`` exists and is not a zombie.
+    """Whether ``pid`` exists and has not exited.
 
     Read in one step: the process can exit between an existence check and the
-    read, and a status file that vanished means it ended.
+    read, and a status file that vanished means it ended. A zombie (``Z``) has
+    exited, and so has a process its parent is reaping (``X``): the kernel
+    shows that state for a moment before the status file goes, and reading
+    ``X`` as running failed this check about once in 30 runs on a busy host.
     """
     try:
-        return "\tZ" not in pathlib.Path(f"/proc/{pid}/status").read_text()
+        status = pathlib.Path(f"/proc/{pid}/status").read_text()
     except (FileNotFoundError, ProcessLookupError):
         return False
+    state = next((line.split()[1] for line in status.splitlines() if line.startswith("State:")), "")
+    return state not in {"", "Z", "X"}
 
 
 def _assert_ended(child_pid: Path) -> None:
@@ -383,7 +390,9 @@ def test_a_missing_follow_up_base_ships_only_what_it_adds_to_a_held_parent(
 
     class Manager:
         def import_base_bundle(self, spec, bundle, *, commit, env):
-            imported.update(bundle=bundle, commit=commit)
+            payload = bundle.read()
+            bundle.seek(0)
+            imported.update(bundle=payload, commit=commit)
 
     monkeypatch.setattr(runner_mod, "repo_clone_base_url", lambda **_: base)
     monkeypatch.setattr(runner_mod, "_sandbox_has_commit", has_commit)

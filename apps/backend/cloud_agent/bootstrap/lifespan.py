@@ -19,23 +19,28 @@ from typing import TYPE_CHECKING, Any
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.workers.agent_memory import maintain_agent_memories
 from cloud_agent.workers.attempts import reap_expired_attempts
-from cloud_agent.workers.background_wake import BackgroundWake
+from cloud_agent.workers.environment_maintenance import run_environment_maintenance
 from cloud_agent.workers.job_event_signal import JobEventSignal
 from cloud_agent.workers.mcp_decision_signal import McpDecisionSignal
+from cloud_agent.workers.notification_maintenance import run_notification_maintenance
 from cloud_agent.workers.notifications import listen
 from cloud_agent.workers.owner_change_signal import OwnerChangeSignal
+from cloud_agent.workers.recovery_maintenance import (
+    run_goal_scheduling_maintenance,
+    run_goal_wakeup_maintenance,
+    run_pending_message_maintenance,
+    run_queued_follow_up_maintenance,
+)
 from cloud_agent.workers.sandbox_deletion import coordinate_sandbox_deletions
 from cloud_agent.workers.sandbox_move_out import coordinate_move_out
-from cloud_agent.workers.snapshots import coordinate_shared_snapshots
 from cloud_agent.workers.work_signal import WorkSignal
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Coroutine
 
+    import asyncpg
     from fastapi import FastAPI
 
-    from cloud_agent.publish_worker import PublishStorage
-    from cloud_agent.workers.pr_archive import PrArchiveStorage
 
 #: The moved lifespan keeps logging under the module it came from: the
 #: deployment's log selection is on ``cloud_agent.app``.
@@ -45,14 +50,57 @@ logger = get_logger("cloud_agent.app")
 ENV_DATABASE_URL = "AGENT_DATABASE_URL"
 
 
-ENV_PUBLISH_BASE_BRANCH = "AGENT_PUBLISH_BASE_BRANCH"
+#: What every database session the service opens sets for itself.
+#:
+#: No JIT compilation. It pays off for statements that process millions of
+#: rows, and the largest reads here, the admin usage selection among them, stop
+#: at tens of thousands. But the planner prices a correlated subquery once per
+#: outer row, so a statement reading a few hundred indexed rows can be
+#: estimated past ``jit_above_cost``, and then compiles itself on every call.
+#: At a thousand hosts the admin host list spent 1.9 s compiling a statement
+#: that ran in 85 ms, and each reaper pass spent 170 ms compiling a check that
+#: ran in under one.
+DATABASE_SESSION_SETTINGS = {"jit": "off"}
+
+#: The connections the control plane holds open to its database: asyncpg's own
+#: default, written down so that changing it is a decision.
+DATABASE_POOL_SIZE = 10
 
 
-ENV_GITHUB_TOKEN = "AGENT_GITHUB_TOKEN"
+async def _release_as_is(_connection: asyncpg.Connection) -> None:
+    """Return a pooled connection to the pool without asyncpg's reset query.
+
+    The default reset runs ``SELECT pg_advisory_unlock_all(); CLOSE ALL;
+    UNLISTEN *; RESET ALL;`` on every release: one more round trip for every
+    repository call, since each acquires a connection per call. asyncpg still
+    rolls back a transaction left open, and drops its listeners, before this.
+
+    **No session state on a pooled connection.** That is what makes this safe.
+    Settings are ``SET LOCAL``; LISTEN has its own connection
+    (``workers/notifications.py``); and the one session advisory lock
+    (``storage/repositories/source_control.py``) is released, or its
+    connection reset, before the connection goes back. A session-level
+    ``SET``, LISTEN, advisory lock or cursor taken on a pooled connection would
+    outlive the caller that took it.
+    """
+
+
+async def create_database_pool(dsn: str) -> asyncpg.Pool:
+    """Open the control plane's connection pool."""
+    import asyncpg
+
+    pool: asyncpg.Pool = await asyncpg.create_pool(
+        dsn,
+        min_size=DATABASE_POOL_SIZE,
+        max_size=DATABASE_POOL_SIZE,
+        server_settings=DATABASE_SESSION_SETTINGS,
+        reset=_release_as_is,
+    )
+    return pool
 
 
 #: Held so the event loop cannot collect a running background task. Without
-#: this the reaper and publisher are eligible for garbage collection the moment
+#: this the reaper and the other loops are eligible for garbage collection the moment
 #: nothing else references them, and they stop without a word.
 _BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
 
@@ -61,8 +109,8 @@ def _forget_background_task(task: asyncio.Task[Any]) -> None:
     """Drop a finished background task, and say so when it died rather than stopped.
 
     Every loop started here is meant to run until shutdown cancels it. One that
-    ends with an exception has stopped doing its work -- reaping, publishing,
-    renewing -- while the process goes on serving, and the only other place
+    ends with an exception has stopped doing its work -- reaping, renewing,
+    maintaining -- while the process goes on serving, and the only other place
     the error surfaces is shutdown, which re-raises it.
     """
     _BACKGROUND_TASKS.discard(task)
@@ -80,26 +128,44 @@ def _forget_background_task(task: asyncio.Task[Any]) -> None:
         )
 
 
-#: Historical shutdown order. Each attribute is cancelled and awaited on its
-#: own, so one task that already failed cannot skip the ones after it.
+#: Every background task the lifespan starts, by its ``app.state`` attribute,
+#: in shutdown order. Each is cancelled and awaited on its own, so one task
+#: that already failed cannot skip the ones after it. A task can only be
+#: started under a name listed here, so shutdown stops all of them.
 _SHUTDOWN_TASK_ATTRS: tuple[str, ...] = (
     "settings_task",
     "mcp_maintenance_task",
     "mcp_catalog_task",
     "reaper_task",
-    "snapshot_task",
+    "environment_maintenance_task",
+    "notification_maintenance_task",
+    "queued_follow_up_maintenance_task",
+    "goal_wakeup_maintenance_task",
+    "goal_scheduling_maintenance_task",
+    "pending_message_maintenance_task",
     "sandbox_deletion_task",
     "sandbox_move_out_task",
-    "ledger_task",
     "capacity_task",
     "agent_memory_task",
     "queue_monitor_task",
-    "publish_task",
-    "pr_archive_task",
     "profiling_policy_task",
     "compute_resource_task",
+    "account_access_task",
+    "account_broadcast_task",
     "notification_listener_task",
 )
+
+
+def _spawn(app: FastAPI, name: str, work: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
+    """Start a background loop, keep it referenced, and store it where shutdown finds it."""
+    if name not in _SHUTDOWN_TASK_ATTRS:
+        work.close()
+        raise ValueError(f"{name} is not in the shutdown order")
+    task = asyncio.create_task(work)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_forget_background_task)
+    setattr(app.state, name, task)
+    return task
 
 
 def _build_source_control(app: FastAPI) -> None:
@@ -114,58 +180,6 @@ def _build_source_control(app: FastAPI) -> None:
     from cloud_agent.source_control_runtime import SourceControlRuntime
 
     app.state.source_control = SourceControlRuntime.from_env()
-
-
-def _start_publisher(app: FastAPI, store: PublishStorage) -> None:
-    """Start the publish loop, idle if no git credential is configured."""
-    from cloud_agent.publish_worker import GitHubCredential, publish_loop
-    from cloud_agent.settings import setting_env
-
-    def credential_provider() -> GitHubCredential | None:
-        """Mint the credential for one publish, or None if unconfigured.
-
-        Read per call rather than captured, so rotating the token does not
-        need a restart.
-        """
-        token = setting_env(ENV_GITHUB_TOKEN, "")
-        return GitHubCredential(token) if token else None
-
-    task = asyncio.create_task(
-        publish_loop(
-            store,
-            credential_provider=credential_provider,
-            github_app=app.state.source_control.github,
-            grants=app.state.grants,
-            wake=getattr(app.state, "background_wake", None),
-        )
-    )
-    _BACKGROUND_TASKS.add(task)
-    task.add_done_callback(_forget_background_task)
-    app.state.publish_task = task
-
-
-def _start_pr_archiver(app: FastAPI, store: PrArchiveStorage) -> None:
-    """Start durable PR merge checks with live source-control credentials."""
-    from cloud_agent.publish_worker import GitHubCredential
-    from cloud_agent.settings import setting_env
-    from cloud_agent.workers.pr_archive import pr_archive_loop
-
-    def credential_provider() -> GitHubCredential | None:
-        """Read the optional deployment credential for each check."""
-        token = setting_env(ENV_GITHUB_TOKEN, "")
-        return GitHubCredential(token) if token else None
-
-    task = asyncio.create_task(
-        pr_archive_loop(
-            store,
-            credential_provider=credential_provider,
-            github_app=app.state.source_control.github,
-            client=app.state.http,
-        )
-    )
-    _BACKGROUND_TASKS.add(task)
-    task.add_done_callback(_forget_background_task)
-    app.state.pr_archive_task = task
 
 
 async def _invoke(action: Any, errors: list[BaseException]) -> None:
@@ -232,7 +246,7 @@ def _surface_cleanup_errors(primary: BaseException | None, errors: list[BaseExce
     raise errors[0]
 
 
-async def _shutdown_lifespan(
+async def _shutdown_lifespan(  # noqa: PLR0912 complexity baseline, #771
     app: FastAPI,
     *,
     pool: Any,
@@ -311,7 +325,7 @@ async def _shutdown_lifespan(
             _BACKGROUND_TASKS.discard(task)
     await _invoke(close_host, errors)
     # Close what was opened, innermost first: the per-sandbox-manager pools, the
-    # GitHub App's own client, then the shared gateway pool.
+    # GitHub App's own client, then the shared outbound pool.
     await _invoke(close_sandbox_manager_clients, errors)
     source_control = getattr(app.state, "source_control", None)
     if source_control is not None:
@@ -326,27 +340,31 @@ async def _shutdown_lifespan(
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[None]:
-    """Open the store, optionally start the reaper and publisher, tear down.
+async def lifespan(  # noqa: PLR0915 complexity baseline, #771
+    app: FastAPI, *, background: bool = True, source_control: bool | None = None
+) -> AsyncIterator[None]:
+    """Open the store, optionally start the reaper and maintenance, tear down.
 
     Args:
         app: The application whose state is being built.
-        background: Whether this process owns the reaper and the publisher.
+        background: Whether this process owns the reaper and the maintenance loops.
             False for a second listener sharing the database — see the comment
             below for why that is not merely wasteful.
+        source_control: Whether this listener loads the GitHub and GitLab
+            credentials. Defaults to ``background``; the GitHub relay needs the
+            App's (to renew an owner's token) without owning any background work.
 
     The database is required. A control plane without one cannot claim, fence
     or record anything, so it refuses to start rather than serving an API that
     fails at every call.
     """
-    import asyncpg
+    from http.cookiejar import CookieJar, DefaultCookiePolicy
+
     import httpx
 
+    from cloud_agent.accounts.config import refuse_retired_configuration
     from cloud_agent.application.profiling_control import ProfilingControlService
     from cloud_agent.capacity_history import prune_host_capacity_history
-    from cloud_agent.gateway import GatewayClient
-    from cloud_agent.grants import GrantClient
-    from cloud_agent.ledger import collect_usage_snapshots
     from cloud_agent.mcp.catalog import McpCatalog
     from cloud_agent.mcp.runtime import close_host, maintain_host_sessions
     from cloud_agent.measurement_writer import MeasurementWriter, reset_writer
@@ -356,19 +374,21 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
     from cloud_agent.settings import (
         initialize_settings,
         reset_settings,
-        setting_env,
         synchronize_settings,
     )
     from cloud_agent.storage.assembly import Storage
     from cloud_agent.workers.profiling_control import ProfilingPolicyWorker
 
+    # Before the database is touched at all: a deployment still configured for
+    # the removed Gateway integration stops here, with the variables named.
+    refuse_retired_configuration()
     dsn = os.environ.get(ENV_DATABASE_URL, "")
     if not dsn:
         raise RuntimeError(f"{ENV_DATABASE_URL} must be set")
 
     # One region after the pool exists: any later failure still releases what
     # startup opened, and a cleanup error must not replace that failure.
-    pool = await asyncpg.create_pool(dsn)
+    pool = await create_database_pool(dsn)
     http = None
     local_measurement_writer = None
     writer_installed = False
@@ -380,50 +400,51 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
         # Schema is Alembic's. There is no initialize step to run: the store's
         # no-op one went with the store, and the DDL and backfills it used to
         # carry have been migrations since 0001.
-        from cloud_agent.identity_namespace import ensure_gateway_namespace
+        from cloud_agent.bootstrap.identity import (
+            account_tasks,
+            attach_owner_directory,
+            bind_identity_source,
+        )
 
-        # An empty deployment must remain reachable through recovery-token setup.
-        # A recorded foreign namespace still refuses startup before workers run.
-        issuer = (setting_env("GATEWAY_ISSUER") or "").strip() or None
-        app.state.gateway_issuer = await ensure_gateway_namespace(pool, issuer)
+        # A database whose owners are not this service's accounts refuses
+        # startup before any worker runs.
+        await bind_identity_source(pool)
 
         app.state.storage = storage
-        app.state.settings_task = asyncio.create_task(synchronize_settings(storage.settings))
-        _BACKGROUND_TASKS.add(app.state.settings_task)
-        app.state.settings_task.add_done_callback(_forget_background_task)
-        # One pool, shared by both gateway clients. Each call used to build its own
-        # client and pay a connect — and a TLS handshake, where the gateway is
-        # behind TLS — and admission is not an occasional call: `require_agent_owner`
-        # is a dependency of every owner route, terminal input and resize included.
-        # Both clients pass their own deadline per request, so this one carries no
-        # default timeout of its own.
-        http = httpx.AsyncClient()
+        # A task this process does not start stays None.
+        for name in _SHUTDOWN_TASK_ATTRS:
+            setattr(app.state, name, None)
+        _spawn(app, "settings_task", synchronize_settings(storage.settings))
+        # One outbound pool. Draft pull requests, web search, the MCP catalog and
+        # CloudLab borrow it, each at a bounded rate, rather than each paying a
+        # connect and a TLS handshake per call. Every borrower passes its own
+        # deadline per request, so this one carries no default timeout of its
+        # own.
+        #
+        # It keeps no cookies. A cookie one answer set would go out with every
+        # later request to that host, and these requests carry repositories'
+        # tokens; the per-call clients they replaced kept none.
+        #
+        # Idle connections expire at httpx's five seconds: no upstream here
+        # documents a longer idle timeout.
+        http = httpx.AsyncClient(cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=[])))
         app.state.http = http
-        app.state.gateway = GatewayClient(client=http)
-        # The sandbox's credential is minted at the gateway now, so the claim
-        # path and the renewal/revocation passes share that pool rather than each
-        # building their own per call. They take the same seam; until this was
-        # wired, the comment here described sharing that was not happening.
-        app.state.grants = GrantClient(client=http)
-        if background:
+        # Identity and admission are answered from this database.
+        attach_owner_directory(app, storage)
+        if background if source_control is None else source_control:
             _build_source_control(app)
         else:
             app.state.source_control = None
 
         # **The background work belongs to exactly one process.** The attempt
-        # maintenance task supersedes lapsed attempts and revokes grants; its
-        # owned sibling task renews live grants. The publisher opens pull
-        # requests. A second listener on this same database — the MCP relay is
-        # one — running its own copies would renew every grant twice per
-        # interval, double the load it puts on the gateway, and have two workers
-        # racing for the same publish.
+        # maintenance task supersedes lapsed attempts. A second listener on this
+        # same database — the MCP and GitHub relays are two — running its own
+        # copies would reap every lease twice and race the other maintenance.
         #
         # So this is a parameter of the lifespan rather than a property of it, and
         # `create_mcp_app` says no.
         app.state.mcp_catalog = None
-        app.state.mcp_catalog_task = None
         app.state.compute_commands = None
-        app.state.compute_resource_task = None
         if background:
             from cloud_agent.bootstrap.compute import build_compute_runtime
 
@@ -432,64 +453,62 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
                 host_pool=storage.host_pool,
                 http=http,
             )
-            app.state.compute_resource_task = asyncio.create_task(compute_worker.run())
-            _BACKGROUND_TASKS.add(app.state.compute_resource_task)
-            app.state.compute_resource_task.add_done_callback(_forget_background_task)
+            _spawn(app, "compute_resource_task", compute_worker.run())
             app.state.mcp_catalog = McpCatalog(storage.mcp_catalog, http)
-            app.state.mcp_catalog_task = asyncio.create_task(app.state.mcp_catalog.run())
-            app.state.mcp_catalog_task.add_done_callback(_forget_background_task)
-            reaper = asyncio.create_task(
-                reap_expired_attempts(
+            _spawn(app, "mcp_catalog_task", app.state.mcp_catalog.run())
+            _spawn(
+                app,
+                "reaper_task",
+                reap_expired_attempts(storage),
+            )
+            _spawn(
+                app,
+                "environment_maintenance_task",
+                run_environment_maintenance(storage.environments, storage.environment_snapshots),
+            )
+            _spawn(
+                app,
+                "notification_maintenance_task",
+                run_notification_maintenance(storage.notification_maintenance),
+            )
+            _spawn(
+                app, "queued_follow_up_maintenance_task", run_queued_follow_up_maintenance(storage)
+            )
+            _spawn(
+                app,
+                "goal_wakeup_maintenance_task",
+                run_goal_wakeup_maintenance(
                     storage,
-                    grants=app.state.grants,
                     github_app=app.state.source_control.github,
-                    gateway=app.state.gateway,
-                )
+                    owners=app.state.owners,
+                ),
             )
-            # The workers below wait on this as well as their clocks; the shared
-            # listener started further down is what sets it.
-            app.state.background_wake = BackgroundWake()
-            snapshot_coordinator = asyncio.create_task(
-                coordinate_shared_snapshots(storage, wake=app.state.background_wake)
+            _spawn(
+                app, "goal_scheduling_maintenance_task", run_goal_scheduling_maintenance(storage)
             )
-            sandbox_deletions = asyncio.create_task(coordinate_sandbox_deletions(storage))
-            sandbox_move_out = asyncio.create_task(coordinate_move_out(storage))
-            ledger_collector = asyncio.create_task(
-                collect_usage_snapshots(
-                    storage.ledger, app.state.grants, wake=app.state.background_wake
-                )
+            _spawn(
+                app,
+                "pending_message_maintenance_task",
+                run_pending_message_maintenance(
+                    storage,
+                    github_app=app.state.source_control.github,
+                    owners=app.state.owners,
+                ),
             )
+            _spawn(app, "sandbox_deletion_task", coordinate_sandbox_deletions(storage))
+            _spawn(app, "sandbox_move_out_task", coordinate_move_out(storage))
             # Host capacity history keeps filling whether or not anybody has the
             # admin page open — that is the whole reason it is stored at all rather
             # than accumulated in the browser. The points are written by the
             # heartbeats that accept them; what runs here is the retention that
             # bounds the table, in its own task, so a slow delete cannot delay a
             # heartbeat or the reaper.
-            capacity_history = asyncio.create_task(
-                prune_host_capacity_history(storage.host_capacity)
-            )
-            agent_memories = asyncio.create_task(maintain_agent_memories(storage.agent_memory))
-            _BACKGROUND_TASKS.add(reaper)
-            _BACKGROUND_TASKS.add(snapshot_coordinator)
-            _BACKGROUND_TASKS.add(sandbox_deletions)
-            _BACKGROUND_TASKS.add(sandbox_move_out)
-            _BACKGROUND_TASKS.add(ledger_collector)
-            _BACKGROUND_TASKS.add(capacity_history)
-            _BACKGROUND_TASKS.add(agent_memories)
-            reaper.add_done_callback(_forget_background_task)
-            snapshot_coordinator.add_done_callback(_forget_background_task)
-            sandbox_deletions.add_done_callback(_forget_background_task)
-            sandbox_move_out.add_done_callback(_forget_background_task)
-            ledger_collector.add_done_callback(_forget_background_task)
-            capacity_history.add_done_callback(_forget_background_task)
-            agent_memories.add_done_callback(_forget_background_task)
-            app.state.reaper_task = reaper
-            app.state.snapshot_task = snapshot_coordinator
-            app.state.sandbox_deletion_task = sandbox_deletions
-            app.state.sandbox_move_out_task = sandbox_move_out
-            app.state.ledger_task = ledger_collector
-            app.state.capacity_task = capacity_history
-            app.state.agent_memory_task = agent_memories
+            _spawn(app, "capacity_task", prune_host_capacity_history(storage.host_capacity))
+            _spawn(app, "agent_memory_task", maintain_agent_memories(storage.agent_memory))
+            for name, work in account_tasks(
+                storage, mailer=getattr(app.state, "account_mailer", None)
+            ):
+                _spawn(app, name, work)
             # The profiling policy loop runs only here, in the one main process
             # that owns the reaper: file and terminal requests are rooted in this
             # process alone (the relay listener roots none, see below), so this is
@@ -502,79 +521,53 @@ async def lifespan(app: FastAPI, *, background: bool = True) -> AsyncIterator[No
                 host_pool=storage.host_pool,
             )
             profiling_worker = ProfilingPolicyWorker(service=profiling_service)
-            app.state.profiling_control_service = profiling_service
             app.state.profiling_policy_worker = profiling_worker
-            app.state.profiling_policy_task = asyncio.create_task(profiling_worker.run())
-            _BACKGROUND_TASKS.add(app.state.profiling_policy_task)
-            app.state.profiling_policy_task.add_done_callback(_forget_background_task)
-            app.state.queue_monitor_task = asyncio.create_task(monitor_queue(storage.host_pool))
-            _BACKGROUND_TASKS.add(app.state.queue_monitor_task)
-            app.state.queue_monitor_task.add_done_callback(_forget_background_task)
+            _spawn(app, "profiling_policy_task", profiling_worker.run())
+            _spawn(app, "queue_monitor_task", monitor_queue(storage.host_pool))
             # One connection to Postgres answers what waits on a change: idle hosts
             # parked on the worker wait endpoint (a job was queued, requeued or
             # ended), owners' event streams (their job stored an event or changed
             # state), owners' change streams (one of their jobs, conversations,
-            # usage, queue, tool approvals or publications changed), and this
-            # process's own snapshot, publish and usage workers.
+            # usage, queue or tool approvals changed), and this process's own
+            # usage workers.
             app.state.work_signal = WorkSignal()
             app.state.job_event_signal = JobEventSignal()
             app.state.owner_change_signal = OwnerChangeSignal()
-            app.state.notification_listener_task = asyncio.create_task(
+            _spawn(
+                app,
+                "notification_listener_task",
                 listen(
                     dsn,
                     (
                         app.state.work_signal,
                         app.state.job_event_signal,
                         app.state.owner_change_signal,
-                        app.state.background_wake,
                     ),
-                )
+                ),
             )
-            _BACKGROUND_TASKS.add(app.state.notification_listener_task)
-            app.state.notification_listener_task.add_done_callback(_forget_background_task)
             # This listener holds no tool call for its owner's decision.
             app.state.mcp_decision_signal = None
-            _start_publisher(app, storage)
-            _start_pr_archiver(app, storage)
             logger.info("cloud agent control plane started")
         else:
             # The relay listener roots no file or terminal request, so it has no
             # configuration to apply and nothing to collect.
-            app.state.profiling_control_service = None
             app.state.profiling_policy_worker = None
-            app.state.profiling_policy_task = None
-            app.state.reaper_task = None
-            app.state.snapshot_task = None
-            app.state.sandbox_deletion_task = None
-            app.state.sandbox_move_out_task = None
-            app.state.ledger_task = None
-            app.state.capacity_task = None
-            app.state.agent_memory_task = None
-            app.state.queue_monitor_task = None
-            app.state.publish_task = None
-            app.state.pr_archive_task = None
             app.state.work_signal = None
             app.state.job_event_signal = None
             app.state.owner_change_signal = None
-            app.state.background_wake = None
             # The relay holds tool calls for their owners' decisions, and a
             # decision wakes the call it names: its own connection, on that one
             # channel.
             app.state.mcp_decision_signal = McpDecisionSignal()
-            app.state.notification_listener_task = asyncio.create_task(
-                listen(dsn, (app.state.mcp_decision_signal,))
-            )
-            _BACKGROUND_TASKS.add(app.state.notification_listener_task)
-            app.state.notification_listener_task.add_done_callback(_forget_background_task)
+            _spawn(app, "notification_listener_task", listen(dsn, (app.state.mcp_decision_signal,)))
             logger.info("cloud agent relay listener started")
 
         # Reached only after the start log. Shutdown then logs the stop line,
         # including when a later setup step fails.
         entered = True
         # Each listener owns upstream sockets in its own process, even when it
-        # does not run the control plane's grant reaper or publisher.
-        app.state.mcp_maintenance_task = asyncio.create_task(maintain_host_sessions(storage))
-        app.state.mcp_maintenance_task.add_done_callback(_forget_background_task)
+        # does not run the control plane's grant reaper or maintenance.
+        _spawn(app, "mcp_maintenance_task", maintain_host_sessions(storage))
         # Created per process, but worker tasks remain lazy until a selected
         # file/terminal record is actually offered.
         local_measurement_writer = MeasurementWriter()

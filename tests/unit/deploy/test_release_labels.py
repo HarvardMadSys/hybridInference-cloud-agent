@@ -20,7 +20,7 @@ DOCKERFILES = (
     "deploy/control-plane/Dockerfile.web",
     "deploy/host/Dockerfile.agent-runner",
     "deploy/sandbox/Dockerfile.agent-sandbox",
-    "deploy/host/Dockerfile.agent-gateway-tunnel",
+    "deploy/host/Dockerfile.agent-ssh-tunnel",
 )
 
 SOURCE_URL = "https://github.com/HarvardMadSys/hybridInference-cloud-agent"

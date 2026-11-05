@@ -1,7 +1,7 @@
 """A resent submission is the same submission; an administrator is a person.
 
 Both halves of ``0002_request_keys_and_actors``: the key an owner sends with
-a create or follow-up returns the job that key already made, refuses the key
+a create or a message returns what that key already made, refuses the key
 under different content, and survives two sends racing; and the audit trail
 carries who acted, not only from where.
 """
@@ -99,38 +99,34 @@ async def test_two_sends_racing_produce_one_job(pool, store: Storage):
         assert await conn.fetchval("SELECT COUNT(*) FROM agent_threads") == 1
 
 
-async def test_a_resent_follow_up_returns_the_turn_the_first_send_made(pool, store: Storage):
+async def test_a_resent_message_returns_what_the_first_send_made(pool, store: Storage):
     parent = await _create_job(store)
-    payload = {"parent_job_id": parent["id"], "prompt": "and then"}
-    fingerprint = request_fingerprint("follow_up", payload)
-    first = await store.conversation_commands.create_follow_up(
-        parent_job_id=parent["id"],
-        user_id="user-1",
-        prompt="and then",
-        client_request_id="turn-2",
-        client_request_fingerprint=fingerprint,
-    )
-    again = await store.conversation_commands.create_follow_up(
-        parent_job_id=parent["id"],
-        user_id="user-1",
-        prompt="and then",
-        client_request_id="turn-2",
-        client_request_fingerprint=fingerprint,
-    )
-    assert first is not None and again is not None
-    assert again["id"] == first["id"] and again["turn_no"] == 2
-    edited = await store.conversation_commands.create_follow_up(
-        parent_job_id=parent["id"],
-        user_id="user-1",
-        prompt="and then something else",
-        client_request_id="turn-2",
-        client_request_fingerprint=request_fingerprint(
-            "follow_up", {**payload, "prompt": "and then something else"}
-        ),
+    payload = {"thread_id": parent["thread_id"], "prompt": "and then"}
+
+    async def send(prompt: str, fingerprint: str) -> dict:
+        return await store.pending_messages.submit_message(
+            thread_id=parent["thread_id"],
+            user_id="user-1",
+            prompt=prompt,
+            skill_ids=None,
+            attachment_ids=None,
+            model=None,
+            reasoning_effort=None,
+            client_request_id="turn-2",
+            client_request_fingerprint=fingerprint,
+        )
+
+    fingerprint = request_fingerprint("thread_message", payload)
+    first = await send("and then", fingerprint)
+    again = await send("and then", fingerprint)
+    assert again["message"]["id"] == first["message"]["id"]
+    edited = await send(
+        "and then something else",
+        request_fingerprint("thread_message", {**payload, "prompt": "and then something else"}),
     )
     assert edited == {"error": "client_request_conflict"}
     async with pool.acquire() as conn:
-        assert await conn.fetchval("SELECT COUNT(*) FROM agent_jobs") == 2
+        assert await conn.fetchval("SELECT COUNT(*) FROM agent_pending_messages") == 1
 
 
 async def test_a_key_travels_with_its_fingerprint(pool, store: Storage):

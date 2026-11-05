@@ -25,6 +25,7 @@ import {
   type PointerEvent,
 } from 'react';
 
+import { Select } from '@/components/ui/Select';
 import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import { filterSteps, type TrajectoryStep } from './trajectorySteps';
 import { preview, toSessionLog, type TrajectoryLane } from './trajectory';
@@ -462,11 +463,14 @@ function ExecutionOverview({
     // produced. Without this, a draft interval and the frame loop walking the
     // window would carry on after the reader asked for it to stop, and the
     // release would commit the selection they just cancelled.
+    const gesture = dragRef.current !== null || panRef.current !== null;
     stopEdgePan();
     dragRef.current = null;
     panRef.current = null;
     setPanning(false);
     setDraft(null);
+    // Cancelling the gesture claims the key, so it cannot also stop the run.
+    if (gesture) event.preventDefault();
     if (range !== null) {
       event.preventDefault();
       commitRange(null);
@@ -827,22 +831,19 @@ export function TrajectoryView({
             onChange={(event) => onQueryChange(event.target.value)}
             placeholder="Search steps"
             aria-label="Search steps"
-            className="min-w-0 basis-full rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-[13px] text-gray-900 outline-none focus:border-gray-300 dark:border-white/10 dark:bg-gray-950 dark:text-gray-100 sm:flex-1 sm:basis-auto"
+            className="ui-input min-w-0 basis-full sm:flex-1 sm:basis-auto"
           />
           {subagents.length > 0 && onSubagentFilterChange ? (
-            <select
+            <Select
               value={subagentFilter}
-              onChange={(event) => onSubagentFilterChange(event.target.value)}
+              onValueChange={onSubagentFilterChange}
               aria-label="Show steps from"
-              className="min-w-0 max-w-full shrink rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-[12px] text-gray-700 outline-none focus:border-gray-300 dark:border-white/10 dark:bg-gray-950 dark:text-gray-200 sm:max-w-64"
-            >
-              <option value="">All agents</option>
-              {subagents.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
+              className="ui-input min-w-0 max-w-full shrink px-2 py-1.5 text-[12px] sm:max-w-64"
+              options={[
+                { value: '', label: 'All agents' },
+                ...subagents.map(({ value, label }) => ({ value, label })),
+              ]}
+            />
           ) : null}
           {focused !== null ? (
             <button

@@ -15,20 +15,15 @@ from typing import Any, cast
 import pytest
 
 from cloud_agent import ports
-from cloud_agent.publish_worker import PublishStorage
 from cloud_agent.storage.assembly import Storage
-from cloud_agent.workers import attempts as attempt_worker, snapshots as snapshot_worker
-from cloud_agent.workers.pr_archive import PrArchiveStorage
+from cloud_agent.workers import attempts as attempt_worker
+from cloud_agent.workers.terminal_replay import TerminalReplayStore
 
 #: Every protocol a background task is handed the real ``Storage`` for. They
 #: live beside the loops that declare them now, not in `app.py`.
 TASK_PROTOCOLS = [
-    attempt_worker._SettledTerminals,
-    attempt_worker._GrantRenewal,
+    TerminalReplayStore,
     attempt_worker._Reaping,
-    snapshot_worker._SnapshotCapture,
-    PublishStorage,
-    PrArchiveStorage,
 ]
 
 
@@ -56,23 +51,19 @@ def test_every_declared_port_is_implemented_by_what_assembly_supplies(protocol: 
     assert not gaps, f"{protocol.__name__}: assembly supplies implementations missing {gaps}"
 
 
-def test_snapshot_work_is_reached_for_through_its_port_not_the_store() -> None:
-    """The exact shape the capture coordinator and publish worker depend on.
+def test_the_retired_publication_capabilities_are_not_assembled() -> None:
+    """The trusted publisher and its snapshot coordinator are gone, with their port.
 
-    ``claim_due_sandbox_snapshot`` and its neighbours live on the snapshot
-    port. A caller that reaches for them on the top-level store gets ``None``
-    from ``getattr`` and returns without claiming anything -- no exception, no
-    log line, and a shared workspace that stays unpublished for good.
+    Agents open their own pull requests now. A caller still reaching for the
+    snapshot repository through ``getattr`` would silently do nothing, so the
+    assembly must not offer one under either name.
     """
     storage = _assembled_storage()
+    assert not hasattr(storage, "snapshot")
     for method in (
         "claim_due_sandbox_snapshot",
         "pending_snapshot_base_import",
         "reap_stalled_sandbox_snapshot_captures",
         "reap_stalled_snapshot_publishes",
     ):
-        assert hasattr(storage.snapshot, method)
-        assert not hasattr(storage, method), (
-            f"{method} is reachable on the top-level store, so a caller using "
-            "getattr against it would silently appear to work"
-        )
+        assert not hasattr(storage, method)

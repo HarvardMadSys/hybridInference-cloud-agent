@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
+import threading
 from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
 from cloud_agent.source_control import SourceControlCipher, SourceControlError
+from cloud_agent_host import environment_preparation
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
 from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_shared.environment import (
@@ -189,6 +192,47 @@ class _Backend:
         return _Process("demo-secret-123456", 1 if self.fail else 0)
 
 
+def test_running_preparation_receipts_are_coalesced_but_final_state_is_durable(
+    monkeypatch, tmp_path
+):
+    """Chatty setup output must not turn every chunk into an fsync."""
+    now = [0.0]
+    backend = _Backend()
+
+    class _ChattyProcess(_Process):
+        def lines(self):
+            for index in range(12):
+                now[0] += 1
+                yield f"line {index}\n"
+
+    def spawn(spec):
+        backend.calls.append(spec)
+        return _ChattyProcess()
+
+    backend.spawn = spawn
+    saves: list[dict[str, object]] = []
+    monkeypatch.setattr(environment_preparation.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        EnvironmentPreparation,
+        "_save",
+        staticmethod(lambda _path, receipt: saves.append(json.loads(json.dumps(receipt)))),
+    )
+
+    result = EnvironmentPreparation(tmp_path).prepare(
+        backend, BoundEnvironment(binding_id="bound", setup_script="install")
+    )
+
+    # Initial running receipt, then only two five-second progress checkpoints.
+    running_setup = [
+        save
+        for save in saves
+        if any(step["phase"] == "setup" and step["state"] == "running" for step in save["steps"])
+    ]
+    assert len(running_setup) == 3
+    assert [step["state"] for step in result["steps"]] == ["succeeded", "succeeded"]
+    assert saves[-1]["steps"][0]["output"].endswith("line 11\n")
+
+
 def test_preparation_is_fixed_across_member_and_broker_restarts(tmp_path):
     backend = _Backend()
     environment = BoundEnvironment(
@@ -216,6 +260,21 @@ def test_preparation_is_fixed_across_member_and_broker_restarts(tmp_path):
         prepare.prepare(backend, environment.model_copy(update={"binding_id": "another"}))
 
 
+def test_forgetting_a_removed_container_drops_only_its_receipt(tmp_path):
+    backend = _Backend()
+    prepare = EnvironmentPreparation(tmp_path)
+    prepare.prepare(backend, BoundEnvironment(binding_id="bound", setup_script="install"))
+    held = sorted(tmp_path.iterdir())
+    assert [path.suffix for path in held] == [".json", ".lock"]
+
+    prepare.forget("another-container")
+    assert sorted(tmp_path.iterdir()) == held
+    prepare.forget("exact-container")
+    assert list(tmp_path.iterdir()) == []
+    assert prepare.status(backend, "bound") == {"ready": False}
+    prepare.forget("exact-container")
+
+
 def test_failed_installation_does_not_start_services_or_record_success(tmp_path):
     backend = _Backend()
     backend.fail = True
@@ -228,6 +287,43 @@ def test_failed_installation_does_not_start_services_or_record_success(tmp_path)
     result = prepare.prepare(backend, environment)
     assert len(backend.calls) == 3
     assert all(s["state"] == "succeeded" for s in result["steps"])
+
+
+@pytest.mark.parametrize(
+    ("revoked", "exit_code", "state"),
+    [
+        pytest.param(True, 0, "cancelled", id="stopped"),
+        pytest.param(False, 1, "failed", id="failed"),
+        pytest.param(False, 130, "failed", id="exited-130-itself"),
+    ],
+)
+def test_a_stopped_installation_is_recorded_as_cancelled_and_a_failed_one_as_failed(
+    tmp_path, revoked, exit_code, state
+):
+    # A Stop revokes the preparation, whose script run_setup then kills and
+    # reports as stopped (130). A script that exits 130 by itself still failed.
+    backend = _Backend()
+
+    def spawn(spec):
+        backend.calls.append(spec)
+        return _Process("installing", exit_code)
+
+    backend.spawn = spawn
+    cancel = threading.Event()
+    if revoked:
+        cancel.set()
+    environment = BoundEnvironment(binding_id="bound", setup_script="install", start_script="start")
+    prepare = EnvironmentPreparation(tmp_path)
+    reported = []
+
+    with pytest.raises(SandboxError, match="Environment setup"):
+        prepare.prepare(backend, environment, callback=reported.append, cancel=cancel)
+
+    assert len(backend.calls) == 1
+    status = prepare.status(backend, "bound")
+    assert [(step["phase"], step["state"]) for step in status["steps"]] == [("setup", state)]
+    assert reported[-1]["state"] == state
+    assert not status["ready"]
 
 
 def test_masked_output_is_idempotent_and_user_data_ids_are_still_masked():
@@ -259,30 +355,6 @@ def test_task_only_variables_are_refused_and_an_empty_list_is_ignored():
             "environment_revision": None,
             "global_revision": None,
         },
-    )
-
-
-def test_trusted_publisher_checks_known_secret_bytes_and_allows_removal(tmp_path, monkeypatch):
-    from cloud_agent import publisher
-
-    monkeypatch.setattr(publisher, "_blob_size", lambda _repo, _sha: 64)
-    content = {
-        "new": b"\x00demo-private-binary\xff",
-        "old": b"\x00demo-private-binary\xff",
-        "deleted": b"\x00\xff",
-    }
-    monkeypatch.setattr(publisher, "_read_blob", lambda _repo, sha, _size: content[sha])
-    with pytest.raises(publisher.PublishError) as rejected:
-        publisher._validate_staged_blobs(
-            tmp_path,
-            [publisher._StagedBlob("asset.bin", "new", None)],
-            {"TOKEN": "demo-private-binary"},
-        )
-    assert "demo-private-binary" not in str(rejected.value)
-    publisher._validate_staged_blobs(
-        tmp_path,
-        [publisher._StagedBlob("asset.bin", "deleted", "old")],
-        {"TOKEN": "demo-private-binary"},
     )
 
 
@@ -358,29 +430,44 @@ async def test_environment_metadata_size_limit_is_enforced_before_json(monkeypat
     assert "metadata exceeds size limit" in caught.value.detail
 
 
-def test_wait_reads_foreground_failure_even_inside_poll_throttle():
+def test_wait_reads_foreground_failure_even_while_a_guest_wait_is_in_flight():
     import threading
-    import time
     from unittest.mock import Mock
 
     from cloud_agent_host.environment_process import EnvironmentProcess
 
     process = EnvironmentProcess.__new__(EnvironmentProcess)
     process._code = None
-    process._next_poll = time.monotonic() + 60
+    process._guest_wait = None
+    process._next_wait = 0.0
     process._lock = threading.Lock()
     process.uid = 30000
     process.status_path = "/private/status"
-    capture = Mock(return_value=SimpleNamespace(returncode=0, stdout="7"))
+    waiting = threading.Event()
+    release = threading.Event()
+    limits = []
+
+    def exec_capture(_spec, argv, **_kwargs):
+        limits.append(argv[-1])
+        if argv[-1] == "0":
+            return SimpleNamespace(returncode=0, stdout=b"7 0")
+        # The guest wait, still waiting when wait() reads.
+        waiting.set()
+        release.wait(5)
+        return SimpleNamespace(returncode=3, stdout=b"")
+
     process.backend = SimpleNamespace(
-        spec=None, manager=SimpleNamespace(exec_capture=capture, backend=SimpleNamespace(gid=10001))
+        spec=None,
+        manager=SimpleNamespace(exec_capture=exec_capture, backend=SimpleNamespace(gid=10001)),
     )
     process.process = Mock()
     process.process.wait.return_value = 0
     assert process.poll() is None
+    assert waiting.wait(5)
     assert process.wait() == 7
-    capture.assert_called_once()
+    assert limits == ["30", "0"]
     process.process.wait.assert_not_called()
+    release.set()
 
 
 def test_missing_completion_receipt_never_reports_success():
@@ -391,7 +478,6 @@ def test_missing_completion_receipt_never_reports_success():
 
     process = EnvironmentProcess.__new__(EnvironmentProcess)
     process._code = None
-    process._next_poll = 0
     process._lock = threading.Lock()
     process.uid = 30000
     process.status_path = "/private/status"
@@ -406,6 +492,60 @@ def test_missing_completion_receipt_never_reports_success():
     process.process.poll.return_value = 0
     with pytest.raises(SandboxError, match="receipt is missing"):
         process.wait()
+
+
+def test_environment_script_starts_in_the_workspace_without_importing_from_it(tmp_path):
+    import subprocess
+
+    from cloud_agent_host.environment_process import EnvironmentProcess
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    # The project's own module, named like the standard library's.
+    (workspace / "types.py").write_text("UserId = int\n")
+    commands = []
+    spawned = {}
+
+    def exec_capture(_spec, argv, **kwargs):
+        commands.append(argv)
+        return SimpleNamespace(returncode=0, stdout=b"")
+
+    def spawn(_spec, argv, **kwargs):
+        commands.append(argv)
+        spawned.update(argv=argv, **kwargs)
+        return SimpleNamespace()
+
+    backend = SimpleNamespace(
+        spec=None,
+        base_env=lambda: {"PATH": "/usr/bin:/bin"},
+        manager=SimpleNamespace(
+            exec_capture=exec_capture, spawn=spawn, backend=SimpleNamespace(gid=10001)
+        ),
+    )
+    EnvironmentProcess(
+        backend,
+        phase="setup",
+        script='printf "%s %s" "$(pwd -P)" "$PYTHONPATH"',
+        env={"PYTHONPATH": "src"},
+    )
+    assert spawned["workdir"] == "/workspace"
+    status = tmp_path / "status"
+    # The helper exactly as the sandbox runs it, from the workspace.
+    helper = subprocess.run(
+        spawned["argv"],
+        cwd=workspace,
+        env={**spawned["env"], "AGENT_SCRIPT_STATUS": str(status)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert helper.returncode == 0, helper.stderr
+    # Its script still starts there, with the owner's variables.
+    assert helper.stdout == f"{workspace.resolve()} src"
+    # The receipt counts the bytes the script wrote beside its exit status.
+    assert status.read_text() == f"0 {len(helper.stdout.encode())}"
+    # The one exec that reaps and prepares its identity runs isolated as well.
+    assert [argv[:2] for argv in commands if argv[0] == "python3"] == [["python3", "-I"]] * 2
 
 
 def test_runtime_refresh_preserves_setup_and_scans_both_secret_generations():
@@ -459,13 +599,6 @@ def test_environment_status_uses_bounded_inspection_cache(tmp_path):
     assert backend.manager.inspect.call_count == 1
 
 
-def test_encryption_publication_failure_is_retryable():
-    from cloud_agent.environments import EnvironmentEncryptionError
-    from cloud_agent.publish_worker import _is_retryable_publication_failure
-
-    assert _is_retryable_publication_failure(EnvironmentEncryptionError("temporary key failure"))
-
-
 @pytest.mark.asyncio
 async def test_environment_gc_is_hourly_but_lease_reaping_runs_every_tick():
     from contextlib import asynccontextmanager
@@ -484,6 +617,43 @@ async def test_environment_gc_is_hourly_but_lease_reaping_runs_every_tick():
     await repository.maintain_environments()
     assert connection.execute.await_count == 2
     connection.fetch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_failed_environment_gc_remains_due_for_the_next_pass():
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock
+
+    from cloud_agent.storage.repositories.environments import PostgresEnvironmentRepository
+
+    calls = 0
+
+    async def execute(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 4:
+            raise RuntimeError("owner cleanup failed")
+
+    @asynccontextmanager
+    async def transaction():
+        yield
+
+    connection = SimpleNamespace(
+        execute=AsyncMock(side_effect=execute),
+        fetch=AsyncMock(return_value=[{"user_id": "owner"}]),
+        transaction=transaction,
+    )
+
+    @asynccontextmanager
+    async def acquire():
+        yield connection
+
+    repository = PostgresEnvironmentRepository(SimpleNamespace(acquire=acquire))
+    with pytest.raises(RuntimeError, match="owner cleanup failed"):
+        await repository.maintain_environments()
+    await repository.maintain_environments()
+
+    assert connection.fetch.await_count == 2
 
 
 @pytest.mark.asyncio

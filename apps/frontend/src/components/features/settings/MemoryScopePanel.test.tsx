@@ -7,6 +7,7 @@ import {
   addMemory,
   deleteMemory,
   getMemories,
+  setMemoryEnabled,
   restoreMemory,
   updateMemory,
   type AgentMemory,
@@ -101,6 +102,34 @@ describe('one scope of durable memories', () => {
     await waitFor(() => expect(input).toHaveValue(''));
     expect(addMemory).toHaveBeenCalledWith('alice/api', 'Run make check.', expect.any(AbortSignal));
     expect(getMemories).toHaveBeenCalledTimes(2);
+  });
+
+  it('uses the toggle response without fetching the scope again', async () => {
+    vi.mocked(setMemoryEnabled).mockResolvedValue({ ...scope, enabled: false });
+    render(panel());
+    const toggle = await screen.findByRole('switch', { name: 'Use memory' });
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggle).not.toBeChecked());
+    expect(getMemories).toHaveBeenCalledTimes(1);
+    expect(setMemoryEnabled).toHaveBeenCalledWith('alice/api', false, expect.any(AbortSignal));
+  });
+
+  it('loads another archive page only when requested', async () => {
+    vi.mocked(getMemories).mockResolvedValueOnce({ ...scope, archived_next_cursor: 'cursor' });
+    const older = { ...old, id: 'older', content: 'An older rule' };
+    vi.mocked(getMemories).mockResolvedValueOnce({
+      ...scope,
+      archived: [older],
+      archived_next_cursor: null,
+    });
+    render(panel());
+    fireEvent.click(await screen.findByText('Archived (1+)'));
+    expect(getMemories).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Show more' }));
+    expect(await screen.findByText('An older rule')).toBeInTheDocument();
+    expect(screen.getByText(old.content)).toBeInTheDocument();
+    expect(getMemories).toHaveBeenLastCalledWith('alice/api', expect.any(AbortSignal), 'cursor');
+    expect(screen.queryByRole('button', { name: 'Show more' })).not.toBeInTheDocument();
   });
 
   it('edits a memory at the version shown and keeps the draft when it changed meanwhile', async () => {

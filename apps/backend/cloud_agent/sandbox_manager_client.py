@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import base64
+import copy
 import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -23,9 +23,13 @@ from cloud_agent_shared.operation_profiling import (
     PROFILING_CONTEXT_HEADER,
     answer_from_headers,
 )
+from cloud_agent_shared.sandbox_manager_wire import member_manifest
+from cloud_agent_shared.sandbox_restore import START_FENCE_HEADER
+from cloud_agent_shared.storable_text import storable_json
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping
+    from collections.abc import AsyncIterator, Callable, Mapping
+    from contextlib import AbstractAsyncContextManager
 
 
 SHARED_SESSION_FORK_TIMEOUT_S = 180.0
@@ -33,10 +37,10 @@ SHARED_SESSION_FORK_TIMEOUT_S = 180.0
 SHARED_PLUGIN_SESSION_FORK_TIMEOUT_S = 960.0
 
 #: The most this process buffers from one sandbox manager reply that carries workspace
-#: content: a file or listing, a one-shot command, Git inspection or a shared
-#: snapshot. The sandbox manager's own bounds, which a misbehaving host does not have to
-#: keep, stop those at 2 MiB of command or Git output plus 2 MiB of stderr, a
-#: 512 KiB preview or 5,000 directory entries. JSON escapes a control byte as
+#: content: a file or listing, or Git inspection. The sandbox
+#: manager's own bounds, which a misbehaving host does not have to keep, stop
+#: those at 2 MiB of Git output plus 2 MiB of stderr, a 512 KiB preview or 5,000
+#: directory entries. JSON escapes a control byte as
 #: six bytes, the widest any character grows, so no honest reply passes 24 MiB.
 MAX_SANDBOX_MANAGER_CONTENT_BYTES = 32 * 1024 * 1024
 #: The same for every other reply: lifecycle answers, terminal bookkeeping,
@@ -44,7 +48,7 @@ MAX_SANDBOX_MANAGER_CONTENT_BYTES = 32 * 1024 * 1024
 #: cut from protocol records of at most 8 MiB.
 MAX_SANDBOX_MANAGER_CONTROL_BYTES = 16 * 1024 * 1024
 #: The route suffixes whose replies are workspace content.
-_CONTENT_ROUTES = frozenset({"files", "terminal", "git", "snapshot"})
+_CONTENT_ROUTES = frozenset({"files", "git"})
 
 
 async def _read_capped(response: httpx.Response, limit: int) -> bytes | None:
@@ -72,6 +76,32 @@ def _json_object(body: bytes) -> dict[str, Any] | None:
     except ValueError:
         return None
     return value if isinstance(value, dict) else None
+
+
+def identity_from_row(row: Mapping[str, Any], *, members: list[dict[str, Any]]) -> dict[str, Any]:
+    """The wire identity of the group a durable sandbox row describes.
+
+    The row's container is the one the request expects, and its start fence
+    was read after the request's own was taken: the request may start the
+    container. ``members`` is the manifest the request carries
+    (:func:`~cloud_agent_shared.sandbox_manager_wire.member_manifest`).
+    """
+    return {
+        "sandbox_id": row["sandbox_id"],
+        "generation": row["generation"],
+        "origin_thread_id": row["origin_thread_id"],
+        "runtime_id": row["runtime_id"],
+        "runtime_version": row.get("runtime_version"),
+        "sandbox_image_digest": row.get("sandbox_image_digest"),
+        "expected_container_id": row.get("container_id"),
+        "resident_slot_capacity": row["resident_slot_capacity"],
+        "memory_limit": row["memory_limit"],
+        "cpu_limit": row["cpu_limit"],
+        "disk_limit_mib": row.get("disk_limit_mib", 0),
+        "stop_timeout_s": row["stop_timeout_seconds"],
+        "members": members,
+        "start_seq": row.get("start_seq"),
+    }
 
 
 @dataclass
@@ -115,7 +145,12 @@ class SandboxManagerClient:
     """Talk to the sandbox manager without exposing its credential to the browser."""
 
     def __init__(
-        self, base_url: str, token: str, *, client: httpx.AsyncClient | None = None
+        self,
+        base_url: str,
+        token: str,
+        *,
+        client: httpx.AsyncClient | None = None,
+        borrow: Callable[[], AbstractAsyncContextManager[httpx.AsyncClient]] | None = None,
     ) -> None:
         """Address one sandbox manager.
 
@@ -127,10 +162,26 @@ class SandboxManagerClient:
                 keystroke — so the pool cannot live on the instance; the
                 caller keeps it, keyed by ``base_url``, and closes it. Without
                 one, each call opens and closes its own connection as before.
+            borrow: Optional request lease that drains the shared pool safely
+                when its host is removed or changes address.
         """
         self._base_url = base_url.rstrip("/")
         self._headers = {"X-Agent-Workspace-Token": token, **IDENTITY_ENCODING_HEADERS}
         self._client = client
+        self._borrow = borrow
+
+    def with_start_seq(self, start_seq: int | None) -> SandboxManagerClient:
+        """This client, naming the start fence its caller's request took.
+
+        Every workspace request it sends may start the group's container, and
+        the sandbox manager labels the run the request joins with this fence
+        alone. ``None`` leaves the client as it is.
+        """
+        if start_seq is None:
+            return self
+        fenced = copy.copy(self)
+        fenced._headers = {**self._headers, START_FENCE_HEADER: str(start_seq)}
+        return fenced
 
     @asynccontextmanager
     async def _http(self, timeout: float) -> AsyncIterator[httpx.AsyncClient]:
@@ -146,6 +197,10 @@ class SandboxManagerClient:
         needs ``read=None`` and it hands its client to the caller to close,
         neither of which a shared pool can offer.
         """
+        if self._borrow is not None:
+            async with self._borrow() as client:
+                yield client
+            return
         if self._client is not None:
             yield self._client
             return
@@ -254,6 +309,8 @@ class SandboxManagerClient:
         *,
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
+        content: AsyncIterator[bytes] | None = None,
+        headers: Mapping[str, str] | None = None,
         timeout: float = 60,
     ) -> dict[str, Any]:
         """Call the private shared-live supervisor for one membership."""
@@ -273,9 +330,10 @@ class SandboxManagerClient:
                     method,
                     f"{self._base_url}{path}",
                     limit=limit,
-                    headers=self._headers,
+                    headers={**self._headers, **(headers or {})},
                     params=params,
                     json=json,
+                    content=content,
                     timeout=timeout,
                 )
         except httpx.HTTPError as exc:
@@ -289,26 +347,42 @@ class SandboxManagerClient:
             invalid="The shared chat supervisor returned invalid data.",
         )
 
+    async def _sandbox_manager_capabilities(
+        self,
+        *,
+        unavailable: str = "Sandbox manager capability is unavailable",
+    ) -> list[str]:
+        """Read bounded capabilities from the actual authenticated broker replica."""
+        try:
+            async with self._http(5) as client:
+                status_code, body = await self._exchange(
+                    client,
+                    "GET",
+                    f"{self._base_url}/health",
+                    limit=MAX_SANDBOX_MANAGER_CONTROL_BYTES,
+                    headers=self._headers,
+                    timeout=5,
+                )
+            answer = _json_object(body) if status_code < 400 and body is not None else None
+            if answer is None:
+                raise ValueError("the sandbox manager gave no capability answer")
+            return [str(c) for c in answer.get("capabilities", [])]
+        except (httpx.HTTPError, ValueError, AttributeError, TypeError):
+            raise SandboxManagerError(503, unavailable) from None
+
     async def require_environment_capability(self, environment: Any = None) -> list[str]:
-        """Require the capabilities from the actual authenticated broker replica.
+        """Require environment support and return every declared capability.
 
         Owner inference credentials need a broker that keeps them from the CLI.
-        Return all declared capabilities so callers only send supported fields.
+        The complete answer also lets callers send only optional fields and
+        wire formats that the authenticated broker replica supports.
         """
         required = {ENVIRONMENT_CAPABILITY}
         if environment is not None and uses_inference_names(environment):
             required.add(ENVIRONMENT_INFERENCE_CAPABILITY)
-        try:
-            async with self._http(5) as client:
-                response = await client.get(
-                    f"{self._base_url}/health", headers=self._headers, timeout=5
-                )
-                response.raise_for_status()
-                capabilities = [str(c) for c in response.json().get("capabilities", [])]
-        except (httpx.HTTPError, ValueError, AttributeError, TypeError):
-            raise SandboxManagerError(
-                503, "Sandbox manager environment capability is unavailable"
-            ) from None
+        capabilities = await self._sandbox_manager_capabilities(
+            unavailable="Sandbox manager environment capability is unavailable"
+        )
         if not required <= set(capabilities):
             raise SandboxManagerError(
                 503, "Sandbox manager must be upgraded for environment configuration"
@@ -316,14 +390,19 @@ class SandboxManagerClient:
         return capabilities
 
     async def prepare_environment(self, workspace_id: str, environment: Any) -> dict[str, Any]:
-        """Require actual broker support before sending value-bearing configuration."""
+        """Require actual broker support before sending value-bearing configuration.
+
+        The steps' output is stored, so what Postgres cannot store is replaced.
+        """
         capabilities = await self.require_environment_capability(environment)
-        return await self._request(
-            "POST",
-            workspace_id,
-            "environment/prepare",
-            json={"environment": environment_payload(environment, capabilities)},
-            timeout=1050,
+        return storable_json(
+            await self._request(
+                "POST",
+                workspace_id,
+                "environment/prepare",
+                json={"environment": environment_payload(environment, capabilities)},
+                timeout=1050,
+            )
         )
 
     async def sync_ssh_access(self, workspace_id: str, access: Any) -> dict[str, Any]:
@@ -449,39 +528,6 @@ class SandboxManagerClient:
             "PUT", workspace_id, "files", params={"path": path}, json={"content": content}
         )
 
-    async def terminal(
-        self,
-        workspace_id: str,
-        *,
-        command: str,
-        cwd: str,
-        timeout_seconds: float,
-        environment: Any = None,
-    ) -> dict[str, Any]:
-        """Execute one bounded command in an isolated workspace sandbox."""
-        if environment is not None and environment.required:
-            await self.require_environment_capability(environment)
-        else:
-            environment = None
-        return await self._request(
-            "POST",
-            workspace_id,
-            "terminal",
-            json={
-                "command": command,
-                "cwd": cwd,
-                "timeout_seconds": timeout_seconds,
-                # A terminal needs no snapshot fields, which an older
-                # broker would refuse.
-                **(
-                    {"environment": environment_payload(environment, ())}
-                    if environment is not None
-                    else {}
-                ),
-            },
-            timeout=timeout_seconds + 10,
-        )
-
     async def create_terminal(
         self,
         workspace_id: str,
@@ -526,39 +572,36 @@ class SandboxManagerClient:
         )
 
     async def suspend_terminals(
-        self, workspace_id: str, *, lease_generation: int, job_id: str | None = None
+        self, workspace_id: str, *, lease_generation: int, job_id: str
     ) -> dict[str, Any]:
         """Freeze every interactive terminal process tree in a workspace."""
         return await self._request(
             "POST",
             workspace_id,
             "terminals/suspend",
+            # COMPAT(remove-after=2026-11-30): every sandbox manager ignores
+            # lease_generation, as those since #974 do. Then stop sending it.
             json={"lease_generation": lease_generation, "job_id": job_id},
             timeout=60,
         )
 
     async def resume_terminals(
-        self, workspace_id: str, *, lease_generation: int, job_id: str | None = None
+        self, workspace_id: str, *, lease_generation: int, job_id: str
     ) -> dict[str, Any]:
         """Resume retained interactive terminals after a protected phase."""
         return await self._request(
             "POST",
             workspace_id,
             "terminals/resume",
+            # COMPAT(remove-after=2026-11-30): as in suspend_terminals.
             json={"lease_generation": lease_generation, "job_id": job_id},
             timeout=60,
         )
 
-    async def resume_settled_terminals(
-        self, workspace_id: str, *, job_id: str | None = None
-    ) -> dict[str, Any]:
+    async def resume_settled_terminals(self, workspace_id: str, *, job_id: str) -> dict[str, Any]:
         """Authoritatively resume terminals after the job can no longer retry."""
         return await self._request(
-            "POST",
-            workspace_id,
-            "terminals/resume-settled",
-            json={"job_id": job_id} if job_id is not None else None,
-            timeout=60,
+            "POST", workspace_id, "terminals/resume-settled", json={"job_id": job_id}, timeout=60
         )
 
     async def stream_terminal(
@@ -671,15 +714,26 @@ class SandboxManagerClient:
         return await self._request("POST", workspace_id, suffix, json={"rows": rows, "cols": cols})
 
     async def terminal_output(self, workspace_id: str, terminal_id: str) -> dict[str, Any]:
-        """Read bounded private terminal output for a redacted operation summary."""
-        return await self._request(
-            "GET", workspace_id, f"terminals/{quote(terminal_id, safe='')}/output"
+        """Read bounded private terminal output for a redacted operation summary.
+
+        The summary is stored, so what Postgres cannot store is replaced: a
+        command that printed a NUL has still finished.
+        """
+        return storable_json(
+            await self._request(
+                "GET", workspace_id, f"terminals/{quote(terminal_id, safe='')}/output"
+            )
         )
 
     async def delete_terminal(self, workspace_id: str, terminal_id: str) -> dict[str, Any]:
         """Kill an interactive terminal; the private operation is idempotent."""
         suffix = f"terminals/{quote(terminal_id, safe='')}"
         return await self._request("DELETE", workspace_id, suffix)
+
+    async def git_metadata(self, workspace_id: str, base_sha: str | None = None) -> dict[str, Any]:
+        """Read a cheap revision and changed-path summary for the live workspace."""
+        params = {"metadata": "true", **({"base_sha": base_sha} if base_sha else {})}
+        return await self._request("GET", workspace_id, "git", params=params, timeout=70)
 
     async def git(self, workspace_id: str, base_sha: str | None = None) -> dict[str, Any]:
         """Read live status, base-relative diff, and recent commits."""
@@ -741,23 +795,9 @@ class SandboxManagerClient:
         back to the owning supervisor without starting or cloning a container.
         """
         origin_thread_id = str(sandbox.get("origin_thread_id") or "")
-        members = []
-        allowed_member_fields = {
-            "thread_id",
-            "native_session_id",
-            "context_status",
-            "activation_generation",
-            "process_generation",
-            "residency_generation",
-            "resident_state",
-            "resident_slot_id",
-            "last_settled_job_id",
-        }
-        for raw in sandbox.get("group_members") or []:
-            if isinstance(raw, dict):
-                members.append(
-                    {key: value for key, value in raw.items() if key in allowed_member_fields}
-                )
+        members = member_manifest(
+            raw for raw in sandbox.get("group_members") or [] if isinstance(raw, dict)
+        )
         if not origin_thread_id or not members:
             raise SandboxManagerError(502, "The shared sandbox manifest is incomplete.")
         return await self._shared_sandbox_request(
@@ -765,20 +805,8 @@ class SandboxManagerClient:
             origin_thread_id,
             "register",
             json={
-                "sandbox_id": sandbox["sandbox_id"],
-                "generation": sandbox["generation"],
+                **identity_from_row(sandbox, members=members),
                 "origin_thread_id": origin_thread_id,
-                "runtime_id": sandbox["runtime_id"],
-                "runtime_version": sandbox.get("runtime_version"),
-                "sandbox_image_digest": sandbox.get("sandbox_image_digest"),
-                "expected_container_id": sandbox.get("container_id"),
-                "start_seq": sandbox.get("start_seq"),
-                "resident_slot_capacity": sandbox["resident_slot_capacity"],
-                "memory_limit": sandbox["memory_limit"],
-                "cpu_limit": sandbox["cpu_limit"],
-                "disk_limit_mib": sandbox.get("disk_limit_mib", 0),
-                "stop_timeout_s": sandbox["stop_timeout_seconds"],
-                "members": members,
             },
         )
 
@@ -844,19 +872,7 @@ class SandboxManagerClient:
         self,
         source_thread_id: str,
         *,
-        sandbox_id: str,
-        generation: int,
-        origin_thread_id: str,
-        runtime_id: str,
-        runtime_version: str | None,
-        sandbox_image_digest: str | None,
-        expected_container_id: str,
-        resident_slot_capacity: int,
-        memory_limit: str,
-        cpu_limit: str,
-        disk_limit_mib: int,
-        stop_timeout_s: int,
-        members: list[dict[str, Any]],
+        identity: dict[str, Any],
         operation_id: str,
         source_native_session_id: str,
         source_native_turn_no: int,
@@ -865,25 +881,17 @@ class SandboxManagerClient:
         source_launch: dict[str, Any],
         target_launch: dict[str, Any],
     ) -> dict[str, Any]:
-        """Materialize a prompt-free native child in the same sandbox."""
+        """Materialize a prompt-free native child in the same sandbox.
+
+        ``identity`` is the group's (:func:`identity_from_row`); its start
+        fence is the one the Fork took, as it may start the source.
+        """
         return await self._shared_sandbox_request(
             "POST",
             source_thread_id,
             "fork",
             json={
-                "sandbox_id": sandbox_id,
-                "generation": generation,
-                "origin_thread_id": origin_thread_id,
-                "runtime_id": runtime_id,
-                "runtime_version": runtime_version,
-                "sandbox_image_digest": sandbox_image_digest,
-                "expected_container_id": expected_container_id,
-                "resident_slot_capacity": resident_slot_capacity,
-                "memory_limit": memory_limit,
-                "cpu_limit": cpu_limit,
-                "disk_limit_mib": disk_limit_mib,
-                "stop_timeout_s": stop_timeout_s,
-                "members": members,
+                **identity,
                 "operation_id": operation_id,
                 "source_native_session_id": source_native_session_id,
                 "source_native_turn_no": source_native_turn_no,
@@ -897,66 +905,6 @@ class SandboxManagerClient:
                 if source_launch.get("plugins") or target_launch.get("plugins")
                 else SHARED_SESSION_FORK_TIMEOUT_S
             ),
-        )
-
-    @staticmethod
-    def _shared_identity(snapshot: dict[str, Any]) -> dict[str, Any]:
-        """Copy only the reviewed immutable group/member manifest fields."""
-        return {
-            "sandbox_id": snapshot["sandbox_id"],
-            "generation": snapshot["generation"],
-            "origin_thread_id": snapshot["origin_thread_id"],
-            "runtime_id": snapshot["runtime_id"],
-            "runtime_version": snapshot.get("runtime_version"),
-            "sandbox_image_digest": snapshot.get("sandbox_image_digest"),
-            "expected_container_id": snapshot.get("container_id"),
-            "resident_slot_capacity": snapshot["resident_slot_capacity"],
-            "memory_limit": snapshot["memory_limit"],
-            "cpu_limit": snapshot["cpu_limit"],
-            "disk_limit_mib": snapshot.get("disk_limit_mib", 0),
-            "stop_timeout_s": snapshot["stop_timeout_seconds"],
-            "members": snapshot["members"],
-        }
-
-    async def capture_shared_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
-        """Ask the owning host for one bounded, generation-fenced Git diff."""
-        payload = {
-            **self._shared_identity(snapshot),
-            "snapshot_id": snapshot["snapshot_id"],
-            "workspace_epoch": snapshot["workspace_epoch"],
-            "base_sha": snapshot["base_sha"],
-            **({"environment": snapshot["environment"]} if snapshot.get("environment") else {}),
-        }
-        if snapshot.get("environment"):
-            await self.require_environment_capability(snapshot["environment"])
-        return await self._shared_sandbox_request(
-            "POST",
-            str(snapshot["origin_thread_id"]),
-            "snapshot",
-            json=payload,
-            timeout=120,
-        )
-
-    async def import_shared_base(
-        self,
-        snapshot: dict[str, Any],
-        *,
-        commit_sha: str,
-        bundle: bytes,
-    ) -> dict[str, Any]:
-        """Import trusted commit objects without changing workspace state."""
-        payload = {
-            **self._shared_identity(snapshot),
-            "snapshot_id": snapshot["snapshot_id"],
-            "commit_sha": commit_sha,
-            "bundle_b64": base64.b64encode(bundle).decode("ascii"),
-        }
-        return await self._shared_sandbox_request(
-            "POST",
-            str(snapshot["origin_thread_id"]),
-            "import-base",
-            json=payload,
-            timeout=360,
         )
 
 

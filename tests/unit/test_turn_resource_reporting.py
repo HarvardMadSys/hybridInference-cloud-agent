@@ -19,6 +19,7 @@ from unittest.mock import Mock
 
 import httpx
 import pytest
+from tests.support.owners import connection_access
 
 from cloud_agent_host import runner as runner_mod
 from cloud_agent_host.member_resources import CheckpointSchedule
@@ -27,6 +28,7 @@ from cloud_agent_host.runtimes import get_runtime
 from cloud_agent_host.sandbox import ContainerBackend
 
 _JOB = ClaimedJob(
+    model_connection=connection_access("claude-code"),
     job_id="ajob_1",
     attempt_id=7,
     attempt_no=1,
@@ -36,7 +38,6 @@ _JOB = ClaimedJob(
     runtime="claude-code",
     model="model",
     worker_token="ajt.a.b",
-    sandbox_token="grant",
     thread_id="athr_1",
     runtime_version=runner_mod.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
 )
@@ -87,7 +88,7 @@ def _json_body(request: httpx.Request) -> dict[str, Any]:
     return json.loads(request.content)
 
 
-def _stamp() -> dict[str, Any]:
+def _stamp(**_: object) -> dict[str, Any]:
     return {
         "sandbox_image_digest": "sha256:shared-image",
         "runtime_versions": dict(runner_mod.SHARED_SANDBOX_RUNTIME_PINS),
@@ -174,7 +175,6 @@ def _run_terminal_turn(
         heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
-        gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=finish,
     )
@@ -374,8 +374,8 @@ def test_a_running_checkpoint_is_posted_as_collecting_during_the_stream(monkeypa
     events: list[dict[str, Any]] = []
 
     def endpoint(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/events"):
-            events.append(_json_body(request))
+        if request.url.path.endswith("/events:batch"):
+            events.extend(_json_body(request)["events"])
             return httpx.Response(200, json={"ok": True})
         assert request.url.path.endswith("/turn-resources")
         bodies.append(_json_body(request))

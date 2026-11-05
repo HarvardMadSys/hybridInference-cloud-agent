@@ -12,8 +12,15 @@
 /** A drive letter prefix (`C:/…`), which is not a relative path anywhere. */
 const DRIVE_PREFIX = /^[A-Za-z]:[\\/]/;
 
+/** Control characters, including the line breaks that would split one file
+ *  reference into several lines in the prompt listing. */
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
+
 export function isSafeUploadPath(path: string, maxLength: number): boolean {
-  if (!path || path.length > maxLength) return false;
+  // A name is kept exactly as it was given, so surrounding whitespace is part
+  // of it — ` report.csv ` and `report.csv` are different files. A path that is
+  // only whitespace names nothing, and is refused like an empty one.
+  if (!path.trim() || path.length > maxLength) return false;
   if (path.startsWith('/') || DRIVE_PREFIX.test(path)) return false;
   const parts = path.split('/');
   return parts.every(
@@ -23,7 +30,7 @@ export function isSafeUploadPath(path: string, maxLength: number): boolean {
       part !== '..' &&
       part.toLowerCase() !== '.git' &&
       !part.includes('\\') &&
-      !part.includes('\0'),
+      !CONTROL_CHARACTER.test(part),
   );
 }
 

@@ -15,15 +15,19 @@ from fastapi import APIRouter, Depends, Query
 
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import (
-    get_gateway_client,
     get_github_app_state,
     get_storage,
 )
+from cloud_agent.application.model_connection_status import usable_runtimes
+from cloud_agent.application.model_connections import model_connections_enabled
 from cloud_agent.entitlement import repos_for_user
-from cloud_agent.gateway import GatewayError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.registry import resolve_connection
-from cloud_agent.schemas import AgentConfigResponse, McpConnectionSummary
+from cloud_agent.model_preference import (
+    ModelPreferenceView,
+    resolve_connection_default,
+)
+from cloud_agent.schemas import AgentConfigResponse, McpConnectionSummary, ModelConnectionOption
 from cloud_agent.source_control import github_connect_configured
 from cloud_agent.source_control_runtime import GitHubAppState  # noqa: TC001 — FastAPI resolves it.
 from cloud_agent_shared.plugins import supported_plugin_runtimes
@@ -38,6 +42,8 @@ if TYPE_CHECKING:
         ConversationCommands,
         ConversationQueries,
         McpConnectionRepository,
+        ModelConnectionRepository,
+        ModelPreferenceRepository,
         SourceControlRepository as SourceControlPort,
     )
 
@@ -51,11 +57,13 @@ logger = get_logger("cloud_agent.api.routes")
 
 
 class _ConfigStorage(Protocol):
-    """The two capabilities the config endpoint reaches for."""
+    """The capabilities the config endpoint reaches for."""
 
     conversation_commands: ConversationCommands
     conversation_queries: ConversationQueries
     mcp: McpConnectionRepository
+    model_connections: ModelConnectionRepository
+    model_preferences: ModelPreferenceRepository
     source_control: SourceControlPort
 
 
@@ -71,7 +79,6 @@ async def get_agent_config(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _ConfigStorage | None = Depends(get_storage),
     github: GitHubAppState = Depends(get_github_app_state),
-    gateway: Any = Depends(get_gateway_client),
 ) -> AgentConfigResponse:
     """What this deployment will actually accept.
 
@@ -80,18 +87,29 @@ async def get_agent_config(
     job nobody was running. A picker has to be built from the same answers the
     create endpoint enforces, or it is decoration.
 
-    Answers while the GitHub App is unavailable — the models, runtimes and MCP
-    connections are all still true — and says so in ``github_load_status``.
+    Answers while the GitHub App is unavailable (the model connections,
+    runtimes and MCP connections are all still true) and says so in
+    ``github_load_status``.
     """
     if fresh and github.credentials is not None:
         github.credentials.forget_user(user["user_id"])
-    # Independent sources can be read together. The model fields come from
-    # one current Gateway response, without caching the owner's admission.
-    (repos, github_account), (models, model_efforts), mcp_connections = await asyncio.gather(
+    # Independent sources can be read together.
+    (
+        (repos, github_account),
+        mcp_connections,
+        preference,
+        model_connections,
+    ) = await asyncio.gather(
         _repositories_and_account(store, github, user["user_id"]),
-        _model_configuration_for_user(gateway, user["user_id"]),
         _mcp_connections_for_user(store, user["user_id"]),
+        _model_preference_for_user(store, user["user_id"]),
+        _model_connections_for_user(store, user["user_id"]),
     )
+    if not model_connections_enabled():
+        # Switched off: nothing is offered, so the control stays empty.
+        model_connections = []
+    connection_default = resolve_connection_default(preference, model_connections)
+    options = [_connection_option(row) for row in model_connections if row.get("enabled")]
     if github.load_status == "unavailable":
         # The create endpoint answers 503 until the App is back, so a form that
         # looked ready would only fail on submit — whatever else is true.
@@ -117,21 +135,24 @@ async def get_agent_config(
         repos=repos,
         runtimes=registered_runtimes(),
         plugin_runtimes=supported_plugin_runtimes(),
-        # Same predicate the create endpoint enforces and the sandbox's calls
-        # will hit — not /v1/models, which answers for the *browsing* user and
-        # offered models whose first agent call then 404ed.
-        models=models,
-        # What each runtime can express, and which models take the parameter at
-        # all. The composer offers the platform's levels narrowed to the first
-        # and gated on the second, and no control when either is empty — which
-        # is also what an older gateway, answering no domains, produces.
+        # An owner runs nothing until one of their own connections has a model
+        # verified for some Agent; the composer then offers the way to set one
+        # up instead of an empty picker that looks like an outage.
+        model_connection_required=not any(option.model_runtimes for option in options),
+        # What each runtime can express, in its own vocabulary.
         runtime_reasoning_efforts=runtime_reasoning_efforts(),
-        model_reasoning_efforts=model_efforts,
         # This user's connected servers, not the deployment's: same reason the
         # repository list above is theirs. Public fields only — McpConnectionSummary
         # has nowhere to put a URL or a credential, which is how it stays that
         # way.
         mcp_connections=[McpConnectionSummary(**entry) for entry in mcp_connections],
+        # The picker's starting point: where the owner's newest turn ran, while
+        # that connection still offers the model. Nothing otherwise.
+        default_model=connection_default[0] if connection_default else None,
+        default_model_connection_id=connection_default[1] if connection_default else None,
+        model_connections_enabled=model_connections_enabled(),
+        # The owner's own enabled connections: the only models there are.
+        model_connections=options,
         mcp_runtimes=runtimes_supporting_mcp(),
         github_connected=github_connected,
         # OAuth must start on the authenticated integrations page so the
@@ -161,19 +182,39 @@ async def _repositories_and_account(
     return repos, account
 
 
-async def _model_configuration_for_user(
-    gateway: Any, user_id: str
-) -> tuple[list[str], dict[str, list[str]]]:
-    """Return one model configuration, or no options when the Gateway fails."""
-    try:
-        return await gateway.model_catalog_with_reasoning_efforts(user_id)
-    except GatewayError:
-        logger.warning(
-            "agent_model_catalog_unavailable",
-            exc_info=True,
-            extra={"event": "agent_model_catalog_unavailable", "user_id": user_id},
-        )
-        return [], {}
+async def _model_preference_for_user(
+    store: _ConfigStorage | None, user_id: str
+) -> ModelPreferenceView:
+    """Where the owner's newest turn ran.
+
+    A missing store answers an empty preference rather than failing the whole
+    config read: a composer with no starting model is still a usable composer,
+    and this is a preference, not an authorization. Every other read here
+    already needs the store, so an ordinary database failure still surfaces as
+    it always did.
+    """
+    if store is None:
+        return ModelPreferenceView()
+    return await store.model_preferences.get_model_preference(user_id)
+
+
+def _connection_option(row: dict[str, Any]) -> ModelConnectionOption:
+    """One enabled connection as the composer offers it, with each model's usable agents."""
+    return ModelConnectionOption(
+        id=row["id"],
+        name=row["name"],
+        models=list(row["models"]),
+        model_runtimes=usable_runtimes(row),
+    )
+
+
+async def _model_connections_for_user(
+    store: _ConfigStorage | None, user_id: str
+) -> list[dict[str, Any]]:
+    """The owner's live connections; none without a store, like the other reads."""
+    if store is None:
+        return []
+    return await store.model_connections.list_model_connections(user_id=user_id)
 
 
 async def _mcp_connections_for_user(

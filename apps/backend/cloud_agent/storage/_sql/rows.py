@@ -88,6 +88,8 @@ def job_row_to_dict(row: Any) -> dict[str, Any]:
         "environment_binding_id": row.get("environment_binding_id"),
         "runtime": row["runtime"],
         "model": row["model"],
+        # NULL is the Gateway; otherwise the owner connection this turn runs on.
+        "model_connection_id": row.get("model_connection_id"),
         "execution_profile": row["execution_profile"],
         "reasoning_effort": row["reasoning_effort"],
         "state": row["state"],
@@ -96,7 +98,6 @@ def job_row_to_dict(row: Any) -> dict[str, Any]:
         "terminal_resume_pending": row["terminal_resume_pending"],
         "current_attempt_id": row["current_attempt_id"],
         "published_pr_url": row["published_pr_url"],
-        "published_commit_sha": row["published_commit_sha"],
         "detail": row["detail"],
         # Every change raises them (migration 0031); a read that does not
         # select them reports the counter at its start.

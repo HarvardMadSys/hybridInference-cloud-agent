@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { money, metric, number, utcDate } from '@/app/(agents)/admin/runs/shared';
+import { money, metric, number } from '@/app/(agents)/admin/runs/shared';
 import {
   activityHref,
   presetKey,
@@ -137,8 +137,7 @@ describe('admin money and date formatting', () => {
     expect(money('-1').display).toBe('Unavailable');
   });
 
-  it('renders an instant in UTC and says so', () => {
-    expect(utcDate('2026-09-03T23:30:00Z')).toBe('Sep 3, 2026');
+  it('renders any finite count, and an absent one as unavailable', () => {
     expect(number(1234)).toBe('1,234');
     expect(number(null)).toBe('Unavailable');
   });

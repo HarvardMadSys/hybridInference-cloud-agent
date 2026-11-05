@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { AgentThreadEventApi } from '@/lib/api/agents';
+import { preview } from './trajectory';
 import { buildTrajectorySteps, turnContextFromJobs } from './trajectorySteps';
 
 function event(
@@ -693,6 +694,32 @@ describe('buildTrajectorySteps', () => {
       payload: { protocol: 'reply-preview', preview_id, delta },
     });
 
+  it('keeps the one-line preview of a long answer exact as it grows and when rewritten', () => {
+    const words = Array.from({ length: 80 }, (_, index) => `word${index} `);
+    const pieces = words.map((word, index) => piece(index + 1, 'long', word));
+    const growing = buildTrajectorySteps(pieces, { isAttemptActive: () => true });
+
+    expect(growing).toHaveLength(1);
+    expect(growing[0].detail).toBe(preview(words.join('')));
+    expect(growing[0].detail?.endsWith('…')).toBe(true);
+
+    const rewritten = buildTrajectorySteps(
+      [
+        ...pieces,
+        event({
+          id: 81,
+          job_id: 'a',
+          turn_no: 1,
+          event_type: 'raw',
+          payload: { protocol: 'reply-preview', preview_id: 'long', delta: 'Short.', reset: true },
+        }),
+        piece(82, 'long', ' Done.'),
+      ],
+      { isAttemptActive: () => true },
+    );
+    expect(rewritten[0].detail).toBe('Short. Done.');
+  });
+
   it('shows an answer growing until its complete message takes the step over', () => {
     const streaming = [
       event({
@@ -1010,6 +1037,30 @@ describe('buildTrajectorySteps', () => {
     expect(steps.map((step) => step.payloadValue)).toEqual(['pwd', 'README.md']);
     expect(steps.map((step) => step.ambiguity)).toEqual([undefined, undefined]);
     expect(new Set(steps.map((step) => step.key)).size).toBe(2);
+  });
+
+  it('keeps the MCP server a Codex call went to on its step', () => {
+    const [mcp, command] = buildTrajectorySteps(
+      [
+        event({
+          id: 1,
+          job_id: 'a',
+          turn_no: 1,
+          event_type: 'tool_use',
+          payload: { id: 'm', name: 'review__task', input: {}, mcp_server: 'session' },
+        }),
+        event({
+          id: 2,
+          job_id: 'a',
+          turn_no: 1,
+          event_type: 'tool_use',
+          payload: { id: 'c', name: 'Bash', input: 'ls' },
+        }),
+      ],
+      idle,
+    );
+    expect(mcp).toMatchObject({ toolName: 'review__task', mcpServer: 'session' });
+    expect(command).not.toHaveProperty('mcpServer');
   });
 
   it('claims no status or duration when one call was answered twice', () => {

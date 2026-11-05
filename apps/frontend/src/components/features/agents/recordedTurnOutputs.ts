@@ -91,7 +91,7 @@ function recordedFiles(payload: AgentJobEventApi['payload']): RecordedTurnFile[]
     typeof text !== 'string' ||
     text.length >= 4000 ||
     payload?.truncated === true ||
-    !text.startsWith('diff --git a/')
+    !/^diff --git "?a\//.test(text)
   ) {
     return [];
   }
@@ -104,10 +104,6 @@ function recordedFiles(payload: AgentJobEventApi['payload']): RecordedTurnFile[]
   ) {
     return [];
   }
-  // The shared parser handles plain paths. Quoted/escaped Git paths need a
-  // decoder before they can become usable file actions, so keep them out.
-  if (files.some((file) => !file.path || file.path.includes('\\') || file.path.startsWith('"')))
-    return [];
   // A path containing " b/" can confuse an unquoted diff header. The new-file
   // marker, when present, must agree before we advertise a selectable path.
   if (
@@ -248,30 +244,4 @@ export function createRecordedOutputsSelector(): RecordedOutputsSelector {
       return results;
     },
   };
-}
-
-/**
- * Read only this turn's own output evidence. Native diffs are recorded
- * snapshots, not a promise that every workspace edit was captured. In
- * particular, never substitute AgentJob.diffFiles or /git for missing events.
- * Input attachments have no generated-artifact contract and are not results.
- */
-export function recordedTurnOutputs(
-  job: RecordedTurnJob,
-  events: readonly RecordedTurnEvent[],
-): RecordedTurnOutputs | null {
-  if (!hasSettledTurn(job.state)) return null;
-  const diffs = events.filter(
-    (event) =>
-      event.event_type === 'diff' &&
-      (!('job_id' in event) || event.job_id === job.id) &&
-      job.current_attempt_id !== null &&
-      event.attempt_id === job.current_attempt_id,
-  );
-  const latest = diffs.reduce<AgentJobEventApi | undefined>(
-    (previous, event) => (!previous || event.seq > previous.seq ? event : previous),
-    undefined,
-  );
-  const files = latest ? recordedFiles(latest.payload) : [];
-  return outputsWithFiles(job, files);
 }

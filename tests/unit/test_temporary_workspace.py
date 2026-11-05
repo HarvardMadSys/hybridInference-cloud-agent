@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import HTTPException
-from tests.unit.test_goal_controller import FakeGateway
+from tests.unit.test_goal_controller import FakeOwners
 from tests.unit.test_runner_host_settings import _JOB, _run_new_chat
 
 from cloud_agent.api.environments import RuntimeRefreshInput, refresh_runtime_environment
@@ -120,9 +120,12 @@ def test_a_missing_temporary_base_is_rebuilt_not_cloned(monkeypatch) -> None:
     monkeypatch.setattr(runner_mod, "prepare_worktree", _refuse_clone)
     bundles: list[dict[str, Any]] = []
     manager = Mock()
-    manager.import_base_bundle.side_effect = lambda _spec, bundle, **kwargs: bundles.append(
-        {"bytes": bundle, **kwargs}
-    )
+
+    def capture_bundle(_spec, bundle, **kwargs):
+        bundles.append({"bytes": bundle.read(), **kwargs})
+        bundle.seek(0)
+
+    manager.import_base_bundle.side_effect = capture_bundle
 
     imported = runner_mod._import_retained_base(
         job=_TEMPORARY_JOB, manager=manager, spec=Mock(), backend=Mock()
@@ -174,7 +177,7 @@ async def test_a_goal_in_a_temporary_workspace_checks_no_repository(monkeypatch)
         raise AssertionError("a temporary workspace has no repository to check")
 
     monkeypatch.setattr("cloud_agent.goals.controller.require_entitled_repo", refuse)
-    gateway = FakeGateway()
+    gateway = FakeOwners()
     turn = {
         "id": "ajob_1",
         "thread_id": "athr_1",
@@ -185,7 +188,7 @@ async def test_a_goal_in_a_temporary_workspace_checks_no_repository(monkeypatch)
     }
 
     action = await _check_access(
-        SimpleNamespace(source_control=None), turn, app_credentials=object(), gateway=gateway
+        SimpleNamespace(source_control=None), turn, app_credentials=object(), owners=gateway
     )
 
     assert action is None
@@ -194,7 +197,7 @@ async def test_a_goal_in_a_temporary_workspace_checks_no_repository(monkeypatch)
 
 async def test_a_goal_in_a_temporary_workspace_still_needs_agent_access() -> None:
     """Withdrawn access pauses the goal before any repository question arises."""
-    gateway = FakeGateway()
+    gateway = FakeOwners()
     gateway.allowed = False
     turn = {
         "id": "ajob_1",
@@ -205,7 +208,7 @@ async def test_a_goal_in_a_temporary_workspace_still_needs_agent_access() -> Non
         "thread_sandbox": None,
     }
 
-    action = await _check_access(SimpleNamespace(source_control=None), turn, gateway=gateway)
+    action = await _check_access(SimpleNamespace(source_control=None), turn, owners=gateway)
 
     assert action is not None
     assert action.kind == "pause"

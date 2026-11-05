@@ -1,13 +1,16 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, expect, it, vi } from 'vitest';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  getEnvironmentActionRun,
   getWorkspaceEnvironment,
   listEnvironments,
   refreshWorkspaceRuntime,
   retryWorkspaceEnvironment,
   skipWorkspaceStart,
+  startEnvironmentAction,
+  stopEnvironmentAction,
 } from '@/lib/api/environments';
 import type { EnvironmentBinding } from '@/lib/api/environments';
 import { WorkspaceEnvironment } from './WorkspaceEnvironment';
@@ -31,6 +34,48 @@ vi.mock('@/lib/api/environments', () => ({
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (cause?: unknown) => void;
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
+
+it('pauses a collapsed workspace and reads fresh state when reopened', async () => {
+  vi.mocked(getWorkspaceEnvironment).mockResolvedValue(binding);
+  const view = render(
+    <WorkspaceEnvironment jobId="job" repo="org/repo" visible={false} onTerminal={() => {}} />,
+  );
+  expect(getWorkspaceEnvironment).not.toHaveBeenCalled();
+  view.rerender(<WorkspaceEnvironment jobId="job" repo="org/repo" visible onTerminal={() => {}} />);
+  await waitFor(() => expect(getWorkspaceEnvironment).toHaveBeenCalledTimes(1));
+});
+
+it('rechecks settled readiness so restarts are still detected', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    vi.mocked(getWorkspaceEnvironment).mockResolvedValue({
+      ...binding,
+      required: false,
+      steps: [],
+    });
+    render(<WorkspaceEnvironment jobId="job" repo="org/repo" onTerminal={() => {}} />);
+    await waitFor(() => expect(getWorkspaceEnvironment).toHaveBeenCalledTimes(1));
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(getWorkspaceEnvironment).toHaveBeenCalledTimes(1);
+    vi.mocked(getWorkspaceEnvironment).mockResolvedValue({ ...binding, required: true, steps: [] });
+    await vi.advanceTimersByTimeAsync(25000);
+    expect(getWorkspaceEnvironment).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(getWorkspaceEnvironment).toHaveBeenCalledTimes(3);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 const binding: EnvironmentBinding = {
@@ -81,6 +126,15 @@ it('updates runtime variables by their version', async () => {
   fireEvent.click(screen.getByText('environment.configuration'));
   fireEvent.click(screen.getByRole('button', { name: 'environment.refreshRuntime' }));
   await waitFor(() => expect(refreshWorkspaceRuntime).toHaveBeenCalledWith('job', 3));
+});
+
+it('starts a task on a newer version inside the app', async () => {
+  vi.mocked(getWorkspaceEnvironment).mockResolvedValue({ ...binding, has_new_version: true });
+  render(<WorkspaceEnvironment jobId="job" repo="org/repo" onTerminal={() => {}} />);
+  expect(await screen.findByRole('link', { name: 'environment.newWorkspace' })).toHaveAttribute(
+    'href',
+    '/?repo=org%2Frepo',
+  );
 });
 
 it('says when preparation has not started yet', async () => {
@@ -175,4 +229,138 @@ it('names the team whose environment the workspace uses, and opens it to view', 
   expect(await screen.findByText('environment.teamBadge')).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'environment.openTeamSaved' }));
   expect(await screen.findByRole('dialog', { name: 'editing Development' })).toBeInTheDocument();
+});
+
+describe('an action outliving its panel', () => {
+  const withAction = {
+    ...binding,
+    steps: [{ phase: 'setup' as const, state: 'succeeded', output: '' }],
+    actions: [{ id: 'serve', name: 'Serve', command: 'npm start', cwd: '' }],
+  };
+
+  it('offers Stop, not a second Run, when the panel is opened again mid-run', async () => {
+    const running = { id: 'run-1', action_id: 'serve', state: 'running', output: 'listening' };
+    vi.mocked(getWorkspaceEnvironment).mockResolvedValue({ ...withAction, action_runs: [] });
+    vi.mocked(startEnvironmentAction).mockResolvedValue(running);
+    vi.mocked(getEnvironmentActionRun).mockResolvedValue(running);
+    const first = render(
+      <WorkspaceEnvironment jobId="job" repo="org/repo" onTerminal={() => {}} />,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'environment.run' }));
+    expect(await screen.findByRole('button', { name: 'environment.stop' })).toBeInTheDocument();
+    // Another workspace tab is chosen, and this one chosen again.
+    first.unmount();
+    vi.mocked(getWorkspaceEnvironment).mockResolvedValue({
+      ...withAction,
+      action_runs: [{ ...running, output: '' }],
+    });
+    render(<WorkspaceEnvironment jobId="job" repo="org/repo" onTerminal={() => {}} />);
+    expect(await screen.findByRole('button', { name: 'environment.stop' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'environment.run' })).not.toBeInTheDocument();
+    expect(startEnvironmentAction).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the last finished run again, with its output', async () => {
+    const done = { id: 'run-1', action_id: 'serve', state: 'succeeded', output: '' };
+    vi.mocked(getWorkspaceEnvironment).mockResolvedValue({ ...withAction, action_runs: [done] });
+    vi.mocked(getEnvironmentActionRun).mockResolvedValue({ ...done, output: 'served' });
+    render(<WorkspaceEnvironment jobId="job" repo="org/repo" onTerminal={() => {}} />);
+    expect(await screen.findByText('served')).toBeInTheDocument();
+    expect(getEnvironmentActionRun).toHaveBeenCalledWith('run-1', expect.any(AbortSignal));
+  });
+
+  it('adopts a newer run from another tab without remounting the panel', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const done = { id: 'run-1', action_id: 'serve', state: 'succeeded', output: '' };
+      const running = { id: 'run-2', action_id: 'serve', state: 'running', output: '' };
+      vi.mocked(getWorkspaceEnvironment)
+        .mockResolvedValueOnce({ ...withAction, action_runs: [done] })
+        .mockResolvedValue({ ...withAction, action_runs: [running] });
+      vi.mocked(getEnvironmentActionRun).mockResolvedValue({ ...done, output: 'served' });
+      render(<WorkspaceEnvironment jobId="job" repo="org/repo" onTerminal={() => {}} />);
+      expect(await screen.findByRole('button', { name: 'environment.run' })).toBeInTheDocument();
+
+      await act(async () => vi.advanceTimersByTimeAsync(30_000));
+
+      expect(getWorkspaceEnvironment).toHaveBeenCalledTimes(2);
+      expect(screen.getByRole('button', { name: 'environment.stop' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'environment.run' })).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a local start newer than a workspace read already in flight', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const done = { id: 'run-1', action_id: 'serve', state: 'succeeded', output: '' };
+      const running = { id: 'run-2', action_id: 'serve', state: 'running', output: 'new run' };
+      const stale = deferred<EnvironmentBinding>();
+      vi.mocked(getWorkspaceEnvironment)
+        .mockResolvedValueOnce({ ...withAction, action_runs: [done] })
+        .mockReturnValueOnce(stale.promise);
+      vi.mocked(getEnvironmentActionRun).mockResolvedValue({ ...done, output: 'served' });
+      vi.mocked(startEnvironmentAction).mockResolvedValue(running);
+      render(<WorkspaceEnvironment jobId="job" repo="org/repo" onTerminal={() => {}} />);
+      const runButton = await screen.findByRole('button', { name: 'environment.run' });
+      await act(async () => vi.advanceTimersByTimeAsync(30_000));
+      expect(getWorkspaceEnvironment).toHaveBeenCalledTimes(2);
+
+      fireEvent.click(runButton);
+      expect(await screen.findByText('new run')).toBeInTheDocument();
+      await act(async () => stale.resolve({ ...withAction, action_runs: [done] }));
+
+      expect(screen.getByRole('button', { name: 'environment.stop' })).toBeInTheDocument();
+      expect(screen.getByText('new run')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not let an older run poll replace a newer listed run', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const first = { id: 'run-1', action_id: 'serve', state: 'running', output: '' };
+      const second = { id: 'run-2', action_id: 'serve', state: 'running', output: '' };
+      const stale = deferred<typeof first>();
+      vi.mocked(getWorkspaceEnvironment)
+        .mockResolvedValueOnce({ ...withAction, action_runs: [first] })
+        .mockResolvedValue({ ...withAction, action_runs: [second] });
+      vi.mocked(getEnvironmentActionRun).mockReturnValue(stale.promise);
+      vi.mocked(stopEnvironmentAction).mockResolvedValue({ ...second, state: 'stopped' });
+      render(<WorkspaceEnvironment jobId="job" repo="org/repo" onTerminal={() => {}} />);
+      expect(await screen.findByRole('button', { name: 'environment.stop' })).toBeInTheDocument();
+      await act(async () => vi.advanceTimersByTimeAsync(1500));
+      expect(getEnvironmentActionRun).toHaveBeenCalledWith('run-1', expect.any(AbortSignal));
+      await act(async () => vi.advanceTimersByTimeAsync(3500));
+      expect(getWorkspaceEnvironment).toHaveBeenCalledTimes(2);
+      await act(async () => stale.resolve({ ...first, state: 'succeeded' }));
+
+      fireEvent.click(screen.getByRole('button', { name: 'environment.stop' }));
+      await waitFor(() => expect(stopEnvironmentAction).toHaveBeenCalledWith('run-2'));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('resends an unanswered start under its key after the panel is opened again', async () => {
+    vi.mocked(getWorkspaceEnvironment).mockResolvedValue({ ...withAction, action_runs: [] });
+    vi.mocked(startEnvironmentAction)
+      .mockReturnValueOnce(new Promise(() => {}))
+      .mockResolvedValue({ id: 'run-1', action_id: 'serve', state: 'running', output: '' });
+    const first = render(
+      <WorkspaceEnvironment jobId="job" repo="org/repo" onTerminal={() => {}} />,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'environment.run' }));
+    await waitFor(() => expect(startEnvironmentAction).toHaveBeenCalledTimes(1));
+    first.unmount();
+    render(<WorkspaceEnvironment jobId="job" repo="org/repo" onTerminal={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'environment.run' }));
+    await waitFor(() => expect(startEnvironmentAction).toHaveBeenCalledTimes(2));
+    const [firstKey, secondKey] = vi
+      .mocked(startEnvironmentAction)
+      .mock.calls.map((call) => call[2]);
+    expect(secondKey).toBe(firstKey);
+  });
 });

@@ -18,6 +18,7 @@ import pytest
 from tests.integration.storage.test_agent_job_store import (
     _claim,
     _create_job,
+    _reserve_retained_chat,
     pool as pool,
     store as store,
 )
@@ -90,6 +91,26 @@ async def test_queueing_requeueing_and_ending_notify_and_claiming_does_not(store
             await conn.execute("UPDATE agent_jobs SET state = 'queued' WHERE FALSE")
             await conn.execute("UPDATE agent_jobs SET state = state")
         assert await _nothing_heard_since(heard, pool), "no state changed, so no work appeared"
+    finally:
+        await heard.connection.close()
+
+
+async def test_a_turn_only_its_groups_host_can_take_names_that_host(store, pool):
+    """The other hosts are not woken for work they could not claim."""
+    job, claim, sandbox = await _reserve_retained_chat(store)
+    heard = await _listen()
+    try:
+        assert await store.attempt_commands.release_claim(
+            job_id=job["id"], attempt_id=claim["attempt_id"]
+        )
+        assert await heard.next() == "runner-a", "its group lives on runner-a"
+
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE agent_sandboxes SET state = 'lost' WHERE id = $1", sandbox["sandbox_id"]
+            )
+            await conn.execute("UPDATE agent_jobs SET state = 'cancelled' WHERE id = $1", job["id"])
+        assert await heard.next() == "", "a group pinned to no host leaves the turn to any"
     finally:
         await heard.connection.close()
 

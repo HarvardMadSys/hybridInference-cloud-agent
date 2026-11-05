@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict
 
-from cloud_agent import settings
+from cloud_agent import settings, site_content
 from cloud_agent.api.deps import (
     get_client_ip,
     get_storage,
@@ -15,8 +15,6 @@ from cloud_agent.api.deps import (
     require_store,
     verify_admin_access,
 )
-from cloud_agent.identity_namespace import IdentityNamespaceError
-from cloud_agent.source_control import SourceControlError
 
 if TYPE_CHECKING:
     from cloud_agent.ports import AuditRepository, SettingsRepository
@@ -43,6 +41,32 @@ class UpdateSettingsRequest(BaseModel):
     expected_revision: int | None = None
 
 
+def _settings_view(revision: int, encoded: Any) -> dict[str, Any]:
+    """The editor response, with settings the deployment's site files replace shown read-only."""
+    view = settings.settings_response(revision, encoded)
+    terms = site_content.site_content().terms
+    if terms:
+        for definition in view["definitions"]:
+            if definition["key"] in site_content.TERMS_SETTINGS:
+                definition["read_only"] = True
+                definition["description"] = (
+                    "Set by this deployment's site files (terms.<locale>.txt), which replace "
+                    "this setting. Change the Terms there."
+                )
+        view["values"]["accounts.terms_url"] = ""
+        view["values"]["accounts.terms_text"] = site_content.terms_text_for(terms)
+    return view
+
+
+def _refuse_managed(changes: dict[str, Any]) -> None:
+    """Refuse an edit the deployment's Terms files would silently override."""
+    if site_content.site_content().terms and set(changes) & set(site_content.TERMS_SETTINGS):
+        raise HTTPException(
+            status_code=409,
+            detail="The Terms of Service are set by this deployment's site files. Change them there.",
+        )
+
+
 def _no_store(response: Response) -> None:
     response.headers["Cache-Control"] = "no-store"
 
@@ -60,8 +84,8 @@ async def read_settings(
     """Return editable setting definitions and values without exposing secrets."""
     revision, encoded = await require_store(store).settings.read_settings()
     try:
-        return settings.settings_response(revision, encoded)
-    except (SourceControlError, ValueError):
+        return _settings_view(revision, encoded)
+    except (settings.SettingsEncryptionError, ValueError):
         raise HTTPException(
             status_code=503,
             detail="Settings cannot be loaded. Check persisted configuration and the server encryption key.",
@@ -77,6 +101,7 @@ async def update_settings(
 ) -> dict[str, Any]:
     """Validate and atomically persist the submitted settings, recording safe changes."""
     storage = require_store(store)
+    _refuse_managed(payload.settings)
     try:
         changes = settings.encode_changes(payload.settings)
         revision, encoded, previous = await storage.settings.update_settings(
@@ -92,9 +117,7 @@ async def update_settings(
         ) from None
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
-    except IdentityNamespaceError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from None
-    except SourceControlError:
+    except settings.SettingsEncryptionError:
         raise HTTPException(
             status_code=503,
             detail="Settings secrets cannot be stored. Check the server encryption key.",
@@ -102,12 +125,12 @@ async def update_settings(
 
     try:
         settings.apply_settings(revision, encoded)
-    except SourceControlError:
+    except settings.SettingsEncryptionError:
         raise HTTPException(
             status_code=503,
             detail="Settings secrets cannot be loaded. Check the server encryption key.",
         ) from None
-    current_view = settings.settings_response(revision, encoded)
+    current_view = _settings_view(revision, encoded)
     defaults = {
         definition["key"]: definition["default"] for definition in current_view["definitions"]
     }

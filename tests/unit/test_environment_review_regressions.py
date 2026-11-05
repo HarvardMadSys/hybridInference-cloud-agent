@@ -2,27 +2,31 @@
 
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
+import functools
+import json
 import threading
 from types import SimpleNamespace
 
 import httpx
 import pytest
-from tests.unit.test_agent_sandbox_manager import _Spawner, _TerminalProcess, _wait_for
+from tests.unit.test_agent_sandbox_manager import (
+    _RunningTerminalProcess,
+    _SlowSpawner,
+    _Spawner,
+    _TerminalProcess,
+    _wait_for,
+)
 
 from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
 from cloud_agent_host import environment_tests
 from cloud_agent_host.action_receipts import ActionReceipts
-from cloud_agent_host.environment_snapshot import check_snapshot_secrets
+from cloud_agent_host.environment_preparation import EnvironmentPreparation
 from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.sandbox_manager import _TerminalManager
 from cloud_agent_shared.environment import (
     BoundEnvironment,
     EnvironmentAction,
     EnvironmentInputError,
-    EnvironmentVariable,
     VariableEdit,
     merge_variables,
     parse_env,
@@ -67,78 +71,6 @@ def test_multiline_secret_does_not_turn_short_lines_or_pem_headers_into_global_p
         )
 
 
-@pytest.fixture
-def git_workspace(tmp_path):
-    def git(*args):
-        return subprocess.check_output(["git", *args], cwd=tmp_path, stderr=subprocess.STDOUT)
-
-    git("init", "-q")
-    (tmp_path / "tracked").write_text("baseline\n")
-    (tmp_path / ".gitignore").write_text("ignored\n")
-    git("add", ".")
-    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base")
-    base = git("rev-parse", "HEAD").decode().strip()
-
-    def capture(_spec, argv, *, env, workdir, timeout_s):
-        return subprocess.run(
-            [sys.executable, *argv[1:]],
-            cwd=workdir,
-            env={**os.environ, **env},
-            capture_output=True,
-            timeout=timeout_s,
-        )
-
-    backend = SimpleNamespace(spec=object(), manager=SimpleNamespace(exec_capture=capture))
-    return tmp_path, git, base, backend
-
-
-@pytest.mark.parametrize("kind", ["untracked", "binary", "staged", "tracked", "symlink"])
-def test_snapshot_scans_every_new_secret_blob_without_changing_the_user_index(git_workspace, kind):
-    root, git, base, backend = git_workspace
-    secret = "example-private-credential"
-    path = root / ("tracked" if kind == "tracked" else ".env.local")
-    if kind == "symlink":
-        path.symlink_to(secret)
-    else:
-        path.write_bytes((b"\0\xff" if kind == "binary" else b"TOKEN=") + secret.encode())
-    if kind == "staged":
-        git("add", ".env.local")
-    index = (root / ".git/index").read_bytes()
-    bound = BoundEnvironment(
-        binding_id="b", variables=[EnvironmentVariable(name="TOKEN", value=secret)]
-    )
-    with pytest.raises(SandboxError, match="Secret value"):
-        check_snapshot_secrets(backend, base, bound, workdir=str(root))
-    assert (root / ".git/index").read_bytes() == index
-
-
-def test_snapshot_allows_ordinary_flags_ignored_files_and_secret_removal(git_workspace):
-    root, git, base, backend = git_workspace
-    value = "example-private-credential"
-    (root / "tracked").write_text(value)
-    git("add", ".")
-    git(
-        "-c",
-        "user.name=Test",
-        "-c",
-        "user.email=test@example.invalid",
-        "commit",
-        "-qm",
-        "baseline secret",
-    )
-    base = git("rev-parse", "HEAD").decode().strip()
-    (root / "tracked").write_text("1 test passed")
-    (root / "ignored").write_text(value)
-    bound = BoundEnvironment(
-        binding_id="b",
-        variables=[
-            EnvironmentVariable(name="TOKEN", value=value),
-            EnvironmentVariable(name="DEBUG", value="1", secret=False),
-        ],
-    )
-    check_snapshot_secrets(backend, base, bound, workdir=str(root))
-
-
 def test_completed_action_is_not_reexecuted_after_reaping_or_broker_restart(tmp_path):
     receipts = ActionReceipts(tmp_path)
     manager = _TerminalManager(
@@ -172,6 +104,40 @@ def test_completed_action_is_not_reexecuted_after_reaping_or_broker_restart(tmp_
     again = restarted.create("workspace", "/workspace", **args)
     assert again["state"] == "exited"
     assert len(backend.processes) == 1
+
+
+def test_reading_an_expired_action_terminal_closes_it_and_returns_its_result(tmp_path):
+    """A keystroke leaves a terminal past its lifetime to the reaper; this read does not.
+
+    Closing an action's terminal is what records its result. Read without that
+    close, the run would answer that its result is unavailable.
+    """
+    receipts = ActionReceipts(tmp_path)
+    manager = _TerminalManager(
+        idle_ttl_s=30, hard_ttl_s=60, max_sessions=4, action_receipts=receipts
+    )
+    bound = BoundEnvironment(
+        binding_id="b", actions=[EnvironmentAction(id="deploy", name="Deploy", command="deploy")]
+    )
+    process = _RunningTerminalProcess()
+    created = manager.create(
+        "workspace",
+        "/workspace",
+        rows=24,
+        cols=80,
+        backend=_Spawner(process),
+        environment=bound,
+        action_id="deploy",
+        run_id="one-run",
+    )
+    manager._sessions["workspace"][created["id"]].created_at -= 120
+
+    output = manager.output("workspace", created["id"])
+
+    assert process.killed
+    assert "workspace" not in manager._sessions
+    assert output["state"] == "closed"
+    assert output == receipts.read("workspace", created["id"])
 
 
 def test_action_result_disk_failure_releases_activity_but_still_blocks_replay(
@@ -225,6 +191,73 @@ def test_stop_before_delayed_action_launch_persists_a_tombstone(tmp_path):
     assert ActionReceipts(tmp_path).reserve("w", "term_run", "bound", "deploy")["state"] == "closed"
 
 
+class _RecordingSlowSpawner(_SlowSpawner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.processes: list = []
+
+    def spawn_terminal(self, spec, *, rows: int, cols: int):
+        process = super().spawn_terminal(spec, rows=rows, cols=cols)
+        self.processes.append(process)
+        return process
+
+
+def test_stopping_an_action_while_its_terminal_spawns_stops_it(tmp_path):
+    """A Stop that lands while an action's terminal spawns closes that terminal.
+
+    Creating an action's terminal reserves its receipt and then spawns the PTY
+    under the workspace's own lock only. A delete in between found no
+    terminal, and its tombstone leaves a reserved receipt alone, so the
+    command the owner had stopped started once its terminal was listed.
+    """
+    receipts = ActionReceipts(tmp_path)
+    manager = _TerminalManager(
+        idle_ttl_s=30, hard_ttl_s=60, max_sessions=4, action_receipts=receipts
+    )
+    bound = BoundEnvironment(
+        binding_id="b", actions=[EnvironmentAction(id="deploy", name="Deploy", command="deploy")]
+    )
+    run_id = "8f2c2a54-0b8e-4e1c-9a51-3f5d2c7b9e10"
+    spawner = _RecordingSlowSpawner()
+    creation = threading.Thread(
+        target=functools.partial(
+            manager.create,
+            "workspace",
+            "/workspace",
+            rows=24,
+            cols=80,
+            backend=spawner,
+            environment=bound,
+            action_id="deploy",
+            run_id=run_id,
+        ),
+        daemon=True,
+    )
+    creation.start()
+    assert spawner.spawning.wait(2)
+    stopped: list[dict] = []
+    stop = threading.Thread(
+        target=lambda: stopped.append(manager.delete("workspace", "term_" + run_id)),
+        daemon=True,
+    )
+    try:
+        stop.start()
+        stop.join(0.3)
+        stopped_mid_spawn = not stop.is_alive()
+    finally:
+        spawner.release.set()
+        creation.join(5)
+        stop.join(5)
+
+    assert not stopped_mid_spawn, "the Stop waits for the terminal it stops"
+    assert [descriptor["state"] for descriptor in stopped] == ["closed"]
+    [process] = spawner.processes
+    assert process.killed
+    assert manager.list("workspace") == []
+    assert receipts.read("workspace", "term_" + run_id)["state"] == "closed"
+    manager.close()
+
+
 def test_environment_test_poll_does_not_block_and_can_be_cancelled(monkeypatch):
     entered = threading.Event()
     exited = threading.Event()
@@ -267,11 +300,370 @@ def test_environment_orphan_poll_is_throttled(monkeypatch):
     assert [call["cleanup_orphans"] for call in calls] == [True, False, False, True]
 
 
+def test_environment_polls_keep_one_client_per_credential(monkeypatch):
+    """A poll opened a client of its own every five seconds; the worker keeps one."""
+    now = [100.0]
+    calls = []
+    monkeypatch.setattr(environment_tests.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(environment_tests, "claim_and_execute", lambda **kw: calls.append(kw))
+    worker = environment_tests.EnvironmentTestWorker("http://control", object())
+    for instant, credential in ((100.0, "host-cred"), (106.0, "host-cred"), (112.0, "rotated")):
+        now[0] = instant
+        worker.poll(credential, {"proof": instant})
+        worker._thread.join(1)
+    worker.close()
+
+    first, again, rotated = (call["client"] for call in calls)
+    assert first is again, "the same credential reuses its client"
+    assert rotated is not first and first.is_closed, "a replaced client is closed"
+    assert rotated.headers["Authorization"] == "Bearer rotated"
+    assert rotated.is_closed, "closing the worker closes its client"
+    assert [call["attestation"] for call in calls] == [
+        {"proof": 100.0},
+        {"proof": 106.0},
+        {"proof": 112.0},
+    ]
+
+
+def test_a_poll_claims_with_the_loops_proof_on_the_workers_client(monkeypatch):
+    """The claim loop's proof is presented as it was built, and the client stays open."""
+    sent = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append((request.url.path, json.loads(request.content)))
+        # No run is queued: the control plane answers ``null``.
+        return httpx.Response(200, content=b"null")
+
+    def second_proof(*_args, **_kwargs):
+        raise AssertionError("the poll built a proof of its own")
+
+    monkeypatch.setattr("cloud_agent_host.runner._claim_attestation", second_proof)
+    with httpx.Client(transport=httpx.MockTransport(handler), base_url="http://control") as client:
+        claimed = environment_tests.claim_and_execute(
+            base_url="http://control",
+            credential="host-cred",
+            backend=object(),
+            cleanup_orphans=False,
+            client=client,
+            attestation={"proof": 1},
+        )
+        assert not client.is_closed, "the worker's client outlives its poll"
+    assert claimed is False
+    [(path, body)] = sent
+    assert path == "/v1/agent/worker/environment-runs/claim"
+    assert body["attestation"] == {"proof": 1}
+
+
+def _environment_worker(monkeypatch, tmp_path, prepare, status, *, environment=None, retained=None):
+    """A worker whose first claim runs one test run against stand-ins.
+
+    The run is handed the stop event the worker gives its claim, as the real
+    claim does; ``prepare`` stands in for installation and ``status`` answers
+    every report, or, called with each report, says how to answer it.
+    ``environment`` replaces the run's binding, and ``retained`` its
+    container's backend. Returns the worker, its claims and the run's reports.
+    """
+    claims = []
+    reports = []
+
+    class _RunManager:
+        def __init__(self, backend):
+            self.backend = backend
+
+        def create(self, spec):
+            pass
+
+        def start(self, spec):
+            return SimpleNamespace(container_id="container-1")
+
+        def prepare_shared_workspace(self, spec):
+            pass
+
+        def inspect(self, name):
+            return None
+
+        def remove_environment_test(self, spec, *, container_id):
+            pass
+
+    class _Source:
+        def __init__(self, job, **kwargs):
+            pass
+
+        def import_into(self, manager, spec):
+            return "c" * 40
+
+        def discard(self):
+            pass
+
+    class _Preparation(EnvironmentPreparation):
+        def __init__(self):
+            super().__init__(tmp_path)
+
+        def prepare(self, backend, environment, *, callback, cancel):
+            prepare(callback, cancel)
+
+    def post(path, json):
+        reports.append(json)
+        answer = status(json) if callable(status) else status
+        return httpx.Response(answer, request=httpx.Request("POST", f"http://control{path}"))
+
+    backend = SimpleNamespace(
+        uid=1000, gid=1000, version_stamp=lambda: {"sandbox_image_digest": "sha256:" + "a" * 64}
+    )
+    environment = (environment or BoundEnvironment(binding_id="b", setup_script="make")).model_dump(
+        mode="json"
+    )
+
+    def claim_and_execute(**kwargs):
+        claims.append(kwargs)
+        if len(claims) == 1:
+            environment_tests.execute_test(
+                client=SimpleNamespace(post=post),
+                run={
+                    "id": "run-1",
+                    "lease_generation": 1,
+                    "repo": "org/repo",
+                    "base_sha": "c" * 40,
+                    "environment": environment,
+                    "purpose": "test",
+                },
+                backend=backend,
+                stop=kwargs["stop"],
+            )
+        return True
+
+    monkeypatch.setattr(environment_tests, "ChatSandboxManager", _RunManager)
+    monkeypatch.setattr(environment_tests, "RetainedChatBackend", lambda manager, spec: retained)
+    monkeypatch.setattr(environment_tests, "EnvironmentPreparation", _Preparation)
+    monkeypatch.setattr(environment_tests, "claim_and_execute", claim_and_execute)
+    monkeypatch.setattr("cloud_agent_host.runner._SourcePrefetch", _Source)
+    return environment_tests.EnvironmentTestWorker("http://control", backend), claims, reports
+
+
+@pytest.mark.parametrize("refused", ["report", "heartbeat"])
+def test_a_cancelled_environment_run_leaves_the_worker_polling(monkeypatch, tmp_path, refused):
+    """A refused report or a failed heartbeat ends that run, never the host's worker."""
+    now = [100.0]
+    monkeypatch.setattr(environment_tests.time, "monotonic", lambda: now[0])
+
+    def prepare(callback, cancel):
+        if refused == "report":
+            # The owner cancelled the run, so its next report is refused.
+            callback({"phase": "setup", "state": "running", "output": "installing"})
+        else:
+            # A heartbeat falls due and the control plane cannot be reached.
+            now[0] += 11
+            assert cancel.wait(15)
+
+    worker, claims, reports = _environment_worker(
+        monkeypatch, tmp_path, prepare, 409 if refused == "report" else 503
+    )
+    worker.poll("credential")
+    worker._thread.join(20)
+    assert reports[-1]["state"] == "cancelled"
+    assert not worker._stop.is_set()
+    now[0] += 6
+    worker.poll("credential")
+    worker._thread.join(1)
+    worker.close()
+    assert len(claims) == 2
+
+
+def test_chatty_environment_progress_reports_are_coalesced(monkeypatch, tmp_path):
+    """Running output renews the lease without posting every output chunk."""
+    now = [100.0]
+    monkeypatch.setattr(environment_tests.time, "monotonic", lambda: now[0])
+
+    def prepare(callback, _cancel):
+        for index in range(12):
+            now[0] += 1
+            callback(
+                {
+                    "phase": "setup",
+                    "state": "running",
+                    "output": f"line {index}",
+                }
+            )
+
+    worker, _, reports = _environment_worker(monkeypatch, tmp_path, prepare, 200)
+    worker.poll("credential")
+    worker._thread.join(5)
+    worker.close()
+
+    progress = [report for report in reports if report["state"] == "running" and report["steps"]]
+    assert [report["steps"][0]["output"] for report in progress] == [
+        "line 0",
+        "line 5",
+        "line 10",
+    ]
+
+
+def test_closing_the_environment_worker_still_cancels_its_run(monkeypatch, tmp_path):
+    started = threading.Event()
+
+    def prepare(callback, cancel):
+        started.set()
+        assert cancel.wait(5)
+
+    worker, _, reports = _environment_worker(monkeypatch, tmp_path, prepare, 200)
+    worker.poll("credential")
+    assert started.wait(5)
+    worker.close()
+    assert not worker.busy
+    assert reports[-1]["state"] == "cancelled"
+
+
+class _Verification:
+    """A verify script's process: it exits with ``exit_code``, or runs until killed."""
+
+    def __init__(self, exit_code, *, until_killed):
+        self.exit_code = exit_code
+        self.until_killed = until_killed
+        self.started = threading.Event()
+        self.killed = threading.Event()
+
+    def lines(self):
+        self.started.set()
+        if self.until_killed:
+            self.killed.wait(5)
+            return
+        yield "verifying"
+
+    def wait(self):
+        return self.exit_code
+
+    def kill(self):
+        self.killed.set()
+
+    def stderr_text(self):
+        return ""
+
+
+@pytest.mark.parametrize(
+    ("stopped", "exit_code", "state"),
+    [
+        pytest.param(True, 137, "cancelled", id="stopped"),
+        pytest.param(False, 1, "failed", id="failed"),
+        pytest.param(False, 130, "failed", id="exited-130-itself"),
+    ],
+)
+def test_a_stopped_verification_is_recorded_as_cancelled_and_a_failed_one_as_failed(
+    monkeypatch, tmp_path, stopped, exit_code, state
+):
+    # Stopping the run kills its verify script, which run_setup then reports
+    # as stopped (130). A script that exits 130 by itself still failed.
+    verification = _Verification(exit_code, until_killed=stopped)
+    worker, _, reports = _environment_worker(
+        monkeypatch,
+        tmp_path,
+        lambda callback, cancel: None,
+        200,
+        environment=BoundEnvironment(binding_id="b", verify_script="make check"),
+        retained=SimpleNamespace(spawn=lambda spec: verification),
+    )
+    worker.poll("credential")
+    assert verification.started.wait(5)
+    if stopped:
+        worker.close()
+    worker._thread.join(20)
+    worker.close()
+
+    assert [(step["phase"], step["state"]) for step in reports[-1]["steps"]] == [("verify", state)]
+    assert reports[-1]["state"] == ("cancelled" if stopped else "failed")
+
+
+class _ChattyScript:
+    """A script's process that prints until it is killed."""
+
+    def __init__(self):
+        self.killed = threading.Event()
+
+    def lines(self):
+        while not self.killed.wait(0.05):
+            yield "still working\n"
+
+    def wait(self):
+        return 137
+
+    def kill(self):
+        self.killed.set()
+
+    def stderr_text(self):
+        return ""
+
+
+def _run_a_chatty_step(monkeypatch, tmp_path, phase, *, answer):
+    """Run a test whose ``phase`` script prints until killed; return its final report.
+
+    The first report of the running step is accepted and every later one is
+    answered with ``answer``, so the run ends while the script prints.
+    """
+    script = _ChattyScript()
+    retained = SimpleNamespace(
+        spec=SimpleNamespace(container_name="container"),
+        manager=SimpleNamespace(
+            inspect=lambda _name: SimpleNamespace(
+                container_id="container-1", running=True, started_at="boot"
+            )
+        ),
+        spawn=lambda spec: script,
+    )
+    if phase == "setup":
+        environment = BoundEnvironment(binding_id="b", setup_script="make")
+
+        def prepare(callback, cancel):
+            EnvironmentPreparation(tmp_path).prepare(
+                retained, environment, callback=callback, cancel=cancel
+            )
+
+    else:
+        environment = BoundEnvironment(binding_id="b", verify_script="make check")
+
+        def prepare(callback, cancel):
+            pass
+
+    accepted = []
+
+    def status(report):
+        if accepted:
+            return answer
+        if report["steps"]:
+            accepted.append(report)
+        return 200
+
+    worker, _, reports = _environment_worker(
+        monkeypatch, tmp_path, prepare, status, environment=environment, retained=retained
+    )
+    worker.poll("credential")
+    worker._thread.join(20)
+    worker.close()
+    assert [(step["phase"], step["state"]) for step in accepted[0]["steps"]] == [(phase, "running")]
+    return reports[-1]
+
+
+@pytest.mark.parametrize("phase", ["setup", "verify"])
+def test_a_step_stopped_through_its_own_output_report_is_recorded_as_cancelled(
+    monkeypatch, tmp_path, phase
+):
+    # The owner stops the run while its script prints often, so a refused
+    # report of that output, not the heartbeat, is the first to learn of it.
+    final = _run_a_chatty_step(monkeypatch, tmp_path, phase, answer=409)
+
+    assert [(step["phase"], step["state"]) for step in final["steps"]] == [(phase, "cancelled")]
+    assert final["state"] == "cancelled"
+
+
+def test_any_other_failed_report_of_a_running_step_still_fails_the_run(monkeypatch, tmp_path):
+    final = _run_a_chatty_step(monkeypatch, tmp_path, "verify", answer=503)
+
+    assert final["state"] == "failed"
+    assert "503" in final["detail"]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("configured", [True, False])
-@pytest.mark.parametrize("operation", ["terminal", "create_terminal"])
 async def test_terminal_prepares_at_the_broker_once_and_empty_bindings_need_no_capability(
-    configured, operation
+    configured,
 ):
     requests = []
 
@@ -287,12 +679,7 @@ async def test_terminal_prepares_at_the_broker_once_and_empty_bindings_need_no_c
     bound = BoundEnvironment(binding_id="b", setup_script="install" if configured else "")
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         broker = SandboxManagerClient("http://broker", "credential", client=client)
-        args = (
-            {"command": "echo 1", "cwd": "/workspace", "timeout_seconds": 60}
-            if operation == "terminal"
-            else {"rows": 24, "cols": 80}
-        )
-        await getattr(broker, operation)("workspace", environment=bound, **args)
+        await broker.create_terminal("workspace", environment=bound, rows=24, cols=80)
     assert len(requests) == (2 if configured else 1)
     assert not any("environment/prepare" in str(request.url) for request in requests)
     assert (b'"environment"' in requests[-1].content) == configured
@@ -320,54 +707,24 @@ async def test_old_broker_receives_no_secret_bearing_payload():
 
 
 @pytest.mark.asyncio
-async def test_empty_binding_snapshot_uses_the_existing_broker_protocol(monkeypatch):
-    from unittest.mock import AsyncMock
-
-    from cloud_agent import sandbox_manager_routing
-    from cloud_agent.workers.snapshots import _capture_due_shared_snapshot
-
-    snapshot = {
-        "snapshot_id": 1,
-        "sandbox_id": "sandbox",
-        "generation": 1,
-        "container_id": "container",
-        "workspace_epoch": 2,
-        "base_sha": "a" * 40,
-        "anchor_job_id": "job",
-    }
-    receipt = {**snapshot, "sandbox_generation": 1, "patch": "", "content_sha256": "digest"}
-    broker = SimpleNamespace(capture_shared_snapshot=AsyncMock(return_value=receipt))
-    monkeypatch.setattr(
-        sandbox_manager_routing, "sandbox_manager_for_job", AsyncMock(return_value=broker)
-    )
-    store = SimpleNamespace(
-        host_pool=object(),
-        snapshot=SimpleNamespace(
-            claim_due_sandbox_snapshot=AsyncMock(return_value=snapshot),
-            record_sandbox_snapshot_capture=AsyncMock(return_value={"id": 1}),
-        ),
-        environments=SimpleNamespace(
-            get_job_environment=AsyncMock(return_value=BoundEnvironment(binding_id="empty"))
-        ),
-    )
-    assert await _capture_due_shared_snapshot(store)
-    assert "environment" not in broker.capture_shared_snapshot.call_args.args[0]
-
-
-@pytest.mark.asyncio
 async def test_empty_binding_fork_reaches_coordination_without_environment_preparation(monkeypatch):
     from unittest.mock import AsyncMock
 
     from fastapi import HTTPException
+    from tests.support.owners import CONNECTION_ID, CONNECTION_MODEL, connection_row
 
     from cloud_agent.application import session_fork
 
+    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "fork-regression-encryption-key")
     broker = SimpleNamespace(prepare_environment=AsyncMock(side_effect=RuntimeError("old broker")))
     monkeypatch.setattr(session_fork, "sandbox_manager_for_job", AsyncMock(return_value=broker))
     store = SimpleNamespace(
         host_pool=object(),
         environments=SimpleNamespace(
             get_environment_binding=AsyncMock(return_value=BoundEnvironment(binding_id="empty"))
+        ),
+        model_connections=SimpleNamespace(
+            get_model_connection=AsyncMock(return_value=connection_row("alice"))
         ),
         session_fork=SimpleNamespace(
             claim_session_fork_materialization=AsyncMock(return_value=False)
@@ -378,13 +735,18 @@ async def test_empty_binding_fork_reaches_coordination_without_environment_prepa
         "runtime_id": "claude-code",
         "source_thread_id": "thread",
         "resident_slot_id": 1,
-        "source_job": {"user_id": "alice", "environment_binding_id": "empty"},
+        "source_job": {
+            "user_id": "alice",
+            "environment_binding_id": "empty",
+            "model": CONNECTION_MODEL,
+            "runtime": "claude-code",
+            "thread_id": "thread",
+            "model_connection_id": CONNECTION_ID,
+        },
         "group_members": [{"thread_id": "thread"}],
     }
     with pytest.raises(HTTPException) as failure:
-        await session_fork.materialize_session_fork(
-            operation, job_id="job", job_store=store, grants=None
-        )
+        await session_fork.materialize_session_fork(operation, job_id="job", job_store=store)
     assert failure.value.detail["error"]["type"] == "fork_in_progress"
     broker.prepare_environment.assert_not_awaited()
     store.session_fork.claim_session_fork_materialization.assert_awaited_once()

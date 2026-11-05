@@ -14,6 +14,8 @@ override the source wrote.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 from typing import Any
 
@@ -21,21 +23,27 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from tests.support.db import reset_agent_tables
+from tests.support.db import assert_pool_idle, reset_agent_tables
 from tests.support.migrations import apply_migrations
+from tests.support.model_connections import (
+    use_test_cipher,
+    verified_connection,
+    with_connection_capability,
+)
+from tests.support.owners import CONNECTION_ID, CONNECTION_MODELS, on_connection
 
 from cloud_agent.api import routes as agent_jobs_router
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_gateway_client,
-    get_grant_client,
-    get_log_store,
+    get_owner_directory,
     get_storage,
 )
 from cloud_agent.api.worker import verify_claiming_host
 from cloud_agent.storage.assembly import Storage
-from cloud_agent_host.shared_protocol import (
+from cloud_agent.workers.attempts import reap_expired_attempts
+from cloud_agent.workers.environment_maintenance import run_environment_maintenance
+from cloud_agent_shared.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
@@ -51,22 +59,25 @@ _TEST_MODEL = "glm-5.1"
 
 
 def _claim_body(worker_id: str) -> dict[str, Any]:
-    return {
-        "worker_id": worker_id,
-        "attestation": {
-            "sandbox_image_digest": "sha256:lifecycle-test-image",
-            "runner_capabilities": [
-                SHARED_SANDBOX_CAPABILITY,
-                NATIVE_FORK_AT_ANCHOR_CAPABILITY,
-                shared_deployment_capability("test-deployment"),
-            ],
-            "runtime_versions": dict(SHARED_SANDBOX_RUNTIME_PINS),
-            "helper_versions": dict(SHARED_SANDBOX_HELPER_PINS),
-        },
-    }
+    # From a host that launches members on owner connections, as every turn runs on one.
+    return with_connection_capability(
+        {
+            "worker_id": worker_id,
+            "attestation": {
+                "sandbox_image_digest": "sha256:lifecycle-test-image",
+                "runner_capabilities": [
+                    SHARED_SANDBOX_CAPABILITY,
+                    NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+                    shared_deployment_capability("test-deployment"),
+                ],
+                "runtime_versions": dict(SHARED_SANDBOX_RUNTIME_PINS),
+                "helper_versions": dict(SHARED_SANDBOX_HELPER_PINS),
+            },
+        }
+    )
 
 
-class _FakeGateway:
+class _FakeOwners:
     """Explicit Agent access and the catalog used by job creation."""
 
     async def model_catalog(self, user_id: str) -> list[str]:
@@ -76,6 +87,13 @@ class _FakeGateway:
         # The interface the create path actually calls now; no aliases, which
         # is exactly what an older gateway answers.
         return [_TEST_MODEL], {}
+
+    async def model_catalog_bundle(
+        self, user_id: str
+    ) -> tuple[list[str], dict[str, str], dict[str, list[str]]]:
+        # The one-read bundle the create path uses (issue #781); no aliases
+        # and no effort domains, the older-gateway shape.
+        return [_TEST_MODEL], {}, {}
 
     async def agent_access(self, user_id: str) -> dict[str, Any]:
         return {"user_id": user_id, "allowed": True, "permissions": ["agent.use"]}
@@ -112,6 +130,8 @@ async def api(monkeypatch):
     # The allowlist is empty unless a deployment sets it, and an unentitled
     # repo is refused at creation, so declare the one repo these tests use.
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "owner/name")
+    monkeypatch.setenv("AGENT_MODEL_CONNECTIONS_ENABLED", "true")
+    use_test_cipher(monkeypatch)
 
     base_db_name = os.getenv("TEST_DB_NAME", "hybridinference_test_db")
     worker_id = os.environ.get("PYTEST_XDIST_WORKER", "master")
@@ -139,6 +159,13 @@ async def api(monkeypatch):
     async with pool.acquire() as conn:
         await reset_agent_tables(conn)
         await conn.execute("UPDATE agent_runner_policy SET active_host = NULL")
+    # The owner's verified connection, the one `on_connection` names.
+    await verified_connection(
+        store,
+        _OWNER,
+        connection_id=CONNECTION_ID,
+        models=tuple(dict.fromkeys((_TEST_MODEL, *CONNECTION_MODELS))),
+    )
     await store.host_pool.register_host(
         host="runner-test",
         credential_hash="test-credential-hash",
@@ -153,12 +180,8 @@ async def api(monkeypatch):
     app = FastAPI()
     app.include_router(agent_jobs_router.router)
     app.dependency_overrides[get_storage] = lambda: store
-    app.dependency_overrides[get_gateway_client] = _FakeGateway
-    app.dependency_overrides[get_grant_client] = _FakeGrants
+    app.dependency_overrides[get_owner_directory] = _FakeOwners
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
-    # No log store here either: the source's app had no services container,
-    # so spend and usage were absent rather than a fabricated zero.
-    app.dependency_overrides[get_log_store] = lambda: None
     # The source overrode ``verify_api_key`` with ``role: "pro"``, which never
     # took effect: ``authenticate_agent_owner`` calls that dependency directly,
     # so FastAPI could not intercept it, and the real one answered with an
@@ -196,7 +219,7 @@ async def test_reaped_worker_token_is_rejected_end_to_end(api):
 
     created = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "task_prompt": "slow task", "model": "glm-5.1"},
+        json=on_connection({"repo": "owner/name", "task_prompt": "slow task", "model": "glm-5.1"}),
     )
     job_id = created.json()["id"]
     claim = await client.post("/v1/agent/worker/claim", json=_claim_body("w1"))
@@ -239,13 +262,158 @@ async def test_reaped_worker_token_is_rejected_end_to_end(api):
     assert [event["event_type"] for event in events] == ["attempt_superseded", "message"]
 
 
+async def test_a_runners_batch_is_stored_in_order_through_the_real_endpoint(api):
+    """One request, the real fence and store: in order, and sent again whole without duplicates."""
+    client, _store, pool = api
+    created = await client.post(
+        "/v1/agent/jobs",
+        json=on_connection(
+            {"repo": "owner/name", "task_prompt": "batched task", "model": "glm-5.1"}
+        ),
+    )
+    job_id = created.json()["id"]
+    claim = await client.post("/v1/agent/worker/claim", json=_claim_body("w1"))
+    auth = {"Authorization": f"Bearer {claim.json()['worker_token']}"}
+    path = f"/v1/agent/worker/jobs/{job_id}/events:batch"
+    batch = {
+        "events": [
+            {"event_type": "lifecycle", "payload": {"phase": "turn_started"}, "event_seq": 1},
+            {"event_type": "message", "payload": {"text": "done"}, "event_seq": 2},
+            {"event_type": "tool_use", "payload": {"name": "ls"}, "event_seq": 3},
+        ]
+    }
+
+    first = await client.post(path, json=batch, headers=auth)
+    replay = await client.post(path, json=batch, headers=auth)
+
+    assert first.status_code == replay.status_code == 201
+    assert first.json() == replay.json()
+    events = (await client.get(f"/v1/agent/jobs/{job_id}/events")).json()["events"]
+    assert [event["id"] for event in events] == first.json()["event_ids"]
+    assert [(event["seq"], event["event_type"]) for event in events] == [
+        (1, "lifecycle"),
+        (2, "message"),
+        (3, "tool_use"),
+    ]
+
+    # Once the lease has run out, a batch is refused whole.
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_attempts SET lease_expires_at = NOW() - INTERVAL '1 second' "
+            "WHERE id = $1",
+            claim.json()["attempt_id"],
+        )
+    late = {"events": [{"event_type": "message", "payload": {"text": "late"}, "event_seq": 4}]}
+    assert (await client.post(path, json=late, headers=auth)).status_code == 409
+    events = (await client.get(f"/v1/agent/jobs/{job_id}/events")).json()["events"]
+    assert len(events) == 3
+
+
+async def test_environment_maintenance_lock_does_not_delay_attempt_reaper(api, monkeypatch):
+    """A real maintenance query blocked on PostgreSQL cannot hold up lease recovery."""
+    client, store, pool = api
+    created = await client.post(
+        "/v1/agent/jobs",
+        json=on_connection(
+            {"repo": "owner/name", "task_prompt": "lock test", "model": _TEST_MODEL}
+        ),
+    )
+    assert created.status_code == 201
+    claim = await client.post("/v1/agent/worker/claim", json=_claim_body("lock-test"))
+    attempt_id = claim.json()["attempt_id"]
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_attempts SET lease_expires_at=NOW()-INTERVAL '1 second' WHERE id=$1",
+            attempt_id,
+        )
+
+    maintenance_completed = asyncio.Event()
+    original_maintenance = store.environments.maintain_environments
+
+    async def observed_maintenance() -> None:
+        await original_maintenance()
+        maintenance_completed.set()
+
+    monkeypatch.setattr(store.environments, "maintain_environments", observed_maintenance)
+
+    lock_connection = await pool.acquire()
+    lock_transaction = lock_connection.transaction()
+    await lock_transaction.start()
+    await lock_connection.execute("LOCK TABLE agent_environment_runs IN ACCESS EXCLUSIVE MODE")
+    lock_held = True
+    maintenance_task = asyncio.create_task(
+        run_environment_maintenance(
+            store.environments,
+            store.environment_snapshots,
+            interval_seconds=0.001,
+            deadline_seconds=10,
+        ),
+        name="dbtest-environment-maintenance",
+    )
+    reaper_task: asyncio.Task[None] | None = None
+    try:
+        async with asyncio.timeout(3):
+            while not await pool.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND state = 'active'
+                      AND wait_event_type = 'Lock'
+                      AND query LIKE 'UPDATE agent_environment_runs SET state=%'
+                )
+                """
+            ):
+                await asyncio.sleep(0.005)
+
+        reaper_task = asyncio.create_task(
+            reap_expired_attempts(
+                store,
+                interval_seconds=0.01,
+                max_attempts=3,
+            ),
+            name="dbtest-attempt-reaper",
+        )
+        async with asyncio.timeout(3):
+            while (
+                await pool.fetchval("SELECT status FROM agent_attempts WHERE id=$1", attempt_id)
+                != "superseded"
+            ):
+                await asyncio.sleep(0.01)
+
+        await lock_transaction.commit()
+        lock_held = False
+        await pool.release(lock_connection)
+        lock_connection = None
+        async with asyncio.timeout(3):
+            await maintenance_completed.wait()
+    finally:
+        if lock_connection is not None:
+            if lock_held:
+                with contextlib.suppress(Exception):
+                    await lock_transaction.rollback()
+            await pool.release(lock_connection)
+        tasks = [maintenance_task]
+        if reaper_task is not None:
+            tasks.append(reaper_task)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert await pool.fetchval("SELECT status FROM agent_attempts WHERE id=$1", attempt_id) == (
+        "superseded"
+    )
+    assert maintenance_completed.is_set(), "releasing the lock must let maintenance finish"
+    await assert_pool_idle(pool, "worker shutdown must return every pool connection")
+
+
 async def test_cancel_running_job_is_delivered_via_heartbeat(api):
     """Owner cancel surfaces to the worker, which performs the transition."""
     client, _store, _pool = api
 
     created = await client.post(
         "/v1/agent/jobs",
-        json={"repo": "owner/name", "task_prompt": "long task", "model": "glm-5.1"},
+        json=on_connection({"repo": "owner/name", "task_prompt": "long task", "model": "glm-5.1"}),
     )
     job_id = created.json()["id"]
     claim = await client.post("/v1/agent/worker/claim", json=_claim_body("w1"))

@@ -37,6 +37,7 @@ class PendingMessageRepository(Protocol):
         reset_reasoning_effort: bool = False,
         skills: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
+        model_connection_id: str | None = None,
     ) -> dict[str, Any]:
         """Put one message at the end of the owner's thread's queue.
 
@@ -48,10 +49,9 @@ class PendingMessageRepository(Protocol):
 
         An idle-only action locks its membership, then its sandbox group after
         the thread lock. It requires the expected newest turn, no live turn,
-        waiting message, active member or Fork in the shared group, and its
-        latest snapshot to be published. Using the resolved skills, attachments
-        and effort choices, it creates the turn in this same transaction, never
-        a pending message. It replays its original receipt before these checks,
+        waiting message, active member or Fork in the shared group. Using the
+        resolved skills, attachments and effort choices, it creates the turn
+        in this same transaction, never a pending message. It replays its original receipt before these checks,
         but cannot newly queue behind or resume waiting work.
 
         When nothing in the thread is running this is also the owner deciding
@@ -197,11 +197,12 @@ class PendingMessageRepository(Protocol):
         """
         ...
 
-    async def threads_to_settle(self, *, limit: int = 50) -> list[str]:
+    async def threads_to_settle(self, *, limit: int = 50, after: str | None = None) -> list[str]:
         """Threads whose queue a settlement could move or pause right now.
 
         For the periodic sweep: a turn that ended without the finish route —
         the reaper's verdict, a control plane restarted mid-request — still
-        gets its queue acted on.
+        gets its queue acted on. In thread order, from past ``after`` when
+        given, so a sweep can page through them all.
         """
         ...

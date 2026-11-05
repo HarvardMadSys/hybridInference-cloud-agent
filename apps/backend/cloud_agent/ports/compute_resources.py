@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from datetime import datetime
+
+
+@dataclass(frozen=True)
+class ComputeSchedulingSnapshot:
+    """One inventory snapshot and its independently bounded operation histories."""
+
+    allocations: list[dict[str, Any]]
+    operations: dict[str, list[dict[str, Any]]]
+    lifecycle_operations: dict[str, list[dict[str, Any]]]
 
 
 class ComputeResourceRepository(Protocol):
@@ -134,6 +144,10 @@ class ComputeResourceRepository(Protocol):
         """Read all managed inventory from one local snapshot."""
         ...
 
+    async def scheduling_inventory(self) -> ComputeSchedulingSnapshot:
+        """Read allocations and both operation histories from one consistent snapshot."""
+        ...
+
     async def server_inventory(self) -> dict[str, Any]:
         """Read global placement and resource/Host distribution in one snapshot."""
         ...
@@ -250,7 +264,10 @@ class ComputeResourceRepository(Protocol):
         request_id: str | None = None,
         kinds: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Find recent operation state, including recovery by request ID."""
+        """Find recent operation state, including recovery by request ID.
+
+        Newest first, keeping every operation not yet settled however old.
+        """
         ...
 
     async def update_policy(
@@ -274,18 +291,6 @@ class ComputeResourceRepository(Protocol):
         worker_id: str | None = None,
     ) -> dict[str, Any]:
         """Save a fenced observation, preserving a known deadline when renewal is unknown."""
-        ...
-
-    async def upsert_node(
-        self,
-        *,
-        allocation_id: str,
-        node: dict[str, Any],
-        operation_id: str | None = None,
-        generation: int | None = None,
-        worker_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Observe an immutable node identity without rebinding retained execution state."""
         ...
 
     async def create_node_registration(
@@ -455,6 +460,32 @@ class ComputeResourceRepository(Protocol):
         """Count the groups still held only by this allocation's Hosts."""
         ...
 
+    async def move_out_report(self, *, allocation_id: str) -> dict[str, Any]:
+        """Whether this allocation's groups are moving out, why not, and what stays."""
+        ...
+
+    async def lose_reclaimed_groups(self, *, allocation_id: str, quiet_seconds: int) -> list[str]:
+        """Mark LOST each group that went with a machine its provider reclaimed."""
+        ...
+
+    async def authorize_superseded_removals(
+        self, *, host: str, containers: list[dict[str, Any]], operation_id: str
+    ) -> list[dict[str, Any]]:
+        """Record which containers ``host`` reports its moved groups left behind."""
+        ...
+
+    async def record_superseded_removal(self, *, request_id: str) -> None:
+        """Record that the Host confirmed an authorized removal."""
+        ...
+
+    async def superseded_removals(self, *, hosts: list[str]) -> int:
+        """Count the confirmed removals of containers left behind on ``hosts``."""
+        ...
+
+    async def recorded_host_state(self, *, host: str) -> dict[str, Any]:
+        """The receipts ``host`` keeps on disk that the control plane recorded."""
+        ...
+
     async def running_attempts(self, *, host: str) -> int:
         """Count the turns a Host is executing now."""
         ...
@@ -488,11 +519,15 @@ class ComputeResourceRepository(Protocol):
         operation_id: str,
         generation: int,
         worker_id: str,
+        refused_acquisition_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Stop a replacement node's pending work and queue its release.
 
         Returns the release operation, or None while the candidate's own work is
         executing or its outcome is unknown and it cannot be stopped safely.
+        Naming ``refused_acquisition_id`` stops it only while that acquisition,
+        locked and read in the same transaction, still shows a capacity refusal
+        that created nothing.
         """
         ...
 
@@ -578,6 +613,14 @@ class ComputeResourceRepository(Protocol):
 
         This never asserts ownership or success. The same operation resumes
         through provider inspection and scope validation before any deployment.
+        """
+        ...
+
+    async def confirm_acquisition_absent(self, *, operation_id: str) -> dict[str, Any]:
+        """Close an acquisition an administrator confirmed created nothing.
+
+        Cancels the operation and makes its allocation absent, so the records
+        can be removed. Refused once anything recorded names a resource.
         """
         ...
 

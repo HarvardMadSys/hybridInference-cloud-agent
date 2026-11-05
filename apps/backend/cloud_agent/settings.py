@@ -1,7 +1,9 @@
 """Validated, database-backed application settings shared by both listeners.
 
-The environment is imported once when the settings row is first created.
-After that, the database is authoritative, including resets to registry defaults.
+The environment is imported once when the settings row is first created, and
+the service keys it does not supply are generated then
+(:data:`GENERATED_ON_FIRST_START`). After that, the database is authoritative,
+including resets to registry defaults.
 Secrets are encrypted under a separate domain and never returned to the browser.
 Only database access, the settings root key, recovery access and process
 infrastructure remain bootstrap. Runtime identity and service keys are persisted.
@@ -10,19 +12,30 @@ infrastructure remain bootstrap. Runtime identity and service keys are persisted
 from __future__ import annotations
 
 import asyncio
-import ipaddress
-import math
 import os
-import re
+import secrets
 import threading
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import urlsplit
+from typing import TYPE_CHECKING, Any
 
-from pydantic import AnyHttpUrl, ValidationError
-
+from cloud_agent.accounts.settings_registry import ACCOUNT_SETTINGS
+from cloud_agent.credential_cipher import CredentialCipher, CredentialCipherError
+from cloud_agent.deployment_setup import BOOTSTRAP as BOOTSTRAP, bootstrap_snapshot
+from cloud_agent.domain_cipher import settings_root_key
+from cloud_agent.setting_definition import (
+    MINIMUM_CREDENTIAL_BYTES as MINIMUM_CREDENTIAL_BYTES,
+    Setting,
+    SettingsRevisionConflict as SettingsRevisionConflict,
+    SettingTooShort,
+    SettingValue,
+    _github_install_url,
+    _gitlab_redirect_uri,
+    _numeric,
+    _package_registry_url,
+    _s3_bucket,
+    _s3_prefix,
+    _s3_region,
+)
 from cloud_agent_shared.sandbox_manager_compat import (
-    STORED_SETTING_KEYS,
     manager_env,
     manager_environment,
 )
@@ -32,257 +45,10 @@ if TYPE_CHECKING:
 
     from cloud_agent.ports.settings import SettingsRepository
 
-SettingValue = str | int | float | bool
-SettingKind = Literal["string", "boolean", "integer", "number"]
 
+class SettingsEncryptionError(Exception):
+    """Persisted settings cannot be encrypted or decrypted safely."""
 
-class SettingTooShort(ValueError):
-    """A value shorter than its setting's minimum length; otherwise acceptable."""
-
-
-class SettingsRevisionConflict(Exception):
-    """Settings were saved after the revision an update was reviewed against."""
-
-
-_CONTACT_MAILTO = re.compile(
-    r"mailto:[A-Za-z0-9.!#$%&'*+/=^_`{|}~-]+"
-    r"@[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)+",
-    re.IGNORECASE,
-)
-
-
-@dataclass(frozen=True)
-class Setting:
-    """An admin-editable value and its public validation rules."""
-
-    key: str
-    label: str
-    category: str
-    default: SettingValue
-    kind: SettingKind = "string"
-    env: str | None = None
-    description: str = "Applies to subsequent operations after settings synchronize."
-    minimum: float | None = None
-    maximum: float | None = None
-    choices: tuple[str, ...] = ()
-    secret: bool = False
-    url: bool = False
-    minimum_bytes: int = 0
-    #: The floor arrived after deployments had already saved this value. A
-    #: shorter saved or imported value still loads, and startup warns about
-    #: it: refusing it would stop the control plane before the settings page
-    #: that replaces it could open. Every new value is held to the floor.
-    minimum_bytes_new_values_only: bool = False
-
-    @property
-    def storage_key(self) -> str:
-        """Keep existing saved secrets readable across the service rename."""
-        return STORED_SETTING_KEYS.get(self.key, self.key)
-
-    def validate(self, value: Any, *, saved: bool = False) -> SettingValue:
-        """Return a checked value, raising a message that contains no supplied data.
-
-        ``saved`` marks a value already stored or imported from the
-        environment rather than one an administrator is submitting now.
-        """
-        valid = True
-        if self.kind == "boolean":
-            valid = isinstance(value, bool)
-        elif self.kind in {"number", "integer"}:
-            try:
-                valid = (
-                    isinstance(value, (int, float))
-                    and not isinstance(value, bool)
-                    and math.isfinite(value)
-                    and (self.kind != "integer" or isinstance(value, int))
-                )
-            except OverflowError:
-                valid = False
-            if valid:
-                valid = (self.minimum is None or value >= self.minimum) and (
-                    self.maximum is None or value <= self.maximum
-                )
-        else:
-            valid = isinstance(value, str) and "\x00" not in value
-            if valid:
-                valid = len(value) <= (131072 if self.secret else 4096)
-            if valid and self.key == "gateway_issuer" and value:
-                valid = value == value.strip() and not any(ord(char) < 32 for char in value)
-            if valid and self.choices:
-                valid = value in self.choices
-            if valid and self.key == "gateway_grant_base_path":
-                # Grant clients validate this during startup as well as live
-                # requests. Reject an unusable prefix before it can be saved.
-                valid = (
-                    value.rstrip("/").startswith("/")
-                    and not value.startswith("//")
-                    and not any(char in value for char in ("?", "#", "\\"))
-                    and not any(char.isspace() or ord(char) < 32 for char in value)
-                )
-            if valid and value and self.key == "sandbox_archive.bucket":
-                valid = bool(re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]", value)) and (
-                    not re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", value)
-                    and not any(part in value for part in ("..", ".-", "-."))
-                    and not value.startswith(("xn--", "sthree-", "amzn-s3-demo-"))
-                    and not value.endswith(("-s3alias", "--ol-s3", ".mrap", "--x-s3", "--table-s3"))
-                )
-            if valid and value and self.key == "sandbox_archive.region":
-                valid = bool(re.fullmatch(r"[a-z0-9-]{1,64}", value))
-            if valid and value and self.key == "sandbox_archive.prefix":
-                valid = (
-                    len(value.encode()) <= 512
-                    and bool(re.fullmatch(r"[a-zA-Z0-9_./-]+", value))
-                    and all(part and part not in {".", ".."} for part in value.split("/"))
-                )
-            if (
-                valid
-                and value
-                and self.key == "site.contact_url"
-                and value[:7].lower() == "mailto:"
-            ):
-                # A support address is as likely as a support page. One plain
-                # address only: header fields would let the link prefill a
-                # message the user did not write.
-                valid = bool(_CONTACT_MAILTO.fullmatch(value))
-            elif valid and self.url and value:
-                try:
-                    if any(
-                        char.isspace() or ord(char) < 32 or 127 <= ord(char) <= 159
-                        for char in value
-                    ):
-                        raise ValueError("A URL cannot contain whitespace or control characters")
-                    # The browser uses a WHATWG URL parser for saved appearance
-                    # links. urlsplit alone accepts malformed hosts (such as
-                    # percent signs or spaces) that would break the root layout.
-                    AnyHttpUrl(value)
-                    parsed = urlsplit(value)
-                    valid = (
-                        parsed.scheme in {"http", "https"}
-                        and bool(parsed.hostname)
-                        and not parsed.username
-                        and not parsed.password
-                        and not parsed.fragment
-                    )
-                    _ = parsed.port
-                    if self.key in {
-                        "compute.cloudlab_api_url",
-                        "compute.registration_url",
-                        "mcp_registry_url",
-                        "sandbox_archive.endpoint",
-                    }:
-                        valid = valid and parsed.scheme == "https" and not parsed.query
-                    if self.key in _GATEWAY_TRUST_URLS and not saved:
-                        valid = valid and (
-                            parsed.scheme == "https" or _private_host(parsed.hostname or "")
-                        )
-                    # The code that uses these refuses anything else, so the
-                    # editor asks it rather than keeping a second copy of the rule.
-                    if self.key == "github_app_install_url":
-                        from cloud_agent.source_control import github_install_url_is_usable
-
-                        valid = valid and github_install_url_is_usable(value)
-                    elif self.key == "gitlab_redirect_uri":
-                        from cloud_agent.source_control import gitlab_redirect_uri_is_usable
-
-                        valid = valid and gitlab_redirect_uri_is_usable(value)
-                except (ValueError, ValidationError):
-                    valid = False
-        if not valid:
-            if self.key == "sandbox_archive.bucket":
-                raise ValueError(
-                    f"Invalid value for {self.label} ({self.key}). "
-                    "Use a bucket name such as freeinference; set cloud-agent/sandbox "
-                    "in Sandbox archive S3 prefix."
-                )
-            raise ValueError(f"Invalid value for {self.label} ({self.key})")
-        # Last, and its own error: a stored key saved before its minimum
-        # existed is still the key everything was signed or encrypted with.
-        if (
-            isinstance(value, str)
-            and value
-            and len(value.encode()) < self.minimum_bytes
-            and not (saved and self.minimum_bytes_new_values_only)
-        ):
-            raise SettingTooShort(
-                f"Invalid value for {self.label} ({self.key}): "
-                f"use at least {self.minimum_bytes} bytes"
-            )
-        return value
-
-    def definition(self) -> dict[str, Any]:
-        """The public editor definition, without environment or credential values."""
-        result: dict[str, Any] = {
-            "key": self.key,
-            "label": self.label,
-            "category": self.category,
-            "description": self.description,
-            "kind": self.kind,
-            "default": self.default,
-            "secret": self.secret,
-        }
-        if self.minimum is not None:
-            result["minimum"] = self.minimum
-        if self.maximum is not None:
-            result["maximum"] = self.maximum
-        if self.choices:
-            result["choices"] = list(self.choices)
-        if self.minimum_bytes:
-            result["minimum_bytes"] = self.minimum_bytes
-        return result
-
-
-#: Where the control plane sends its gateway dispatch token, fetches the keys
-#: that identity tokens are checked against, and sends a browser to sign in.
-#: A new value must use HTTPS unless it names this machine or a private name
-#: (see :func:`_private_host`). A value saved or imported before this rule
-#: still loads, so an internal plain-HTTP gateway keeps working.
-_GATEWAY_TRUST_URLS = frozenset({"gateway_base_url", "gateway_jwks_url", "gateway_authorize_url"})
-
-
-def _private_host(host: str) -> bool:
-    """Whether plain HTTP to ``host`` stays on this machine or a private network.
-
-    Loopback addresses and ``localhost`` names, and a single-label name such
-    as a Compose service (``local-gateway``), which public DNS cannot answer.
-    """
-    host = host.lower().rstrip(".")
-    if host == "localhost" or host.endswith(".localhost"):
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return bool(host) and "." not in host
-
-
-def _numeric(
-    key: str,
-    label: str,
-    category: str,
-    default: int | float,
-    minimum: float,
-    maximum: float,
-    *,
-    env: str | None = None,
-    description: str = "Applies to subsequent operations after settings synchronize.",
-) -> Setting:
-    return Setting(
-        key,
-        label,
-        category,
-        default,
-        kind="integer" if isinstance(default, int) else "number",
-        env=env,
-        minimum=minimum,
-        maximum=maximum,
-        description=description,
-    )
-
-
-#: RFC 7518 §3.2's floor for an HS256 key, which the session key has always
-#: been held to. Below it a signing key is brute-forceable offline from any one
-#: value it signed, and every sandbox holds a worker token the control signing
-#: key signed; a bearer secret that short is guessable outright.
-MINIMUM_CREDENTIAL_BYTES = 32
 
 SETTINGS: tuple[Setting, ...] = (
     Setting(
@@ -303,17 +69,8 @@ SETTINGS: tuple[Setting, ...] = (
         choices=("text", "json"),
         description="Text or structured JSON output. Applies to the control plane's own log handler without a restart.",
     ),
-    _numeric(
-        "gateway_request_timeout_s", "Gateway request timeout (seconds)", "Gateway", 10.0, 0.1, 300
-    ),
-    _numeric(
-        "gateway_connect_timeout_s",
-        "Gateway connection timeout (seconds)",
-        "Gateway",
-        5.0,
-        0.1,
-        300,
-    ),
+    # Seconds between attempts to load an App that failed. Also the Retry-After
+    # a caller refused in the meantime is given.
     _numeric(
         "github_reload_interval_s",
         "GitHub configuration retry interval (seconds)",
@@ -322,6 +79,10 @@ SETTINGS: tuple[Setting, ...] = (
         1,
         3600,
     ),
+    # How long one user's repository answer is reused. Entitlement is asked on
+    # every workspace file read and terminal open; a minute keeps those off
+    # GitHub while bounding how long a revoked permission still reads as
+    # granted.
     _numeric(
         "github_repository_cache_s",
         "GitHub repository cache duration (seconds)",
@@ -346,85 +107,13 @@ SETTINGS: tuple[Setting, ...] = (
         0.1,
         300,
     ),
-    _numeric(
-        "publish_poll_seconds",
-        "Publication retry interval (seconds)",
-        "Publication",
-        15.0,
-        0.1,
-        3600,
-    ),
-    _numeric(
-        "publish_idle_seconds",
-        "Publication idle check interval (seconds)",
-        "Publication",
-        30.0,
-        0.1,
-        3600,
-    ),
-    _numeric(
-        "publish_git_timeout_s", "Publication Git timeout (seconds)", "Publication", 120.0, 0.1, 300
-    ),
-    _numeric(
-        "publish_pr_timeout_s", "Pull request API timeout (seconds)", "Publication", 30.0, 0.1, 300
-    ),
-    Setting(
-        "pr_archive_enabled",
-        "Archive sessions after PR merge",
-        "Publication",
-        True,
-        kind="boolean",
-        env="AGENT_PR_ARCHIVE_ENABLED",
-        description="Archive settled sessions when their current published GitHub PR is verified merged. Preserves history and shared workspaces.",
-    ),
-    _numeric(
-        "pr_archive_poll_s",
-        "PR merge check interval (seconds)",
-        "Publication",
-        30.0,
-        5,
-        3600,
-        env="AGENT_PR_ARCHIVE_POLL_S",
-    ),
-    _numeric(
-        "pr_archive_timeout_s",
-        "PR merge API timeout (seconds)",
-        "Publication",
-        10.0,
-        0.1,
-        60,
-    ),
-    _numeric(
-        "pr_archive_batch_size",
-        "PR merge checks per batch",
-        "Publication",
-        20,
-        1,
-        500,
-    ),
-    _numeric(
-        "pr_archive_retry_max_s",
-        "Maximum PR merge retry delay (seconds)",
-        "Publication",
-        3600.0,
-        30,
-        86400,
-    ),
-    _numeric(
-        "pr_archive_max_failures",
-        "PR merge integration failures before blocking",
-        "Publication",
-        10,
-        1,
-        100,
-        description="Block repeated access or invalid-response failures. Temporary outages and rate limits keep retrying automatically.",
-    ),
     Setting(
         "mcp_registry_url",
         "MCP registry URL",
         "MCP",
         "https://registry.modelcontextprotocol.io",
         url=True,
+        https_only=True,
     ),
     _numeric(
         "mcp_catalog_sync_seconds",
@@ -461,6 +150,10 @@ SETTINGS: tuple[Setting, ...] = (
         0.1,
         300,
     ),
+    # An MCP call is a tool call: it can be a repository search or an issue
+    # fetch, and it is not a token stream. Generous, but bounded: a sandbox
+    # waiting on a hung upstream is a job burning its wall-clock timeout for
+    # nothing.
     _numeric("mcp_request_timeout_s", "MCP request timeout (seconds)", "MCP", 120.0, 0.1, 300),
     _numeric("mcp_connect_timeout_s", "MCP connection timeout (seconds)", "MCP", 10.0, 0.1, 300),
     _numeric("mcp_metadata_timeout_s", "MCP metadata timeout (seconds)", "MCP", 20.0, 0.1, 300),
@@ -543,26 +236,11 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_WEB_CONTACT_URL",
         url=True,
+        mailto=True,
         description=(
             "Where users reach the operators: a support page, or mailto: and one address. "
             "Linked as Contact us from the account menu's Help. Empty hides the link."
         ),
-    ),
-    Setting(
-        "site.gateway_url",
-        "Gateway website URL",
-        "Appearance",
-        "",
-        env="AGENT_WEB_GATEWAY_URL",
-        url=True,
-    ),
-    Setting(
-        "site.feature_rag",
-        "Docs assistant",
-        "Appearance",
-        False,
-        kind="boolean",
-        env="AGENT_WEB_FEATURE_RAG",
     ),
     Setting(
         "compute.cloudlab_api_url",
@@ -571,6 +249,12 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_CLOUDLAB_API_URL",
         url=True,
+        https_only=True,
+        description=(
+            "CloudLab's Portal API: https://boss.emulab.net:43794. The portal's web address, "
+            "www.cloudlab.us, does not serve it. Empty disables CloudLab. Applies to "
+            "subsequent operations after settings synchronize."
+        ),
     ),
     Setting(
         "compute.registration_url",
@@ -579,6 +263,7 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_COMPUTE_REGISTRATION_URL",
         url=True,
+        https_only=True,
     ),
     _numeric(
         "compute.poll_seconds", "Compute scheduling interval (seconds)", "Compute", 30, 5, 300
@@ -591,48 +276,6 @@ SETTINGS: tuple[Setting, ...] = (
         30,
         300,
     ),
-    Setting("gateway_base_url", "Gateway API URL", "Gateway", "", env="GATEWAY_BASE_URL", url=True),
-    Setting(
-        "gateway_dispatch_token",
-        "Gateway dispatch token",
-        "Gateway",
-        "",
-        env="GATEWAY_GRANT_DISPATCH_TOKEN",
-        secret=True,
-        minimum_bytes=MINIMUM_CREDENTIAL_BYTES,
-        minimum_bytes_new_values_only=True,
-        description="A random credential of at least 32 bytes, the same value the Gateway holds. Sent only to the Gateway API URL: to change that URL, clear this first and enter it again afterwards, or save both together.",
-    ),
-    Setting(
-        "gateway_grant_base_path",
-        "Grant API path",
-        "Gateway",
-        "/internal/agent-grants",
-        env="GATEWAY_GRANT_BASE_PATH",
-    ),
-    Setting(
-        "gateway_grant_binding_id",
-        "Grant binding ID",
-        "Gateway",
-        "",
-        env="GATEWAY_GRANT_BINDING_ID",
-    ),
-    Setting(
-        "gateway_authorize_url",
-        "Sign-in authorization URL",
-        "Sign-in",
-        "",
-        env="GATEWAY_AUTHORIZE_URL",
-        url=True,
-    ),
-    Setting(
-        "session_redirect_uri",
-        "Sign-in callback URL",
-        "Sign-in",
-        "",
-        env="AGENT_SESSION_REDIRECT_URI",
-        url=True,
-    ),
     Setting("web_base_url", "Web app URL", "Sign-in", "", env="AGENT_WEB_BASE_URL", url=True),
     Setting(
         "repo_allowlist",
@@ -640,7 +283,7 @@ SETTINGS: tuple[Setting, ...] = (
         "Source control",
         "",
         env="AGENT_REPO_ALLOWLIST",
-        description="Comma-separated owner/repository entries or owner/* rules. Every admitted user may have the platform clone and publish to these with this deployment's GitHub credentials, without connecting GitHub. Applies to new repository access decisions.",
+        description="Comma-separated owner/repository entries or owner/* rules. Every admitted user may have the platform clone these with this deployment's GitHub App, without connecting GitHub. Applies to new repository access decisions.",
     ),
     Setting("github_app_id", "GitHub App ID", "Source control", "", env="AGENT_GITHUB_APP_ID"),
     Setting(
@@ -674,6 +317,7 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_GITHUB_APP_INSTALL_URL",
         url=True,
+        check=_github_install_url,
         description="An https://github.com URL, normally https://github.com/apps/<app-slug>/installations/new.",
     ),
     Setting(
@@ -706,36 +350,21 @@ SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_GITLAB_OAUTH_REDIRECT_URI",
         url=True,
+        check=_gitlab_redirect_uri,
         description="The exact callback registered with GitLab. HTTPS, except http://localhost for development.",
     ),
     Setting(
-        "github_publish_token",
-        "GitHub publication token",
-        "Publication",
+        "github_coauthor",
+        "Agent commit co-author",
+        "Source control",
         "",
-        env="AGENT_GITHUB_TOKEN",
-        secret=True,
-    ),
-    Setting(
-        "publish_base_branch",
-        "Default pull request base branch",
-        "Publication",
-        "dev",
-        env="AGENT_PUBLISH_BASE_BRANCH",
-    ),
-    Setting(
-        "git_author_name",
-        "Commit author name",
-        "Publication",
-        "HybridInference Agent",
-        env="AGENT_GIT_AUTHOR_NAME",
-    ),
-    Setting(
-        "git_author_email",
-        "Commit author email",
-        "Publication",
-        "agent@localhost",
-        env="AGENT_GIT_AUTHOR_EMAIL",
+        env="AGENT_GITHUB_COAUTHOR",
+        description=(
+            "The co-author agents name in their commits, as `Name <email>`. Use the "
+            "GitHub App bot's noreply address (`<bot-user-id>+<app-slug>[bot]@users."
+            "noreply.github.com`) so GitHub shows its avatar. Empty: commits name the "
+            "owner only."
+        ),
     ),
     Setting(
         "mcp_public_base_url",
@@ -771,20 +400,9 @@ SETTINGS: tuple[Setting, ...] = (
         secret=True,
         url=True,
     ),
-    Setting(
-        "oncall_user_id", "On-call service account", "Operations", "", env="AGENT_ONCALL_USER_ID"
-    ),
-    Setting(
-        "oncall_dispatch_token",
-        "On-call dispatch token",
-        "Operations",
-        "",
-        env="AGENT_ONCALL_DISPATCH_TOKEN",
-        secret=True,
-        minimum_bytes=MINIMUM_CREDENTIAL_BYTES,
-        minimum_bytes_new_values_only=True,
-        description="A random credential of at least 32 bytes, the same value the alert relay sends. Empty opens nothing.",
-    ),
+    # How long a residency's lease lives between beats (design §7): the cap on
+    # how long an idle resident process keeps running after its host goes
+    # quiet.
     _numeric(
         "residency_ttl_s",
         "Residency lease duration (seconds)",
@@ -807,18 +425,9 @@ SETTINGS: tuple[Setting, ...] = (
         86400,
     ),
     _numeric("max_attempts", "Maximum job attempts", "Operations", 3, 1, 20),
-    _numeric("grant_renewal_concurrency", "Concurrent grant renewals", "Operations", 16, 1, 128),
-    _numeric("ledger_refresh_concurrency", "Concurrent usage refreshes", "Operations", 4, 1, 128),
-    _numeric(
-        "ledger_refresh_timeout_s", "Usage refresh timeout (seconds)", "Operations", 15.0, 1, 120
-    ),
+    # The longest an idle usage collector waits on its wake-up before looking
+    # anyway.
     _numeric("ledger_idle_s", "Usage idle check interval (seconds)", "Operations", 30.0, 1, 300),
-    _numeric(
-        "snapshot_idle_s", "Snapshot idle check interval (seconds)", "Operations", 30.0, 1, 300
-    ),
-    _numeric(
-        "snapshot_capture_interval_s", "Snapshot interval (seconds)", "Operations", 5.0, 0.1, 300
-    ),
     _numeric(
         "capacity_history_retention_s",
         "Capacity history retention (seconds)",
@@ -844,6 +453,9 @@ SETTINGS: tuple[Setting, ...] = (
         20971520,
     ),
     _numeric("attachments.max_files", "Maximum upload file count", "Attachments", 50, 1, 50),
+    # Abandoned staged uploads count against staging quota until collected.
+    # Pending-message and job-claimed rows are kept by the repository
+    # predicate.
     _numeric(
         "attachments.staged_retention_hours",
         "Abandoned upload retention (hours)",
@@ -853,6 +465,10 @@ SETTINGS: tuple[Setting, ...] = (
         8760,
         description="Remove uploads this old only when no job or pending message holds them. Changes apply on the next maintenance pass.",
     ),
+    # Everything one owner's uploads keep in the database, staged or attached
+    # to a conversation that still exists. Attached bytes stay until the
+    # conversation is deleted, so the per-turn bounds alone would let one
+    # account grow the shared database without end.
     _numeric(
         "attachments.max_user_bytes",
         "Maximum stored upload bytes per user",
@@ -876,11 +492,24 @@ SETTINGS: tuple[Setting, ...] = (
     ),
     _numeric("skills.max_selected", "Maximum selected skills", "Skills", 16, 1, 16),
     _numeric("skills.max_library", "Maximum library skills", "Skills", 100, 1, 100),
+    # How recently an active goal with no pending obligation must have moved
+    # for the recovery sweep to assume a consumer is still about to act on it.
+    # Long enough to cover a decision in flight, short enough that a goal
+    # nothing is working on is noticed rather than re-armed for ever.
     _numeric("goals.arm_after_seconds", "Goal activation delay (seconds)", "Goals", 60.0, 1, 3600),
+    # How long an active goal may sit with no queued or running turn and no
+    # pending wakeup before the recovery sweep pauses it. This is a backstop
+    # for a path that forgot to schedule, not a mechanism: every ordinary way a
+    # goal stops being able to continue pauses it where and when it happens.
     _numeric(
         "goals.stalled_after_seconds", "Goal stall timeout (seconds)", "Goals", 900.0, 60, 86400
     ),
+    # How many times a wakeup may fail on temporary scheduling infrastructure
+    # before the goal is paused with scheduling_failed rather than retried
+    # forever behind a green "active" badge.
     _numeric("goals.max_wakeup_attempts", "Maximum goal wakeup attempts", "Goals", 5, 1, 100),
+    # The first backoff step; each retry doubles it up to
+    # goals.wakeup_backoff_max_seconds.
     _numeric(
         "goals.wakeup_backoff_seconds", "Goal wakeup retry delay (seconds)", "Goals", 5.0, 0.1, 300
     ),
@@ -893,35 +522,32 @@ SETTINGS: tuple[Setting, ...] = (
         3600,
     ),
     _numeric("task_titles.max_chars", "Maximum task title length", "Task titles", 36, 8, 36),
-    _numeric(
-        "task_titles.input_max_chars", "Maximum title input length", "Task titles", 4000, 1, 4000
-    ),
-    _numeric(
-        "task_titles.timeout_seconds",
-        "Title request timeout (seconds)",
-        "Task titles",
-        10.0,
-        0.1,
-        120,
-    ),
-    _numeric(
-        "task_titles.total_timeout_seconds",
-        "Title generation time limit (seconds)",
-        "Task titles",
-        120.0,
-        1,
-        600,
-    ),
-    _numeric("task_titles.max_attempts", "Maximum title attempts", "Task titles", 5, 1, 5),
-    _numeric("task_titles.max_tokens", "Maximum title output tokens", "Task titles", 256, 16, 256),
 )
-MIGRATED_SETTINGS: tuple[Setting, ...] = (
+_MIGRATED_DEFINITIONS: tuple[Setting, ...] = (
+    Setting(
+        "public_api_url",
+        "Public API URL",
+        "Sign-in",
+        "",
+        env="AGENT_PUBLIC_API_URL",
+        url=True,
+        description=(
+            "This API's public address, including any proxy prefix, such as "
+            "https://agent.example.com/api. MCP sign-in callbacks and compute node "
+            "registration are built from it unless they have their own address."
+        ),
+    ),
     Setting(
         "sandbox_archive.bucket",
         "Sandbox archive S3 bucket",
         "Sandbox archives",
         "",
         env="AGENT_SANDBOX_ARCHIVE_S3_BUCKET",
+        check=_s3_bucket,
+        hint=(
+            "Use a bucket name such as freeinference; set cloud-agent/sandbox "
+            "in Sandbox archive S3 prefix."
+        ),
         description="Enter a bucket name, or paste an S3 URI such as s3://freeinference/cloud-agent/sandbox to save the bucket and prefix together. Required for sandbox deletion; the completed archive is verified before removal. Empty disables deletion.",
     ),
     Setting(
@@ -930,6 +556,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "Sandbox archives",
         "",
         env="AGENT_SANDBOX_ARCHIVE_S3_REGION",
+        check=_s3_region,
         description="Optional AWS region. Empty uses the control plane's standard AWS SDK configuration.",
     ),
     Setting(
@@ -939,6 +566,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "",
         env="AGENT_SANDBOX_ARCHIVE_S3_ENDPOINT",
         url=True,
+        https_only=True,
         description="Optional HTTPS S3-compatible endpoint supporting conditional PUT and full-object SHA-256 checksums. Empty uses AWS S3.",
     ),
     Setting(
@@ -947,6 +575,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         "Sandbox archives",
         "sandbox-archives",
         env="AGENT_SANDBOX_ARCHIVE_S3_PREFIX",
+        check=_s3_prefix,
         description="Object key prefix for new deletion requests. Each request has an immutable object; completed receipts retain their original bucket and key.",
     ),
     Setting(
@@ -968,32 +597,6 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         description="Optional public URL ending in /admin/agent/pgadmin. Empty derives it from the saved web base URL and /api/admin/agent/pgadmin.",
     ),
     Setting(
-        "gateway_issuer",
-        "Gateway identity issuer",
-        "Sign-in",
-        "",
-        env="GATEWAY_ISSUER",
-        description="Exact issuer signed by the Gateway. Once this database is bound, it cannot be changed here.",
-    ),
-    Setting(
-        "gateway_jwks_url",
-        "Gateway public keys URL",
-        "Sign-in",
-        "",
-        env="GATEWAY_JWKS_URL",
-        url=True,
-    ),
-    Setting(
-        "session_signing_secret",
-        "Session signing key",
-        "Security",
-        "",
-        env="AGENT_SESSION_SECRET",
-        secret=True,
-        minimum_bytes=32,
-        description="A random key of at least 32 bytes. Replacing it signs out existing browser sessions.",
-    ),
-    Setting(
         "control_signing_secret",
         "Host and worker signing key",
         "Security",
@@ -1013,7 +616,7 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         secret=True,
         minimum_bytes=MINIMUM_CREDENTIAL_BYTES,
         minimum_bytes_new_values_only=True,
-        description="A random key of at least 32 bytes. Protects user source-control and MCP credentials. Once configured, rotation requires a separate re-encryption procedure.",
+        description="A random key of at least 32 bytes. Protects user source-control, MCP, environment, and SSH credentials. Once configured, rotation requires a separate re-encryption procedure.",
     ),
     Setting(
         "compute_encryption_key",
@@ -1087,68 +690,104 @@ MIGRATED_SETTINGS: tuple[Setting, ...] = (
         env="AGENT_MCP_ALLOW_PLAIN_HTTP",
         description="Allow unencrypted HTTP MCP connections. Takes effect for new MCP transports after restarting the MCP listener.",
     ),
+    _numeric(
+        "streams.max_per_user",
+        "Live streams per account",
+        "Operations",
+        24,
+        1,
+        1_000_000,
+        env="AGENT_MAX_STREAMS_PER_USER",
+        description=(
+            "How many live-update streams (the change stream and job event streams) one "
+            "account may hold open on one control-plane process; one more answers 429 with "
+            "Retry-After, which the web app backs off on. A browser tab holds one change "
+            "stream and one stream per conversation it is watching."
+        ),
+        apply_mode="next_operation",
+        apply_description="Checked each time a stream opens; open streams are not closed.",
+        invalid_env_uses_default=True,
+    ),
+    Setting(
+        "runtime_registry_url",
+        "Agent package registry",
+        "Agent versions",
+        "",
+        env="AGENT_RUNTIME_REGISTRY_URL",
+        check=_package_registry_url,
+        hint="Use an https:// address, or http:// to this machine or a private service name.",
+        description=(
+            "The npm registry agent versions are listed from here and downloaded from on "
+            "every server. Empty is the public registry (https://registry.npmjs.org). "
+            "Servers receive it on their next heartbeat; updates are refused until every "
+            "online server reports using it."
+        ),
+        apply_mode="next_operation",
+        apply_description=(
+            "Version lists use it at once; each server uses it for downloads it starts "
+            "after its next heartbeat."
+        ),
+    ),
+    Setting(
+        "api_docs",
+        "Serve API documentation",
+        "Operations",
+        False,
+        kind="boolean",
+        env="AGENT_API_DOCS",
+        description=(
+            "Serves /docs, /redoc and /openapi.json on the main API. Keep off in production: "
+            "the schema is unauthenticated, and the two pages load scripts from a CDN at a "
+            "floating version. The MCP-only listener never serves them."
+        ),
+        apply_mode="next_operation",
+        apply_description="Checked on each documentation request; no restart.",
+        invalid_env_uses_default=True,
+    ),
 )
-SETTINGS += MIGRATED_SETTINGS
+#: Registered after settings rows existed, but only in SETTINGS, so a database
+#: created before their registration never imported their environment value
+#: (P1 section 5.1). Listed here, an existing row missing them imports them once.
+_IMPORTED_AFTER_REGISTRATION = frozenset(
+    {
+        "web_search_provider",
+        "serper_api_key",
+        "brave_search_api_key",
+        "parallel_api_key",
+        "mcp_github_client_id",
+        "mcp_github_client_secret",
+        "site.docs_url",
+        "site.contact_url",
+        "github_coauthor",
+    }
+)
+SETTINGS += _MIGRATED_DEFINITIONS
+#: Settings an existing database imports from the environment when its row
+#: lacks them. Every registration with an environment name belongs here.
+#: Account settings are imported the same way, so an upgraded deployment keeps
+#: its AGENT_SMTP_* mail.
+MIGRATED_SETTINGS: tuple[Setting, ...] = (
+    _MIGRATED_DEFINITIONS
+    + tuple(setting for setting in SETTINGS if setting.key in _IMPORTED_AFTER_REGISTRATION)
+    + ACCOUNT_SETTINGS
+)
+SETTINGS += ACCOUNT_SETTINGS
 SETTINGS_BY_KEY = {setting.key: setting for setting in SETTINGS}
 SETTINGS_BY_STORAGE_KEY = {setting.storage_key: setting for setting in SETTINGS}
 _SETTINGS_BY_ENV = {setting.env: setting for setting in SETTINGS if setting.env}
-
-BOOTSTRAP = (
-    {
-        "key": "AGENT_DATABASE_URL",
-        "label": "Database connection",
-        "description": "Required before saved settings can be read.",
-    },
-    {
-        "key": "AGENT_SETTINGS_ENCRYPTION_KEY / AGENT_SESSION_SECRET",
-        "label": "Settings encryption key",
-        "description": "Use a stable encryption key of at least 32 bytes. Existing session secret is used if a dedicated key is absent. Rotate only with data re-encryption.",
-    },
-    {
-        "key": "ADMIN_TOKEN",
-        "label": "Administrator recovery access",
-        "description": "Use this deployment credential on the setup page when Gateway sign-in is not configured. It remains independent of saved settings.",
-    },
-    {
-        "key": "AGENT_GITHUB_APP_PRIVATE_KEY_PATH",
-        "label": "Mounted GitHub App key",
-        "description": "Deployment file path; an inline private key can be set above.",
-    },
-    {
-        "key": "AGENT_COMPUTE_CONFIG",
-        "label": "Compute deployment profiles",
-        "description": "Trusted deployment bundles and mounted secret file references remain operator configuration.",
-    },
-    {
-        "key": "AGENT_PGADMIN_BOOTSTRAP_URL / AGENT_PGADMIN_BOOTSTRAP_PUBLIC_URL / AGENT_PGADMIN_BOOTSTRAP_DIR",
-        "label": "pgAdmin first-time setup",
-        "description": "Deployment routing and the private setup volume let the first administrator choose the account in Admin → Database. Setup saves the connection; later changes use the Database tools settings.",
-    },
-    {
-        "key": "Host networking, isolation, listener and build configuration",
-        "label": "Deployment infrastructure",
-        "description": "Machine addresses, credentials, sandbox isolation, egress, proxy trust and build routing are configured when deploying.",
-    },
-)
 
 _lock = threading.RLock()
 _values: dict[str, SettingValue] | None = None
 _revision = -1
 
 
-def _cipher(key: str) -> Any:
-    from cloud_agent.source_control import SourceControlCipher, SourceControlError
-
-    secret = (
-        os.environ.get("AGENT_SETTINGS_ENCRYPTION_KEY")
-        or os.environ.get("AGENT_SESSION_SECRET")
-        or ""
-    )
+def _cipher(key: str) -> CredentialCipher:
+    secret = settings_root_key()
     if len(secret.encode()) < 32:
-        raise SourceControlError(
+        raise SettingsEncryptionError(
             "A settings encryption key of at least 32 bytes is required to store secret settings"
         )
-    return SourceControlCipher(secret, domain=b"cloud-agent/admin-settings/v1/" + key.encode())
+    return CredentialCipher(secret, domain=b"cloud-agent/admin-settings/v1/" + key.encode())
 
 
 def _encode(setting: Setting, value: SettingValue) -> Any:
@@ -1175,8 +814,6 @@ def _decode(
     ``changed`` keys stay strict, so an update cannot save what this refuses.
     Decryption failures and unencrypted secrets always raise.
     """
-    from cloud_agent.source_control import SourceControlError
-
     values: dict[str, SettingValue] = {}
     for setting in SETTINGS:
         value = encoded.get(setting.storage_key, setting.default)
@@ -1184,10 +821,10 @@ def _decode(
             cipher = _cipher(setting.storage_key)
             try:
                 value = cipher.decrypt(value["ciphertext"])
-            except SourceControlError:
+            except CredentialCipherError:
                 # Name the setting, never the value: the cipher's own message
                 # cannot say which of the stored secrets failed.
-                raise SourceControlError(
+                raise SettingsEncryptionError(
                     f"Stored secret for {setting.label} could not be decrypted"
                 ) from None
         elif setting.secret and value:
@@ -1219,7 +856,6 @@ def _validate_relations(
         ("attachments.max_total_bytes", "attachments.max_user_bytes"),
         ("skills.max_skill_bytes", "skills.max_selection_bytes"),
         ("goals.wakeup_backoff_seconds", "goals.wakeup_backoff_max_seconds"),
-        ("task_titles.timeout_seconds", "task_titles.total_timeout_seconds"),
     ):
         if values[smaller] > values[larger]:
             message = (
@@ -1262,12 +898,7 @@ def validate_settings_update(previous: Mapping[str, Any], encoded: Mapping[str, 
     Only the changed keys are held to this registry. A value an earlier release
     saved and this one refuses must never block the update that repairs it,
     and the editor saves one key at a time. Stored credential encryption keys
-    stay stable. And the gateway URL cannot move away from the dispatch token
-    it was configured with: the token is write-only, but it is sent to
-    whatever URL is saved, so an update that changes the URL must also supply
-    the token again or clear it. A supplied secret is always fresh ciphertext
-    (Fernet's IV is random), so an encoded value equal to the previous one is a
-    token this update did not supply.
+    stay stable.
     """
     changed = {
         SETTINGS_BY_STORAGE_KEY[key].key
@@ -1280,26 +911,20 @@ def validate_settings_update(previous: Mapping[str, Any], encoded: Mapping[str, 
             raise ValueError(
                 f"{SETTINGS_BY_KEY[key].label} cannot be replaced or reset without re-encrypting stored credentials"
             )
-    # Compared with whatever the URL was, unset included, so clearing it and
-    # then naming a new host is the same move.
-    if (
-        after["gateway_base_url"]
-        and after["gateway_base_url"] != before["gateway_base_url"]
-        and after["gateway_dispatch_token"]
-        and encoded.get("gateway_dispatch_token") == previous.get("gateway_dispatch_token")
-    ):
-        url, token = (
-            SETTINGS_BY_KEY["gateway_base_url"].label,
-            SETTINGS_BY_KEY["gateway_dispatch_token"].label,
-        )
-        raise ValueError(
-            f"{token} is sent to {url}. To change {url}, clear {token} first and "
-            "enter it again afterwards, or save both in one update."
-        )
 
 
-def initial_settings(*, keys: set[str] | None = None) -> dict[str, Any]:
-    """Import only registered environment variables into the initial settings row."""
+def initial_settings(  # noqa: C901, PLR0912 complexity baseline, #771
+    *, keys: set[str] | None = None, problems: list[str] | None = None
+) -> dict[str, Any]:
+    """Import only registered environment variables into the initial settings row.
+
+    The first row refuses an invalid value, so a new deployment learns about
+    it before anything is stored. ``keys`` imports into an existing row on
+    upgrade: there an invalid value would stop a running deployment, so it
+    imports the default and ``problems`` names the variable, never its value.
+    A setting marked ``invalid_env_uses_default`` does that on the first row
+    too, as the reader it replaced did.
+    """
     result: dict[str, Any] = {}
     values: dict[str, SettingValue] = {setting.key: setting.default for setting in SETTINGS}
     imported: dict[str, SettingValue] = {}
@@ -1316,7 +941,14 @@ def initial_settings(*, keys: set[str] | None = None) -> dict[str, Any]:
             continue
         value: Any = imported.get(setting.key, setting.default)
         raw = manager_env(setting.env, "") if setting.env else ""
-        if raw:
+        if (
+            raw == ""
+            and setting.env
+            and setting.empty_env_imports
+            and manager_env(setting.env) is not None
+        ):
+            value = ""
+        elif raw:
             try:
                 if setting.kind == "integer":
                     value = int(raw)
@@ -1335,13 +967,19 @@ def initial_settings(*, keys: set[str] | None = None) -> dict[str, Any]:
                     normalized = raw.strip().lower()
                     value = normalized if normalized in {"text", "json"} else "text"
                 value = setting.validate(value, saved=True)
-            except SettingTooShort:
-                raise ValueError(
-                    f"Invalid initial configuration for {setting.label} ({setting.env}): "
-                    f"use at least {setting.minimum_bytes} bytes"
-                ) from None
-            except (ValueError, OverflowError):
-                raise ValueError(f"Invalid initial configuration for {setting.label}") from None
+            except (ValueError, OverflowError) as exc:
+                if keys is None and not setting.invalid_env_uses_default:
+                    if isinstance(exc, SettingTooShort):
+                        raise ValueError(
+                            f"Invalid initial configuration for {setting.label} "
+                            f"({setting.env}): use at least {setting.minimum_bytes} bytes"
+                        ) from None
+                    raise ValueError(f"Invalid initial configuration for {setting.label}") from None
+                value = imported.get(setting.key, setting.default)
+                if problems is not None:
+                    problems.append(
+                        f"{setting.env} is not a valid {setting.label}; imported the default"
+                    )
         values[setting.key] = value
         result[setting.storage_key] = _encode(setting, value)
     _validate_relations(values)
@@ -1356,9 +994,11 @@ def apply_settings(revision: int, encoded: Mapping[str, Any]) -> None:
     """
     global _values, _revision
     problems: list[str] = []
-    values = _decode(encoded, problems)
     adopted = False
     with _lock:
+        if _values is not None and revision <= _revision:
+            return
+        values = _decode(encoded, problems)
         if revision >= _revision:
             adopted = revision != _revision
             logging_changed = _values is None or any(
@@ -1381,9 +1021,7 @@ def settings_response(revision: int, encoded: Mapping[str, Any]) -> dict[str, An
     """Build the editor response with write-only secret status."""
     values = _decode(encoded, [])
     locked = {
-        key
-        for key in ("gateway_issuer", "source_control_encryption_key", "compute_encryption_key")
-        if values[key]
+        key for key in ("source_control_encryption_key", "compute_encryption_key") if values[key]
     }
     return {
         "revision": revision,
@@ -1396,7 +1034,7 @@ def settings_response(revision: int, encoded: Mapping[str, Any]) -> dict[str, An
         "secret_configured": {
             setting.key: bool(values[setting.key]) for setting in SETTINGS if setting.secret
         },
-        "bootstrap": list(BOOTSTRAP),
+        "bootstrap": bootstrap_snapshot(values),
         "setup": setup_status(values),
     }
 
@@ -1409,21 +1047,7 @@ def setup_status(values: Mapping[str, SettingValue]) -> dict[str, Any]:
     if mounted_key and os.path.isfile(mounted_key) and os.access(mounted_key, os.R_OK):
         configured["github_app_private_key"] = True
     for key, label, required, fields in (
-        (
-            "sign_in",
-            "Gateway sign-in",
-            True,
-            (
-                "gateway_base_url",
-                "gateway_dispatch_token",
-                "gateway_issuer",
-                "gateway_jwks_url",
-                "gateway_authorize_url",
-                "session_redirect_uri",
-                "web_base_url",
-                "session_signing_secret",
-            ),
-        ),
+        ("sign_in", "Account mail links", True, ("web_base_url",)),
         (
             "execution",
             "Agent execution",
@@ -1482,11 +1106,7 @@ def setup_status(values: Mapping[str, SettingValue]) -> dict[str, Any]:
                 "missing": missing,
             }
         )
-    root_key = (
-        os.environ.get("AGENT_SETTINGS_ENCRYPTION_KEY")
-        or os.environ.get("AGENT_SESSION_SECRET")
-        or ""
-    )
+    root_key = settings_root_key()
     bootstrap_missing = []
     if len(root_key.encode()) < 32:
         bootstrap_missing.append(
@@ -1507,6 +1127,8 @@ def get_setting(key: str, fallback: SettingValue | None = None) -> SettingValue:
             return _values[key]
     if setting.env:
         raw = manager_env(setting.env)
+        if raw == "" and setting.empty_env_imports:
+            return ""
         if raw:
             if setting.kind == "integer":
                 return int(raw)
@@ -1548,6 +1170,32 @@ def setting_env(name: str, default: str | None = None) -> str | None:
     return manager_env(name, default)
 
 
+def public_api_url() -> str:
+    """This API's configured public base URL, without a trailing slash, or ``""``.
+
+    Read from the operator's ``AGENT_PUBLIC_API_URL`` only, never from request
+    headers. Anything other than an absolute HTTP(S) URL with no credentials,
+    query or fragment answers ``""``, so a caller treats it as unconfigured.
+    """
+    from urllib.parse import urlsplit
+
+    raw = (setting_env("AGENT_PUBLIC_API_URL") or "").strip().rstrip("/")
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme not in {"https", "http"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        return ""
+    return raw
+
+
 def settings_environment() -> dict[str, str]:
     """Build a provider configuration mapping from bootstrap and saved settings."""
     result = manager_environment(os.environ)
@@ -1562,8 +1210,8 @@ def settings_environment() -> dict[str, str]:
 def weak_credentials() -> list[str]:
     """Name each configured credential shorter than :data:`MINIMUM_CREDENTIAL_BYTES`.
 
-    Names only; no value leaves this function. The signing key, the user
-    credential encryption key and the dispatch tokens are read from the
+    Names only; no value leaves this function. The signing key and the user
+    credential encryption key are read from the
     adopted snapshot, where a value saved before their floor existed may still
     be short. ``ADMIN_TOKEN`` is read from the process environment, the only
     place it lives: it is not refused, because a deployment's recovery door
@@ -1582,15 +1230,58 @@ def weak_credentials() -> list[str]:
     return weak
 
 
+#: Keys a new deployment needs and nobody has to choose. When the settings row
+#: is first created and the environment supplies none, each is generated into
+#: it; a seed racing that one keeps whichever row was stored first. Never into
+#: an existing row: what it holds, empty included, is the deployment's.
+GENERATED_ON_FIRST_START = (
+    "control_signing_secret",
+    "source_control_encryption_key",
+    "compute_encryption_key",
+)
+
+
+def first_settings(problems: list[str] | None = None) -> tuple[dict[str, Any], list[str]]:
+    """The first settings row: the environment's import plus the keys it lacks.
+
+    Returns the encoded row and the names of the keys generated, never their
+    values. Without a settings root key nothing secret can be stored, so
+    nothing is generated; the setup status names the root key instead.
+    """
+    encoded = initial_settings(problems=problems)
+    if len(settings_root_key().encode()) < MINIMUM_CREDENTIAL_BYTES:
+        return encoded, []
+    generated = []
+    for key in GENERATED_ON_FIRST_START:
+        setting = SETTINGS_BY_KEY[key]
+        if not encoded.get(setting.storage_key):
+            encoded[setting.storage_key] = _encode(setting, secrets.token_hex(32))
+            generated.append(setting.env or key)
+    return encoded, generated
+
+
 async def initialize_settings(repository: SettingsRepository, *, seed: bool = True) -> None:
     """Seed once, then adopt the database rather than reimporting the environment."""
     revision, encoded = await repository.read_settings()
     missing = {setting.storage_key for setting in MIGRATED_SETTINGS} - encoded.keys()
     if revision < 0 or missing:
         if seed:
-            revision, encoded = await repository.seed_settings(
-                initial_settings(keys=missing if revision >= 0 else None)
-            )
+            from cloud_agent.logging_utils import get_logger
+
+            problems: list[str] = []
+            generated: list[str] = []
+            if revision < 0:
+                values, generated = first_settings(problems)
+            else:
+                values = initial_settings(keys=missing, problems=problems)
+            revision, encoded = await repository.seed_settings(values)
+            for problem in problems:
+                get_logger(__name__).warning("settings import: %s", problem)
+            if generated:
+                get_logger(__name__).info(
+                    "first settings row: generated %s, which the environment did not set",
+                    ", ".join(generated),
+                )
         else:
             # Only the main listener has the complete legacy environment.
             # A relay racing it must never seed blank integration credentials.
@@ -1621,15 +1312,17 @@ async def initialize_settings(repository: SettingsRepository, *, seed: bool = Tr
 async def synchronize_settings(repository: SettingsRepository) -> None:
     """Refresh every listener's snapshot; failed reads retain the last committed values."""
     from cloud_agent.logging_utils import get_logger
-    from cloud_agent.source_control import SourceControlError
 
     logger = get_logger(__name__)
     while True:
         await asyncio.sleep(5)
         try:
-            revision, encoded = await repository.read_settings()
-            apply_settings(revision, encoded)
-        except (ValueError, SourceControlError) as exc:
+            with _lock:
+                current_revision = _revision
+            revision, encoded = await repository.read_settings(after_revision=current_revision)
+            if revision >= 0:
+                apply_settings(revision, encoded)
+        except (ValueError, SettingsEncryptionError) as exc:
             # Raised by decoding the snapshot, and worded to name a setting
             # without its value; the type alone left nothing to act on.
             logger.warning("settings synchronization failed (%s: %s)", type(exc).__name__, exc)

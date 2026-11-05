@@ -1,5 +1,11 @@
 {
-  "extends": ["next/core-web-vitals", "plugin:@typescript-eslint/recommended", "prettier"],
+  "extends": [
+    "next/core-web-vitals",
+    "plugin:@typescript-eslint/recommended",
+    "prettier",
+    "./eslint-ratchet.json",
+    "./eslint-test-ratchet.json"
+  ],
   "parser": "@typescript-eslint/parser",
   "parserOptions": {
     "ecmaVersion": 2021,
@@ -14,6 +20,14 @@
     }
   },
   "plugins": ["@typescript-eslint"],
+  "overrides": [
+    {
+      "files": ["scripts/**/*.mjs"],
+      "rules": {
+        "no-console": "off"
+      }
+    }
+  ],
   "rules": {
     "indent": ["error", 2],
     "linebreak-style": ["error", "unix"],
@@ -31,6 +45,17 @@
     "@typescript-eslint/explicit-module-boundary-types": "off",
     "@typescript-eslint/no-explicit-any": "warn",
     "no-console": ["warn", { "allow": ["warn", "error"] }],
+    "no-restricted-syntax": [
+      "error",
+      {
+        "selector": "JSXOpeningElement[name.name='select']",
+        "message": "Use the shared themed Select from @/components/ui/Select instead of a native <select>."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='datalist']",
+        "message": "Use SuggestionInput from @/components/ui/SuggestionInput instead of a native <datalist>."
+      }
+    ],
     "prefer-const": "error",
     "no-var": "error",
     "object-shorthand": "error",

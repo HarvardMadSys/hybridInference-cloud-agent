@@ -8,10 +8,17 @@ Any future restore path must validate an inner archive before extracting it.
 The fetch callback is deliberately injected. Lifecycle code can prove either
 the running pre-prompt barrier or the stopped final barrier before supplying
 Docker's stream, without coupling this primitive to Docker or the manager.
+
+Fetching and writing are separate steps. :func:`spool_sandbox_archive` fetches
+the inputs once, and its spool can then be written at more than one gzip
+level, so a caller can find the level an earlier bundle was written at
+without asking Docker for the same bytes again.
+:func:`build_sandbox_archive_bundle` does both for one level.
 """
 
 from __future__ import annotations
 
+import copy
 import gzip
 import hashlib
 import io
@@ -19,8 +26,8 @@ import json
 import math
 import tarfile
 import tempfile
-from collections.abc import Mapping
-from contextlib import ExitStack
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from typing import BinaryIO, Literal, Protocol, cast
 
@@ -30,6 +37,12 @@ ArchivePhase = Literal["initial", "final"]
 
 DEFAULT_MAX_ARCHIVE_MEMBER_BYTES = 8 * 1024 * 1024 * 1024
 DEFAULT_MAX_ARCHIVE_TOTAL_BYTES = 16 * 1024 * 1024 * 1024
+# The gzip level a new bundle is written at. On a tar of source, .git and
+# .venv, level 9 compressed 7.2 MB/s and level 6 32.5 MB/s, for an output
+# about 1% larger (#760). Every level is the same ``tar.gz`` format, but the
+# bytes differ: a bundle rebuilt to match an earlier digest must be written
+# at the level that earlier bundle used.
+DEFAULT_ARCHIVE_COMPRESSION_LEVEL = 6
 _FORMAT_NAME = "cloud-agent-stopped-sandbox"
 _FORMAT_VERSION = 1
 
@@ -81,48 +94,81 @@ def _validate_limit(name: str, value: int) -> None:
         raise ValueError(f"{name} must be a positive integer")
 
 
-class _BoundedDigestWriter:
-    """A write-only sink that enforces both archive limits as bytes arrive."""
+def _validate_compression_level(value: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 9:
+        raise ValueError("compression_level must be an integer from 1 to 9")
+
+
+def _no_check() -> None:
+    return None
+
+
+class BoundedDigestWriter:
+    """A write-only sink that hashes every byte and refuses a write past its limits.
+
+    ``limits`` pairs a byte ceiling with the message a write past it is
+    refused with; they are checked in order. ``check`` runs around every
+    call, so an elapsed deadline stops a long copy between writes.
+    ``source`` names what writes to the sink and ``what`` what it spools,
+    for the errors a non-bytes or a short write raises.
+    """
 
     def __init__(
         self,
         stream: BinaryIO,
         *,
-        container_path: str,
-        prior_total: int,
-        max_member_bytes: int,
-        max_total_bytes: int,
+        limits: Sequence[tuple[int, str]],
+        what: str,
+        source: str,
+        check: Callable[[], None] = _no_check,
     ) -> None:
         self._stream = stream
-        self._container_path = container_path
-        self._prior_total = prior_total
-        self._max_member_bytes = max_member_bytes
-        self._max_total_bytes = max_total_bytes
+        self._limits = tuple(limits)
+        self._what = what
+        self._source = source
+        self._check = check
         self._digest = hashlib.sha256()
-        self.size_bytes = 0
+        self.size = 0
 
     def write(self, chunk: bytes | bytearray | memoryview) -> int:
+        """Write and hash ``chunk``, unless it would take the total past a limit."""
+        self._check()
         if not isinstance(chunk, (bytes, bytearray, memoryview)):
-            raise SandboxError("sandbox archive fetch callback wrote non-bytes data")
-        projected_size = self.size_bytes + len(chunk)
-        if projected_size > self._max_member_bytes:
-            raise SandboxError(
-                f"sandbox path archive {self._container_path!r} exceeds the "
-                f"{self._max_member_bytes}-byte member limit"
-            )
-        if self._prior_total + projected_size > self._max_total_bytes:
-            raise SandboxError(
-                f"sandbox path archives exceed the {self._max_total_bytes}-byte total limit"
-            )
+            raise SandboxError(f"{self._source} wrote non-bytes data")
+        projected = self.size + len(chunk)
+        for maximum, message in self._limits:
+            if projected > maximum:
+                raise SandboxError(message)
         written = self._stream.write(chunk)
+        self._check()
         if written != len(chunk):
-            raise OSError("short write while spooling a sandbox path archive")
+            raise OSError(f"short write while spooling {self._what}")
         self._digest.update(chunk)
-        self.size_bytes = projected_size
+        self.size = projected
         return written
+
+    def flush(self) -> None:
+        """Flush the underlying stream."""
+        self._check()
+        self._stream.flush()
+        self._check()
+
+    def tell(self) -> int:
+        """Return the underlying stream's position."""
+        self._check()
+        return self._stream.tell()
+
+    def restart(self) -> None:
+        """Empty the stream, and start the size and digest over, for a write begun again."""
+        self._check()
+        self._stream.seek(0)
+        self._stream.truncate()
+        self._digest = hashlib.sha256()
+        self.size = 0
 
     @property
     def sha256(self) -> str:
+        """Return the digest of every byte written so far."""
         return self._digest.hexdigest()
 
 
@@ -135,12 +181,21 @@ def _fetch_archive(
     max_member_bytes: int,
     max_total_bytes: int,
 ) -> tuple[int, str] | None:
-    writer = _BoundedDigestWriter(
+    writer = BoundedDigestWriter(
         stream,
-        container_path=spec.container_path,
-        prior_total=prior_total,
-        max_member_bytes=max_member_bytes,
-        max_total_bytes=max_total_bytes,
+        limits=(
+            (
+                max_member_bytes,
+                f"sandbox path archive {spec.container_path!r} exceeds the "
+                f"{max_member_bytes}-byte member limit",
+            ),
+            (
+                max_total_bytes - prior_total,
+                f"sandbox path archives exceed the {max_total_bytes}-byte total limit",
+            ),
+        ),
+        what="a sandbox path archive",
+        source="sandbox archive fetch callback",
     )
     try:
         reported_size = fetch_archive(
@@ -149,7 +204,7 @@ def _fetch_archive(
             max_bytes=max_member_bytes,
         )
     except FileNotFoundError as exc:
-        if spec.optional and writer.size_bytes == 0:
+        if spec.optional and writer.size == 0:
             return None
         if spec.optional:
             raise SandboxError(
@@ -169,15 +224,15 @@ def _fetch_archive(
         raise SandboxError(
             f"sandbox path archive {spec.container_path!r} reported a non-integer size"
         )
-    if reported_size != writer.size_bytes:
+    if reported_size != writer.size:
         raise SandboxError(
             f"sandbox path archive {spec.container_path!r} reported {reported_size} bytes "
-            f"after writing {writer.size_bytes}"
+            f"after writing {writer.size}"
         )
-    if writer.size_bytes == 0:
+    if writer.size == 0:
         raise SandboxError(f"sandbox path archive {spec.container_path!r} is empty")
     stream.seek(0)
-    return writer.size_bytes, writer.sha256
+    return writer.size, writer.sha256
 
 
 def _tar_info(name: str, size: int, *, mode: int) -> tarfile.TarInfo:
@@ -279,39 +334,94 @@ def _manifest(
     }
 
 
-def build_sandbox_archive_bundle(
-    out: BinaryIO,
+class SpooledSandboxArchive:
+    """One lifecycle point's fetched path archives, ready to be written.
+
+    Only :func:`spool_sandbox_archive` makes one, and it is usable only inside
+    that context. Every write at the same level produces the same bytes, the
+    bytes :func:`build_sandbox_archive_bundle` produces for the same inputs.
+    """
+
+    def __init__(
+        self,
+        phase: ArchivePhase,
+        archives: list[_SpooledArchive],
+        metadata: dict[str, object],
+    ) -> None:
+        self._phase = phase
+        self._archives = archives
+        self._metadata = metadata
+        self._open = True
+
+    def write(self, out: BinaryIO, *, compression_level: int) -> dict[str, object]:
+        """Write the deterministic ``tar.gz`` bundle to ``out`` and return its manifest.
+
+        An output failure can leave a partial bundle, which the caller must
+        discard. The spool is unchanged by a write, failed or not, so it can be
+        written again.
+        """
+        _validate_compression_level(compression_level)
+        if not self._open:
+            raise SandboxError("sandbox archive spool is closed")
+        # Each manifest gets its own metadata copy: changing one returned
+        # manifest cannot change a later bundle written from this spool.
+        manifest = _manifest(self._phase, self._archives, copy.deepcopy(self._metadata))
+        manifest_bytes = (
+            json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
+                "ascii"
+            )
+            + b"\n"
+        )
+        try:
+            # GzipFile lets us fix the timestamp; tarfile's ``w:gz`` shorthand
+            # would stamp the bundle with wall-clock time.
+            with (
+                gzip.GzipFile(
+                    filename="",
+                    mode="wb",
+                    compresslevel=compression_level,
+                    fileobj=out,
+                    mtime=0,
+                ) as compressed,
+                tarfile.open(
+                    fileobj=compressed,
+                    mode="w|",
+                    format=tarfile.PAX_FORMAT,
+                ) as bundle,
+            ):
+                bundle.addfile(
+                    _tar_info("manifest.json", len(manifest_bytes), mode=0o444),
+                    io.BytesIO(manifest_bytes),
+                )
+                for item in self._archives:
+                    item.stream.seek(0)
+                    bundle.addfile(
+                        _tar_info(item.spec.archive_path, item.size_bytes, mode=0o400),
+                        item.stream,
+                    )
+        except (OSError, tarfile.TarError) as exc:
+            raise SandboxError(f"sandbox archive bundle could not be written: {exc}") from exc
+        return manifest
+
+    def _close(self) -> None:
+        self._open = False
+
+
+@contextmanager
+def spool_sandbox_archive(
     *,
     phase: ArchivePhase,
     fetch_archive: ArchiveFetcher,
     metadata: Mapping[str, object] | None = None,
     max_member_bytes: int = DEFAULT_MAX_ARCHIVE_MEMBER_BYTES,
     max_total_bytes: int = DEFAULT_MAX_ARCHIVE_TOTAL_BYTES,
-) -> dict[str, object]:
-    """Write a deterministic ``tar.gz`` bundle and return its manifest.
+) -> Iterator[SpooledSandboxArchive]:
+    """Fetch, bound, hash and spool the path archives of one lifecycle point.
 
-    For an ``initial`` bundle, ``fetch_archive`` is called once for
-    ``/workspace``.  A ``final`` bundle additionally fetches ``/agent-state``
-    and ``/home/agent/.freeinference-platform`` in that order.  The callback
-    writes each Docker tar stream to the supplied sink and returns the number
-    of bytes written.  The platform path is omitted from a final bundle when
-    the callback raises :class:`FileNotFoundError` before writing any bytes;
-    the other paths are required.
-
-    ``metadata`` is defensively copied after accepting only JSON objects,
-    arrays and finite scalar values.  Canonical key ordering makes equivalent
-    mappings serialize identically; caller mutation cannot change the returned
-    manifest or bundle.
-
-    Inputs are completely fetched, bounded, hashed and spooled to anonymous
-    temporary files before the first output byte is written.  Therefore a
-    fetch or limit failure leaves ``out`` untouched.  An output failure can
-    leave a partial bundle, which the caller must discard.
-
-    Determinism covers the outer member order, JSON encoding, tar metadata and
-    gzip timestamp.  Identical callback bytes and arguments produce identical
-    output; the opaque Docker tar headers themselves are intentionally not
-    rewritten.
+    The callback, limit and metadata rules are those of
+    :func:`build_sandbox_archive_bundle`. Nothing is written to any output
+    here, so a fetch or limit failure never reaches one. The temporary files
+    are removed when the context exits.
     """
     if phase not in {"initial", "final"}:
         raise ValueError("sandbox archive phase must be 'initial' or 'final'")
@@ -350,50 +460,67 @@ def build_sandbox_archive_bundle(
                     sha256=sha256,
                 )
             )
-
-        manifest = _manifest(phase, archives, copied_metadata)
-        manifest_bytes = (
-            json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
-                "ascii"
-            )
-            + b"\n"
-        )
+        spooled = SpooledSandboxArchive(phase, archives, copied_metadata)
         try:
-            # GzipFile lets us fix the timestamp; tarfile's ``w:gz`` shorthand
-            # would stamp the bundle with wall-clock time.
-            with (
-                gzip.GzipFile(
-                    filename="",
-                    mode="wb",
-                    compresslevel=9,
-                    fileobj=out,
-                    mtime=0,
-                ) as compressed,
-                tarfile.open(
-                    fileobj=compressed,
-                    mode="w|",
-                    format=tarfile.PAX_FORMAT,
-                ) as bundle,
-            ):
-                bundle.addfile(
-                    _tar_info("manifest.json", len(manifest_bytes), mode=0o444),
-                    io.BytesIO(manifest_bytes),
-                )
-                for item in archives:
-                    item.stream.seek(0)
-                    bundle.addfile(
-                        _tar_info(item.spec.archive_path, item.size_bytes, mode=0o400),
-                        item.stream,
-                    )
-        except (OSError, tarfile.TarError) as exc:
-            raise SandboxError(f"sandbox archive bundle could not be written: {exc}") from exc
-    return manifest
+            yield spooled
+        finally:
+            spooled._close()
+
+
+def build_sandbox_archive_bundle(
+    out: BinaryIO,
+    *,
+    phase: ArchivePhase,
+    fetch_archive: ArchiveFetcher,
+    metadata: Mapping[str, object] | None = None,
+    max_member_bytes: int = DEFAULT_MAX_ARCHIVE_MEMBER_BYTES,
+    max_total_bytes: int = DEFAULT_MAX_ARCHIVE_TOTAL_BYTES,
+    compression_level: int = DEFAULT_ARCHIVE_COMPRESSION_LEVEL,
+) -> dict[str, object]:
+    """Write a deterministic ``tar.gz`` bundle and return its manifest.
+
+    For an ``initial`` bundle, ``fetch_archive`` is called once for
+    ``/workspace``.  A ``final`` bundle additionally fetches ``/agent-state``
+    and ``/home/agent/.freeinference-platform`` in that order.  The callback
+    writes each Docker tar stream to the supplied sink and returns the number
+    of bytes written.  The platform path is omitted from a final bundle when
+    the callback raises :class:`FileNotFoundError` before writing any bytes;
+    the other paths are required.
+
+    ``metadata`` is defensively copied after accepting only JSON objects,
+    arrays and finite scalar values.  Canonical key ordering makes equivalent
+    mappings serialize identically; caller mutation cannot change the returned
+    manifest or bundle.
+
+    Inputs are completely fetched, bounded, hashed and spooled to anonymous
+    temporary files before the first output byte is written.  Therefore a
+    fetch or limit failure leaves ``out`` untouched.  An output failure can
+    leave a partial bundle, which the caller must discard.
+
+    ``compression_level`` is the gzip level, 1 to 9.  Determinism covers the
+    outer member order, JSON encoding, tar metadata, gzip timestamp and gzip
+    level.  Identical callback bytes and arguments produce identical output;
+    the opaque Docker tar headers themselves are intentionally not rewritten.
+    """
+    _validate_compression_level(compression_level)
+    with spool_sandbox_archive(
+        phase=phase,
+        fetch_archive=fetch_archive,
+        metadata=metadata,
+        max_member_bytes=max_member_bytes,
+        max_total_bytes=max_total_bytes,
+    ) as spooled:
+        return spooled.write(out, compression_level=compression_level)
 
 
 __all__ = [
+    "DEFAULT_ARCHIVE_COMPRESSION_LEVEL",
     "DEFAULT_MAX_ARCHIVE_MEMBER_BYTES",
     "DEFAULT_MAX_ARCHIVE_TOTAL_BYTES",
     "ArchiveFetcher",
     "ArchivePhase",
+    "BoundedDigestWriter",
+    "SpooledSandboxArchive",
     "build_sandbox_archive_bundle",
+    "spool_sandbox_archive",
 ]

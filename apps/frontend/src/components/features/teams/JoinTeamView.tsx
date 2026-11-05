@@ -9,7 +9,6 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { useAuth, useLocale, useT } from '@/components/providers';
-import { basePath } from '@/config/env';
 import { claimInvitation, listOwnJoinRequests, type OwnJoinRequest } from '@/lib/api/teams';
 import {
   clearInvitationToken,
@@ -25,6 +24,10 @@ import { TeamJoinIcon } from './TeamJoinIcon';
 
 const JOIN_PATH = '/teams/join';
 
+// Refusals that answer for the visitor's membership rather than the link. The
+// page says them once, where it would otherwise ask for a link.
+const MEMBERSHIP_ANSWERS = new Set(['already_member', 'no_longer_member']);
+
 export function JoinTeamView() {
   const t = useT();
   const { locale } = useLocale();
@@ -34,7 +37,7 @@ export function JoinTeamView() {
   const [token, setToken] = useState<string | null | undefined>(undefined);
   const [request, setRequest] = useState<OwnJoinRequest | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [alreadyMember, setAlreadyMember] = useState(false);
+  const [membership, setMembership] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -55,16 +58,17 @@ export function JoinTeamView() {
       setRequest(await claimInvitation(token));
       clearInvitationToken();
     } catch (cause) {
+      const answer = cause instanceof APIError && MEMBERSHIP_ANSWERS.has(cause.code);
       if (cause instanceof APIError && cause.statusCode === 403) {
         setError(t('teams.join.noAccess'));
-      } else {
+      } else if (!answer) {
         setError(teamErrorMessage(t, cause));
       }
       // A refusal about the link itself is final; a transient one keeps it for a retry.
       if (cause instanceof APIError && (cause.statusCode === 410 || cause.statusCode === 409)) {
         clearInvitationToken();
         setToken(null);
-        setAlreadyMember(cause.code === 'already_member');
+        setMembership(answer ? teamErrorMessage(t, cause) : null);
       }
     } finally {
       setBusy(false);
@@ -152,9 +156,13 @@ export function JoinTeamView() {
   } else if (!token) {
     body = (
       <>
-        <p className="text-sm leading-6 text-muted">
-          {alreadyMember ? t('teams.error.alreadyMember') : t('teams.join.noLink')}
-        </p>
+        {membership ? (
+          <p role="status" className="text-sm leading-6 text-muted">
+            {membership}
+          </p>
+        ) : (
+          <p className="text-sm leading-6 text-muted">{t('teams.join.noLink')}</p>
+        )}
         <Link href={SETTINGS_PATHS.teams} className={primary}>
           {t('teams.join.openTeams')}
         </Link>
@@ -169,7 +177,7 @@ export function JoinTeamView() {
           className={primary}
           onClick={() => {
             const query = new URLSearchParams({ return_to: JOIN_PATH });
-            window.location.assign(`${basePath}/login?${query.toString()}`);
+            window.location.assign(`/login?${query.toString()}`);
           }}
         >
           {t('teams.join.signIn')}

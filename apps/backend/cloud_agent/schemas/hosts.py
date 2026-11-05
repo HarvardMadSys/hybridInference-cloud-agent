@@ -17,7 +17,6 @@ from cloud_agent.schemas._host_reports import (
     _HostReportVersion,
     _HostVersionMenu,
 )
-from cloud_agent.schemas._sandbox_manager_wire import _SandboxManagerWireNames
 from cloud_agent.schemas.archive_settings import (
     HostSandboxArchiveSettings,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
@@ -25,11 +24,19 @@ from cloud_agent.schemas.workers import (
     WorkerSandboxMember,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
 from cloud_agent_shared.host_settings import MAX_SETTINGS_KEYS
+
+#: The configuration reports a host may make about itself on the heartbeat.
+HOST_CONFIG_REPORT_NAMES = frozenset({"runtime_registry_url"})
 from cloud_agent_shared.runtime_catalog import downloadable_runtimes
 from cloud_agent_shared.runtime_downloads import read_reports
+from cloud_agent_shared.sandbox_incidents import SandboxIncident, parse_incidents
 from cloud_agent_shared.sandbox_resources import (
     SandboxResourceSample,
     parse_sandbox_resource_sample,
+)
+from cloud_agent_shared.sandbox_restore import (
+    SandboxCheckpointMember as SandboxCheckpointMember,
+    SandboxCheckpointReceipt,
 )
 from cloud_agent_shared.shared_protocol import HOST_LAUNCH_ERROR_MAX_CHARS
 
@@ -120,6 +127,8 @@ class HostRegisterRequest(BaseModel):
     )
     sandbox_manager_url: str = Field(
         ...,
+        # COMPAT(remove-after=2026-11-30): every host sends sandbox_manager_url;
+        # hosts since #974 do.
         validation_alias=AliasChoices("sandbox_manager_url", "broker_url"),
         max_length=2048,
         description=(
@@ -135,7 +144,7 @@ class HostRegisterRequest(BaseModel):
     )
 
 
-class HostRegisterResponse(_SandboxManagerWireNames):
+class HostRegisterResponse(BaseModel):
     """The host's identity and the credential it authenticates with."""
 
     host: str
@@ -147,9 +156,6 @@ class HostRegisterResponse(_SandboxManagerWireNames):
         ),
     )
     status: str
-    broker_error: str | None = Field(
-        default=None, deprecated=True, description="Compatibility alias for sandbox_manager_error."
-    )
     sandbox_manager_error: str | None = Field(
         None,
         description=(
@@ -169,42 +175,8 @@ class ResidencyBeat(BaseModel):
     generation: int = Field(..., ge=1)
 
 
-class SandboxCheckpointMember(BaseModel):
-    """One chat's native-session position inside a checkpoint."""
-
-    thread_id: str = Field(..., min_length=1, max_length=128)
-    native_session_id: str | None = Field(None, max_length=256)
-    last_settled_job_id: str | None = Field(None, max_length=256)
-    context_status: str | None = Field(None, max_length=32)
-
-
-class SandboxCheckpointBeat(BaseModel):
+class SandboxCheckpointBeat(SandboxCheckpointReceipt):
     """The latest restorable checkpoint a host stored for one retained group."""
-
-    checkpoint_id: str = Field(..., pattern=r"^[0-9a-f]{32}$")
-    sandbox_id: str = Field(..., min_length=1, max_length=128)
-    generation: int = Field(..., ge=1)
-    container_id: str = Field(..., min_length=12, max_length=128)
-    base_image: str = Field(..., min_length=1, max_length=256)
-    runtime_id: str = Field(..., min_length=1, max_length=128)
-    runtime_version: str | None = Field(None, max_length=128)
-    object_key: str = Field(
-        ...,
-        pattern=r"^cloud-agent/sandbox/v2/[0-9a-f]{64}/g[0-9]+/[0-9a-f]{32}\.oci\.tar$",
-        max_length=256,
-    )
-    version_id: str | None = Field(None, max_length=1024)
-    sha256: str = Field(..., pattern=r"^[0-9a-f]{64}$")
-    size_bytes: int = Field(..., ge=1)
-    new_layer_bytes: int = Field(..., ge=0)
-    layer_count: int = Field(..., ge=1, le=1024)
-    created_at: datetime
-    members: list[SandboxCheckpointMember] = Field(default_factory=list, max_length=128)
-    durations_ms: dict[str, int] = Field(default_factory=dict, max_length=16)
-    format_version: Literal[1] = 1
-    # The group's start fence when the checkpointed run began. Absent from
-    # managers that predate restore; such a receipt never covers its group.
-    start_seq: int | None = Field(None, ge=0)
 
 
 class RetainedSandboxBeat(BaseModel):
@@ -238,6 +210,9 @@ class RetainedSandboxBeat(BaseModel):
     resource_usage: SandboxResourceSample | None = None
     terminal_count: StrictInt | None = Field(None, ge=0, le=4096)
     checkpoint: SandboxCheckpointBeat | None = None
+    #: What went wrong in this sandbox since the host's rows were last confirmed
+    #: (``cloud_agent_shared.sandbox_incidents``). An older host sends none.
+    incidents: list[SandboxIncident] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -246,6 +221,8 @@ class RetainedSandboxBeat(BaseModel):
         if not isinstance(data, dict):
             return data
         result = dict(data)
+        if "incidents" in result:
+            result["incidents"] = parse_incidents(result["incidents"])
         if result.get("resource_usage") is not None:
             result["resource_usage"] = parse_sandbox_resource_sample(result["resource_usage"])
         if result.get("checkpoint") is not None:
@@ -266,10 +243,8 @@ class RetainedSandboxStop(BaseModel):
 
     thread_id: str = Field(..., min_length=1, max_length=128)
     generation: int = Field(..., ge=1)
-    # A fork target is born stopped at generation zero. If the sandbox manager starts
-    # it for a file/terminal operation and then restarts before the first agent
-    # turn, the durable idle-stop fence still legitimately names generation
-    # zero. Rejecting it here leaks that reconstructed container in RUNNING.
+    # Zero is reserved for explicit group-level orphan/lost stops. Ordinary
+    # idle stops carry the origin member's positive activation generation.
     activation_generation: int = Field(..., ge=0)
     reason: Literal["idle", "orphaned_attempt", "lost"] = "idle"
     shared_live: Literal[True] = True
@@ -277,6 +252,16 @@ class RetainedSandboxStop(BaseModel):
         dict[Annotated[str, Field(min_length=1, max_length=256)], Annotated[int, Field(ge=0)]]
         | None
     ) = Field(None, max_length=128)
+
+    @model_validator(mode="after")
+    def zero_activation_requires_group_stop_scope(self) -> RetainedSandboxStop:
+        """Require a group-level scope for generation-zero stop fences."""
+        if self.activation_generation == 0 and (
+            self.reason not in {"orphaned_attempt", "lost"}
+            or self.member_activation_generations is None
+        ):
+            raise ValueError("generation zero requires a fenced group-level orphan/lost stop")
+        return self
 
 
 class HostHeartbeatRequest(BaseModel):
@@ -309,6 +294,8 @@ class HostHeartbeatRequest(BaseModel):
     sandbox_manager_url: str | None = Field(
         None,
         max_length=2048,
+        # COMPAT(remove-after=2026-11-30): every host sends sandbox_manager_url;
+        # hosts since #974 do.
         validation_alias=AliasChoices("sandbox_manager_url", "broker_url"),
     )
     capabilities: list[_HostCapability] | None = Field(None, max_length=64)
@@ -362,16 +349,6 @@ class HostHeartbeatRequest(BaseModel):
             "heartbeat refused."
         ),
     )
-    residencies: list[ResidencyBeat] | None = Field(
-        None,
-        max_length=128,
-        description=(
-            "The hot sandboxes this host still holds, generation-scoped. Each "
-            "listed residency's lease is extended; one that no longer holds "
-            "its generation comes back in residencies_lost and the host tears "
-            "that sandbox down (design §7)."
-        ),
-    )
     retained_sandboxes: list[RetainedSandboxBeat] | None = Field(
         None,
         max_length=4096,
@@ -407,6 +384,15 @@ class HostHeartbeatRequest(BaseModel):
             "keeps the last observation for compatibility with older runners."
         ),
     )
+    config_reports: dict[str, str] | None = Field(
+        None,
+        max_length=8,
+        description=(
+            "Non-numeric configuration this host uses now, by name: "
+            "runtime_registry_url is the npm registry its next agent download uses "
+            "(empty for the public registry). Unknown names are dropped."
+        ),
+    )
     runtime_downloads: list[dict[str, Any]] | None = Field(
         None,
         description=(
@@ -417,6 +403,22 @@ class HostHeartbeatRequest(BaseModel):
             "heartbeat. Null means not reported and keeps what is stored."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _keep_known_config_reports(cls, data: Any) -> Any:
+        """Keep only report names this release knows, with bounded text values."""
+        if not isinstance(data, dict) or not isinstance(data.get("config_reports"), dict):
+            return data
+        kept = {
+            name: value
+            for name, value in data["config_reports"].items()
+            if name in HOST_CONFIG_REPORT_NAMES
+            and isinstance(value, str)
+            and len(value) <= 2048
+            and "\x00" not in value
+        }
+        return {**data, "config_reports": kept}
 
     @model_validator(mode="before")
     @classmethod
@@ -463,20 +465,51 @@ class HostResidencyEstablishResponse(BaseModel):
     thread_id: str
     generation: int
     ttl_seconds: float
-    credential: str | None = None
+    #: A Gateway grant, or an owner connection's own long-lived key: never in a repr.
+    credential: str | None = Field(None, repr=False)
     model: str | None = None
+    #: For a residency on an owner model connection, the credential revision
+    #: ``credential`` (that connection's key) belongs to. The host refuses one
+    #: that differs from its claim's: the key changed during the turn.
+    model_connection_revision: int | None = None
+    #: For a residency on an owner model connection, the plan it was resolved
+    #: with (``ProtocolPlan.identity``). The host refuses one that differs from
+    #: its claim's: a verification changed the model's path during the turn.
+    model_connection_plan: str | None = None
     mcp_credential: str = Field(
         "",
         description=(
-            "The MCP relay credential for this residency's process. It names the "
-            "residency, not this attempt, so the process keeps it for every later "
-            "turn it serves. Empty from a control plane that predates it; the "
-            "host then uses the turn's own MCP token."
+            "The MCP relay credential for this residency's process, and the only "
+            "one the host gives it. It names the residency, not this attempt, so "
+            "the process keeps it for every later turn it serves."
         ),
+    )
+    github_credential: str = Field(
+        "",
+        repr=False,
+        description=(
+            "The GitHub relay placeholder for this residency's process: what git and "
+            "gh present to GitHub, which only the GitHub relay accepts and exchanges "
+            "for the owner's own GitHub token. Like `mcp_credential` it names the "
+            "residency, so the process keeps it across turns."
+        ),
+    )
+    git_author_name: str = Field(
+        "",
+        description="The owner's GitHub login, as commit author and committer. Empty "
+        "when the owner has not connected GitHub.",
+    )
+    git_author_email: str = Field(
+        "",
+        description="The owner's GitHub noreply address, so GitHub attributes the commits to them.",
+    )
+    git_coauthor: str = Field(
+        "",
+        description="`Name <email>` the agent names as its commits' co-author, or empty.",
     )
 
 
-class HostHeartbeatResponse(_SandboxManagerWireNames):
+class HostHeartbeatResponse(BaseModel):
     """What the control plane thinks of this host after the heartbeat."""
 
     host: str
@@ -500,7 +533,23 @@ class HostHeartbeatResponse(_SandboxManagerWireNames):
             "override returns the next level's value, never a legacy environment value."
         ),
     )
-    sandbox_archive_settings: HostSandboxArchiveSettings
+    sandbox_archive_settings: HostSandboxArchiveSettings | None = Field(
+        ...,
+        description=(
+            "The archive policy this host should apply. Null for a host that cannot "
+            "apply it: an enabled policy with a bucket other than the default goes "
+            "only to a host advertising sandbox-archive-destination-v1."
+        ),
+    )
+    runtime_registry_url: str | None = Field(
+        None,
+        max_length=2048,
+        description=(
+            "The npm registry this deployment downloads agent versions from; empty is "
+            "the public registry. Absent from a control plane that does not manage it, "
+            "in which case the host keeps its own environment value."
+        ),
+    )
     runtime_downloads: list[dict[str, str]] = Field(
         default_factory=list,
         description=(
@@ -528,9 +577,6 @@ class HostHeartbeatResponse(_SandboxManagerWireNames):
             "durable container and activation generations reported by this host."
         ),
     )
-    broker_error: str | None = Field(
-        default=None, deprecated=True, description="Compatibility alias for sandbox_manager_error."
-    )
     sandbox_manager_error: str | None = Field(
         None,
         description=(
@@ -544,5 +590,13 @@ class HostHeartbeatResponse(_SandboxManagerWireNames):
         description=(
             "How often to report in. Missing three consecutive intervals is "
             "what moves a host to offline."
+        ),
+    )
+    incidents: Literal["accepted"] | None = Field(
+        None,
+        description=(
+            "`accepted` when every sandbox incident this beat carried is stored: "
+            "the host forgets those rows only then. Absent from a control plane "
+            "that does not store incidents, or when one could not be stored."
         ),
     )

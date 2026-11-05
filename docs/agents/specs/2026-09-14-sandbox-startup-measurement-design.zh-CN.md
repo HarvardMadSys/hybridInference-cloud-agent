@@ -414,6 +414,15 @@ child 不重新抽样、不重新认领预算，并在 prompt dispatch 冻结后
 profiling，runner 仍能正确分类路径。反过来，动作缺失时不猜：`reuse` + 未上报的
 resident 动作返回 `unknown`，而不是默认成 `resume_running`。
 
+`resume_running` 还要回答“为什么没复用活着的 CLI”。租约说 resident 是 `live` 时，runner
+先发一个不带凭证的探测；被拒绝后才申请新的 residency 并重开进程。探测结果记成事实：
+`resident_probe=accepted|refused|skipped`。被拒绝时另记 `resident_probe_us`（探测耗时，
+这次失败的调用没有片段可带回时长）、`resident_probe_status`，以及
+`resident_probe_differs`——sandbox manager 拒绝时列出的**字段名**（如
+`model,residency_generation`），其他原因（进程已退出、租约丢失等）记为 `other`。只记录
+字段名，不记录错误原文：错误信息是自由文本，而测量记录不经过脱敏。租约不是 `live` 时
+记 `resident_probe_lease_state`，取值限定在已知状态内。
+
 **关键内部阶段。** 跨进程的时长以 duration 形式挂在它所属的本地阶段下：
 
 - sandbox manager 侧经 lease/descriptor 返回：`container_create`、`container_start`、

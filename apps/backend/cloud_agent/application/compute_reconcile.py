@@ -7,18 +7,40 @@ fixed resource identity and request parameters bound the external effects.
 
 from __future__ import annotations
 
+import re
 import secrets
-from datetime import datetime, timedelta, timezone
+from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 from pydantic import SecretStr
 
-from cloud_agent.application.compute_rotation import ComputeRotation
-from cloud_agent.application.compute_setup import HostRelease, load_control_plane_host_release
+from cloud_agent.application.compute_release import (
+    EXPIRED_NOT_FOUND,
+    NEVER_CREATED,
+    ComputeRelease,
+    acknowledged_release,
+    recorded_evidence,
+    release_evidence,
+)
+from cloud_agent.application.compute_rotation import (
+    ComputeRotation,
+    host_release_blocks_rotation,
+    load_host_release_for_allocations,
+)
+from cloud_agent.application.compute_setup import (
+    HostRelease,
+    load_control_plane_host_release,
+)
 from cloud_agent.application.host_commands import HostCommands
+from cloud_agent.application.release_inventory import quiesce_and_scan
+from cloud_agent.application.superseded_removal import superseded_refusal
 from cloud_agent.compute_config import current_observation_seconds, current_registration_url
 from cloud_agent.compute_secrets import ComputeSecretError
 from cloud_agent.domain.compute import (
+    MOVE_OUT_RENEWAL_LEAD_SECONDS,
+    RECLAIMED_QUIET_SECONDS,
     ComputeRefusal,
     fingerprint,
     move_out_window_seconds,
@@ -97,6 +119,10 @@ _RELEASE_ACTIVE = {"pending", "running", "waiting", "unknown"}
 # Prepare can fail without draining. Stop retrying a release that keeps failing
 # that way; an administrator retry clears the counter and tries again.
 _RELEASE_ATTEMPTS = 3
+# A deployment drain fence normally lasts one rollout. Kept this long on a Host
+# that is off the control plane's commit, it is reported: the Host can neither
+# take work nor be rolled forward until someone resumes it.
+_RELEASE_FENCE_ALERT_AFTER = timedelta(minutes=30)
 
 
 # How long past its recorded deadline a missing resource is taken as ended.
@@ -132,7 +158,242 @@ def _preferred_host_key(keys: list[str]) -> str:
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
+
+
+def _provider_observation_is_fresh(observation: ResourceObservation) -> bool:
+    """Reject stale provider snapshots before using them to authorize bootstrap."""
+    observed_at = observation.observed_at
+    if observed_at.tzinfo is None:
+        return False
+    age = (_now() - observed_at.astimezone(UTC)).total_seconds()
+    return -30 <= age <= 300
+
+
+_SAFE_DIAGNOSTIC_LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_SENSITIVE_DIAGNOSTIC_LABEL = re.compile(
+    r"token|secret|password|credential|bearer|api[_-]?key|jwt", re.IGNORECASE
+)
+_SAFE_PROVIDER_OPERATIONS = {
+    "experiments.create",
+    "experiments.delete",
+    "experiments.list",
+    "experiments.manifests.read",
+    "experiments.read",
+    "experiments.update",
+    "profiles.read",
+    "profiles.request",
+    "provider.request",
+}
+_SAFE_PROVIDER_REASONS = {
+    "authorization_denied",
+    "capacity_unavailable",
+    "connect_failed",
+    "experiment_failed_no_provider_reason",
+    "experiment_ready",
+    "http_rejected",
+    "invalid_create_response",
+    "invalid_expiry_timestamp",
+    "invalid_json_response",
+    "invalid_manifest",
+    "invalid_parameter",
+    "invalid_profile_binding",
+    "invalid_request",
+    "invalid_response_shape",
+    "invalid_ssh_destination",
+    "invalid_ssh_manifest",
+    "incomplete_resource_scope",
+    "missing_or_invalid_experiment_id",
+    "permission_denied",
+    "profile_not_found",
+    "profile_rejected",
+    "project_access_denied",
+    "provider_server_error",
+    "rate_limited",
+    "rate_limited_or_capacity",
+    "request_accepted",
+    "request_failed",
+    "request_outcome_unknown",
+    "reservation_conflict",
+    "resource_identity_mismatch",
+    "resource_not_found",
+    "response_too_large",
+    "tls_verification_failed",
+    "unsupported_node_count",
+}
+
+
+def _safe_provider_fields(source: dict[str, Any]) -> dict[str, str | int | bool]:  # noqa: PLR0912 complexity baseline, #771
+    """Validate provider diagnostic values as well as their field names."""
+    details: dict[str, str | int | bool] = {}
+    operation = source.get("provider_operation")
+    if isinstance(operation, str) and operation in _SAFE_PROVIDER_OPERATIONS:
+        details["provider_operation"] = operation
+    status = source.get("http_status")
+    if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+        details["http_status"] = status
+    reason = source.get("provider_reason_code")
+    if isinstance(reason, str) and reason in _SAFE_PROVIDER_REASONS:
+        details["provider_reason_code"] = reason
+    for key in ("provider_request_id", "external_id", "submission_request_id"):
+        value = source.get(key)
+        if isinstance(value, str):
+            try:
+                details[key] = str(UUID(value))
+            except ValueError:
+                continue
+    status = source.get("submission_http_status")
+    if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+        details["submission_http_status"] = status
+    for key in (
+        "requested_project",
+        "requested_profile",
+        "requested_profile_project",
+        "requested_site",
+        "requested_hardware",
+        "provider_state",
+    ):
+        value = source.get(key)
+        if isinstance(value, str) and _safe_diagnostic_label(value):
+            details[key] = value
+    observed_at = source.get("provider_observed_at")
+    if isinstance(observed_at, str):
+        try:
+            parsed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+        else:
+            if parsed.tzinfo is not None:
+                details["provider_observed_at"] = observed_at[:64]
+    return details
+
+
+def _safe_diagnostic_label(value: str) -> bool:
+    """Reject label-shaped values that look like credentials or opaque tokens."""
+    return bool(
+        _SAFE_DIAGNOSTIC_LABEL.fullmatch(value)
+        and not _SENSITIVE_DIAGNOSTIC_LABEL.search(value)
+        and not (len(value) >= 32 and re.fullmatch(r"[A-Za-z0-9_-]+", value))
+    )
+
+
+def _cloudlab_observation_diagnostics(
+    observation: ResourceObservation, *, reason_code: str
+) -> dict[str, str | int | bool]:
+    """Summarize a successful CloudLab read without retaining provider text."""
+    config = observation.ref.config
+    details: dict[str, str | int | bool] = {
+        "provider_operation": "experiments.read",
+        "provider_reason_code": reason_code,
+        "external_id": observation.ref.external_id,
+        "provider_state": observation.state,
+        "provider_observed_at": observation.observed_at.isoformat(),
+    }
+    project = config.get("project")
+    if isinstance(project, str) and _safe_diagnostic_label(project):
+        details["requested_project"] = project
+    if observation.provider_http_status is not None:
+        details["http_status"] = observation.provider_http_status
+    if observation.provider_request_id is not None:
+        details["provider_request_id"] = observation.provider_request_id
+    for source, target in (
+        ("profile_name", "requested_profile"),
+        ("profile_project", "requested_profile_project"),
+    ):
+        value = config.get(source)
+        if isinstance(value, str) and _safe_diagnostic_label(value):
+            details[target] = value
+    bindings = config.get("bindings")
+    if isinstance(bindings, dict):
+        for keys, target in (
+            (("site", "cluster"), "requested_site"),
+            (("phystype", "hardware", "node_type"), "requested_hardware"),
+        ):
+            value = next(
+                (bindings[key] for key in keys if isinstance(bindings.get(key), str)), None
+            )
+            if isinstance(value, str) and _safe_diagnostic_label(value):
+                details[target] = value
+    return details
+
+
+def _provider_diagnostic_result(
+    error: Exception,
+    operation: dict[str, Any],
+    *,
+    outcome: str,
+) -> dict[str, Any]:
+    """Persist only allowlisted provider facts plus local operation correlation."""
+    source = getattr(error, "diagnostics", None)
+    if not isinstance(source, dict) or not source:
+        return {}
+    stage = source.get("_failure_stage")
+    if not isinstance(stage, str):
+        stage = str(operation.get("step") or "unknown")
+    details = _safe_provider_fields(source)
+    previous = (operation.get("result") or {}).get("provider_diagnostic")
+    if (
+        isinstance(previous, dict)
+        and previous.get("provider_operation") == "experiments.create"
+        and previous.get("operation_outcome") == "accepted"
+    ):
+        request_id = previous.get("provider_request_id")
+        if isinstance(request_id, str):
+            with suppress(ValueError):
+                details["submission_request_id"] = str(UUID(request_id))
+        status = previous.get("http_status")
+        if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+            details["submission_http_status"] = status
+    resource_ref = (operation.get("result") or {}).get("resource_ref") or {}
+    external_id = details.get("external_id") or (
+        resource_ref.get("external_id") if isinstance(resource_ref, dict) else None
+    )
+    if isinstance(external_id, str):
+        try:
+            details["external_id"] = str(UUID(external_id))
+        except ValueError:
+            details.pop("external_id", None)
+    details.update(
+        {
+            "stage": stage[:64],
+            "operation_id": str(operation.get("id") or "")[:128],
+            "allocation_id": str(operation.get("allocation_id") or "")[:128],
+            "operation_outcome": outcome,
+            "retryable": bool(getattr(error, "retryable", False)),
+            "recorded_at": _now().isoformat(),
+        }
+    )
+    return {"provider_diagnostic": details}
+
+
+def _provider_receipt_diagnostic_result(
+    receipt: ProviderReceipt, operation: dict[str, Any]
+) -> dict[str, Any]:
+    """Checkpoint allowlisted receipt metadata before the next provider call."""
+    source = receipt.diagnostics
+    if not source:
+        return {}
+    details = _safe_provider_fields(source)
+    if receipt.resource is not None:
+        try:
+            details["external_id"] = str(UUID(receipt.resource.external_id))
+        except ValueError:
+            details.pop("external_id", None)
+    details.update(
+        {
+            "stage": str(operation.get("step") or "unknown")[:64],
+            "operation_id": str(operation.get("id") or "")[:128],
+            "allocation_id": str(operation.get("allocation_id") or "")[:128],
+            "operation_outcome": (
+                "accepted"
+                if details.get("provider_reason_code") == "request_accepted"
+                else receipt.outcome
+            ),
+            "retryable": False,
+            "recorded_at": _now().isoformat(),
+        }
+    )
+    return {"provider_diagnostic": details}
 
 
 def _moment(value: Any) -> datetime | None:
@@ -152,58 +413,59 @@ class ComputeReconciler:
         self.host_pool = host_pool
         self.bootstrap = bootstrap
         self.rotation = ComputeRotation(self)
+        self.release = ComputeRelease(self)
         self._move_out_reminded: set[str] = set()
+        self._move_out_blocked_reported: set[str] = set()
+        self._release_fenced_since: dict[str, datetime] = {}
+        self._release_fence_reported: set[str] = set()
 
     async def schedule(self) -> None:
-        """Observe leases and submit renewals even while retirement is blocked."""
+        """Observe leases and submit renewals even while retirement is blocked.
+
+        A released resource not yet seen gone is still read, and only read.
+        """
         now = _now()
         observation_seconds = current_observation_seconds(self.commands.configuration)
-        release = load_control_plane_host_release()
-        for row in await self.repository.list_allocations():
-            if row.get("release_committed_at") or row.get("observed_state") in {
-                "terminated",
-                "absent",
-            }:
+        snapshot = await self.repository.scheduling_inventory()
+        release = await load_host_release_for_allocations(
+            snapshot.allocations, load_control_plane_host_release
+        )
+        for row in snapshot.allocations:
+            if row.get("observed_state") == "terminated":
+                await self._lose_reclaimed_groups(row)
+            if row.get("observed_state") in {"terminated", "absent"}:
                 continue
-            operations = await self.repository.list_operations(allocation_id=row["id"])
+            operations = snapshot.operations.get(row["id"], [])
             if row.get("external_id"):
-                observed = _moment(row.get("observed_at"))
-                due = observed is None or (now - observed).total_seconds() >= observation_seconds
-                active_inspect = any(
-                    op["kind"] in {"inspect", "acquire", "import"}
-                    and op["state"] in {"pending", "running", "waiting", "unknown"}
-                    for op in operations
-                )
-                if due and not active_inspect:
-                    slot = int(now.timestamp()) // observation_seconds
-                    await self.commands.queue_inspection(
-                        row, request_key=f"inspect:{row['id']}:{slot}"
-                    )
+                await self._queue_due_inspection(row, operations, now, observation_seconds)
+            if row.get("release_committed_at"):
+                continue
             if release is not None and row.get("desired_state") == "present":
-                await self._queue_host_release(row, operations, release)
+                await self._queue_host_release(row, operations, release, now)
             policy = RenewalPolicy.model_validate(row.get("policy") or {})
             expires = _moment(row.get("expires_at"))
             if expires is not None and row.get("expiration_known"):
+                await self._report_blocked_move_out(row, policy, now, expires)
                 await self._remind_unfinished_move_out(row, policy, now, expires)
             if not policy.enabled or expires is None or not row.get("expiration_known"):
                 continue
-            # An extension is tried before the move-out window opens, so a
-            # granted one keeps the groups where they are.
+            # An extension is tried, and granted or given up, before the
+            # move-out window opens, so a granted one keeps the groups where
+            # they are.
+            window = move_out_window_seconds(policy.model_dump())
             renew_before = max(
                 policy.renew_before_seconds,
-                move_out_window_seconds(policy.model_dump()),
+                window + MOVE_OUT_RENEWAL_LEAD_SECONDS if window else 0,
             )
             if row["management_mode"] != "manage" or expires - now > timedelta(
                 seconds=renew_before
             ):
                 continue
-            lifecycle = await self.repository.list_operations(
-                allocation_id=row["id"], kinds=["extend", "rotate"]
-            )
+            lifecycle = snapshot.lifecycle_operations.get(row["id"], [])
             trigger = self.rotation.due(row, policy, lifecycle, now, expires)
             # A rollout already occupies this machine. Keep renewing the lease
             # it is still serving; do not start a node replacement beside it.
-            release_moving = self._host_release_blocks_rotation(operations, release)
+            release_moving = host_release_blocks_rotation(operations, release)
             started = (
                 trigger is not None
                 and not release_moving
@@ -237,6 +499,72 @@ class ComputeReconciler:
                 # Concurrent schedulers may have already persisted a fixed target.
                 logger.warning("compute_renewal_not_submitted", extra={"allocation_id": row["id"]})
 
+    async def _queue_due_inspection(
+        self,
+        row: dict[str, Any],
+        operations: list[dict[str, Any]],
+        now: datetime,
+        observation_seconds: int,
+    ) -> None:
+        """Queue one read once the last observation is due and none is already queued."""
+        observed = _moment(row.get("observed_at"))
+        due = observed is None or (now - observed).total_seconds() >= observation_seconds
+        active_inspect = any(
+            op["kind"] in {"inspect", "acquire", "import"}
+            and op["state"] in {"pending", "running", "waiting", "unknown"}
+            for op in operations
+        )
+        if due and not active_inspect:
+            slot = int(now.timestamp()) // observation_seconds
+            await self.commands.queue_inspection(row, request_key=f"inspect:{row['id']}:{slot}")
+
+    async def _report_blocked_move_out(
+        self, row: dict[str, Any], policy: RenewalPolicy, now: datetime, expires: datetime
+    ) -> None:
+        """Alert once, inside the move-out window, when groups will stay with the machine.
+
+        Either the move cannot start (or continue) and the reason code says
+        why, or it runs but some groups can never move: no checkpoint covers
+        them, or their image cannot be pulled elsewhere. Reported while there
+        is still time to act, unlike the reminder just before the lease ends.
+        """
+        window = move_out_window_seconds(policy.model_dump())
+        if window == 0 or expires <= now or expires - now > timedelta(seconds=window):
+            return
+        key = f"{row['id']}:{int(expires.timestamp())}"
+        if key in self._move_out_blocked_reported:
+            return
+        report = await self.repository.move_out_report(allocation_id=row["id"])
+        if report["unmoved"] == 0:
+            return
+        if report["blocker"] is not None:
+            reason = f"{report['blocker']}; {report['unmoved']} groups would stay"
+        elif report["unmovable"]:
+            reason = f"{report['unmovable']} of {report['unmoved']} groups cannot move"
+        else:
+            return
+        self._move_out_blocked_reported.add(key)
+        hosts = row.get("hosts") or []
+        await self.rotation._notify(
+            "compute_move_out_blocked",
+            host=hosts[0]["host"] if hosts else row["name"],
+            reason=reason,
+        )
+
+    async def _lose_reclaimed_groups(self, row: dict[str, Any]) -> None:
+        """End the chats whose sandboxes went with a machine its provider reclaimed."""
+        lost = await self.repository.lose_reclaimed_groups(
+            allocation_id=row["id"], quiet_seconds=RECLAIMED_QUIET_SECONDS
+        )
+        if not lost:
+            return
+        hosts = row.get("hosts") or []
+        await self.rotation._notify(
+            "compute_groups_lost_with_server",
+            host=hosts[0]["host"] if hosts else row["name"],
+            reason=f"{len(lost)} groups lost",
+        )
+
     async def _remind_unfinished_move_out(
         self, row: dict[str, Any], policy: RenewalPolicy, now: datetime, expires: datetime
     ) -> None:
@@ -265,7 +593,7 @@ class ComputeReconciler:
             reason=f"{remaining} groups not moved",
         )
 
-    async def execute(self, operation: dict[str, Any]) -> None:
+    async def execute(self, operation: dict[str, Any]) -> None:  # noqa: C901, PLR0912 complexity baseline, #771
         """Execute one claimed operation; public diagnostics contain no remote output."""
         try:
             kind = operation["kind"]
@@ -315,7 +643,10 @@ class ComputeReconciler:
                     "waiting",
                     "confirming",
                     "The provider outcome is being checked.",
-                    result={"external_pending": True},
+                    result={
+                        "external_pending": True,
+                        **_provider_diagnostic_result(exc, operation, outcome="waiting"),
+                    },
                     retry=30,
                 )
             elif code == "result_unknown" and (
@@ -328,6 +659,7 @@ class ComputeReconciler:
                     "waiting",
                     operation["step"],
                     "Connection and deployment readiness will be checked again.",
+                    result=_provider_diagnostic_result(exc, operation, outcome="waiting"),
                     retry=30,
                 )
             elif code == "result_unknown":
@@ -336,6 +668,7 @@ class ComputeReconciler:
                     "unknown",
                     operation["step"],
                     "The acquisition outcome is unknown. Identify the existing resource before continuing.",
+                    result=_provider_diagnostic_result(exc, operation, outcome="unknown"),
                 )
             else:
                 terminal_acquire = operation["kind"] == "acquire" and (
@@ -352,6 +685,17 @@ class ComputeReconciler:
                     str(exc),
                     result={
                         **({"external_pending": False} if terminal_acquire else {}),
+                        **_provider_diagnostic_result(
+                            exc,
+                            operation,
+                            outcome=(
+                                "failed"
+                                if terminal_acquire
+                                else "waiting"
+                                if retryable
+                                else "blocked"
+                            ),
+                        ),
                         "blocked_reasons": [{"code": code, "message": str(exc)}],
                     },
                     retry=30 if retryable else None,
@@ -449,7 +793,7 @@ class ComputeReconciler:
             },
         )
 
-    async def _acquire(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:
+    async def _acquire(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
         provider = self.commands.registry.get(allocation["provider_id"]).provider
         observation: ResourceObservation | None
         if allocation.get("external_id"):
@@ -483,9 +827,17 @@ class ComputeReconciler:
             raise ProviderError("resource_terminated", "The allocated resource has terminated")
         if observation.state == "failed":
             await self._release_failed_acquisition(operation, allocation)
+            diagnostics = (
+                _cloudlab_observation_diagnostics(
+                    observation, reason_code="experiment_failed_no_provider_reason"
+                )
+                if allocation.get("provider_id") == "cloudlab"
+                else {}
+            )
             raise ProviderError(
                 "resource_failed",
                 "The provider could not set up this resource; it was released",
+                diagnostics=diagnostics,
             )
         if observation.state != "ready":
             await self._finish(
@@ -497,8 +849,8 @@ class ComputeReconciler:
                 retry=30,
             )
             return
-        await self._checkpoint(operation, "resource_ready", {"external_pending": False})
         if operation["kind"] == "import":
+            await self._checkpoint(operation, "resource_ready", {"external_pending": False})
             await self._finish(
                 operation,
                 "succeeded",
@@ -506,14 +858,106 @@ class ComputeReconciler:
                 "Resource imported for observation; no Host was deployed.",
             )
             return
+        if not observation.scope_complete:
+            diagnostics = (
+                _cloudlab_observation_diagnostics(
+                    observation, reason_code="incomplete_resource_scope"
+                )
+                if allocation.get("provider_id") == "cloudlab"
+                else {}
+            )
+            raise ProviderError(
+                "resource_scope_incomplete",
+                "The provider has not reported the complete resource inventory.",
+                diagnostics=diagnostics,
+            )
+        await self._checkpoint(operation, "resource_ready", {"external_pending": False})
         if len(observation.nodes) != 1:
+            diagnostics = (
+                _cloudlab_observation_diagnostics(observation, reason_code="unsupported_node_count")
+                if allocation.get("provider_id") == "cloudlab"
+                else {}
+            )
             raise ProviderError(
                 "unsupported_node_count",
                 "This deployment profile supports one node; the full allocation remains visible for review",
+                diagnostics=diagnostics,
             )
         allocation = await self._allocation(allocation["id"])
+        # The original ready observation only admitted node registration. Read
+        # CloudLab again immediately before creating the Host binding, then
+        # persist that full snapshot so the repository can guard the commit
+        # against current allocation state under its compute-entry lock.
+        latest = await provider.inspect(self._ref(allocation))
+        if not _provider_observation_is_fresh(latest):
+            await self._finish(
+                operation,
+                "waiting",
+                "waiting_for_resource",
+                "Waiting for a fresh provider observation before bootstrapping the host.",
+                result={"external_pending": True},
+                retry=30,
+            )
+            return
+        await self._save_observation(operation, allocation, latest)
+        if latest.state == "terminated":
+            raise ProviderError("resource_terminated", "The allocated resource has terminated")
+        if latest.state == "failed":
+            await self._release_failed_acquisition(operation, allocation)
+            diagnostics = (
+                _cloudlab_observation_diagnostics(
+                    latest, reason_code="experiment_failed_no_provider_reason"
+                )
+                if allocation.get("provider_id") == "cloudlab"
+                else {}
+            )
+            raise ProviderError(
+                "resource_failed",
+                "The provider could not set up this resource; it was released",
+                diagnostics=diagnostics,
+            )
+        if latest.state != "ready" or not latest.scope_complete:
+            await self._finish(
+                operation,
+                "waiting",
+                "waiting_for_resource",
+                "Waiting for the provider to report one complete ready node before bootstrapping.",
+                result={"external_pending": True},
+                retry=30,
+            )
+            return
+        if len(latest.nodes) != 1:
+            diagnostics = (
+                _cloudlab_observation_diagnostics(latest, reason_code="unsupported_node_count")
+                if allocation.get("provider_id") == "cloudlab"
+                else {}
+            )
+            raise ProviderError(
+                "unsupported_node_count",
+                "This deployment profile supports one node; the full allocation remains visible for review",
+                diagnostics=diagnostics,
+            )
+        allocation = await self._allocation(allocation["id"])
+        if (
+            not allocation.get("scope_complete")
+            or allocation.get("observed_state") not in {"ready", "active", "running"}
+            or allocation.get("observation_error") is not None
+            or len(allocation.get("nodes", [])) != 1
+            or allocation.get("observed_at") is None
+            or (_now() - allocation["observed_at"]).total_seconds() > 300
+        ):
+            await self._finish(
+                operation,
+                "waiting",
+                "waiting_for_resource",
+                "Waiting for the current allocation snapshot to become complete and ready.",
+                result={"external_pending": True},
+                retry=30,
+            )
+            return
+        observation = latest
         node = allocation["nodes"][0]
-        registered = await self._registered_node(operation, allocation, node, observation.nodes[0])
+        registered = await self._registered_node(operation, allocation, node, latest.nodes[0])
         if registered is None:
             return
         observed_node = registered
@@ -541,12 +985,22 @@ class ComputeReconciler:
                 enrollment = SecretStr(token)
             deployed = await self.bootstrap.deploy(observed_node, profile, intent, enrollment)
             if not deployed.ready:
-                await self._bootstrap_blocked(operation, deployed.blocked_reasons)
+                await self._bootstrap_blocked(
+                    operation,
+                    deployed.blocked_reasons,
+                    observation=observation,
+                    provider_id=allocation.get("provider_id"),
+                )
                 return
             await self._checkpoint(operation, "verifying_host", {"deployed": True})
         readiness = await self.bootstrap.readiness(observed_node, profile, intent)
         if not readiness.ready:
-            await self._bootstrap_blocked(operation, readiness.blocked_reasons)
+            await self._bootstrap_blocked(
+                operation,
+                readiness.blocked_reasons,
+                observation=observation,
+                provider_id=allocation.get("provider_id"),
+            )
             return
         host = await self.host_pool.get_host(host=intent.host)
         if host is None or host.get("status") != "online" or not host.get("enrolled"):
@@ -588,7 +1042,14 @@ class ComputeReconciler:
             result={"nodes_ready": 1, "external_pending": False, "blocked_reasons": []},
         )
 
-    async def _bootstrap_blocked(self, operation: dict[str, Any], reasons: tuple[str, ...]) -> None:
+    async def _bootstrap_blocked(
+        self,
+        operation: dict[str, Any],
+        reasons: tuple[str, ...],
+        *,
+        observation: ResourceObservation | None = None,
+        provider_id: str | None = None,
+    ) -> None:
         # Public diagnostics use our vocabulary, never remote exception/output text.
         blocked = [
             {"code": code, "message": _BOOTSTRAP_REASONS[code]}
@@ -602,16 +1063,30 @@ class ComputeReconciler:
                     "message": "Host deployment or readiness checks did not pass.",
                 }
             ]
+        result: dict[str, Any] = {"blocked_reasons": blocked}
+        if observation is not None and provider_id == "cloudlab":
+            error = ProviderError(
+                "host_initialization_failed",
+                "CloudLab resource is ready but host initialization did not pass.",
+                diagnostics=_cloudlab_observation_diagnostics(
+                    observation, reason_code="experiment_ready"
+                ),
+            )
+            result.update(_provider_diagnostic_result(error, operation, outcome="blocked"))
         await self._finish(
             operation,
             "blocked",
             operation["step"],
             "Host deployment needs attention.",
-            result={"blocked_reasons": blocked},
+            result=result,
         )
 
     async def _queue_host_release(
-        self, row: dict[str, Any], operations: list[dict[str, Any]], release: HostRelease
+        self,
+        row: dict[str, Any],
+        operations: list[dict[str, Any]],
+        release: HostRelease,
+        now: datetime | None = None,
     ) -> None:
         """Queue one rollout when a managed host is not on this control-plane commit."""
         if row.get("management_mode") != "manage" or not row.get("external_id"):
@@ -622,8 +1097,12 @@ class ComputeReconciler:
         if not profile.get("deployment_sha") or not profile.get("source_sha256"):
             return
         hosts = row.get("hosts") or []
-        if len(hosts) != 1 or any(host.get("drain_fence_active") for host in hosts):
+        if len(hosts) != 1:
             return
+        if hosts[0].get("drain_fence_active"):
+            await self._report_release_fence(row, release, profile, now or _now())
+            return
+        self._release_fenced_since.pop(row["id"], None)
         if any(
             op.get("kind") in _RELEASE_MUTATIONS and op.get("state") in _RELEASE_ACTIVE
             for op in operations
@@ -635,12 +1114,7 @@ class ComputeReconciler:
         host = await self.host_pool.get_host(host=hosts[0]["host"])
         if host is None or host.get("status") != "online" or not host.get("enrolled"):
             return
-        on_release = shared_deployment_capability(release.sha) in (host.get("capabilities") or [])
-        profile_current = (
-            profile.get("deployment_sha") == release.sha
-            and profile.get("source_sha256") == release.digest
-        )
-        if on_release and profile_current:
+        if self._on_release(host, profile, release):
             return
         parameters = {"allocation_id": row["id"], "deployment_sha": release.sha}
         await self.repository.create_operation(
@@ -657,20 +1131,44 @@ class ComputeReconciler:
         )
 
     @staticmethod
-    def _host_release_blocks_rotation(
-        operations: list[dict[str, Any]], release: HostRelease | None
-    ) -> bool:
-        """Keep a node where it is while its release is moving or needs attention."""
-        if release is None:
-            return False
-        return any(
-            op.get("kind") == "upgrade"
-            and (op.get("parameters") or {}).get("deployment_sha") == release.sha
-            and op.get("state") not in {"succeeded", "cancelled"}
-            for op in operations
+    def _on_release(host: dict[str, Any], profile: dict[str, Any], release: HostRelease) -> bool:
+        """Whether the Host runs this release and its stored profile pins it."""
+        return shared_deployment_capability(release.sha) in (host.get("capabilities") or []) and (
+            profile.get("deployment_sha") == release.sha
+            and profile.get("source_sha256") == release.digest
         )
 
-    async def _upgrade(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:
+    async def _report_release_fence(
+        self,
+        row: dict[str, Any],
+        release: HostRelease,
+        profile: dict[str, Any],
+        now: datetime,
+    ) -> None:
+        """Alert once when a deployment drain fence keeps a Host off this release.
+
+        The rollout waits for the fence, which a deployment normally clears
+        within one run. Left behind, it keeps the Host from taking work and
+        from being rolled forward, so it never gains what a newer release
+        adds, such as checkpoints its groups would need to move out.
+        """
+        hosts = row.get("hosts") or []
+        host = await self.host_pool.get_host(host=hosts[0]["host"])
+        if host is None or not host.get("enrolled") or self._on_release(host, profile, release):
+            self._release_fenced_since.pop(row["id"], None)
+            return
+        since = self._release_fenced_since.setdefault(row["id"], now)
+        key = f"{row['id']}:{release.sha}"
+        if now - since < _RELEASE_FENCE_ALERT_AFTER or key in self._release_fence_reported:
+            return
+        self._release_fence_reported.add(key)
+        await self.rotation._notify(
+            "compute_host_release_blocked",
+            host=hosts[0]["host"],
+            reason="deployment drain fence active",
+        )
+
+    async def _upgrade(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:  # noqa: PLR0912 complexity baseline, #771
         """Deploy this control plane's host bundle and record that release.
 
         The host recipe builds the replacement before it drains runners, and it
@@ -908,7 +1406,7 @@ class ComputeReconciler:
         return ResourceObservation(
             ref=self._ref(allocation),
             state="terminated",
-            raw_state="expired_not_found",
+            raw_state=EXPIRED_NOT_FOUND,
             observed_at=_now(),
             expires_at=expires,
             lease_known=True,
@@ -1059,6 +1557,11 @@ class ComputeReconciler:
         try:
             return await provider.acquire(request, self._intent(operation, allocation))
         except (ProviderError, ComputeSecretError) as exc:
+            if isinstance(exc, ProviderError) and exc.diagnostics:
+                # A definite rejection resets the acquisition step below so
+                # it can be retried after repair. Preserve where this attempt
+                # failed before that retry checkpoint changes the step.
+                exc.diagnostics["_failure_stage"] = str(operation.get("step") or "unknown")
             if getattr(exc, "code", "credential_unavailable") != "result_unknown":
                 # A definite rejection is safe to retry after credentials or
                 # capacity are repaired. Ambiguous submissions keep the fence.
@@ -1075,6 +1578,7 @@ class ComputeReconciler:
                 {
                     "resource_ref": receipt.resource.model_dump(mode="json"),
                     "external_id": receipt.resource.external_id,
+                    **_provider_receipt_diagnostic_result(receipt, operation),
                 },
             )
         if receipt.observation is not None:
@@ -1082,6 +1586,12 @@ class ComputeReconciler:
         if receipt.resource is not None:
             provider = self.commands.registry.get(allocation["provider_id"]).provider
             return await provider.inspect(receipt.resource)
+        if receipt.outcome == "unknown" and receipt.diagnostics:
+            raise ProviderError(
+                "result_unknown",
+                "The provider did not return an identifiable resource",
+                diagnostics=receipt.diagnostics,
+            )
         return None
 
     async def _extend(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:
@@ -1188,10 +1698,7 @@ class ComputeReconciler:
                 await self._checkpoint(
                     operation,
                     "extension_rejected",
-                    {
-                        "extension_requested": False,
-                        "external_pending": False,
-                    },
+                    {"extension_requested": False, "external_pending": False},
                 )
             raise
         await self._checkpoint(
@@ -1225,19 +1732,13 @@ class ComputeReconciler:
             )
 
     async def _settle_terminal_retirement(
-        self, operation: dict[str, Any], allocation: dict[str, Any]
+        self, operation: dict[str, Any], allocation: dict[str, Any], evidence: dict[str, Any] | None
     ) -> None:
         """Commit local fencing after the provider is already terminal."""
         await self.repository.commit_release(
             allocation_id=allocation["id"], **self._fence(operation)
         )
-        await self._finish(
-            operation,
-            "succeeded",
-            "released",
-            "Provider confirmed that the resource is terminated.",
-            result={"external_pending": False, "blocked_reasons": []},
-        )
+        await self.release.released(operation, evidence)
 
     async def _retire(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:
         if not allocation.get("release_committed_at"):
@@ -1245,7 +1746,9 @@ class ComputeReconciler:
                 "terminated",
                 "absent",
             }:
-                await self._settle_terminal_retirement(operation, allocation)
+                await self._settle_terminal_retirement(
+                    operation, allocation, recorded_evidence(operation, allocation)
+                )
                 return
             self.commands._require_managed(allocation, "release")
             await self.repository.begin_retirement(
@@ -1256,7 +1759,9 @@ class ComputeReconciler:
             if allocation.get("external_id"):
                 observation = await self._inspect(operation, allocation)
                 if observation.state == "terminated":
-                    await self._settle_terminal_retirement(operation, allocation)
+                    await self._settle_terminal_retirement(
+                        operation, allocation, release_evidence(operation, observation)
+                    )
                     return
                 allocation = await self._allocation(allocation["id"])
             impact = await self.repository.retirement_impact(allocation["id"])
@@ -1300,74 +1805,35 @@ class ComputeReconciler:
         if provider_resource_absent(allocation):
             await self._release_absent_provider_resource(operation, allocation)
             return
-        provider = self.commands.registry.get(allocation["provider_id"]).provider
-        observation = await self._inspect(operation, allocation)
-        if observation.state == "terminated":
-            await self._finish(
-                operation,
-                "succeeded",
-                "released",
-                "Provider confirmed that the resource is terminated.",
-                result={"external_pending": False, "blocked_reasons": []},
-            )
-            return
-        if operation.get("result", {}).get("release_requested") and observation.state != "ready":
-            await self._finish(
-                operation,
-                "waiting",
-                "confirming_release",
-                "Release was submitted; checking provider state before declaring success.",
-                result={"external_pending": True},
-                retry=30,
-            )
-            return
-        await self._checkpoint(
-            operation, "releasing", {"release_requested": True, "external_pending": True}
-        )
-        try:
-            receipt = await provider.release(
-                self._ref(allocation), self._intent(operation, allocation)
-            )
-        except (ProviderError, ComputeSecretError) as exc:
-            if getattr(exc, "code", "credential_unavailable") != "result_unknown":
-                await self._checkpoint(
-                    operation,
-                    "release_rejected",
-                    {
-                        "release_requested": False,
-                        "external_pending": False,
-                    },
-                )
-            raise
-        observation = receipt.observation or await provider.inspect(self._ref(allocation))
-        await self._save_observation(operation, allocation, observation)
-        if observation.state == "terminated":
-            await self._finish(
-                operation,
-                "succeeded",
-                "released",
-                "Provider confirmed that the resource is terminated.",
-                result={"external_pending": False, "blocked_reasons": []},
-            )
-        else:
-            await self._finish(
-                operation,
-                "waiting",
-                "confirming_release",
-                "Waiting for provider termination confirmation.",
-                result={"external_pending": True},
-                retry=30,
-            )
+        await self.release.committed(operation, allocation)
 
     async def _release_absent_provider_resource(
         self, operation: dict[str, Any], allocation: dict[str, Any]
     ) -> None:
-        """Finish retirement when the provider never created a resource.
+        """Finish retirement of a server whose provider resource was never observed.
 
         Inspect and delete both require an experiment id. A missing profile, or
-        a create cancelled before submission, leaves none. Recording absence
-        locally is the whole release.
+        a create cancelled before submission, leaves none: recording absence
+        locally is the whole release. A create the provider answered left its
+        id with the acquisition, and that experiment is deleted. No Host ran
+        there: deployment starts only on a node an observation recorded.
         """
+        ref = await self._provider_resource(allocation)
+        if ref is not None:
+            observation = await self._delete_by_identity(operation, allocation, ref)
+            if observation.state != "terminated":
+                await self._finish(
+                    operation,
+                    "waiting",
+                    "confirming_release",
+                    "Waiting for provider termination confirmation.",
+                    result={"external_pending": True},
+                    retry=30,
+                )
+                return
+            await self._save_observation(operation, allocation, observation)
+            await self.release.released(operation, release_evidence(operation, observation))
+            return
         await self.repository.observe_allocation(
             allocation_id=allocation["id"],
             observation={
@@ -1378,13 +1844,145 @@ class ComputeReconciler:
             },
             **self._fence(operation),
         )
-        await self._finish(
+        await self.release.released(
             operation,
-            "succeeded",
-            "released",
+            NEVER_CREATED,
             "No provider resource exists for this server, so it was released locally.",
-            result={"external_pending": False, "blocked_reasons": []},
         )
+
+    async def _provider_resource(self, allocation: dict[str, Any]) -> ResourceRef | None:
+        """The provider resource of this allocation, or None if none was ever named.
+
+        Its identity is the allocation's once an observation recorded it. Until
+        then only the acquisition the provider answered keeps it.
+        """
+        if allocation.get("external_id"):
+            return self._ref(allocation)
+        for prior in await self.repository.list_operations(
+            allocation_id=allocation["id"], kinds=["acquire", "import"]
+        ):
+            result = prior.get("result") or {}
+            if result.get("resource_ref"):
+                return ResourceRef.model_validate(result["resource_ref"])
+            named = result.get("external_id") or result.get("resolved_external_id")
+            if named:
+                return ResourceRef(external_id=named, config=allocation["configuration"])
+        return None
+
+    async def _delete_by_identity(
+        self, operation: dict[str, Any], allocation: dict[str, Any], ref: ResourceRef
+    ) -> ResourceObservation:
+        """Delete one resource by its exact identity and return what the provider reports.
+
+        Its node scope is not reviewed: the caller knows no Host of ours ran there.
+        A DELETE this operation already saw acknowledged is not sent again.
+        """
+        acknowledged = acknowledged_release(operation, ref)
+        if acknowledged is not None:
+            return acknowledged
+        provider = self.commands.registry.get(allocation["provider_id"]).provider
+        observation = await provider.inspect(ref)
+        if observation.state != "terminated":
+            await self._checkpoint(
+                operation, "releasing", {"release_requested": True, "external_pending": True}
+            )
+            receipt = await provider.release(ref, self._intent(operation, allocation))
+            await self.release.keep_receipt(operation, ref, receipt)
+            observation = receipt.observation or await provider.inspect(ref)
+        return observation
+
+    async def _remove_superseded(
+        self, operation: dict[str, Any], host: dict[str, Any], sandbox_manager: Any
+    ) -> list[dict[str, Any]]:
+        """Remove the containers this Host's groups left behind; return what it still holds.
+
+        A group handed over by its checkpoint, or restored elsewhere since,
+        leaves its stopped container here, and release refuses a Host that
+        holds one. Only those the control plane proves superseded go
+        (``SUPERSEDED_CONTAINER_SQL``), whether or not the group's chats ever
+        run again, and only once that proof is recorded under the group's row
+        lock (``authorize_superseded_removals``): a group that became ``lost``
+        first keeps its container. Each goes by its exact id through the
+        Sandbox Manager's discard, which requires it stopped and idle under
+        the reported generation, and records the request before Docker
+        removes it. A retry sends what was authorized under the same request
+        id, and one that finds the container gone completes. So does a removal
+        the Host carried out but whose answer was lost: the container no
+        longer shows, and its receipt is fetched again before release goes on.
+        """
+        held = await sandbox_manager.list_sandboxes()
+        stopped = [
+            row
+            for row in held
+            if row.get("running") is False
+            and type(row.get("generation")) is int
+            and all(
+                isinstance(row.get(key), str) and row[key]
+                for key in ("sandbox_id", "container_id", "origin_thread_id")
+            )
+        ]
+        superseded = await self.repository.authorize_superseded_removals(
+            host=str(host["host"]), containers=stopped, operation_id=str(operation["id"])
+        )
+        if not superseded:
+            return held
+        refusals: list[ProviderError] = []
+        for container in superseded:
+            request_id = container["request_id"]
+            try:
+                receipt = await sandbox_manager.discard_sandbox_deletion(
+                    container["origin_thread_id"],
+                    {
+                        "request_id": request_id,
+                        "generation": container["generation"],
+                        "expected_container_id": container["container_id"],
+                        "sandbox_id": container["sandbox_id"],
+                    },
+                )
+            except SandboxManagerError as exc:
+                refusals.append(
+                    superseded_refusal(host, container, exc, operation_id=str(operation["id"]))
+                )
+                continue
+            if (
+                receipt.get("deleted") is not True
+                or receipt.get("request_id") != request_id
+                or receipt.get("container_id") != container["container_id"]
+            ):
+                refusals.append(
+                    ProviderError(
+                        "superseded_container_not_removed",
+                        "The Host did not confirm removing a container its groups left behind",
+                    )
+                )
+                continue
+            await self.repository.record_superseded_removal(request_id=request_id)
+            logger.info(
+                "superseded_container_removed",
+                extra={
+                    "event": "superseded_container_removed",
+                    "host": host["host"],
+                    "sandbox_id": container["sandbox_id"],
+                    "generation": container["generation"],
+                },
+            )
+        if refusals:
+            # One that waits for an administrator outranks one that may pass.
+            raise next((item for item in refusals if not item.retryable), refusals[0])
+        return await sandbox_manager.list_sandboxes()
+
+    async def _count_superseded(
+        self, operation: dict[str, Any], allocation: dict[str, Any]
+    ) -> None:
+        """Report how many left-behind containers this machine's Hosts confirmed removed.
+
+        Read from the durable record, so a pass that stopped after some
+        removals were confirmed loses none of them.
+        """
+        hosts = [str(host["host"]) for host in allocation.get("hosts", [])]
+        removed = await self.repository.superseded_removals(hosts=hosts)
+        if removed and operation.get("result", {}).get("superseded_removed") != removed:
+            await self._checkpoint(operation, "checking_retention", {"superseded_removed": removed})
 
     async def _verify_empty_inventory(
         self, operation: dict[str, Any], allocation: dict[str, Any]
@@ -1400,13 +1998,16 @@ class ComputeReconciler:
             if sandbox_manager is None:
                 continue  # A trusted full-node scan below must prove this host empty.
             try:
-                if await sandbox_manager.list_sandboxes():
-                    raise ProviderError(
-                        "retained_groups_present",
-                        "The sandbox manager still reports retained sandbox state",
-                    )
+                retained = await self._remove_superseded(operation, host, sandbox_manager)
             except SandboxManagerError:
                 continue  # Never infer emptiness; require the full-node scan below.
+            finally:
+                await self._count_superseded(operation, allocation)
+            if retained:
+                raise ProviderError(
+                    "retained_groups_present",
+                    "The sandbox manager still reports retained sandbox state",
+                )
         # This control plane reaches a registering node only through the key
         # its registration supplied, and binds a Host only after pinning it.
         # A node that never registered, with no key and no Host, never ran
@@ -1416,6 +2017,7 @@ class ComputeReconciler:
             registration = await self.repository.node_registration(allocation_id=allocation["id"])
             never_registered = registration is None or not registration.get("registered_at")
         bound = {host.get("compute_node_id") for host in allocation.get("hosts", [])}
+        scans: list[dict[str, Any]] = []
         for node in allocation["nodes"]:
             if (
                 never_registered
@@ -1423,19 +2025,17 @@ class ComputeReconciler:
                 and node["id"] not in bound
             ):
                 continue
-            proof = await self.bootstrap.inventory(
-                self._node(node), profile, self._bootstrap_intent(operation, allocation, node)
+            await quiesce_and_scan(
+                self.bootstrap,
+                lambda host: self.repository.recorded_host_state(host=host),
+                lambda result: self._checkpoint(operation, operation["step"], result),
+                operation,
+                self._node(node),
+                node["id"],
+                profile,
+                self._bootstrap_intent(operation, allocation, node),
+                scans,
             )
-            if (
-                not proof.complete
-                or proof.retained_containers
-                or proof.unknown_containers
-                or proof.orphan_state
-            ):
-                raise ProviderError(
-                    "inventory_not_empty",
-                    "Stopped containers, unrecognized containers, or retained files prevent release",
-                )
         recorded = await self.repository.record_inventory(
             allocation_id=allocation["id"],
             hosts=[h["host"] for h in allocation.get("hosts", [])],
@@ -1468,7 +2068,7 @@ class ComputeReconciler:
                 raise ProviderError(
                     "resource_identity_changed", "The allocation's complete node scope has changed"
                 )
-        await self.repository.observe_allocation(
+        saved = await self.repository.observe_allocation(
             allocation_id=allocation["id"],
             observation={
                 "external_id": observation.ref.external_id,
@@ -1492,6 +2092,12 @@ class ComputeReconciler:
             },
             **self._fence(operation),
         )
+        if (
+            saved.get("observed_state") in {"terminated", "absent"}
+            and observation.state != "terminated"
+        ):
+            # The resource's terminal proof stood; this stale read sets no holds.
+            return
         policy = RenewalPolicy.model_validate(allocation.get("policy") or {})
         scope = None
         if observation.expires_at is not None:

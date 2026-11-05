@@ -1,8 +1,8 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
-import { createAgentJob, getAgentConfig, listRepoBranches } from '@/lib/api/agents';
+import { Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { createAgentJob, listRepoBranches } from '@/lib/api/agents';
 import type {
   AgentConfigApi,
   AgentPluginInputApi,
@@ -19,7 +19,8 @@ import {
   peekComposerDraft,
   rememberReturn,
 } from './githubReturn';
-import { SOURCE_CONTROL_RECHECK_MS } from './sourceControlRecovery';
+import { useComposerConfig } from './useComposerConfig';
+import { ModelConnectionNotice } from './ModelConnectionNotice';
 import { highestEffort, offeredEfforts } from './effort';
 import { useT } from '@/components/providers';
 import { useAuth } from '@/components/providers/AuthProvider';
@@ -30,8 +31,9 @@ import { DeferredCreateRepositoryDialog } from './DeferredCreateRepositoryDialog
 import { ComposerDialogLoading } from './ComposerDialogLoading';
 import { ComposerPlusMenu } from './ComposerPlusMenu';
 import { ComposerCommandMenu } from './ComposerCommandMenu';
-import { PromptRewrite } from './PromptRewrite';
 import { composerCommandMatches } from './composerCommands';
+import { useContextCommandDialog } from './context/ContextCommandDialog';
+import { PluginSelectionDialog, SkillSelectionDialog } from './job-detail/LazyPanels';
 import { AttachmentStrip } from './attachments/AttachmentStrip';
 import { useAttachments } from './attachments/useAttachments';
 import { filesFromDataTransfer } from '@/lib/dataTransferFiles';
@@ -40,25 +42,19 @@ import { useComposerMcp } from './mcp/useComposerMcp';
 import { useComposerSsh } from './ssh/useComposerSsh';
 import { useSkillLibrary } from './skills/useSkillLibrary';
 import type { SelectedSkillApi } from '@/lib/api/skills';
-import { readDraftPlugins, validPluginForRuntime } from '@/lib/pluginConfiguration';
+import { validPluginForRuntime } from '@/lib/pluginConfiguration';
+import { readNewTaskDraft } from './newTaskDraft';
+import { useComposerModel } from './useComposerModel';
 import { EnvironmentPicker, type EnvironmentSelection } from './environment/EnvironmentPicker';
 import { UserAvatar } from './UserAvatar';
 import { UserHomeInsights } from './UserHomeInsights';
 import { useUserHomeProfile } from './useUserHomeProfile';
 import { TEMPORARY_WORKSPACE } from '@/lib/temporaryWorkspace';
+import { connectionAgentName } from '@/components/features/settings/modelConnectionDisplay';
 import {
   TemporaryWorkspaceConfirm,
   useTemporaryWorkspaceAcknowledgement,
 } from './TemporaryWorkspace';
-
-const SkillSelectionDialog = lazy(() =>
-  import('./skills/SkillPicker').then((module) => ({ default: module.SkillSelectionDialog })),
-);
-const PluginSelectionDialog = lazy(() =>
-  import('./plugins/PluginSelectionDialog').then((module) => ({
-    default: module.PluginSelectionDialog,
-  })),
-);
 
 // New-task composer (the /agents index state). Runtime × model are first-class
 // controls — BYOA × BYOM is the product, not an advanced option.
@@ -78,31 +74,6 @@ export function TaskComposer({ initialRepo }: { initialRepo?: string }) {
   );
 }
 
-interface NewTaskDraft {
-  task: string;
-  repo: string;
-  runtime: string;
-  model: string;
-  effort: string;
-  branch: string;
-  plugins: AgentPluginInputApi[];
-}
-
-function readNewTaskDraft(value: string): NewTaskDraft | null {
-  try {
-    const saved: unknown = JSON.parse(value);
-    if (!saved || typeof saved !== 'object') return null;
-    const record = saved as Record<string, unknown>;
-    const fields = ['task', 'repo', 'runtime', 'model', 'effort', 'branch'] as const;
-    if (!fields.every((field) => typeof record[field] === 'string')) return null;
-    const plugins = readDraftPlugins(record.plugins);
-    if (plugins === null) return null;
-    return { ...(saved as NewTaskDraft), plugins };
-  } catch {
-    return null;
-  }
-}
-
 /**
  * The repositories a task may be sent to now. Choosing one needs a connected
  * GitHub, allowlisted repositories included — `/config` lists those either
@@ -112,11 +83,30 @@ function selectableRepos(config: AgentConfigApi | null): string[] {
   return config?.github_connected ? config.repos : [];
 }
 
+/** Product names for the agent picker; the submitted runtime stays its id. */
+function runtimeLabels(config: AgentConfigApi | null): Record<string, string> {
+  return Object.fromEntries(
+    (config?.runtimes ?? []).map((runtime) => [runtime, connectionAgentName(runtime)]),
+  );
+}
+
+/** A refreshed config must still admit this workspace before a task can run. */
+function canRunInRepository(config: AgentConfigApi | null, repo: string, refreshing: boolean) {
+  if (!config || refreshing || config.github_load_status === 'unavailable') return false;
+  return repo === TEMPORARY_WORKSPACE || (config.github_connected && Boolean(repo));
+}
+
 function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; userId?: string }) {
   const router = useRouter();
   const t = useT();
   const userProfile = useUserHomeProfile(userId);
-  const draftStore = useComposerDraft({ userId, threadId: 'new-task' });
+  // A create made before New task was opened again can land while it shows
+  // that task's text, which Run would then create a second time.
+  const draftStore = useComposerDraft({
+    userId,
+    threadId: 'new-task',
+    onSentElsewhere: () => setTask(''),
+  });
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -146,12 +136,12 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   // What to say when `/goal` was typed with nothing after it. Guidance, not a
   // failure: nothing was created and nothing was sent.
   const [goalHint, setGoalHint] = useState<string | null>(null);
+  const contextCommand = useContextCommandDialog(() => taskBox.current?.focus());
   const [dropping, setDropping] = useState(false);
   // Drops whose folders are still being walked; their files are not attached yet.
   const [readingDrops, setReadingDrops] = useState(0);
   const taskBox = useRef<HTMLTextAreaElement>(null);
   const [config, setConfig] = useState<AgentConfigApi | null>(null);
-  const [models, setModels] = useState<string[]>([]);
   // Empty until the owner picks one. A task changes a real repository, so
   // where it runs is never a default — see RepositoryPicker. The one exception
   // is the temporary workspace (`TEMPORARY_WORKSPACE`), which changes no
@@ -189,11 +179,12 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   const [branch, setBranch] = useState(draft?.branch ?? '');
   const [branchOptionsRepo, setBranchOptionsRepo] = useState<string | null>(null);
   const [runtime, setRuntime] = useState(draft?.runtime ?? '');
-  const [model, setModel] = useState(draft?.model ?? '');
+  const composerModel = useComposerModel(draft, runtime);
+  const { draftFields, requestFields, adoptModels, missingModel, picker, modelControl } =
+    composerModel;
+  const { model, connectionId } = composerModel.choice;
   const [effort, setEffort] = useState(draft?.effort ?? '');
-  const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
-  const [rewriting, setRewriting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const attachments = useAttachments(t, config?.attachment_limits);
   const mcp = useComposerMcp(t);
@@ -201,9 +192,18 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   const saveDraft = draftStore.setValue;
   const savedBranch =
     branchOptionsRepo === repo ? branch : draft?.repo === repo ? draft.branch : '';
-  useEffect(() => {
-    saveDraft(JSON.stringify({ task, repo, runtime, model, effort, branch: savedBranch, plugins }));
-  }, [saveDraft, task, repo, runtime, model, effort, savedBranch, plugins]);
+  const draftFor = (where: string) =>
+    JSON.stringify({
+      task,
+      repo: where,
+      runtime,
+      ...draftFields,
+      effort,
+      branch: savedBranch,
+      plugins,
+    });
+  const draftValue = draftFor(repo);
+  useEffect(() => saveDraft(draftValue), [saveDraft, draftValue]);
   const goalCommand = useGoalCommand({
     value: task,
     setValue: setTask,
@@ -211,6 +211,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     onNeedsObjective: () => setGoalHint(t('goal.needsObjective')),
     onApply: applyGoalObjective,
     onError: setError,
+    onContext: contextCommand.open,
   });
 
   // The config fetch runs once on mount, but its fallback message has to be
@@ -219,34 +220,29 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   const tRef = useRef(t);
   tRef.current = t;
 
-  const applyConfig = useCallback((cfg: AgentConfigApi) => {
-    // The config's model list is the create endpoint's own predicate;
-    // /v1/models answers for the browsing user and offered models whose
-    // first agent call then 404ed.
-    const modelIds = cfg.models ?? [];
-    setConfig(cfg);
-    setModels(modelIds);
-    // A re-read keeps every choice still on offer and drops only the ones that
-    // are not. A repository is never filled in: see the effect below. With no
-    // repository on offer — GitHub not connected, down, or giving the App none
-    // — the temporary workspace is the only place a task can run, and it
-    // changes no real repository, so it is chosen.
-    const repos = selectableRepos(cfg);
-    setRepo((current) =>
-      current === TEMPORARY_WORKSPACE || (current && repos.includes(current))
-        ? current
-        : repos.length === 0
-          ? TEMPORARY_WORKSPACE
-          : '',
-    );
-    setRuntime((current) =>
-      current && cfg.runtimes.includes(current) ? current : (cfg.runtimes[0] ?? ''),
-    );
-    const defaultModel = modelIds.includes('deepseek-v4-flash')
-      ? 'deepseek-v4-flash'
-      : (modelIds[0] ?? '');
-    setModel((current) => (current && modelIds.includes(current) ? current : defaultModel));
-  }, []);
+  const applyConfig = useCallback(
+    (cfg: AgentConfigApi) => {
+      setConfig(cfg);
+      adoptModels(cfg);
+      // A re-read keeps every choice still on offer and drops only the ones that
+      // are not. A repository is never filled in: see the effect below. With no
+      // repository on offer — GitHub not connected, down, or giving the App none
+      // — the temporary workspace is the only place a task can run, and it
+      // changes no real repository, so it is chosen.
+      const repos = selectableRepos(cfg);
+      setRepo((current) =>
+        current === TEMPORARY_WORKSPACE || (current && repos.includes(current))
+          ? current
+          : repos.length === 0
+            ? TEMPORARY_WORKSPACE
+            : '',
+      );
+      setRuntime((current) =>
+        current && cfg.runtimes.includes(current) ? current : (cfg.runtimes[0] ?? ''),
+      );
+    },
+    [adoptModels],
+  );
 
   // The one place a repository is chosen for the owner: they opened the page
   // from a project's "New task in …", which is them choosing it. Applied when
@@ -277,7 +273,6 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     // opened the page, wherever they are still on offer.
     if (first && draft) {
       if (draft.runtime && config.runtimes.includes(draft.runtime)) setRuntime(draft.runtime);
-      if (draft.model && (config.models ?? []).includes(draft.model)) setModel(draft.model);
       if (
         (!initialRepo || draft.repo === initialRepo) &&
         draft.repo &&
@@ -304,60 +299,26 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     if (draft) forgetComposerDraft(userId);
   }, [draft, userId]);
 
-  useEffect(() => {
-    let cancelled = false;
-    getAgentConfig()
-      .then((cfg) => {
-        if (!cancelled) applyConfig(cfg);
-      })
-      .catch((cause: unknown) => {
-        if (!cancelled)
-          setError(
-            cause instanceof Error ? cause.message : tRef.current('composer.loadConfigFailed'),
-          );
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [applyConfig]);
-
-  // While the deployment's GitHub App is temporarily unavailable nothing can
-  // run, and the service is retrying on its own. Look again at its interval so
-  // the composer comes back by itself; the pickers are hidden meanwhile, so
-  // re-reading the config overwrites no choice the user made.
   const githubUnavailable = config?.github_load_status === 'unavailable';
-  useEffect(() => {
-    if (!githubUnavailable) return undefined;
-    let cancelled = false;
-    let pending = false;
-    const read = () => {
-      if (document.visibilityState === 'hidden' || pending) return;
-      pending = true;
-      getAgentConfig()
-        .then((cfg) => {
-          if (!cancelled) applyConfig(cfg);
-        })
-        // The next tick asks again; the notice already says why nothing runs.
-        .catch(() => undefined)
-        .finally(() => {
-          pending = false;
-        });
-    };
-    const timer = window.setInterval(read, SOURCE_CONTROL_RECHECK_MS);
-    document.addEventListener('visibilitychange', read);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-      document.removeEventListener('visibilitychange', read);
-    };
-  }, [githubUnavailable, applyConfig]);
+  const {
+    loading,
+    refreshing: configRefreshing,
+    refresh: refreshConfig,
+  } = useComposerConfig(
+    applyConfig,
+    (cause) => {
+      setConfig((current) => (current?.github_load_status === 'unavailable' ? current : null));
+      setError(cause instanceof Error ? cause.message : tRef.current('composer.loadConfigFailed'));
+    },
+    githubUnavailable,
+  );
 
   // The offered efforts follow the (runtime, model) pair, so switching either
   // can empty the set or drop the current choice out of it.
-  const efforts = useMemo(() => offeredEfforts(config, runtime, model), [config, runtime, model]);
+  const efforts = useMemo(
+    () => offeredEfforts(config, runtime, model, connectionId),
+    [config, runtime, model, connectionId],
+  );
   useEffect(() => {
     // Only once the config has arrived: before that the offered set is empty
     // because nothing is *known*, not because nothing is offered.
@@ -431,12 +392,10 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   // Connected, and GitHub has given the App no repository yet: a step still to
   // take, not a connection to make again.
   const noRepositories = config?.github_connected === true && config.repos.length === 0;
-  const busy =
-    submitting || goalCommand.busy || rewriting || Boolean(repo && environmentStatus === 'loading');
+  const busy = submitting || goalCommand.busy || Boolean(repo && environmentStatus === 'loading');
   const missingRepository = config?.github_connected === true && !repo;
   const canRun =
-    !locked &&
-    (temporary || (config?.github_connected === true && Boolean(repo))) &&
+    canRunInRepository(config, repo, configRefreshing) &&
     task.trim().length > 0 &&
     !busy &&
     !(repo && !environmentSelection && environmentStatus !== 'error') &&
@@ -457,25 +416,16 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   async function goToGitHub(kind: 'connect' | 'manage') {
     setLeaving(kind);
     setError(null);
-    if (temporary) {
-      // Either trip is for a repository: come back to the picker, not to the
-      // temporary workspace the owner is leaving to get one.
-      saveDraft(
-        JSON.stringify({ task, repo: '', runtime, model, effort, branch: savedBranch, plugins }),
-      );
-    }
+    // Either trip is for a repository: come back to the picker, not to the
+    // temporary workspace the owner is leaving to get one.
+    if (temporary) saveDraft(draftFor(''));
     rememberReturn(
       // Not back to the temporary workspaces' folder: its link asks for a
       // temporary workspace again, ahead of the draft that asks where to run.
       initialRepo && initialRepo !== TEMPORARY_WORKSPACE
         ? `/?repo=${encodeURIComponent(initialRepo)}`
         : '/',
-      {
-        task,
-        repo: temporary ? '' : repo,
-        runtime,
-        model,
-      },
+      { task, repo: temporary ? '' : repo, runtime, ...draftFields },
       userId,
     );
     try {
@@ -514,20 +464,15 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
    */
   async function refreshRepositories() {
     setRefreshing(true);
-    try {
-      const cfg = await getAgentConfig({ fresh: true });
-      applyConfig(cfg);
+    const cfg = await refreshConfig({ fresh: true });
+    if (cfg) {
       setError(null);
-      // The repository the link asked for may be the one that just arrived.
       if (unavailableRepo && cfg.repos.includes(unavailableRepo)) {
         setRepo(unavailableRepo);
         setUnavailableRepo(null);
       }
-    } catch (cause: unknown) {
-      setError(cause instanceof Error ? cause.message : t('composer.loadConfigFailed'));
-    } finally {
-      setRefreshing(false);
     }
+    setRefreshing(false);
   }
 
   /**
@@ -585,7 +530,8 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
       // is already working toward it rather than learning about it later.
       ...(goal ? { goal } : {}),
       runtime,
-      model,
+      // The model with its source, when that is the owner's own connection.
+      ...requestFields,
       // Sent as a ref; the platform pins it to a commit at creation, because
       // a branch moves and the publisher applies onto a fixed one.
       ...(branch ? { base_ref: branch } : {}),
@@ -614,16 +560,19 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     if (pluginsBlocked) throw new Error(pluginBlockedReason);
     const snapshot = draftStore.capture();
     setGoalHint(null);
-    const job = await createAgentJob(requestBody(objective, { objective }));
+    const job = await attachments.whileSending(
+      createAgentJob(requestBody(objective, { objective }), { account: userId }),
+    );
     draftStore.acknowledge(snapshot);
     if (mounted.current) router.push(`/${job.id}`);
   }
 
   async function run(acknowledged = acknowledgement.acknowledged) {
     if (!canRun) {
-      // The one thing missing is where to run it: ask, rather than ignore the
-      // key. Nothing is sent until a repository has actually been chosen.
+      // Ask where to run, or point at the empty model, rather than ignore the
+      // key. Nothing is sent until both have actually been chosen.
       if (missingRepository && task.trim() && !busy) openRepositoryPicker(true);
+      if (!busy) modelControl.pointIfMissing();
       return;
     }
     // The first temporary workspace waits for its owner to say they know its
@@ -639,7 +588,9 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
     setError(null);
     try {
       const snapshot = draftStore.capture();
-      const job = await createAgentJob(requestBody(task.trim()));
+      const job = await attachments.whileSending(
+        createAgentJob(requestBody(task.trim()), { account: userId }),
+      );
       draftStore.acknowledge(snapshot);
       if (mounted.current) router.push(`/${job.id}`);
     } catch (cause: unknown) {
@@ -688,6 +639,8 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
         </p>
       </div>
 
+      <ModelConnectionNotice config={config} />
+
       {locked ? (
         <div className="mt-5">
           <ConnectSourceControl unavailable />
@@ -700,9 +653,9 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           />
           <button
             type="button"
-            disabled={rewriting || submitting}
+            disabled={submitting}
             onClick={() => {
-              if (!rewriting && !submitting) setCreateRepositoryOpen(true);
+              if (!submitting) setCreateRepositoryOpen(true);
             }}
             className="mt-3 rounded-lg px-3 py-2 text-sm font-medium text-crimson-dark hover:bg-crimson/5 disabled:cursor-not-allowed disabled:opacity-50 dark:text-rose-300 dark:hover:bg-white/5"
           >
@@ -747,6 +700,12 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           onHighlight={goalCommand.onHighlight}
           onChoose={goalCommand.onChoose}
         />
+        <AttachmentStrip
+          entries={attachments.entries}
+          onRemove={attachments.remove}
+          disabled={submitting}
+        />
+
         <textarea
           ref={taskBox}
           rows={4}
@@ -784,23 +743,6 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           className="block min-h-[88px] w-full resize-y rounded-t-xl border-0 bg-transparent px-4 pb-2 pt-3 text-sm leading-6 text-foreground focus:outline-none focus:ring-0 disabled:cursor-not-allowed sm:min-h-[104px]"
         />
 
-        <AttachmentStrip
-          entries={attachments.entries}
-          onRemove={attachments.remove}
-          disabled={submitting}
-        />
-
-        <PromptRewrite
-          value={task}
-          model={model}
-          disabled={submitting || goalCommand.busy || /^\s*\//.test(task)}
-          onActiveChange={setRewriting}
-          onApply={(prompt) => {
-            setTask(prompt);
-            taskBox.current?.focus();
-          }}
-        />
-
         <EnvironmentPicker
           key={repo}
           repo={temporary ? '' : repo}
@@ -811,31 +753,12 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
           onStatusChange={setEnvironmentStatus}
           onSummaryChange={setEnvironmentSummary}
         />
-        <div className="flex min-w-0 flex-nowrap items-center gap-1 rounded-b-xl border-t border-border bg-surface-muted/50 p-2">
-          <ComposerPlusMenu
-            disabled={busy}
-            onOpen={goalCommand.dismiss}
-            onFiles={attachments.add}
-            onOpenSkills={() => setSkillsOpen(true)}
-            skillSummary={
-              pendingSkillDefaults ? t('attach.skillsDefaults') : String(selectedSkills.length)
-            }
-            goalSummary={t('commands.goalHint')}
-            onOpenGoal={insertGoalCommand}
-            mcp={mcp}
-            mcpBlockedReason={mcpBlockedReason}
-            ssh={ssh}
-            onOpenPlugins={
-              pluginsSupported || plugins.length ? () => setPluginsOpen(true) : undefined
-            }
-            pluginSummary={String(plugins.length)}
-            onOpenEnvironment={repo ? () => setEnvironmentOpen(true) : undefined}
-            environmentSummary={environmentSummary}
-          />
-          <span aria-hidden="true" className="mx-0.5 h-4 w-px shrink-0 bg-border" />
-          {/* Leave the scroller unpositioned so the repository menu anchors
-                  to the composer and can extend outside the scroll area. */}
-          <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [&>button]:shrink-0 [&>button]:whitespace-nowrap [&>label]:shrink-0 [&>label]:whitespace-nowrap">
+        {/* Two rows: where the task runs, then how. Each row wraps by the
+            composer's own width, so nothing scrolls sideways or hides behind
+            Run. The rows stay unpositioned so the repository menu anchors to
+            the composer itself. */}
+        <div className="space-y-1 rounded-b-xl border-t border-border bg-surface-muted/50 p-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-1">
             <RepositoryPicker
               repos={selectableRepos(config)}
               value={repo}
@@ -848,14 +771,14 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
               onRefresh={() => void refreshRepositories()}
               onConfigure={config?.github_install_url ? () => void goToGitHub('manage') : undefined}
               onCreate={() => {
-                if (!rewriting && !submitting) setCreateRepositoryOpen(true);
+                if (!submitting) setCreateRepositoryOpen(true);
               }}
               // Repository access is GitHub's to give; until it is connected
               // the picker offers the connection instead of managing any.
               disconnected={disconnected}
               onConnect={canConnect ? () => void goToGitHub('connect') : undefined}
               refreshing={refreshing}
-              createDisabled={rewriting || submitting}
+              createDisabled={submitting}
               returnFocusTo={repoPickerFromTask ? taskBox : undefined}
             />
             {temporary ? null : (
@@ -866,45 +789,81 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
                 onChange={setBranch}
               />
             )}
+          </div>
+          <div className="flex min-w-0 flex-wrap items-center gap-1">
+            <ComposerPlusMenu
+              disabled={busy}
+              onOpen={goalCommand.dismiss}
+              onFiles={attachments.add}
+              onOpenSkills={() => setSkillsOpen(true)}
+              skillSummary={
+                pendingSkillDefaults ? t('attach.skillsDefaults') : String(selectedSkills.length)
+              }
+              goalSummary={t('commands.goalHint')}
+              onOpenGoal={insertGoalCommand}
+              mcp={mcp}
+              mcpBlockedReason={mcpBlockedReason}
+              ssh={ssh}
+              onOpenPlugins={
+                pluginsSupported || plugins.length ? () => setPluginsOpen(true) : undefined
+              }
+              pluginSummary={String(plugins.length)}
+              onOpenEnvironment={repo ? () => setEnvironmentOpen(true) : undefined}
+              environmentSummary={environmentSummary}
+            />
+            <span aria-hidden="true" className="mx-0.5 h-4 w-px shrink-0 bg-border" />
+            {/* The control names stay in each trigger's accessible name and
+                its menu's heading; the row shows only the choices. */}
             <Picker
+              compact
               label={t('composer.agent')}
               value={runtime}
               options={config?.runtimes ?? []}
+              optionLabels={runtimeLabels(config)}
               onChange={setRuntime}
             />
             <Picker
+              compact
               label={t('composer.model')}
-              value={model}
-              options={models}
-              onChange={setModel}
+              {...picker}
+              // Empty until something resolves for this owner. The model is
+              // never filled in for them: see applyConfig.
+              placeholder={t('composer.chooseModelPlaceholder')}
+              triggerRef={modelControl.attach}
             />
             <Picker
+              compact
               label={t('composer.reasoning')}
               value={effort}
               options={efforts}
               onChange={setEffort}
             />
-          </div>
-
-          <button
-            type="button"
-            disabled={!canRun}
-            onClick={() => void run()}
-            title={missingRepository ? t('composer.chooseRepository') : t('composer.runTitle')}
-            className="ui-button ui-button-primary ml-auto shrink-0 px-3 text-xs"
-          >
-            {submitting || goalCommand.busy ? t('composer.starting') : t('composer.run')}
-            <svg
-              aria-hidden="true"
-              className="h-3.5 w-3.5"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2}
+            <button
+              type="button"
+              disabled={!canRun}
+              onClick={() => void run()}
+              title={
+                missingRepository
+                  ? t('composer.chooseRepository')
+                  : missingModel
+                    ? t('composer.chooseModel')
+                    : t('composer.runTitle')
+              }
+              className="ui-button ui-button-primary ml-auto shrink-0 px-3 text-xs"
             >
-              <path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14m0 0-6-6m6 6-6 6" />
-            </svg>
-          </button>
+              {submitting || goalCommand.busy ? t('composer.starting') : t('composer.run')}
+              <svg
+                aria-hidden="true"
+                className="h-3.5 w-3.5"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14m0 0-6-6m6 6-6 6" />
+              </svg>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -944,6 +903,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
         />
       ) : null}
 
+      {contextCommand.dialog}
       {pluginsOpen ? (
         <Suspense
           fallback={
@@ -1027,6 +987,13 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
         </p>
       ) : null}
 
+      <p
+        hidden={!composerModel.unavailableHint}
+        className="mt-3 text-center text-[13px] text-status-error"
+        role="status"
+      >
+        {composerModel.unavailableHint}
+      </p>
       {unavailableRepo && !disconnected ? (
         <p className="mt-3 text-center text-[13px] text-gray-500 dark:text-gray-400" role="status">
           {t('composer.repositoryUnavailable', { repo: unavailableRepo })}

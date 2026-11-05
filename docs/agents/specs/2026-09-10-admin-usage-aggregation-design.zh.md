@@ -67,7 +67,7 @@ flowchart LR
 2. 每个 `agent_attempt_ledger` 行只进入一次求和。同一 attempt 换 grant 时可以有多行，全部计入。
 3. 不按 `grant_id` 全局去重：常驻会话的不同轮次可能使用同一个 grant，但保存的是不同窗口。也不把同一 grant 的整段生命周期用量重复算到每轮。
 4. 已成功、失败、取消的 attempts 都计入；不因任务失败而减去已发生的用量，不重新查询或重建窗口。
-5. Fork 的任务各自计入，即使共享 sandbox；不以 thread、workspace 或 sandbox 再去重。
+5. Fork 的任务各自计入，即使共享 sandbox；不以 thread、workspace 或 sandbox 再去重。Fork 时为显示而复制到子对话的源轮次（`fork_source_job_id` 不为空）没有运行过，不是任务，不进入任务集合。
 6. 只读每个引用当前保存的 snapshot。刷新次数和刷新阶段不是账本版本列表，不能累加同一引用的多次读取。
 
 ### 3.2 复用现有校验与状态
@@ -76,7 +76,9 @@ flowchart LR
 
 没有 attempt 的任务：非终态为 `pending`，终态为 `unavailable`，与 `summarize_job_usage()` 当前特殊处理一致。若抽取一个只处理 job ledger 的公共函数，让 owner、Admin Run 和本接口都调用它；不向 `summarize_job_usage()` 塞伪造 runtime 输入。
 
-聚合不调用 `usage_inputs()`，不读取 `agent_job_events`，不计算 runtime 用量，也不为了每个任务发一次 SQL/API 请求。
+没有账本引用的 attempt 与 Admin Run 的读法相同：仍在运行的是 `pending`；已结束、从未上报模型用量的是 `no_model_calls`，计为 `available`，不算缺失；只有其余的才是缺失的归属。投影因此与单任务读取共用 `UNREFERENCED_ATTEMPT_SQL`：带上 attempt 的状态，并只对已结束且没有引用的 attempt 用 `EXISTS` 问 `agent_job_events` 有没有用量事件。
+
+聚合不调用 `usage_inputs()`，除上面这个存在性判断外不读取 `agent_job_events`，不计算 runtime 用量，也不为了每个任务发一次 SQL/API 请求。
 
 ### 3.3 数值与缺失值
 

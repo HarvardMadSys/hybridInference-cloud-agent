@@ -40,6 +40,7 @@ else:  # pragma: no cover - a checkout with no control plane is not a release
     raise SystemExit(f"no cloud_agent package under {_old_tree}")
 
 from cloud_agent.storage.assembly import Storage
+from cloud_agent.storage.repositories.conversation_commands import insert_follow_up
 from cloud_agent_shared import shared_protocol
 
 # The same fall-through as above, for the vocabulary a runner attests with: a
@@ -72,17 +73,14 @@ _RESOLVED_BASE_SHA = "a" * 40
 async def _run_turn(store: Storage, claim: dict[str, Any]) -> None:
     """Drive one claimed turn the way a runner drives it through the old API.
 
-    The worker routes in the order a turn calls them: link its grant, renew
-    its lease, report an event, reserve the chat's group (a new one, or the
-    retained group of a follow-up), start it, establish the member's residency,
-    record the CLI process, admit and settle the turn, fence the workspace and
+    The worker routes in the order a turn calls them: renew its lease, report
+    an event, reserve the chat's group (a new one, or the retained group of a
+    follow-up), start it, establish the member's residency, record the CLI
+    process, admit and settle the turn, fence the workspace and
     finish. Then the host's own heartbeat renews that residency.
     """
     thread_id = str(claim["thread_id"])
     lease = {"attempt_id": claim["attempt_id"], "lease_generation": claim["lease_generation"]}
-    assert await store.grants.record_attempt_grant(
-        **lease, grant_id=f"rolling-attempt-grant-{claim['attempt_id']}"
-    )
     beat = await store.attempt_commands.heartbeat(**lease, lease_ttl_seconds=_LEASE_TTL_S)
     assert beat["ok"], beat
     assert (
@@ -132,11 +130,6 @@ async def _run_turn(store: Storage, claim: dict[str, Any]) -> None:
     )
     assert residency is not None, "the residency lost its lease"
     generation = int(residency["generation"])
-    assert await store.grants.link_residency_grant(
-        thread_id=thread_id,
-        generation=generation,
-        grant_id=f"rolling-residency-grant-{claim['attempt_id']}",
-    )
     assert await store.sandbox.record_shared_thread_residency(
         thread_id=thread_id,
         **lease,
@@ -169,8 +162,12 @@ async def _run_turn(store: Storage, claim: dict[str, Any]) -> None:
     assert await store.host_pool.record_host_heartbeat(
         host=_HOST, capabilities=_CAPABILITIES, sandbox_image_digest=_IMAGE
     )
-    assert await store.residency.heartbeat_residency(
-        thread_id=thread_id, generation=generation, host=_HOST, ttl_seconds=_RESIDENCY_TTL_S
+    # `None` is a lost lease; a residency without a grant beats with "".
+    assert (
+        await store.residency.heartbeat_residency(
+            thread_id=thread_id, generation=generation, host=_HOST, ttl_seconds=_RESIDENCY_TTL_S
+        )
+        is not None
     )
 
 
@@ -231,11 +228,13 @@ async def main() -> None:
             job_id=parent["id"], user_id=owner
         )
         assert await store.mcp.list_mcp_connections(user_id=owner) == []
-        followup = await store.conversation_commands.create_follow_up(
-            parent_job_id=parent["id"],
-            user_id=owner,
-            prompt="Continue",
-        )
+        # A follow-up the way the old API writes one: ``insert_follow_up`` in a
+        # transaction of its own. These arguments are its required ones both
+        # in releases that still have ``create_follow_up`` and in later ones.
+        async with pool.acquire() as conn, conn.transaction():
+            followup = await insert_follow_up(
+                conn, parent_job_id=parent["id"], user_id=owner, prompt="Continue"
+            )
         assert followup["state"] == "queued"
         # A new chat's first turn and a retained chat's next one both run to
         # the end, so both paths through the worker routes meet this schema.

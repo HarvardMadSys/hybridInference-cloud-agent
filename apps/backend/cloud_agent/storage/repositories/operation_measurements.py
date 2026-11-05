@@ -263,20 +263,6 @@ class PostgresOperationMeasurementRepository:
             )
         return [_run_row(row) for row in rows]
 
-    async def get_profiling_run(self, run_id: str) -> dict[str, Any] | None:
-        """Return one experiment, or ``None`` when it was never recorded."""
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT run_id, operations, target, expires_at, config_version,
-                       admission_instances, created_at, received_at
-                FROM agent_operation_profiling_runs
-                WHERE run_id = $1
-                """,
-                run_id,
-            )
-        return _run_row(row) if row is not None else None
-
     async def list_operation_measurements(
         self,
         *,

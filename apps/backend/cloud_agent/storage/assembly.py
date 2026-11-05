@@ -29,32 +29,40 @@ from cloud_agent.storage.repositories import (
     PostgresAttemptCommands,
     PostgresAuditLogRepository,
     PostgresAuditRepository,
+    PostgresCommandExecutionQueries,
     PostgresComputeResourceRepository,
+    PostgresContextQueries,
     PostgresConversationCommands,
     PostgresConversationQueries,
     PostgresCredentialQueries,
     PostgresExecutionQueries,
+    PostgresFileActivityQueries,
+    PostgresGitHubRelayRepository,
     PostgresGoalRepository,
     PostgresGoalWakeupRepository,
-    PostgresGrantRepository,
     PostgresHostCapacityRepository,
     PostgresHostPoolRepository,
     PostgresLedgerRepository,
+    PostgresLocalAccountRepository,
     PostgresMcpCatalogRepository,
     PostgresMcpConnectionRepository,
+    PostgresModelConnectionRepository,
+    PostgresModelPreferenceRepository,
+    PostgresNotificationMaintenanceRepository,
     PostgresOperationMeasurementRepository,
     PostgresOwnerUsageRepository,
+    PostgresOwnerWorkRepository,
     PostgresPendingMessageRepository,
-    PostgresPrArchiveRepository,
     PostgresProfilingControlRepository,
     PostgresResidencyRepository,
+    PostgresSandboxIncidentRepository,
     PostgresSandboxRepository,
     PostgresSessionForkRepository,
     PostgresSettingsRepository,
     PostgresSkillRepository,
-    PostgresSnapshotRepository,
     PostgresSourceControlRepository,
     PostgresSshServerRepository,
+    PostgresTeamAdminQueries,
     PostgresTeamRepository,
     PostgresUserProfileRepository,
     PostgresWebSearchRepository,
@@ -74,32 +82,39 @@ if TYPE_CHECKING:
         AttemptCommands,
         AuditLogQueries,
         AuditRepository,
+        CommandExecutionQueries,
         ComputeResourceRepository,
+        ContextQueries,
         ConversationCommands,
         ConversationQueries,
         CredentialQueries,
         ExecutionQueries,
+        FileActivityQueries,
+        GitHubRelayRepository,
         GoalRepository,
         GoalWakeupRepository,
-        GrantRepository,
         HostCapacityRepository,
         HostPoolRepository,
         LedgerRepository,
+        LocalAccountRepository,
         McpCatalogRepository,
         McpConnectionRepository,
+        ModelConnectionRepository,
+        ModelPreferenceRepository,
+        NotificationMaintenanceRepository,
         OperationMeasurements,
         OwnerUsageQueries,
+        OwnerWorkTermination,
         PendingMessageRepository,
-        PrArchiveRepository,
         ProfilingControl,
         ResidencyRepository,
         SandboxRepository,
         SessionForkRepository,
         SettingsRepository,
         SkillRepository,
-        SnapshotRepository,
         SourceControlRepository,
         SshServerRepository,
+        TeamAdminQueries,
         TeamRepository,
         UserProfileRepository,
         WebSearchRepository,
@@ -107,6 +122,7 @@ if TYPE_CHECKING:
     )
     from cloud_agent.ports.environment_snapshots import EnvironmentSnapshotRepository
     from cloud_agent.ports.environments import EnvironmentRepository
+    from cloud_agent.ports.sandbox_incidents import SandboxIncidentRepository
 
 
 class Storage:
@@ -114,16 +130,7 @@ class Storage:
 
     def __init__(self, pool: asyncpg.Pool) -> None:
         """Build one implementation per capability against the caller's pool."""
-        #: Admin read models. Still concrete: they are bounded projections for
-        #: one console, not a capability any other caller asks for, and they
-        #: have no port yet. Named here so that the routes which need them
-        #: stop reaching into another object's pool to build one.
-        self.admin_conversations = AdminConversationQueries(pool)
-        self.admin_database = AdminDatabaseQueries(pool)
-        self.admin_runs = AdminRunQueries(pool)
-        self.admin_sandboxes = AdminSandboxQueries(pool)
-        self.admin_usage = AdminUsageQueries(pool)
-
+        self._admin_read_models(pool)
         self.environments: EnvironmentRepository = PostgresEnvironmentRepository(pool)
         self.environment_snapshots: EnvironmentSnapshotRepository = (
             PostgresEnvironmentSnapshotRepository(pool)
@@ -136,9 +143,10 @@ class Storage:
         self.conversation_queries: ConversationQueries = PostgresConversationQueries(pool)
         self.credential_queries: CredentialQueries = PostgresCredentialQueries(pool)
         self.execution_queries: ExecutionQueries = PostgresExecutionQueries(pool)
+        self.file_activity_queries: FileActivityQueries = PostgresFileActivityQueries(pool)
+        self.github_relay: GitHubRelayRepository = PostgresGitHubRelayRepository(pool)
         self.goals: GoalRepository = PostgresGoalRepository(pool)
         self.goal_wakeups: GoalWakeupRepository = PostgresGoalWakeupRepository(pool)
-        self.grants: GrantRepository = PostgresGrantRepository(pool)
         self.host_capacity: HostCapacityRepository = PostgresHostCapacityRepository(pool)
         self.host_pool: HostPoolRepository = PostgresHostPoolRepository(pool)
         self.ledger: LedgerRepository = PostgresLedgerRepository(pool)
@@ -147,21 +155,45 @@ class Storage:
             pool
         )
         self.mcp_catalog: McpCatalogRepository = PostgresMcpCatalogRepository(pool)
+        self.model_preferences: ModelPreferenceRepository = PostgresModelPreferenceRepository(pool)
+        self.notification_maintenance: NotificationMaintenanceRepository = (
+            PostgresNotificationMaintenanceRepository(pool)
+        )
         self.owner_usage: OwnerUsageQueries = PostgresOwnerUsageRepository(pool)
+        self.context_queries: ContextQueries = PostgresContextQueries(pool)
+        self.command_executions: CommandExecutionQueries = PostgresCommandExecutionQueries(pool)
         self.pending_messages: PendingMessageRepository = PostgresPendingMessageRepository(pool)
-        self.pr_archive: PrArchiveRepository = PostgresPrArchiveRepository(pool)
         self.profiling_control: ProfilingControl = PostgresProfilingControlRepository(pool)
         self.residency: ResidencyRepository = PostgresResidencyRepository(pool)
         self.sandbox: SandboxRepository = PostgresSandboxRepository(pool)
+        self.sandbox_incidents: SandboxIncidentRepository = PostgresSandboxIncidentRepository(pool)
         self.session_fork: SessionForkRepository = PostgresSessionForkRepository(pool)
         self.settings: SettingsRepository = PostgresSettingsRepository(pool)
         self.skills: SkillRepository = PostgresSkillRepository(pool)
         self.attachments: AttachmentRepository = PostgresAttachmentRepository(pool)
-        self.snapshot: SnapshotRepository = PostgresSnapshotRepository(pool)
         self.source_control: SourceControlRepository = PostgresSourceControlRepository(pool)
         self.ssh_servers: SshServerRepository = PostgresSshServerRepository(pool)
+        self.model_connections: ModelConnectionRepository = PostgresModelConnectionRepository(pool)
         self.work_insights: WorkInsightsRepository = PostgresWorkInsightsRepository(pool)
         self.agent_memory: AgentMemoryRepository = PostgresAgentMemoryRepository(pool)
         self.user_profile: UserProfileRepository = PostgresUserProfileRepository(pool)
         self.teams: TeamRepository = PostgresTeamRepository(pool)
+        self.team_admin: TeamAdminQueries = PostgresTeamAdminQueries(pool)
         self.web_search: WebSearchRepository = PostgresWebSearchRepository(pool)
+        #: Accounts and the work ended with them.
+        self.local_accounts: LocalAccountRepository = PostgresLocalAccountRepository(pool)
+        self.owner_work: OwnerWorkTermination = PostgresOwnerWorkRepository(pool)
+
+    def _admin_read_models(self, pool: asyncpg.Pool) -> None:
+        """The admin read models.
+
+        Still concrete: they are bounded projections for one console, not a
+        capability any other caller asks for, and they have no port yet. Named
+        here so that the routes which need them stop reaching into another
+        object's pool to build one.
+        """
+        self.admin_conversations = AdminConversationQueries(pool)
+        self.admin_database = AdminDatabaseQueries(pool)
+        self.admin_runs = AdminRunQueries(pool)
+        self.admin_sandboxes = AdminSandboxQueries(pool)
+        self.admin_usage = AdminUsageQueries(pool)

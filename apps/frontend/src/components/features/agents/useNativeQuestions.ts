@@ -10,14 +10,23 @@ import { getErrorMessage } from '@/lib/utils/errors';
 import type { QuestionReadScope } from '@/lib/api/questionReadScope';
 import { useQuestionReads } from './AgentReadProvider';
 
+/**
+ * How often the conversation on screen reads its questions. Nothing pushes a
+ * new question yet, and the owner is looking at this one.
+ */
 export const QUESTION_POLL_MS = 2_000;
+/** How often a conversation that is not on screen does: a sidebar row, a notification. */
+export const QUESTION_BACKGROUND_POLL_MS = 12_000;
 
-interface QuestionState {
-  reads: QuestionReadScope;
-  scope: string;
+interface QuestionView {
   snapshot: AgentQuestionsApi | null;
   error: string | null;
   submitting: boolean;
+}
+
+interface QuestionState extends QuestionView {
+  reads: QuestionReadScope;
+  scope: string;
 }
 
 interface QuestionOperations {
@@ -29,17 +38,33 @@ interface QuestionOperations {
   ) => Promise<void>;
 }
 
-/** Native request IDs are only meaningful inside the exact live turn that issued them. */
+/** Whether a read changes nothing the page shows: the request on offer, the error, the send. */
+function sameView(shown: QuestionView, next: QuestionView): boolean {
+  return (
+    shown.snapshot?.questions[0]?.request_id === next.snapshot?.questions[0]?.request_id &&
+    shown.error === next.error &&
+    shown.submitting === next.submitting
+  );
+}
+
+/**
+ * Native request IDs are only meaningful inside the exact live turn that issued them.
+ *
+ * Reads on the tab's one clock for the conversation, every `intervalMs` at
+ * most: the default is for the conversation on screen.
+ */
 export function useNativeQuestions({
   threadId,
   jobId,
   attemptId,
   active,
+  intervalMs = QUESTION_POLL_MS,
 }: {
   threadId: string;
   jobId: string;
   attemptId?: number | null;
   active: boolean;
+  intervalMs?: number;
 }) {
   const reads = useQuestionReads();
   const scope = JSON.stringify([threadId, jobId, attemptId ?? null, active]);
@@ -65,19 +90,26 @@ export function useNativeQuestions({
     let answerError: string | null = null;
     const controller = new AbortController();
     let snapshot: AgentQuestionsApi | null = null;
+    // What this scope last put on the page. A request ID names one immutable
+    // native request, so a poll that finds the same one renders nothing.
+    let shown: QuestionView = { snapshot: null, error: null, submitting: false };
     const current = () =>
       !disposed && currentScope.current === scope && currentReads.current === reads;
-    const update = (value: Partial<QuestionState>) => {
-      if (current()) setState((previous) => ({ ...previous, reads, scope, ...value }));
+    const update = (value: Partial<QuestionView>) => {
+      if (!current()) return;
+      const next = { ...shown, ...value };
+      if (sameView(shown, next)) return;
+      shown = next;
+      setState({ reads, scope, ...next });
     };
-    setState({ reads, scope, snapshot: null, error: null, submitting: false });
+    setState({ reads, scope, ...shown });
     if (!active || !threadId || !jobId || typeof attemptId !== 'number') {
       operations.current = null;
       return;
     }
 
     async function refresh() {
-      if (!current() || submitting || document.visibilityState === 'hidden') return;
+      if (!current() || submitting) return;
       if (reading) {
         readAgain = true;
         return;
@@ -166,19 +198,14 @@ export function useNativeQuestions({
     }
 
     operations.current = { refresh, answer };
-    void refresh();
-    const interval = setInterval(() => void refresh(), QUESTION_POLL_MS);
-    const onVisible = () => {
-      if (document.visibilityState !== 'hidden') void refresh();
-    };
-    document.addEventListener('visibilitychange', onVisible);
+    // The clock reads now, then on its ticks, and pauses while the tab is hidden.
+    const leave = reads.watch(threadId, { intervalMs }, () => void refresh());
     return () => {
       disposed = true;
       controller.abort();
-      clearInterval(interval);
-      document.removeEventListener('visibilitychange', onVisible);
+      leave();
     };
-  }, [scope, active, threadId, jobId, attemptId, reads]);
+  }, [scope, active, threadId, jobId, attemptId, reads, intervalMs]);
 
   const visible = active && state.scope === scope && state.reads === reads;
   return {

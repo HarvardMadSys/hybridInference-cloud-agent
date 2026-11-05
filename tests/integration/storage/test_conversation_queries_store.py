@@ -17,19 +17,25 @@ these six methods turns on: **the scope is in the query, not in the caller**.
 Setup goes through the store, because a job is ConversationCommands' to create
 and that capability has not moved yet. Every assertion goes through this
 repository.
+
+`latest_assistant_message_state` is here for what only Postgres can settle
+about it: which rows it reads. Every automatic round calls it as it finishes.
 """
 
 from __future__ import annotations
 
+import json
 import os
+from typing import Any
 
+import asyncpg
 import pytest
 import pytest_asyncio
 from tests.integration.storage.test_agent_job_store import _create_job
+from tests.integration.storage.test_schema_upgrade import _db_config
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
 
-from cloud_agent.domain.execution import JobStreamState
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
 
@@ -105,31 +111,35 @@ async def test_a_job_is_only_read_by_its_owner(store, queries: PostgresConversat
     assert await queries.get_thread_for_job(job_id=job["id"], user_id=_OTHER) is None
 
 
+async def test_ownership_is_answered_as_the_full_job_read_answers_it(
+    store, queries: PostgresConversationQueries, db
+) -> None:
+    """The narrow check refuses what the full read's fields refuse, and nothing else."""
+    job = await _create_job(store, user_id=_OWNER)
+
+    def owned(row: dict[str, Any] | None, user_id: str) -> bool:
+        return row is not None and row["user_id"] == user_id and row.get("deleted_at") is None
+
+    for user_id in (_OWNER, _OTHER):
+        assert await queries.owns_job(job_id=job["id"], user_id=user_id) == owned(
+            await queries.get_job(job["id"]), user_id
+        )
+    assert await queries.owns_job(job_id=job["id"], user_id=_OWNER) is True
+    assert await queries.owns_job(job_id=job["id"], user_id=_OTHER) is False
+    assert await queries.owns_job(job_id="ajob_missing", user_id=_OWNER) is False
+
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_threads SET deleted_at = NOW() WHERE id = $1", job["thread_id"]
+        )
+    assert owned(await queries.get_job(job["id"]), _OWNER) is False
+    assert await queries.owns_job(job_id=job["id"], user_id=_OWNER) is False
+
+
 async def test_an_unknown_job_answers_nothing(queries: PostgresConversationQueries) -> None:
     """Absence and refusal are the same answer, which callers rely on."""
     assert await queries.get_job("ajob_does_not_exist") is None
     assert await queries.get_thread_for_job(job_id="ajob_does_not_exist", user_id=_OWNER) is None
-
-
-async def test_stream_state_is_current_and_scoped_to_the_owner(
-    store, queries: PostgresConversationQueries, db
-) -> None:
-    job = await _create_job(store, user_id=_OWNER)
-    assert await queries.get_job_stream_state(job_id=job["id"], user_id=_OWNER) == JobStreamState(
-        "queued", None
-    )
-    assert await queries.get_job_stream_state(job_id=job["id"], user_id=_OTHER) is None
-    assert await queries.get_job_stream_state(job_id="ajob_missing", user_id=_OWNER) is None
-    async with db.acquire() as conn:
-        await conn.execute(
-            "UPDATE agent_jobs SET state = 'succeeded', native_turn_no = 1, "
-            "published_pr_url = $2 WHERE id = $1",
-            job["id"],
-            "https://example.test/pr/42",
-        )
-    assert await queries.get_job_stream_state(job_id=job["id"], user_id=_OWNER) == JobStreamState(
-        "succeeded", "https://example.test/pr/42"
-    )
 
 
 async def test_the_job_list_is_scoped_to_its_owner(
@@ -238,3 +248,105 @@ async def test_a_row_only_session_page_skips_the_history_aggregate(
 
     assert page["sessions"], "the page should still list the row"
     assert page["total"] is None and page["projects"] is None
+
+
+# ── The final message of a turn ───────────────────────────────────────
+
+#: Conversations whose transcripts share the table with the one under test.
+_TRANSCRIPT_CHATS = 1000
+
+#: The messages the conversation under test holds: two turns, one reply twice.
+_OWN_MESSAGES = 5
+
+
+def _plan_nodes(node: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every node of one ``EXPLAIN (FORMAT JSON)`` plan, subplans included."""
+    return [node, *(item for child in node.get("Plans", []) for item in _plan_nodes(child))]
+
+
+async def _seed_transcripts(conn: asyncpg.Connection, turns: list[int]) -> None:
+    """Every conversation's prompt and reply for ``turns``, oldest first."""
+    await conn.execute(
+        """
+        INSERT INTO agent_thread_messages (thread_id, job_id, role, content)
+        SELECT j.thread_id, j.id, role.name, role.name || ' of ' || j.id
+        FROM agent_jobs j CROSS JOIN (VALUES ('user'), ('assistant')) AS role(name)
+        WHERE j.turn_no = ANY($1::int[])
+        ORDER BY j.turn_no, j.id, role.name DESC
+        """,
+        turns,
+    )
+
+
+async def test_a_turns_final_message_is_read_from_its_own_conversation(db) -> None:
+    """Every automatic round reads its final message as it finishes: one transcript, not all.
+
+    The message table holds every conversation's transcript, and nothing
+    indexes a reply by its job. Read by job alone, each finishing round read
+    the table until it reached that reply -- all of it, in the plan a large
+    table gets -- so the read grew with everything anyone had been answered
+    since. The plan check runs the statement the read actually sends.
+    """
+    async with db.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO agent_threads
+                (id, user_id, repo, title, title_source, setup_script, execution_profile)
+            SELECT 'athr_tx_' || g, $2, 'example-org/example-repo', 'history', 'fallback',
+                   NULL, 'trusted-v1'
+            FROM generate_series(1, $1) g
+            """,
+            _TRANSCRIPT_CHATS,
+            _OWNER,
+        )
+        await conn.execute(
+            """
+            INSERT INTO agent_jobs
+                (id, thread_id, user_id, parent_job_id, turn_no, native_turn_no,
+                 task_prompt, runtime, model, state)
+            SELECT 'ajob_tx_' || g || '_' || turn, 'athr_tx_' || g, $2,
+                   CASE WHEN turn = 2 THEN 'ajob_tx_' || g || '_1' END, turn, turn,
+                   'p', 'claude-code', 'glm-5.1', 'succeeded'
+            FROM generate_series(1, $1) g CROSS JOIN generate_series(1, 2) turn
+            """,
+            _TRANSCRIPT_CHATS,
+            _OWNER,
+        )
+        await _seed_transcripts(conn, [1])
+        # The turn under test answered twice; its last reply is its report.
+        await conn.execute(
+            "INSERT INTO agent_thread_messages (thread_id, job_id, role, content, truncated) "
+            "VALUES ('athr_tx_7', 'ajob_tx_7_1', 'assistant', 'the final answer', TRUE)"
+        )
+        # Every conversation went on talking after it.
+        await _seed_transcripts(conn, [2])
+        await conn.execute("ANALYZE agent_jobs")
+        await conn.execute("ANALYZE agent_thread_messages")
+
+    captured: list[Any] = []
+
+    async def capture_queries(conn: asyncpg.Connection) -> None:
+        conn.add_query_logger(captured.append)
+
+    reading_pool = await asyncpg.create_pool(
+        **_db_config(), min_size=1, max_size=1, init=capture_queries
+    )
+    try:
+        state = await PostgresConversationQueries(reading_pool).latest_assistant_message_state(
+            job_id="ajob_tx_7_1"
+        )
+    finally:
+        await reading_pool.close()
+    assert state == {"content": "the final answer", "truncated": True}
+
+    (statement,) = [item for item in captured if "agent_thread_messages" in item.query]
+    async with db.acquire() as conn:
+        plan = await conn.fetchval(
+            f"EXPLAIN (ANALYZE, FORMAT JSON) {statement.query}", *statement.args
+        )
+    read = sum(
+        (node["Actual Rows"] + node.get("Rows Removed by Filter", 0)) * node["Actual Loops"]
+        for node in _plan_nodes(json.loads(plan)[0]["Plan"])
+        if node.get("Relation Name") == "agent_thread_messages"
+    )
+    assert read <= _OWN_MESSAGES, f"read {read} messages to find one of {_OWN_MESSAGES}"

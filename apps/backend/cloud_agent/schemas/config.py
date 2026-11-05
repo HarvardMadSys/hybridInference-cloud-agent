@@ -18,6 +18,23 @@ from cloud_agent.source_control_runtime import (
 from cloud_agent_shared.environment import environment_limits
 
 
+class ModelConnectionOption(BaseModel):
+    """One of the owner's enabled model connections, as the composer offers it.
+
+    Everything needed to offer its models, and which agents can run each one
+    now; nothing about its key or its APIs.
+    """
+
+    id: str
+    name: str
+    #: Every listed model, in the owner's order.
+    models: list[str]
+    #: The listed models a task can run now, each with the agents that can run
+    #: it: exactly what the execution gates accept. A model missing here is not
+    #: verified, or no agent can use it.
+    model_runtimes: dict[str, list[str]] = Field(default_factory=dict)
+
+
 class AgentConfigResponse(BaseModel):
     """What this deployment will actually accept, for the task composer.
 
@@ -40,11 +57,11 @@ class AgentConfigResponse(BaseModel):
         default_factory=list,
         description="Runtime ids that support plugins installed at sandbox initialization.",
     )
-    models: list[str] = Field(
-        default_factory=list,
+    model_connection_required: bool = Field(
+        default=False,
         description=(
-            "Model ids an agent job can actually call for this user — the same "
-            "predicate the create endpoint enforces, not the /v1/models list."
+            "True while none of this owner's enabled model connections has a model "
+            "verified for any Agent: nothing can run until one is set up."
         ),
     )
     runtime_reasoning_efforts: dict[str, list[str]] = Field(
@@ -54,18 +71,34 @@ class AgentConfigResponse(BaseModel):
             "runtime absent here cannot express one at all."
         ),
     )
-    model_reasoning_efforts: dict[str, list[str]] = Field(
-        default_factory=dict,
-        description=(
-            "Effort levels each model accepts, from the gateway's registry. The "
-            "composer offers the intersection with the chosen runtime's, and no "
-            "control at all when that is empty — which is also what it shows "
-            "against a gateway too old to answer this."
-        ),
-    )
     mcp_connections: list[McpConnectionSummary] = Field(
         default_factory=list,
         description="MCP servers this deployment offers. Empty means none are configured.",
+    )
+    default_model: str | None = Field(
+        default=None,
+        description=(
+            "The model a new task should start on: the one this owner's newest turn "
+            "used, while its connection is enabled and still lists it. Null means "
+            "the composer leaves its model control empty and asks."
+        ),
+    )
+    model_connections: list[ModelConnectionOption] = Field(
+        default_factory=list,
+        description=(
+            "This owner's enabled model connections, the only inference source. A "
+            "model chosen from one is submitted with its `model_connection_id`."
+        ),
+    )
+    model_connections_enabled: bool = Field(
+        default=False,
+        description="Whether this deployment lets owners add and run on their own connections.",
+    )
+    default_model_connection_id: str | None = Field(
+        default=None,
+        description=(
+            "The connection `default_model` last ran on; set exactly when `default_model` is."
+        ),
     )
     mcp_runtimes: list[str] = Field(
         default_factory=list,

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from itertools import pairwise
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-from cloud_agent_shared.event_payloads import bound_event_payload
+from cloud_agent_shared.event_payloads import MAX_EVENT_BATCH_EVENTS, bound_event_payload
 
 # Normalized event kinds (issue #1041) plus the control events the platform
 # appends. The pattern is the security-relevant part: an event type is
@@ -86,3 +87,41 @@ class WorkerEventResponse(BaseModel):
     """Accepted event id (the SSE cursor value)."""
 
     event_id: int
+
+
+class WorkerBatchEvent(WorkerEventRequest):
+    """One event of a batch, which always carries the worker's number for it."""
+
+    event_seq: int = Field(
+        ...,
+        ge=1,
+        description=(
+            "The worker's own number for this event within its attempt. A batch "
+            "whose answer was lost is sent again whole, and each number already "
+            "stored is answered with that event's id instead of a duplicate row."
+        ),
+    )
+
+
+class WorkerEventBatchRequest(BaseModel):
+    """Normalized events a worker reports together, oldest first."""
+
+    events: list[WorkerBatchEvent] = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_EVENT_BATCH_EVENTS,
+        description="Stored in this order, so their numbers must increase.",
+    )
+
+    @model_validator(mode="after")
+    def _numbered_in_order(self) -> WorkerEventBatchRequest:
+        """Refuse a batch whose order and numbering disagree."""
+        if any(later.event_seq <= earlier.event_seq for earlier, later in pairwise(self.events)):
+            raise ValueError("event_seq must increase within a batch")
+        return self
+
+
+class WorkerEventBatchResponse(BaseModel):
+    """The id of each event in the batch, in the order it was sent."""
+
+    event_ids: list[int]

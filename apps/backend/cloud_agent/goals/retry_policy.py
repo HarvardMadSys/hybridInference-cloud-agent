@@ -10,11 +10,6 @@ from __future__ import annotations
 
 import math
 
-from cloud_agent.goals.models import (
-    MAX_WAKEUP_ATTEMPTS,
-    WAKEUP_BACKOFF_MAX_S,
-    WAKEUP_BACKOFF_S,
-)
 from cloud_agent.settings import integer_setting, number_setting
 
 
@@ -25,8 +20,8 @@ def wakeup_backoff(attempts: int) -> float:
     a database that is refusing writes, not to schedule anything precisely:
     every wakeup that matters is also re-armed by the finish that unblocks it.
     """
-    backoff = number_setting("goals.wakeup_backoff_seconds", WAKEUP_BACKOFF_S)
-    max_backoff = number_setting("goals.wakeup_backoff_max_seconds", WAKEUP_BACKOFF_MAX_S)
+    backoff = number_setting("goals.wakeup_backoff_seconds")
+    max_backoff = number_setting("goals.wakeup_backoff_max_seconds")
     if attempts <= 1:
         return min(backoff, max_backoff)
     return min(backoff * math.pow(2, min(attempts - 1, 100)), max_backoff)
@@ -34,7 +29,7 @@ def wakeup_backoff(attempts: int) -> float:
 
 def is_exhausted(attempts: int) -> bool:
     """Whether a wakeup has failed often enough to stop retrying it."""
-    return attempts >= integer_setting("goals.max_wakeup_attempts", MAX_WAKEUP_ATTEMPTS)
+    return attempts >= integer_setting("goals.max_wakeup_attempts")
 
 
 __all__ = ["is_exhausted", "wakeup_backoff"]

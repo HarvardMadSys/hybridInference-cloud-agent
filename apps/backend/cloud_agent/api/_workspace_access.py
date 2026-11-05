@@ -15,6 +15,7 @@ from fastapi import HTTPException
 from cloud_agent.sandbox_manager_client import SandboxManagerError
 from cloud_agent.sandbox_manager_routing import (
     hydrate_shared_sandbox_manager,
+    sandbox_manager_for_host,
     sandbox_manager_for_job,
 )
 from cloud_agent.workspace_errors import (
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from typing import Any
 
     from cloud_agent.ports import HostPoolRepository, SandboxRepository
+    from cloud_agent.ports.sandbox import TerminalControlRoute
     from cloud_agent.sandbox_manager_client import SandboxManagerClient
 
 
@@ -62,19 +64,47 @@ def _workspace_restoring() -> HTTPException:
     )
 
 
-async def fence_workspace_start(store: _WorkspaceAccessStorage, job: dict[str, Any]) -> None:
+def _workspace_host_removed() -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "error": {
+                "type": "workspace_unavailable",
+                "message": (
+                    "This workspace is on a server that has been removed. "
+                    "It is available again only if that server is added back."
+                ),
+            }
+        },
+    )
+
+
+async def fence_workspace_start(store: _WorkspaceAccessStorage, job: dict[str, Any]) -> int | None:
     """Fence a request that may start the chat's stopped container.
 
     Every workspace operation and terminal opens the container. Counting the
     start before the request leaves stops the last checkpoint from covering a
     group whose files are about to change. A group only a checkpoint holds is
-    refused instead: its next turn recreates it.
+    refused instead: its next turn recreates it. So is a group still on a
+    host that has left the pool, which nothing may start any more.
+
+    Returns the new ``start_seq``, which the request must hand the sandbox
+    manager (:func:`hydrate_shared_sandbox_manager`). ``job`` was read before
+    the fence, so its own sequence is one behind: a run labelled with it would
+    end in a checkpoint that never covers the group.
     """
     thread_id = job.get("thread_id")
     if not thread_id:
-        return
-    if await store.sandbox.fence_workspace_start(thread_id=str(thread_id)) in _RESTORE_STATES:
+        return None
+    fenced = await store.sandbox.fence_workspace_start(thread_id=str(thread_id))
+    if fenced is None:
+        return None
+    state, start_seq = fenced
+    if state in _RESTORE_STATES:
         raise _workspace_restoring()
+    if state == "host_revoked":
+        raise _workspace_host_removed()
+    return start_seq
 
 
 _TERMINAL_ID_PATTERN = r"^term_[A-Za-z0-9_-]{1,80}$"
@@ -101,12 +131,35 @@ async def _sandbox_manager_for_job(
     job: dict[str, Any],
 ) -> SandboxManagerClient | None:
     """Resolve the owning sandbox manager and restore shared aliases before use."""
-    await fence_workspace_start(store, job)
+    start_seq = await fence_workspace_start(store, job)
     sandbox_manager = await sandbox_manager_for_job(store.host_pool, job["id"])
     try:
-        return await hydrate_shared_sandbox_manager(job, sandbox_manager)
+        return await hydrate_shared_sandbox_manager(job, sandbox_manager, start_seq=start_seq)
     except SandboxManagerError as exc:
         raise _sandbox_manager_http_error(exc) from exc
+
+
+def _terminal_control_manager(route: TerminalControlRoute) -> SandboxManagerClient | None:
+    """The manager an attached terminal's input, resize or kill goes to as it is.
+
+    None of the three can start the container: the manager only finds the
+    terminal in its memory. So they skip both steps of
+    :func:`_sandbox_manager_for_job`: the start fence, a write to the group's
+    row, and the manifest registration, a second trip over the host tunnel.
+    ``None`` sends the call the general way, which answers as it always has:
+    the chat has no group, a checkpoint holds it, its host was removed, a
+    settled turn's terminals still wait to be resumed, or no manager is
+    reachable.
+    """
+    if (
+        route.group_state is None
+        or route.group_state in _RESTORE_STATES
+        or route.host_revoked
+        or route.terminal_resume_pending
+        or route.host is None
+    ):
+        return None
+    return sandbox_manager_for_host(route.host)
 
 
 def _workspace_not_ready() -> HTTPException:

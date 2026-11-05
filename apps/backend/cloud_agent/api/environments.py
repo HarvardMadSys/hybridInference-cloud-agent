@@ -4,18 +4,17 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-import asyncpg
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
-from fastapi.routing import APIRoute
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from cloud_agent.api._body_limits import HostBodyLimitRoute
+from cloud_agent.api._environment_route_policy import EnvironmentSensitiveRoute
+from cloud_agent.api._local_auth import terminal_open_fence
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api._workspace_access import fence_workspace_start
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_gateway_client,
+    get_owner_directory,
     get_storage,
     require_agent_access,
     require_store,
@@ -23,10 +22,7 @@ from cloud_agent.api.deps import (
 from cloud_agent.api.worker import verify_claiming_host
 from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent.environments import (
-    EnvironmentAccessRevoked,
-    EnvironmentBusy,
     EnvironmentConflict,
-    EnvironmentEncryptionError,
     EnvironmentForbidden,
     EnvironmentNotFound,
 )
@@ -36,95 +32,25 @@ from cloud_agent_shared.environment import (
     ENVIRONMENT_CAPABILITY,
     MAX_IMPORT_BYTES,
     MIN_SECRET_CHARS,
-    EnvironmentInputError,
     EnvironmentScripts,
     VariableEdit,
     environment_payload,
     parse_env,
 )
 from cloud_agent_shared.environment_snapshots import ENVIRONMENT_SNAPSHOT_CAPABILITY
+from cloud_agent_shared.storable_text import storable_json
 
 
-class CredentialSafeRoute(APIRoute):
-    """Keep submitted secrets out of validation errors and generic failures."""
+class _HostRoute(EnvironmentSensitiveRoute, HostBodyLimitRoute):
+    """A route hosts call: the host body ceiling first, then the safe error answers.
 
-    def get_route_handler(self) -> Any:
-        """Wrap environment inputs in safe, non-cacheable error responses."""
-        original = super().get_route_handler()
-
-        async def safe(request: Request) -> Response:
-            try:
-                response = await original(request)
-            except RequestValidationError as exc:
-                errors = []
-                for error in exc.errors():
-                    message = error["msg"]
-                    cause = error.get("ctx", {}).get("error")
-                    if isinstance(cause, EnvironmentInputError):
-                        message = str(cause)
-                    elif error["type"] in {"value_error", "assertion_error"}:
-                        message = "Invalid field value"
-                    errors.append({"loc": error["loc"], "type": error["type"], "msg": message})
-                detail: Any = errors
-                if any(
-                    "execution_profile is server-owned" in e.get("msg", "") for e in exc.errors()
-                ):
-                    detail = "execution_profile is server-owned"
-                response = JSONResponse(status_code=422, content={"detail": detail})
-            except HTTPException as exc:
-                response = JSONResponse(
-                    status_code=exc.status_code, content={"detail": exc.detail}, headers=exc.headers
-                )
-            except EnvironmentNotFound:
-                response = JSONResponse(
-                    status_code=404, content={"detail": "Environment or run not found."}
-                )
-            except EnvironmentForbidden as exc:
-                response = JSONResponse(status_code=403, content={"detail": str(exc)})
-            except EnvironmentAccessRevoked as exc:
-                response = JSONResponse(status_code=409, content={"detail": str(exc)})
-            except SandboxManagerError as exc:
-                response = JSONResponse(
-                    status_code=exc.status_code, content={"detail": exc.message}
-                )
-            except asyncpg.UniqueViolationError:
-                response = JSONResponse(
-                    status_code=409,
-                    content={"detail": "Configuration conflicts with an existing object."},
-                )
-            except (EnvironmentConflict, EnvironmentBusy) as exc:
-                response = JSONResponse(
-                    status_code=409,
-                    content={
-                        "detail": str(exc),
-                        **(
-                            {"current_revision": exc.current_revision}
-                            if isinstance(exc, EnvironmentConflict)
-                            and exc.current_revision is not None
-                            else {}
-                        ),
-                    },
-                )
-            except EnvironmentEncryptionError:
-                response = JSONResponse(
-                    status_code=503,
-                    content={
-                        "detail": "Environment encryption is unavailable. Contact the deployment administrator."
-                    },
-                )
-            except ValidationError:
-                response = JSONResponse(
-                    status_code=422, content={"detail": "Invalid environment variable or script"}
-                )
-            except EnvironmentInputError as exc:
-                response = JSONResponse(status_code=422, content={"detail": str(exc)})
-            response.headers["Cache-Control"] = "no-store"
-            return response
-
-        return safe
+    Hosts reach these through their tunnel, where no edge limit applies.
+    """
 
 
-router = APIRouter(prefix="/v1/agent", tags=["environments"], route_class=CredentialSafeRoute)
+router = APIRouter(prefix="/v1/agent", tags=["environments"], route_class=EnvironmentSensitiveRoute)
+# Included into ``router``, and so under its prefix, at the end of this module.
+_host_router = APIRouter(route_class=_HostRoute)
 
 
 class RevisionInput(BaseModel):
@@ -220,6 +146,16 @@ class TestUpdate(BaseModel):
     cleanup_complete: bool = False
     #: The host's receipt for the installation snapshot this run saved.
     snapshot: dict[str, Any] | None = Field(None, repr=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _storable(cls, data: Any) -> Any:
+        """Replace what Postgres cannot store in what the scripts printed.
+
+        Refusing it would refuse the report, and a host stops a test whose
+        report is refused; so it comes before any field is checked.
+        """
+        return storable_json(data)
 
 
 def _snapshots(store: Any) -> Any:
@@ -682,7 +618,7 @@ async def cancel_test(
     return await require_store(store).environments.cancel_environment_run(user["user_id"], run_id)
 
 
-@router.get("/worker/environment-runs/orphans")
+@_host_router.get("/worker/environment-runs/orphans")
 async def orphan_tests(
     host: dict[str, str] = Depends(verify_claiming_host), store: Any = Depends(get_storage)
 ) -> dict[str, Any]:
@@ -690,13 +626,13 @@ async def orphan_tests(
     return {"runs": await require_store(store).environments.list_environment_orphans(host["host"])}
 
 
-@router.post("/worker/environment-runs/claim")
+@_host_router.post("/worker/environment-runs/claim")
 async def claim_environment_test(
     body: ClaimTestInput,
     host: dict[str, str] = Depends(verify_claiming_host),
     store: Any = Depends(get_storage),
     credentials: Any = Depends(get_agent_app_credentials),
-    gateway: Any = Depends(get_gateway_client),
+    owners: Any = Depends(get_owner_directory),
 ) -> dict[str, Any] | None:
     """Hand only an environment-capable enrolled host a test or prebuild lease."""
     if ENVIRONMENT_CAPABILITY not in body.capabilities:
@@ -709,7 +645,7 @@ async def claim_environment_test(
     if run is None:
         return None
     try:
-        await require_agent_access(gateway, run["user_id"])
+        await require_agent_access(owners, run["user_id"])
         await _entitled(store, run["user_id"], run["repo"], credentials)
         bound = await store.environments.get_environment_binding(run["user_id"], run["binding_id"])
         from cloud_agent.environment_source import read_repository_token
@@ -749,7 +685,7 @@ async def claim_environment_test(
     }
 
 
-@router.post("/worker/environment-runs/{run_id}")
+@_host_router.post("/worker/environment-runs/{run_id}")
 async def report_test(
     run_id: str,
     body: TestUpdate,
@@ -781,7 +717,7 @@ async def report_test(
     return {"accepted": True}
 
 
-@router.get("/worker/environment-snapshots/deletions")
+@_host_router.get("/worker/environment-snapshots/deletions")
 async def snapshot_deletions(
     host: dict[str, str] = Depends(verify_claiming_host), store: Any = Depends(get_storage)
 ) -> dict[str, Any]:
@@ -798,7 +734,7 @@ class LocalSnapshotImages(BaseModel):
     snapshot_ids: list[Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]] = Field(max_length=500)
 
 
-@router.post("/worker/environment-snapshots/retired")
+@_host_router.post("/worker/environment-snapshots/retired")
 async def retired_snapshot_images(
     body: LocalSnapshotImages,
     host: dict[str, str] = Depends(verify_claiming_host),
@@ -812,7 +748,7 @@ async def retired_snapshot_images(
     return {"snapshots": await snapshots.retired_images(body.snapshot_ids)}
 
 
-@router.post("/worker/environment-snapshots/{snapshot_id}/deleted", status_code=204)
+@_host_router.post("/worker/environment-snapshots/{snapshot_id}/deleted", status_code=204)
 async def snapshot_deleted(
     snapshot_id: str,
     host: dict[str, str] = Depends(verify_claiming_host),
@@ -928,14 +864,18 @@ async def start_action(
         job_id=job_id, user=user, store=store, app_credentials=credentials, require_ready=True
     )
     bound = await store.environments.get_environment_binding(user["user_id"], run["binding_id"])
-    terminal = await broker.create_terminal(
-        str(job["thread_id"]),
-        rows=24,
-        cols=100,
-        environment=bound,
-        action_id=action_id,
-        run_id=run["id"],
-    )
+    async with terminal_open_fence(
+        store, str(user["user_id"]), broker, str(job["thread_id"])
+    ) as opened:
+        terminal = await broker.create_terminal(
+            str(job["thread_id"]),
+            rows=24,
+            cols=100,
+            environment=bound,
+            action_id=action_id,
+            run_id=run["id"],
+        )
+        opened["terminal"] = terminal
     updated = await store.environments.update_environment_action_run(
         user["user_id"], run["id"], {"terminal_id": terminal["id"], **_action_result(terminal)}
     )
@@ -1046,18 +986,24 @@ async def retry_preparation(
 ) -> dict[str, Any]:
     """Retry failed preparation using the same workspace binding."""
     from cloud_agent.api._owner_auth import _owned_job
-    from cloud_agent.sandbox_manager_routing import sandbox_manager_for_job
+    from cloud_agent.sandbox_manager_routing import (
+        hydrate_shared_sandbox_manager,
+        sandbox_manager_for_job,
+    )
 
     store = require_store(store)
     job = await _owned_job(store.conversation_queries, job_id, user)
     await _job_entitled(store, user["user_id"], job, credentials)
     if not job.get("environment_binding_id"):
         raise HTTPException(409, "Workspace has no environment binding")
-    # Preparation runs inside the container, starting it if stopped.
-    await fence_workspace_start(store, job)
+    # Preparation runs inside the container, starting it if stopped, so the
+    # manager is told the fence the start belongs to before it runs.
+    start_seq = await fence_workspace_start(store, job)
     broker = await sandbox_manager_for_job(store.host_pool, job_id)
     if broker is None:
         raise HTTPException(503, "Workspace host is unavailable")
+    await hydrate_shared_sandbox_manager(job, broker, start_seq=start_seq)
+    broker = broker.with_start_seq(start_seq)
     bound = await store.environments.get_environment_binding(
         user["user_id"], job["environment_binding_id"]
     )
@@ -1127,3 +1073,6 @@ async def skip_environment_start(
         user["user_id"], job["environment_binding_id"], job_id
     )
     return {"skip_start_next_turn": True}
+
+
+router.include_router(_host_router)

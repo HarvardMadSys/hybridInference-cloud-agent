@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import threading
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -26,6 +28,7 @@ from cloud_agent_shared.sandbox_archive_settings import (
     MIN_MULTIPART_PART_BYTES,
     SANDBOX_ARCHIVE_S3_URI,
     SandboxArchivePolicy,
+    SandboxArchivePolicyError,
 )
 
 _ACCOUNT = "123456789012"
@@ -163,13 +166,7 @@ class RecordingS3Client:
 
 
 def _config(**overrides: Any) -> SandboxArchiveS3Config:
-    values: dict[str, Any] = {
-        "region": _REGION,
-        "kms_key_arn": _KMS_KEY,
-        "expected_bucket_owner": _ACCOUNT,
-    }
-    values.update(overrides)
-    return SandboxArchiveS3Config(**values)
+    return SandboxArchiveS3Config.from_policy(_policy(**{"revision": 0, **overrides}))
 
 
 def _policy(**overrides: Any) -> SandboxArchivePolicy:
@@ -226,13 +223,30 @@ def _upload(
     )
 
 
-def test_enabled_policy_builds_config_for_the_exact_fixed_destination() -> None:
+def test_enabled_policy_builds_config_for_the_default_destination() -> None:
     config = SandboxArchiveS3Config.from_policy(_policy())
 
     assert config.uri == SANDBOX_ARCHIVE_S3_URI
     assert config.bucket == "freeinference"
     assert config.prefix == "cloud-agent/sandbox"
     assert config.max_archive_bytes == 2 * 1024 * 1024 * 1024
+
+
+def test_a_policy_with_another_bucket_sends_every_request_there() -> None:
+    """Same keys, same prefix: only the bucket the policy names changes."""
+    config = SandboxArchiveS3Config.from_policy(_policy(bucket="example-archives"))
+    assert config.uri == "s3://example-archives/cloud-agent/sandbox"
+    assert config.prefix == "cloud-agent/sandbox"
+
+    client = RecordingS3Client()
+    uploader = SandboxArchiveS3Uploader(config, client=client)
+    payload = b"compressed sandbox bytes"
+    receipt = _upload(uploader, phase="initial", body=io.BytesIO(payload), size=len(payload))
+
+    assert receipt.bucket == "example-archives"
+    assert receipt.key == _key("initial")
+    buckets = {kwargs.get("Bucket") for _, kwargs in client.calls}
+    assert buckets == {"example-archives"}
 
 
 def test_disabled_policy_cannot_create_an_s3_service_config() -> None:
@@ -243,8 +257,6 @@ def test_disabled_policy_cannot_create_an_s3_service_config() -> None:
 @pytest.mark.parametrize(
     "updates, message",
     [
-        ({"uri": "s3://other/cloud-agent/sandbox"}, "exactly"),
-        ({"uri": f"{SANDBOX_ARCHIVE_S3_URI}/"}, "exactly"),
         ({"expected_bucket_owner": "123"}, "12-digit"),
         (
             {"kms_key_arn": "arn:aws:kms:us-west-2:123456789012:key/12345678"},
@@ -261,14 +273,50 @@ def test_disabled_policy_cannot_create_an_s3_service_config() -> None:
 def test_config_rejects_destination_and_bound_weakening(
     updates: dict[str, Any], message: str
 ) -> None:
-    values: dict[str, Any] = {
-        "region": _REGION,
-        "kms_key_arn": _KMS_KEY,
-        "expected_bucket_owner": _ACCOUNT,
-    }
-    values.update(updates)
-    with pytest.raises(SandboxArchiveConfigError, match=message):
-        SandboxArchiveS3Config(**values)
+    """A config holds a parsed policy, so weakening it is refused while parsing.
+
+    The destination is no field of either: a config always writes to the fixed
+    bucket, and a policy naming any other ``s3_uri`` does not parse.
+    """
+    with pytest.raises(SandboxArchivePolicyError, match=message):
+        SandboxArchiveS3Config.from_policy(_policy(**updates))
+
+
+@pytest.mark.parametrize("missing", ["expected_bucket_owner", "kms_key_arn"])
+def test_workload_identity_needs_the_kms_key_and_bucket_owner(missing: str) -> None:
+    """Credentials resolved for a pinned policy can leave an access-key policy without a key."""
+    policy = _policy(
+        **{missing: ""},
+        aws_access_key_id=_ACCESS_KEY_ID,
+        aws_secret_access_key=_SECRET_ACCESS_KEY,
+    )
+    assert SandboxArchiveS3Config.from_policy(policy).aws_access_key_id == _ACCESS_KEY_ID
+    with pytest.raises(SandboxArchiveConfigError):
+        SandboxArchiveS3Config.from_policy(policy, aws_access_key_id="", aws_secret_access_key="")
+
+
+@pytest.mark.parametrize("missing", [(), ("expected_bucket_owner", "kms_key_arn")])
+def test_a_config_given_no_credentials_keeps_the_policys_access_key(
+    missing: tuple[str, ...],
+) -> None:
+    """Built directly, a config uses the policy's own key, as ``from_policy`` does.
+
+    With the KMS key and owner it is not workload identity, and without them
+    it is not refused.
+    """
+    policy = _policy(
+        **dict.fromkeys(missing, ""),
+        aws_access_key_id=_ACCESS_KEY_ID,
+        aws_secret_access_key=_SECRET_ACCESS_KEY,
+    )
+
+    config = SandboxArchiveS3Config(policy)
+
+    assert config == SandboxArchiveS3Config.from_policy(policy)
+    assert config.aws_access_key_id == _ACCESS_KEY_ID
+    assert config.aws_secret_access_key == _SECRET_ACCESS_KEY
+    assert config.as_policy().uses_access_key
+    assert _SECRET_ACCESS_KEY not in repr(config)
 
 
 def test_single_upload_uses_opaque_key_sha256_kms_and_expected_owner() -> None:
@@ -434,7 +482,11 @@ def test_multipart_upload_streams_bounded_parts_and_completes_with_checksums() -
     assert created["ExpectedBucketOwner"] == _ACCOUNT
     assert created["ChecksumAlgorithm"] == "SHA256"
 
-    part_calls = [kwargs for name, kwargs in client.calls if name == "upload_part"]
+    # Parts are sent several at once, so S3 can see them in any order.
+    part_calls = sorted(
+        (kwargs for name, kwargs in client.calls if name == "upload_part"),
+        key=lambda call: call["PartNumber"],
+    )
     assert [call["PartNumber"] for call in part_calls] == [1, 2]
     assert [len(call["Body"]) for call in part_calls] == [part_size, 5]
     for call in part_calls:
@@ -466,7 +518,12 @@ def test_multipart_upload_streams_bounded_parts_and_completes_with_checksums() -
     assert not [call for call in client.calls if call[0] == "abort_multipart_upload"]
 
 
-def test_deadline_expiring_between_multipart_parts_stops_without_another_request() -> None:
+def test_deadline_expiring_between_multipart_parts_stops_without_another_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # One part in flight at a time, so part 2 can only start after part 1;
+    # with several at once, see the in-flight deadline test below.
+    monkeypatch.setattr(archive_s3, "_PART_UPLOAD_WORKERS", 1)
     part_size = MIN_MULTIPART_PART_BYTES
     payload = b"a" * part_size + b"final"
     now = 0.0
@@ -504,6 +561,295 @@ def test_deadline_expiring_between_multipart_parts_stops_without_another_request
     # Once the absolute deadline has elapsed, even cleanup must not add another
     # synchronous network request; bucket lifecycle handles the abandoned MPU.
     assert not [call for call in client.calls if call[0] == "abort_multipart_upload"]
+
+
+def _parts_payload(parts: int) -> bytes:
+    """``parts`` minimum-size parts, each of its own byte, so a misplaced part shows."""
+    return b"".join(bytes([65 + number]) * MIN_MULTIPART_PART_BYTES for number in range(parts))
+
+
+def _multipart_uploader(
+    client: RecordingS3Client, *, parts: int, **kwargs: Any
+) -> SandboxArchiveS3Uploader:
+    return SandboxArchiveS3Uploader(
+        _config(
+            max_archive_bytes=parts * MIN_MULTIPART_PART_BYTES,
+            multipart_threshold_bytes=1,
+            multipart_part_bytes=MIN_MULTIPART_PART_BYTES,
+        ),
+        client=client,
+        **kwargs,
+    )
+
+
+def _part_numbers(client: RecordingS3Client) -> list[int]:
+    return sorted(kwargs["PartNumber"] for name, kwargs in client.calls if name == "upload_part")
+
+
+def test_parts_are_sent_at_once_and_completed_in_part_order() -> None:
+    payload = _parts_payload(3)
+
+    class LastPartFirstClient(RecordingS3Client):
+        """Answer part 1 only once the parts sent after it have been answered."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.answered: list[int] = []
+            self.lock = threading.Lock()
+            self.later_parts_answered = threading.Event()
+
+        def upload_part(self, **kwargs: Any) -> dict[str, Any]:
+            if kwargs["PartNumber"] == 1:
+                # One part at a time would wait here for good: parts 2 and 3
+                # are sent only while part 1 is still in flight.
+                assert self.later_parts_answered.wait(timeout=10)
+            response = super().upload_part(**kwargs)
+            with self.lock:
+                self.answered.append(kwargs["PartNumber"])
+                if {2, 3} <= set(self.answered):
+                    self.later_parts_answered.set()
+            return response
+
+    client = LastPartFirstClient()
+
+    receipt = _upload(
+        _multipart_uploader(client, parts=3),
+        phase="final",
+        body=io.BytesIO(payload),
+        size=len(payload),
+    )
+
+    assert client.answered[-1] == 1
+    part_size = MIN_MULTIPART_PART_BYTES
+    checksums = [
+        base64.b64encode(hashlib.sha256(payload[start : start + part_size]).digest()).decode()
+        for start in range(0, len(payload), part_size)
+    ]
+    assert client.one_call("complete_multipart_upload")["MultipartUpload"] == {
+        "Parts": [
+            {"ETag": f'"part-{number}"', "PartNumber": number, "ChecksumSHA256": checksum}
+            for number, checksum in enumerate(checksums, start=1)
+        ]
+    }
+    assert receipt.sha256 == hashlib.sha256(payload).hexdigest()
+    assert receipt.multipart is True
+
+
+def test_parts_beyond_the_workers_are_neither_read_nor_sent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(archive_s3, "_PART_UPLOAD_WORKERS", 2)
+    payload = _parts_payload(4)
+    body = io.BytesIO(payload)
+    read_while_busy: list[int] = []
+
+    class CountingClient(RecordingS3Client):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lock = threading.Lock()
+            self.in_flight = 0
+            self.most_in_flight = 0
+            # Parts 1 and 2 are answered only once both are in flight; the
+            # action sees how much of the body has been read by then.
+            self.both_sent = threading.Barrier(
+                2, action=lambda: read_while_busy.append(body.tell()), timeout=10
+            )
+
+        def upload_part(self, **kwargs: Any) -> dict[str, Any]:
+            with self.lock:
+                self.in_flight += 1
+                self.most_in_flight = max(self.most_in_flight, self.in_flight)
+            try:
+                if kwargs["PartNumber"] <= 2:
+                    self.both_sent.wait()
+                return super().upload_part(**kwargs)
+            finally:
+                with self.lock:
+                    self.in_flight -= 1
+
+    client = CountingClient()
+
+    receipt = _upload(
+        _multipart_uploader(client, parts=4), phase="final", body=body, size=len(payload)
+    )
+
+    assert client.most_in_flight == 2
+    # Memory holds the parts in flight: the third is read once one finishes.
+    assert read_while_busy == [2 * MIN_MULTIPART_PART_BYTES]
+    assert _part_numbers(client) == [1, 2, 3, 4]
+    assert receipt.sha256 == hashlib.sha256(payload).hexdigest()
+
+
+def test_no_part_starts_once_the_deadline_passes_with_parts_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(archive_s3, "_PART_UPLOAD_WORKERS", 2)
+    payload = _parts_payload(4)
+    now = 0.0
+
+    def expire() -> None:
+        nonlocal now
+        now = 2.0
+
+    class ExpiringClient(RecordingS3Client):
+        def __init__(self) -> None:
+            super().__init__()
+            # The two parts in flight are answered after the deadline.
+            self.both_sent = threading.Barrier(2, action=expire, timeout=10)
+
+        def upload_part(self, **kwargs: Any) -> dict[str, Any]:
+            response = super().upload_part(**kwargs)
+            self.both_sent.wait()
+            return response
+
+    client = ExpiringClient()
+
+    with pytest.raises(SandboxArchiveDeadlineExceeded, match="deadline exceeded"):
+        _upload(
+            _multipart_uploader(client, parts=4, clock=lambda: now),
+            phase="final",
+            body=io.BytesIO(payload),
+            size=len(payload),
+            deadline=1.0,
+        )
+
+    assert _part_numbers(client) == [1, 2]
+    assert not [call for call in client.calls if call[0] == "complete_multipart_upload"]
+    assert not [call for call in client.calls if call[0] == "abort_multipart_upload"]
+
+
+def test_a_failed_part_stops_later_parts_and_aborts_after_the_parts_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(archive_s3, "_PART_UPLOAD_WORKERS", 2)
+    payload = _parts_payload(4)
+
+    class FailingClient(RecordingS3Client):
+        def __init__(self) -> None:
+            super().__init__()
+            self.part_two_sent = threading.Event()
+            self.part_two_answered = threading.Event()
+            self.answered_before_abort: bool | None = None
+
+        def upload_part(self, **kwargs: Any) -> dict[str, Any]:
+            response = super().upload_part(**kwargs)
+            if kwargs["PartNumber"] == 1:
+                assert self.part_two_sent.wait(timeout=10)
+                raise RuntimeError("simulated part failure")
+            self.part_two_sent.set()
+            # Still in flight when part 1 fails.
+            time.sleep(0.05)
+            self.part_two_answered.set()
+            return response
+
+        def abort_multipart_upload(self, **kwargs: Any) -> dict[str, Any]:
+            self.answered_before_abort = self.part_two_answered.is_set()
+            return super().abort_multipart_upload(**kwargs)
+
+    client = FailingClient()
+
+    with pytest.raises(RuntimeError, match="simulated part failure"):
+        _upload(
+            _multipart_uploader(client, parts=4),
+            phase="final",
+            body=io.BytesIO(payload),
+            size=len(payload),
+        )
+
+    assert _part_numbers(client) == [1, 2]
+    assert not [call for call in client.calls if call[0] == "complete_multipart_upload"]
+    # S3 may keep a part that lands after an abort; this one finished first.
+    assert client.one_call("abort_multipart_upload")["UploadId"] == "upload-1"
+    assert client.answered_before_abort is True
+
+
+def test_a_multipart_body_unlike_its_digest_is_aborted_not_completed() -> None:
+    payload = _parts_payload(2)
+    client = RecordingS3Client()
+
+    with pytest.raises(SandboxArchiveUploadError, match="changed before upload"):
+        _multipart_uploader(client, parts=2).upload(
+            namespace=_NAMESPACE,
+            sandbox_id=_SANDBOX_ID,
+            generation=_GENERATION,
+            phase="final",
+            body=io.BytesIO(payload),
+            size=len(payload),
+            sha256=hashlib.sha256(payload[::-1]).hexdigest(),
+        )
+
+    assert _part_numbers(client) == [1, 2]
+    assert not [call for call in client.calls if call[0] == "complete_multipart_upload"]
+    assert client.one_call("abort_multipart_upload")["UploadId"] == "upload-1"
+
+
+def test_a_spool_file_is_read_by_offset_without_moving_its_position(tmp_path) -> None:
+    payload = _parts_payload(3)
+    client = RecordingS3Client()
+
+    with (tmp_path / "spool").open("w+b") as spool:
+        spool.write(payload)
+        spool.seek(0)
+        receipt = _upload(
+            _multipart_uploader(client, parts=3), phase="final", body=spool, size=len(payload)
+        )
+        # Each worker read its own part with os.pread; no read moved the file.
+        assert spool.tell() == 0
+
+    part_calls = sorted(
+        (kwargs for name, kwargs in client.calls if name == "upload_part"),
+        key=lambda call: call["PartNumber"],
+    )
+    assert b"".join(call["Body"] for call in part_calls) == payload
+    assert receipt.sha256 == hashlib.sha256(payload).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("stored", "message"),
+    [("longer", "exceeds its declared size"), ("shorter", "ended before its declared size")],
+)
+def test_a_spool_file_unlike_its_declared_size_is_aborted_not_completed(
+    tmp_path, stored: str, message: str
+) -> None:
+    payload = _parts_payload(2)
+    client = RecordingS3Client()
+
+    with (tmp_path / "spool").open("w+b") as spool:
+        spool.write(payload + b"trailing" if stored == "longer" else payload[:-1])
+        spool.seek(0)
+        with pytest.raises(SandboxArchiveUploadError, match=message):
+            _multipart_uploader(client, parts=3).upload(
+                namespace=_NAMESPACE,
+                sandbox_id=_SANDBOX_ID,
+                generation=_GENERATION,
+                phase="final",
+                body=spool,
+                size=len(payload),
+                sha256=hashlib.sha256(payload).hexdigest(),
+            )
+
+    assert not [call for call in client.calls if call[0] == "complete_multipart_upload"]
+    assert client.one_call("abort_multipart_upload")["UploadId"] == "upload-1"
+
+
+def test_a_read_that_returns_every_byte_is_used_without_a_copy() -> None:
+    whole = b"x" * 4096
+
+    class OneRead:
+        def read(self, _amount: int) -> bytes:
+            return whole
+
+    class Trickle:
+        def __init__(self, data: bytes) -> None:
+            self.data = data
+
+        def read(self, amount: int) -> bytes:
+            piece, self.data = self.data[: min(amount, 3)], self.data[3:]
+            return piece
+
+    assert archive_s3._read_exact(OneRead(), len(whole)) is whole  # type: ignore[arg-type]
+    # Short reads are still put together into exactly the bytes asked for.
+    assert archive_s3._read_exact(Trickle(b"abcdefgh"), 8) == b"abcdefgh"  # type: ignore[arg-type]
 
 
 def test_deadline_is_checked_before_and_after_a_single_s3_request() -> None:
@@ -1099,6 +1445,55 @@ def test_checkpoint_retry_refuses_different_existing_bytes() -> None:
         _upload_checkpoint(uploader, payload)
 
 
+@pytest.mark.parametrize("kind", ["checkpoint", "environment snapshot"])
+def test_an_existing_object_found_after_the_deadline_is_not_accepted(kind: str) -> None:
+    """A retry that finds its own earlier write still answers within its deadline.
+
+    The refused put is followed by two HEADs of the existing object: one that
+    proves it is this upload's, then the one the receipt is read from. Only
+    the second is slow here.
+    """
+    payload = b"oci-archive"
+    now = 0.0
+
+    class SlowHeadClient(RecordingS3Client):
+        def head_object(self, **kwargs: Any) -> dict[str, Any]:
+            nonlocal now
+            response = super().head_object(**kwargs)
+            if [call[0] for call in self.calls].count("head_object") == 2:
+                now = 2.0
+            return response
+
+    head = _matching_head(payload) | {
+        "ContentType": "application/x-tar",
+        "Metadata": {
+            "archive-phase": "checkpoint",
+            "archive-format": "oci-layer-archive-v1",
+            "archive-size-bytes": str(len(payload)),
+            "archive-sha256": hashlib.sha256(payload).hexdigest(),
+        },
+    }
+    client = SlowHeadClient(put_error=PreconditionFailure(), head_response=head)
+    uploader = SandboxArchiveS3Uploader(_config(), client=client, clock=lambda: now)
+    upload = {
+        "body": io.BytesIO(payload),
+        "size": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "deadline": 1.0,
+    }
+
+    with pytest.raises(SandboxArchiveDeadlineExceeded, match="deadline exceeded"):
+        if kind == "checkpoint":
+            uploader.upload_checkpoint(
+                sandbox_id=_SANDBOX_ID,
+                generation=_GENERATION,
+                checkpoint_id=_CHECKPOINT_ID,
+                **upload,
+            )
+        else:
+            uploader.upload_environment_snapshot(owner="a" * 64, snapshot_id="b" * 32, **upload)
+
+
 @pytest.mark.parametrize("checkpoint_id", ["", "F" * 32, "f" * 31, "../" + "f" * 29])
 def test_checkpoint_key_refuses_a_malformed_id(checkpoint_id: str) -> None:
     with pytest.raises(SandboxArchiveUploadError, match="checkpoint id"):
@@ -1116,3 +1511,114 @@ def test_config_carries_the_checkpoint_switch_back_into_its_policy() -> None:
     policy = _policy(checkpoints_enabled=True)
 
     assert SandboxArchiveS3Config.from_policy(policy).as_policy() == policy
+
+
+_SNAPSHOT_OWNER = "a" * 64
+_SNAPSHOT_ID = "b" * 32
+
+
+def _snapshot_key() -> str:
+    return f"cloud-agent/sandbox/env/v1/{_SNAPSHOT_OWNER}/{_SNAPSHOT_ID}.oci.tar"
+
+
+def _snapshot_head(payload: bytes) -> dict[str, Any]:
+    return _matching_head(payload) | {
+        "ContentType": "application/x-tar",
+        "ETag": '"existing"',
+        "Metadata": {
+            "archive-phase": "checkpoint",
+            "archive-format": "oci-layer-archive-v1",
+            "archive-size-bytes": str(len(payload)),
+            "archive-sha256": hashlib.sha256(payload).hexdigest(),
+        },
+    }
+
+
+def _upload_environment_snapshot(
+    uploader: SandboxArchiveS3Uploader,
+    payload: bytes,
+    *,
+    deadline: float | None = None,
+) -> SandboxArchiveReceipt:
+    return uploader.upload_environment_snapshot(
+        owner=_SNAPSHOT_OWNER,
+        snapshot_id=_SNAPSHOT_ID,
+        body=io.BytesIO(payload),
+        size=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+        deadline=deadline,
+    )
+
+
+def test_environment_snapshot_retry_after_a_lost_response_returns_the_existing_receipt() -> None:
+    payload = b"env-snapshot"
+    client = RecordingS3Client(
+        put_error=PreconditionFailure(), head_response=_snapshot_head(payload)
+    )
+    uploader = SandboxArchiveS3Uploader(_config(), client=client)
+
+    receipt = _upload_environment_snapshot(uploader, payload)
+
+    assert receipt.key == _snapshot_key()
+    assert receipt.version_id == "version-existing"
+    assert receipt.etag == '"existing"'
+
+
+def test_environment_snapshot_retry_refuses_different_existing_bytes() -> None:
+    payload = b"env-snapshot"
+    head = _snapshot_head(b"something else")
+    client = RecordingS3Client(put_error=PreconditionFailure(), head_response=head)
+    uploader = SandboxArchiveS3Uploader(_config(), client=client)
+
+    with pytest.raises(SandboxArchiveUploadError, match="does not match"):
+        _upload_environment_snapshot(uploader, payload)
+
+
+def test_environment_snapshot_retry_refuses_a_head_that_crosses_the_deadline() -> None:
+    payload = b"env-snapshot"
+    now = 0.0
+
+    class ExpiringClient(RecordingS3Client):
+        def head_object(self, **kwargs: Any) -> dict[str, Any]:
+            nonlocal now
+            response = super().head_object(**kwargs)
+            now += 0.6
+            return response
+
+    client = ExpiringClient(put_error=PreconditionFailure(), head_response=_snapshot_head(payload))
+    uploader = SandboxArchiveS3Uploader(_config(), client=client, clock=lambda: now)
+
+    with pytest.raises(SandboxArchiveDeadlineExceeded, match="deadline exceeded"):
+        _upload_environment_snapshot(uploader, payload, deadline=1.0)
+
+    # Both the retry probe and the receipt's own HEAD ran; the second must not
+    # be allowed to hand back a receipt once the deadline has elapsed.
+    assert len([call for call in client.calls if call[0] == "head_object"]) == 2
+
+
+def test_checkpoint_retry_also_refuses_a_head_that_crosses_the_deadline() -> None:
+    payload = b"oci-archive"
+    now = 0.0
+
+    class ExpiringClient(RecordingS3Client):
+        def head_object(self, **kwargs: Any) -> dict[str, Any]:
+            nonlocal now
+            response = super().head_object(**kwargs)
+            now += 0.6
+            return response
+
+    client = ExpiringClient(put_error=PreconditionFailure(), head_response=_snapshot_head(payload))
+    uploader = SandboxArchiveS3Uploader(_config(), client=client, clock=lambda: now)
+
+    with pytest.raises(SandboxArchiveDeadlineExceeded, match="deadline exceeded"):
+        uploader.upload_checkpoint(
+            sandbox_id=_SANDBOX_ID,
+            generation=_GENERATION,
+            checkpoint_id=_CHECKPOINT_ID,
+            body=io.BytesIO(payload),
+            size=len(payload),
+            sha256=hashlib.sha256(payload).hexdigest(),
+            deadline=1.0,
+        )
+
+    assert len([call for call in client.calls if call[0] == "head_object"]) == 2

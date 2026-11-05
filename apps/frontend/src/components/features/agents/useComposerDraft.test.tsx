@@ -1,8 +1,14 @@
 // @vitest-environment jsdom
-import { act, cleanup, renderHook } from '@testing-library/react';
+import { act, cleanup, render, renderHook, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { composerDraftStorageKey, useComposerDraft } from './useComposerDraft';
+import {
+  composerDraftStorageKey,
+  useComposerDraft,
+  useComposerDraftStore,
+  useComposerDraftValue,
+  type ComposerDraftStore,
+} from './useComposerDraft';
 
 beforeEach(() => localStorage.clear());
 afterEach(() => {
@@ -103,6 +109,53 @@ describe('composer drafts', () => {
     expect(third.result.current.value).toBe('Repeat this message');
   });
 
+  it('clears a composer opened again while its send was out, once the send lands', () => {
+    const left = renderHook(() => useComposerDraft({ userId: 'alice', threadId: 'chat' }));
+    act(() => left.result.current.setValue('Send this once'));
+    const sent = left.result.current.capture();
+    const { acknowledge } = left.result.current;
+    left.unmount();
+    const reopened = renderHook(() => useComposerDraft({ userId: 'alice', threadId: 'chat' }));
+    const other = renderHook(() => useComposerDraft({ userId: 'alice', threadId: 'other' }));
+    act(() => other.result.current.setValue('Send this once'));
+    expect(reopened.result.current.value).toBe('Send this once');
+    act(() => acknowledge(sent));
+    expect(reopened.result.current.value).toBe('');
+    expect(other.result.current.value).toBe('Send this once');
+  });
+
+  it('clears a composer opened again when its send lands before the composer listens', () => {
+    const left = renderHook(() => useComposerDraft({ userId: 'alice', threadId: 'chat' }));
+    act(() => left.result.current.setValue('Send this once'));
+    const sent = left.result.current.capture();
+    const { acknowledge } = left.result.current;
+    left.unmount();
+    let landed = false;
+    const reopened = renderHook(() => {
+      const draft = useComposerDraft({ userId: 'alice', threadId: 'chat' });
+      // The send answers after this render read the draft, and before the
+      // composer's effects have run.
+      if (!landed) {
+        landed = true;
+        acknowledge(sent);
+      }
+      return draft;
+    });
+    expect(reopened.result.current.value).toBe('');
+  });
+
+  it('keeps what a composer opened again typed while the send it showed was out', () => {
+    const left = renderHook(() => useComposerDraft({ userId: 'alice', threadId: 'chat' }));
+    act(() => left.result.current.setValue('Send this once'));
+    const sent = left.result.current.capture();
+    const { acknowledge } = left.result.current;
+    left.unmount();
+    const reopened = renderHook(() => useComposerDraft({ userId: 'alice', threadId: 'chat' }));
+    act(() => reopened.result.current.setValue('Typed after coming back'));
+    act(() => acknowledge(sent));
+    expect(reopened.result.current.value).toBe('Typed after coming back');
+  });
+
   it('works in memory when browser storage is blocked', () => {
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
       throw new Error('Storage denied');
@@ -131,5 +184,73 @@ describe('composer drafts', () => {
     act(() => anonymous.result.current.setValue('Private to this mounted composer'));
     expect(anonymous.result.current.value).toBe('Private to this mounted composer');
     expect(write).not.toHaveBeenCalled();
+  });
+});
+
+describe('a draft read by its composer alone', () => {
+  const draws = { page: 0, composer: 0 };
+  let store: ComposerDraftStore;
+
+  function Composer({ draft }: { draft: ComposerDraftStore }) {
+    draws.composer += 1;
+    return <textarea aria-label="Draft" value={useComposerDraftValue(draft)} readOnly />;
+  }
+
+  function Page({ threadId = 'chat', onDraw }: { threadId?: string; onDraw?: () => void }) {
+    draws.page += 1;
+    store = useComposerDraftStore({ userId: 'alice', threadId });
+    onDraw?.();
+    return <Composer draft={store} />;
+  }
+
+  const shown = () => (screen.getByLabelText('Draft') as HTMLTextAreaElement).value;
+
+  beforeEach(() => {
+    draws.page = 0;
+    draws.composer = 0;
+  });
+
+  it('draws the composer and not the page that holds the draft', () => {
+    render(<Page />);
+    act(() => store.setValue('Hel'));
+    act(() => store.setValue((value) => `${value}lo`));
+    expect(shown()).toBe('Hello');
+    expect(draws).toEqual({ page: 1, composer: 3 });
+
+    const sent = store.capture();
+    expect(sent.value).toBe('Hello');
+    act(() => store.acknowledge(sent));
+    expect(shown()).toBe('');
+    expect(draws.page).toBe(1);
+  });
+
+  it('shows the chat it moves to at once, and keeps each chat its own text', () => {
+    const view = render(<Page threadId="first" />);
+    act(() => store.setValue('First chat'));
+    view.rerender(<Page threadId="second" />);
+    expect(shown()).toBe('');
+    act(() => store.setValue('Second chat'));
+    view.rerender(<Page threadId="first" />);
+    expect(shown()).toBe('First chat');
+  });
+
+  it('clears the composer when a send lands before the page listens', () => {
+    const left = renderHook(() => useComposerDraft({ userId: 'alice', threadId: 'chat' }));
+    act(() => left.result.current.setValue('Send this once'));
+    const sent = left.result.current.capture();
+    const { acknowledge } = left.result.current;
+    left.unmount();
+    let landed = false;
+    render(
+      <Page
+        onDraw={() => {
+          // The send answers after the page read the draft, before its effects.
+          if (landed) return;
+          landed = true;
+          acknowledge(sent);
+        }}
+      />,
+    );
+    expect(shown()).toBe('');
   });
 });

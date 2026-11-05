@@ -13,6 +13,7 @@ import {
 } from '@testing-library/react';
 import { useKeyboardShortcuts } from '@/components/features/settings/keyboardShortcutPreferences';
 import { DEFAULT_KEYBOARD_SHORTCUTS } from '@/lib/keyboardShortcuts';
+import { onPlatform } from '@/lib/platformTestSupport';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentConversationApi, AgentJobApi, AgentSessionListOptions } from '@/lib/api/agents';
 import { announceAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
@@ -63,6 +64,7 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   getAgentJobThread: api.thread,
   listAllAgentThreadEvents: api.events,
   getAgentJobGit: api.git,
+  getAgentJobGitMetadata: api.git,
   streamAgentJob: api.stream,
   archiveAgentJob: api.archive,
   deleteAgentSessions: api.deleteSessions,
@@ -72,12 +74,23 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   pinAgentJob: api.pin,
   unpinAgentJob: api.pin,
 }));
+vi.mock('@/lib/api/agents/readReceipts', () => ({
+  listAgentReadReceipts: vi.fn(async () => ({
+    user_id: api.user,
+    receipts: [],
+    next_cursor: null,
+  })),
+  saveAgentReadReceipts: vi.fn(async () => ({
+    user_id: api.user,
+    receipts: [],
+    next_cursor: null,
+  })),
+}));
 import { AgentsSidebar } from './AgentsSidebar';
 import { SkillDialog } from './skills/SkillDialog';
 import { AgentReadProvider } from './AgentReadProvider';
 import { useAgentJob } from './useAgentJobs';
 import { ArchivedTasksView } from './ArchivedTasksView';
-import { announceConversationRestored } from './conversationEvents';
 import { DEFAULT_PREFERENCES, sidebarPreferencesKey } from './sidebarPreferences';
 import { SIDEBAR_ACTIVITY_REFRESH_MS } from './sidebarRecordChanges';
 import {
@@ -117,7 +130,7 @@ it('uses the customized search shortcut and retains click access when disabled',
     }),
   );
   const search = screen.getByRole('button', { name: 'Search tasks' });
-  expect(search).toHaveAttribute('aria-keyshortcuts', 'Meta+Shift+G Control+Shift+G');
+  expect(search).toHaveAttribute('aria-keyshortcuts', 'Control+Shift+G');
   fireEvent.keyDown(document, { key: 'k', ctrlKey: true });
   expect(screen.queryByRole('textbox', { name: 'Search tasks' })).not.toBeInTheDocument();
   fireEvent.keyDown(document, { key: 'G', ctrlKey: true, shiftKey: true });
@@ -246,12 +259,12 @@ describe('sidebar navigation interactions', () => {
     expect(api.thread).not.toHaveBeenCalled();
   });
 
-  it('shows nine settings destinations without loading or polling chat lists', async () => {
+  it('shows eleven settings destinations without loading or polling chat lists', async () => {
     api.pathname = '/settings/plugins';
     vi.useFakeTimers();
     await act(async () => render(<AgentsSidebar settingsNavigation={{ backHref: '/a' }} />));
     const navigation = screen.getByRole('navigation', { name: 'Settings' });
-    expect(within(navigation).getAllByRole('link')).toHaveLength(9);
+    expect(within(navigation).getAllByRole('link')).toHaveLength(11);
     expect(within(navigation).getByRole('link', { name: 'My Settings' })).toHaveAttribute(
       'href',
       '/settings/my-settings',
@@ -555,9 +568,9 @@ describe('sidebar navigation interactions', () => {
     api.projects.mockClear();
     vi.useFakeTimers();
 
-    for (const kind of ['usage', 'mcp', 'queue', 'publication'] as const) {
+    for (const kind of ['usage', 'mcp', 'queue'] as const) {
       act(() => {
-        receiveHint(kind, kind === 'queue' || kind === 'publication' ? 'thread-a' : 'a');
+        receiveHint(kind, kind === 'queue' ? 'thread-a' : 'a');
         vi.advanceTimersByTime(PUSH_BATCH_MS);
       });
       expect(api.list).not.toHaveBeenCalled();
@@ -636,6 +649,33 @@ describe('sidebar navigation interactions', () => {
     });
     expect(api.projects).toHaveBeenCalledOnce();
     expect(api.list).toHaveBeenCalledTimes(2);
+  });
+
+  it('reorders open search results once per window while only activity moves', async () => {
+    render(<AgentsSidebar />);
+    await screen.findByText('Task a');
+    fireEvent.click(screen.getByRole('button', { name: 'Search tasks' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Search tasks' }), {
+      target: { value: 'Task' },
+    });
+    const searched = expect.objectContaining({ q: 'Task' });
+    await waitFor(() => expect(api.list).toHaveBeenCalledWith(searched, expect.any(AbortSignal)));
+    vi.useFakeTimers();
+    const thread = { id: 'thread-a', title: 'Task a', title_source: 'manual' as const };
+    for (const revision of [1, 2]) {
+      await act(async () => {
+        receiveThreadChange({ ...thread, revision, updated_at: `2026-10-14T10:00:0${revision}Z` });
+        receiveJobChange({ id: 'a', thread_id: 'thread-a', revision, state: 'running' });
+        await vi.advanceTimersByTimeAsync(PUSH_BATCH_MS);
+      });
+      api.list.mockClear();
+    }
+
+    await act(async () => vi.advanceTimersByTimeAsync(SIDEBAR_ACTIVITY_REFRESH_MS));
+    expect(api.list).toHaveBeenCalledWith(
+      expect.objectContaining({ q: 'Task', limit: 50 }),
+      expect.any(AbortSignal),
+    );
   });
 
   it('refreshes a delayed automatic title after the conversation is idle', async () => {
@@ -932,9 +972,13 @@ describe('sidebar navigation interactions', () => {
     expect(screen.queryByText('Current')).not.toBeInTheDocument();
   });
 
-  it.each([{ ctrlKey: true }, { metaKey: true }])(
-    'preserves a portaled modal focus cycle when search is requested with %j',
-    async (modifier) => {
+  it.each([
+    ['Win32', { ctrlKey: true }],
+    ['MacIntel', { metaKey: true }],
+  ])(
+    'preserves a portaled modal focus cycle when search is requested on %s with %j',
+    async (platform, modifier) => {
+      onPlatform(platform);
       function Workspace() {
         const [open, setOpen] = useState(true);
         return open ? (
@@ -997,6 +1041,35 @@ describe('sidebar navigation interactions', () => {
 
     screen.getByRole('dialog', { name: 'Task details' }).removeAttribute('open');
     fireEvent.keyDown(document, { key: 'k', ctrlKey: true });
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Search tasks' })).toHaveFocus(),
+    );
+  });
+
+  it('leaves Control+K to a text field on a Mac and searches on Command+K', async () => {
+    onPlatform('MacIntel');
+    render(
+      <>
+        <AgentsSidebar />
+        <textarea aria-label="Message" />
+      </>,
+    );
+    await screen.findByText('Task a');
+    const composer = screen.getByRole('textbox', { name: 'Message' });
+    composer.focus();
+
+    // In a Mac text field, Control+K deletes to the end of the line.
+    expect(fireEvent.keyDown(composer, { key: 'k', ctrlKey: true })).toBe(true);
+    await act(async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    });
+    expect(composer).toHaveFocus();
+    expect(screen.queryByRole('textbox', { name: 'Search tasks' })).not.toBeInTheDocument();
+    const search = screen.getByRole('button', { name: 'Search tasks' });
+    expect(search).toHaveAttribute('aria-keyshortcuts', 'Meta+K');
+    expect(search).toHaveAttribute('title', 'Search tasks (⌘ + K)');
+
+    expect(fireEvent.keyDown(composer, { key: 'k', metaKey: true })).toBe(false);
     await waitFor(() =>
       expect(screen.getByRole('textbox', { name: 'Search tasks' })).toHaveFocus(),
     );
@@ -1279,20 +1352,5 @@ describe('sidebar navigation interactions', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close search' }));
     expect(await screen.findByRole('link', { name: 'Task old' })).toHaveAttribute('href', '/old');
     expect(old.last_activity_at).toBe('2025-01-01T00:00:00Z');
-  });
-  it('ignores restore invalidation from a different signed-in account', async () => {
-    render(<AgentsSidebar />);
-    await screen.findByText('Task a');
-    api.list.mockClear();
-    api.projects.mockClear();
-    act(() => announceConversationRestored({ threadId: 'thread-a', userId: 'bob' }));
-    expect(api.list).not.toHaveBeenCalled();
-    expect(api.projects).not.toHaveBeenCalled();
-    act(() => announceConversationRestored({ threadId: 'thread-a', userId: 'alice' }));
-    await waitFor(() => expect(api.projects).toHaveBeenCalledOnce());
-    expect(api.list).toHaveBeenCalledWith(
-      expect.objectContaining({ repo: 'owner/repo' }),
-      expect.any(AbortSignal),
-    );
   });
 });

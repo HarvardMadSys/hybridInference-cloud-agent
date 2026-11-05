@@ -11,11 +11,11 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from cloud_agent_host import sandbox_archive_runtime as archive_runtime
-from cloud_agent_host.chat_sandbox import FINAL_ARCHIVE_MARKER_MAX_BYTES
+from cloud_agent_host.chat_sandbox_markers import FINAL_ARCHIVE_MARKER_MAX_BYTES
 from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
 from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveReceipt
-from cloud_agent_host.sandbox_archives import SandboxInitialArchiveMarker
+from cloud_agent_host.sandbox_archives import CaptureGate, SandboxInitialArchiveMarker
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 if TYPE_CHECKING:
@@ -228,6 +228,51 @@ def test_maximum_valid_uploaded_final_marker_fits_durable_bound() -> None:
     assert archive_runtime._FinalArchiveMarker.decode(payload) == uploaded
 
 
+@pytest.mark.parametrize(
+    ("receipt_bucket", "accepted"), [("example-archives", True), ("freeinference", False)]
+)
+def test_a_final_receipt_must_come_from_the_policys_bucket(
+    receipt_bucket: str, accepted: bool
+) -> None:
+    """The bucket the marker's policy names, and no other, even the default."""
+    policy = SandboxArchivePolicy(
+        enabled=True,
+        bucket="example-archives",
+        region="us-east-1",
+        kms_key_arn=f"arn:aws:kms:us-east-1:{_ACCOUNT}:key/archive",
+        expected_bucket_owner=_ACCOUNT,
+        revision=4,
+    )
+    spec = SimpleNamespace(sandbox_id="sandbox-1", generation=3)
+    pending = archive_runtime._FinalArchiveMarker.create(
+        namespace="pool-east",
+        spec=spec,
+        inspection=SimpleNamespace(container_id="container-1"),
+        policy=policy,
+    )
+    receipt = SandboxArchiveReceipt(
+        phase="final",
+        bucket=receipt_bucket,
+        key=(
+            f"cloud-agent/sandbox/v1/{hashlib.sha256(b'pool-east').hexdigest()}/"
+            f"{hashlib.sha256(b'sandbox-1').hexdigest()}/g3/final.tar.gz"
+        ),
+        size=123,
+        sha256="a" * 64,
+        etag="etag",
+        version_id="version-1",
+        s3_checksum_sha256="checksum",
+        multipart=False,
+    )
+
+    if accepted:
+        uploaded = pending.with_receipt(receipt)
+        assert archive_runtime._FinalArchiveMarker.decode(uploaded.encode()) == uploaded
+    else:
+        with pytest.raises(SandboxError, match="unexpected destination"):
+            pending.with_receipt(receipt)
+
+
 def test_unknown_policy_is_distinct_from_explicit_disabled_policy() -> None:
     controller, services = _controller()
     controller.start()
@@ -339,7 +384,7 @@ def test_retired_client_close_failure_cannot_rollback_policy_application(
 def test_default_factory_shares_one_capture_gate_across_policy_revisions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    gates: list[threading.BoundedSemaphore] = []
+    gates: list[CaptureGate] = []
     services: list[_Service] = []
 
     class Uploader:
@@ -932,4 +977,107 @@ def test_a_skipped_final_is_never_checkpointed() -> None:
 
     assert services[0].final_calls == 0
     assert services[0].checkpoint_calls == []
+    controller.close()
+
+
+def _stopped_generation_marker(manager: _MarkerManager) -> bytes:
+    """The uploaded final marker a clean stop leaves in generation 1's container."""
+    controller, _services = _controller(manager)
+    controller.start()
+    controller.apply(_policy(1))
+    spec = SimpleNamespace(sandbox_id="asbx", generation=1)
+    stopped = SimpleNamespace(container_id="container-a")
+    controller.prepare_final(spec, stopped)
+    controller.queue_final(spec, stopped, ())
+    controller.close()
+    assert manager.marker is not None and b'"state":"uploaded"' in manager.marker
+    return manager.marker
+
+
+@pytest.mark.parametrize("arriving", ["pool-east", "pool-west"])
+def test_a_restored_container_replaces_the_final_marker_its_checkpoint_carried(
+    arriving: str,
+) -> None:
+    """A checkpoint commits the stopped container whole, its final marker included.
+
+    The container restored from it on another host is generation 2 with a new
+    id. Its first start used to read generation 1's marker as its own and
+    refuse: on staging every restore failed that way (2026-10-19). That other
+    host is its own deployment, so the marker names the leaving host's
+    namespace, not this one's.
+    """
+    manager = _MarkerManager()
+    _stopped_generation_marker(manager)
+    controller = SandboxArchiveController(
+        manager,  # type: ignore[arg-type]
+        namespace=arriving,
+        service_factory=_Service,
+    )
+    controller.start()
+    controller.apply(_policy(1))
+    spec = SimpleNamespace(sandbox_id="asbx", generation=2)
+    restored = SimpleNamespace(container_id="container-b")
+
+    controller.prepare_start(spec, restored)
+
+    assert manager.marker is not None
+    marker = archive_runtime._FinalArchiveMarker.decode(manager.marker)
+    assert (marker.generation, marker.container_id, marker.state) == (2, "container-b", "pending")
+    controller.complete_start(spec, restored)
+    assert manager.marker is None
+    controller.close()
+
+
+@pytest.mark.parametrize(
+    ("sandbox_id", "generation", "container_id", "namespace"),
+    [
+        pytest.param("asbx-other", 2, "container-b", "pool-east", id="another-group"),
+        pytest.param("asbx", 1, "container-b", "pool-east", id="same-generation"),
+        pytest.param("asbx", 1, "container-a", "pool-west", id="same-container-another-deployment"),
+    ],
+)
+def test_only_an_earlier_generation_of_the_same_group_is_read_as_restored(
+    sandbox_id: str, generation: int, container_id: str, namespace: str
+) -> None:
+    """Every other marker that is not the container's own still refuses its start."""
+    manager = _MarkerManager()
+    _stopped_generation_marker(manager)
+    controller = SandboxArchiveController(
+        manager,  # type: ignore[arg-type]
+        namespace=namespace,
+        service_factory=_Service,
+    )
+    controller.start()
+    controller.apply(_policy(1))
+    # Generation 1's marker, read by a container claiming each identity.
+    spec = SimpleNamespace(sandbox_id=sandbox_id, generation=generation)
+
+    with pytest.raises(SandboxError, match="does not match the sandbox"):
+        controller.prepare_start(spec, SimpleNamespace(container_id=container_id))
+    controller.close()
+
+
+def test_a_restored_container_probes_its_baseline_under_the_current_policy() -> None:
+    """The initial marker restored with the checkpoint is generation 1's baseline.
+
+    It neither refuses the restored container nor chooses the policy its probe
+    runs under, as a marker this container prepared would.
+    """
+    manager = _MarkerManager()
+    manager.initial_marker = _initial_marker(_policy(1))
+    controller, services = _controller(manager)
+    controller.start()
+    controller.apply(_policy(2))
+    restored = SimpleNamespace(spec=SimpleNamespace(sandbox_id="asbx", generation=2))
+
+    controller.probe_initial(
+        restored,
+        expected_container_id="container-b",
+        preparation_id="ajob",
+        members=(),
+    )
+
+    assert [(service.config.revision, service.initial_probe_calls) for service in services] == [
+        (2, 1)
+    ]
     controller.close()

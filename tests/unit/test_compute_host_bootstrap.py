@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import io
 import json
+import os
 import shlex
 import tarfile
 import threading
@@ -15,6 +16,7 @@ from unittest.mock import AsyncMock
 import pytest
 from dotenv import dotenv_values
 from pydantic import SecretStr, ValidationError
+from tests.support.host_docker import Docker, probe, sandbox, service, work
 
 from cloud_agent.ports.external.compute_provider import (
     NodeObservation,
@@ -26,9 +28,18 @@ from cloud_agent.providers.compute.host_bootstrap import (
     _DEPLOY,
     _INVENTORY,
     _PREFLIGHT,
+    _QUIESCE,
     _READINESS,
     _REQUIRED_ENV,
     SshHostBootstrap,
+)
+from cloud_agent_host.chat_sandbox_models import CHAT_NAMESPACE_LABEL
+from cloud_agent_host.runtime_images import (
+    NAMESPACE_LABEL,
+    RUNTIME_LABEL,
+    SOURCE_LABEL,
+    VERSION_LABEL,
+    WORK_LABEL,
 )
 
 NODE = NodeObservation(
@@ -85,7 +96,7 @@ def setup(tmp_path, *, unsafe_member=None):
     env = dict.fromkeys(_REQUIRED_ENV, "value")
     files = {}
     secrets = {}
-    for prefix in ("AGENT_TUNNEL", "AGENT_MCP_TUNNEL", "AGENT_CONTROL_PLANE_TUNNEL"):
+    for prefix in ("AGENT_MCP_TUNNEL", "AGENT_CONTROL_PLANE_TUNNEL"):
         for suffix in ("SSH_KEY", "SSH_KNOWN_HOSTS"):
             filename = ".compute-secrets/" + prefix.lower() + "-" + suffix.lower()
             ref = "deployment:" + prefix.lower() + "-" + suffix.lower()
@@ -365,14 +376,15 @@ async def test_inventory_includes_stopped_containers_and_orphans(tmp_path):
     assert inventory.complete and inventory.retained_containers == 1 and inventory.orphan_state
     command = transport.run.call_args.args[1]
     script = shlex.split(command)[4]
-    assert "['docker', 'ps', '-aq']" in script
+    assert "'docker', 'ps', '-a', '--no-trunc', '--format'" in script
+    assert "'docker', 'inspect'" not in script
     assert "['docker', 'volume', 'ls', '-q']" in script
 
 
 def test_remote_scripts_compile_and_deployment_refuses_existing_unowned_root(
     tmp_path, monkeypatch, capsys
 ):
-    for script in (_PREFLIGHT, _DEPLOY, _READINESS, _INVENTORY):
+    for script in (_PREFLIGHT, _DEPLOY, _READINESS, _INVENTORY, _QUIESCE):
         compile(script, "remote-bootstrap", "exec")
     root = tmp_path / "existing-host"
     root.mkdir()
@@ -627,11 +639,11 @@ async def test_checked_operator_example_loads_and_renders_real_bootstrap_payload
         )
         assert env["AGENT_MCP_TUNNEL_REMOTE_PORT"] == "8001"
         assert env["AGENT_CONTROL_PLANE_TUNNEL_REMOTE_PORT"] == "8000"
-        assert env["AGENT_TUNNEL_SSH_KEY"] == "/opt/cloud-agent-pilot/.compute-secrets/gateway.key"
+        assert "AGENT_TUNNEL_SSH_KEY" not in env
         assert env["AGENT_SANDBOX_MANAGER_REVERSE_PORT"] == "19092"
         assert "{" not in archive.extractfile(".env").read().decode()
         secrets = [m for m in archive.getmembers() if m.name.startswith(".compute-secrets/")]
-        assert len(secrets) == 6
+        assert len(secrets) == 4
         # The secrets above were written without a final newline, as an Admin
         # request delivers them; OpenSSH cannot read a key in that form.
         for member in secrets:
@@ -682,6 +694,7 @@ def test_remote_inventory_only_exempts_exact_current_host_enrollment_files(
         "identity": {"host": INTENT.host, "node_id": INTENT.node_id},
     }
     monkeypatch.setattr("sys.argv", ["remote", json.dumps(params)])
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
     monkeypatch.setattr("shutil.which", lambda command: "/usr/bin/docker")
     # The complete Docker inventory is empty; only on-disk state distinguishes
     # the safe fresh Host from another Host's unobserved retained files.
@@ -695,6 +708,666 @@ def test_remote_inventory_only_exempts_exact_current_host_enrollment_files(
     assert ("orphan_state_present" in result["blocked_reasons"]) is (extra is not None)
 
 
+def _run_inventory(tmp_path, monkeypatch, capsys, recorded=None) -> dict:
+    """Run the shipped inventory script over ``tmp_path / "machine"`` with empty Docker.
+
+    ``recorded`` arrives on standard input, as ``SshHostBootstrap.inventory`` sends it.
+    """
+    import pathlib
+
+    filesystem = tmp_path / "machine"
+    original_path = pathlib.Path
+
+    def isolated_path(value):
+        value = str(value)
+        return (
+            filesystem / value.lstrip("/")
+            if value.startswith("/var/lib/")
+            else original_path(value)
+        )
+
+    params = {
+        "root": str(tmp_path / "no-deploy-yet"),
+        "identity": {"host": INTENT.host, "node_id": INTENT.node_id},
+    }
+    monkeypatch.setattr("sys.argv", ["remote", json.dumps(params)])
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO(json.dumps(recorded or {"checkpoints": {}, "removals": {}}))
+    )
+    monkeypatch.setattr("shutil.which", lambda command: "/usr/bin/docker")
+    monkeypatch.setattr("subprocess.check_output", lambda args, **kwargs: "")
+    with monkeypatch.context() as local:
+        local.setattr("pathlib.Path", isolated_path)
+        exec(_INVENTORY, {})
+    result = json.loads(capsys.readouterr().out)
+    assert result["complete"] is True
+    return result
+
+
+def _host_archives(tmp_path) -> Path:
+    """The Sandbox Manager's archive state, as this Host's Compose file mounts it."""
+    state = tmp_path / "machine/var/lib/cloud-agent" / INTENT.host
+    state.mkdir(parents=True)
+    (state / "credential").write_text("persisted enrollment")
+    return state / "sandbox-archives"
+
+
+#: The checkpoint fields the control plane records, as ``recorded_host_state`` returns them.
+_CHECKPOINT_FIELDS = (
+    "checkpoint_id",
+    "sandbox_id",
+    "generation",
+    "container_id",
+    "base_image",
+    "runtime_id",
+    "runtime_version",
+    "object_key",
+    "version_id",
+    "sha256",
+    "size_bytes",
+    "new_layer_bytes",
+    "layer_count",
+    "format_version",
+    "start_seq",
+)
+
+#: What the control plane recorded of the removal ``_discarded`` carries out.
+_REMOVAL = {
+    "thread_id": "thread-origin",
+    "sandbox_id": "sandbox-1",
+    "generation": 2,
+    "container_id": "container-1",
+}
+
+
+def _saved_checkpoint(archives: Path, sandbox_id: str = "asbx_one") -> dict:
+    """Have the Host's checkpoint store keep a receipt; return what the control plane recorded."""
+    from tests.unit.test_sandbox_checkpoints import _receipt
+
+    from cloud_agent_host.sandbox_checkpoints import SandboxCheckpointStore
+
+    receipt = _receipt(sandbox_id)
+    SandboxCheckpointStore(archives / "checkpoints").save(receipt)
+    return {key: receipt.as_dict()[key] for key in _CHECKPOINT_FIELDS}
+
+
+def _discarded(
+    archives: Path, request_id: str, *, finish: bool = True, absent: bool = False
+) -> None:
+    """Remove one stopped container through the Host's own discard, leaving its receipts.
+
+    With ``absent`` the container is already gone, and the discard proves it.
+    """
+    from tests.unit.test_sandbox_deletion_backup import _Manager
+
+    from cloud_agent_host.chat_sandbox import ChatSandboxSpec
+    from cloud_agent_host.sandbox_deletion_backup import (
+        ArchiveIdentity,
+        SandboxDeletionBackupService,
+    )
+    from cloud_agent_host.shared_session_supervisor import (
+        SharedChatSessionSupervisor,
+        SharedMemberManifest,
+    )
+
+    spec = ChatSandboxSpec(
+        thread_id="thread-origin", sandbox_id="sandbox-1", generation=2, runtime_id="claude-code"
+    )
+    manager = _Manager(spec)
+    supervisor = SharedChatSessionSupervisor(manager)
+    if absent:
+        manager.current = None
+    else:
+        supervisor.register_manifest(
+            spec,
+            [
+                SharedMemberManifest(
+                    thread_id="thread-origin", native_session_id="native", resident_slot_id=0
+                )
+            ],
+            expected_container_id="container-1",
+        )
+    service = SandboxDeletionBackupService(supervisor, state_dir=archives)
+    identity = ArchiveIdentity("thread-origin", request_id, 2, "container-1", "")
+    service.discard(identity, sandbox_id="sandbox-1")
+    assert manager.removals == (0 if absent else 1)
+    if not finish:
+        (service._directory(identity) / "discarded.json").unlink()
+
+
+def test_inventory_excuses_the_checkpoint_receipt_the_control_plane_recorded(
+    tmp_path, monkeypatch, capsys
+):
+    """A Host keeps each sandbox's latest checkpoint receipt; its data is in object storage."""
+    archives = _host_archives(tmp_path)
+    expected = _saved_checkpoint(archives)
+
+    recorded = {"checkpoints": {"asbx_one": expected}, "removals": {}}
+    assert _run_inventory(tmp_path, monkeypatch, capsys, recorded)["orphan_state"] is False
+    assert _run_inventory(tmp_path, monkeypatch, capsys)["orphan_state"] is True
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"checkpoint_id": "f" * 32},
+        {"generation": 4},
+        {"container_id": "container-other"},
+        {"object_key": "cloud-agent/sandbox/v2/other.oci.tar"},
+        {"version_id": "v2"},
+        {"sha256": "f" * 64},
+        {"size_bytes": 1},
+        {"start_seq": 7},
+    ],
+)
+def test_inventory_counts_a_checkpoint_receipt_that_differs_from_the_record(
+    tmp_path, monkeypatch, capsys, changed
+):
+    archives = _host_archives(tmp_path)
+    expected = _saved_checkpoint(archives)
+
+    recorded = {"checkpoints": {"asbx_one": {**expected, **changed}}, "removals": {}}
+    assert _run_inventory(tmp_path, monkeypatch, capsys, recorded)["orphan_state"] is True
+
+
+@pytest.mark.parametrize("kept", [("sandbox_id", "checkpoint_id"), ()])
+def test_inventory_counts_a_checkpoint_receipt_missing_what_was_recorded(
+    tmp_path, monkeypatch, capsys, kept
+):
+    archives = _host_archives(tmp_path)
+    expected = _saved_checkpoint(archives)
+    path = archives / "checkpoints" / (hashlib.sha256(b"asbx_one").hexdigest() + ".json")
+    stored = json.loads(path.read_text())
+    path.write_text(json.dumps({key: stored[key] for key in kept}))
+
+    recorded = {"checkpoints": {"asbx_one": expected}, "removals": {}}
+    assert _run_inventory(tmp_path, monkeypatch, capsys, recorded)["orphan_state"] is True
+
+
+def test_inventory_never_excuses_a_receipt_filed_under_another_sandbox(
+    tmp_path, monkeypatch, capsys
+):
+    archives = _host_archives(tmp_path)
+    expected = _saved_checkpoint(archives)
+    one = archives / "checkpoints" / (hashlib.sha256(b"asbx_one").hexdigest() + ".json")
+    one.rename(one.with_name(hashlib.sha256(b"asbx_two").hexdigest() + ".json"))
+
+    recorded = {"checkpoints": {"asbx_two": {**expected, "sandbox_id": "asbx_two"}}, "removals": {}}
+    assert _run_inventory(tmp_path, monkeypatch, capsys, recorded)["orphan_state"] is True
+
+
+@pytest.mark.parametrize("absent", [False, True])
+def test_inventory_excuses_a_confirmed_removals_finished_receipts(
+    tmp_path, monkeypatch, capsys, absent
+):
+    """Both forms the Host writes: the container it removed, or one it proved gone."""
+    archives = _host_archives(tmp_path)
+    _discarded(archives, "superseded-1", absent=absent)
+
+    recorded = {"checkpoints": {}, "removals": {"superseded-1": _REMOVAL}}
+    assert _run_inventory(tmp_path, monkeypatch, capsys, recorded)["orphan_state"] is False
+
+
+@pytest.mark.parametrize(
+    ("removals", "finish", "extra"),
+    [
+        ({}, True, None),
+        ({"superseded-2": _REMOVAL}, True, None),
+        # The Host recorded the request but never finished it.
+        ({"superseded-1": _REMOVAL}, False, None),
+        ({"superseded-1": _REMOVAL}, True, "archive.tar"),
+        ({"superseded-1": {**_REMOVAL, "thread_id": "thread-other"}}, True, None),
+        ({"superseded-1": {**_REMOVAL, "generation": 999}}, True, None),
+        ({"superseded-1": {**_REMOVAL, "container_id": "container-other"}}, True, None),
+        ({"superseded-1": {**_REMOVAL, "sandbox_id": "sandbox-other"}}, True, None),
+    ],
+)
+def test_inventory_counts_receipts_of_any_other_removal(
+    tmp_path, monkeypatch, capsys, removals, finish, extra
+):
+    archives = _host_archives(tmp_path)
+    _discarded(archives, "superseded-1", finish=finish)
+    if extra:
+        directory = archives / hashlib.sha256(b"superseded-1").hexdigest()
+        (directory / extra).write_text("retained data")
+
+    result = _run_inventory(
+        tmp_path, monkeypatch, capsys, {"checkpoints": {}, "removals": removals}
+    )
+    assert result["orphan_state"] is True
+
+
+@pytest.mark.parametrize(
+    "names", [("discard.json",), ("discarded.json",), ("discard.json", "discarded.json")]
+)
+@pytest.mark.parametrize(
+    "rewrite",
+    [
+        # Another removal, the receipts agreeing with each other where both change.
+        lambda receipt: {
+            **receipt,
+            "identity": {**receipt["identity"], "generation": 999, "container_id": "other"},
+        },
+        lambda receipt: {"identity": {"request_id": receipt["identity"]["request_id"]}},
+        lambda receipt: {**receipt, "sandbox_id": "sandbox-1", "target_absent": True},
+    ],
+)
+def test_inventory_counts_receipts_that_do_not_record_the_removal(
+    tmp_path, monkeypatch, capsys, names, rewrite
+):
+    archives = _host_archives(tmp_path)
+    _discarded(archives, "superseded-1")
+    directory = archives / hashlib.sha256(b"superseded-1").hexdigest()
+    for name in names:
+        path = directory / name
+        path.write_text(json.dumps(rewrite(json.loads(path.read_text()))))
+
+    recorded = {"checkpoints": {}, "removals": {"superseded-1": _REMOVAL}}
+    assert _run_inventory(tmp_path, monkeypatch, capsys, recorded)["orphan_state"] is True
+
+
+def test_inventory_counts_a_discard_whose_spec_names_another_group(tmp_path, monkeypatch, capsys):
+    archives = _host_archives(tmp_path)
+    _discarded(archives, "superseded-1")
+    path = archives / hashlib.sha256(b"superseded-1").hexdigest() / "discard.json"
+    started = json.loads(path.read_text())
+    started["spec"]["sandbox_id"] = "sandbox-other"
+    path.write_text(json.dumps(started))
+
+    recorded = {"checkpoints": {}, "removals": {"superseded-1": _REMOVAL}}
+    assert _run_inventory(tmp_path, monkeypatch, capsys, recorded)["orphan_state"] is True
+
+
+def test_inventory_never_excuses_receipts_filed_under_another_request(
+    tmp_path, monkeypatch, capsys
+):
+    archives = _host_archives(tmp_path)
+    _discarded(archives, "superseded-other")
+    (archives / hashlib.sha256(b"superseded-other").hexdigest()).rename(
+        archives / hashlib.sha256(b"superseded-1").hexdigest()
+    )
+
+    recorded = {"checkpoints": {}, "removals": {"superseded-1": _REMOVAL}}
+    assert _run_inventory(tmp_path, monkeypatch, capsys, recorded)["orphan_state"] is True
+
+
+@pytest.mark.asyncio
+async def test_inventory_records_travel_on_stdin_through_a_real_ssh_client_process(
+    tmp_path, monkeypatch
+):
+    """A Host with a long history still gets a command line of fixed length.
+
+    Only the ``ssh`` binary is replaced: the real bootstrap and transport
+    start it as a subprocess, and it keeps what it was given.
+    """
+    from cloud_agent.ports.external.host_bootstrap import RecordedHostState
+    from cloud_agent.providers.compute.ssh import OpenSshTransport
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    seen = tmp_path / "seen"
+    ssh = bin_dir / "ssh"
+    ssh.write_text(
+        "#!/bin/sh\n"
+        f'for last; do :; done; printf "%s" "$last" > {seen}.command\n'
+        f"cat > {seen}.stdin\n"
+        """printf '{"complete": true}'\n"""
+    )
+    ssh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    resolver = AsyncMock()
+    resolver.resolve.side_effect = lambda ref: (
+        "PRIVATE KEY\n" if ref == "ssh-1" else "node.example.org ssh-ed25519 VERIFIED\n"
+    )
+    _, profile, _, _ = setup(tmp_path)
+    bootstrap = SshHostBootstrap(transport=OpenSshTransport(resolver), resolver=resolver)
+
+    async def command_for(groups: int) -> tuple[int, dict]:
+        recorded = RecordedHostState(
+            checkpoints={
+                f"asbx_{i}": {"checkpoint_id": f"{i:032x}", "sandbox_id": f"asbx_{i}"}
+                for i in range(groups)
+            },
+            removals={f"superseded-{i:064x}": dict(_REMOVAL) for i in range(groups)},
+        )
+        result = await bootstrap.inventory(NODE, profile, INTENT, recorded)
+        assert result.complete
+        sent = json.loads((tmp_path / "seen.stdin").read_text())
+        assert sent == recorded.model_dump(mode="json")
+        return len((tmp_path / "seen.command").read_text()), sent
+
+    small, _ = await command_for(1)
+    large, sent = await command_for(5000)
+    assert len(sent["checkpoints"]) == len(sent["removals"]) == 5000
+    assert large == small < 64 * 1024
+
+
+def test_inventory_still_counts_an_administrators_archive_request(tmp_path, monkeypatch, capsys):
+    """Archive-before-delete receipts are not a confirmed removal, whatever their id."""
+    archives = _host_archives(tmp_path)
+    directory = archives / hashlib.sha256(b"delete-1").hexdigest()
+    directory.mkdir(parents=True)
+    for name in ("prepare.json", "upload.json", "commit.json", "deleted.json"):
+        (directory / name).write_text(json.dumps({"receipt": {}}))
+
+    recorded = {"checkpoints": {}, "removals": {"delete-1": _REMOVAL}}
+    assert _run_inventory(tmp_path, monkeypatch, capsys, recorded)["orphan_state"] is True
+
+
+#: The Compose project, and sandbox namespace, of the deployment on ``INTENT``'s node.
+_PROJECT = "ca-" + INTENT.node_id.replace("-", "").lower()
+
+
+def _quiesce(tmp_path, monkeypatch, capsys, docker: Docker, root=None) -> dict:
+    params = {
+        "root": str(root or tmp_path / "no-deploy-yet"),
+        "identity": {"host": INTENT.host, "node_id": INTENT.node_id},
+    }
+    monkeypatch.setattr("sys.argv", ["remote", json.dumps(params)])
+    monkeypatch.setattr("shutil.which", lambda command: "/usr/bin/docker")
+    monkeypatch.setattr("subprocess.check_output", docker.check_output)
+    monkeypatch.setattr("subprocess.check_call", docker.check_call)
+    with pytest.raises(SystemExit) as answered:
+        exec(_QUIESCE, {})
+    assert answered.value.code == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_quiesce_stops_the_runner_and_removes_only_its_own_self_tests(
+    tmp_path, monkeypatch, capsys
+):
+    docker = Docker(
+        service("runner-1", _PROJECT, "runner"),
+        service("manager", _PROJECT, "sandbox-manager"),
+        probe("probe-mine", _PROJECT),
+        # Left by a runner stopped mid-test: no longer running, still there.
+        {**probe("probe-stopped", _PROJECT), "running": False},
+        probe("probe-elsewhere", "ca-another"),
+        sandbox("chat", _PROJECT, **{"org.freeinference.chat-probe-created": "1760000000"}),
+        sandbox("chat-plain", _PROJECT),
+        # Each of the three marks is required, not just one.
+        sandbox("chat-unmarked", _PROJECT, runtime="preflight"),
+    )
+
+    assert _quiesce(tmp_path, monkeypatch, capsys, docker) == {
+        "quiesced": True,
+        "probes_removed": 2,
+    }
+    assert docker.changes[0] == ["docker", "stop", "-t", "60", "runner-1"]
+    assert sorted(docker.changes[1][3:]) == ["probe-mine", "probe-stopped"]
+    assert len(docker.changes) == 2
+    # The release still removes through the sandbox manager; chats are its to keep.
+    assert docker.containers["manager"]["running"] is True
+    assert {"probe-elsewhere", "chat", "chat-plain", "chat-unmarked"} <= set(docker.containers)
+
+
+def test_quiesce_reports_a_runner_still_running(tmp_path, monkeypatch, capsys):
+    docker = Docker(
+        service("runner-1", _PROJECT, "runner"),
+        probe("probe", _PROJECT),
+        {**work("download", _PROJECT), "running": False},
+        stops=False,
+    )
+
+    assert _quiesce(tmp_path, monkeypatch, capsys, docker) == {
+        "quiesced": False,
+        "reason": "host_quiesce_failed",
+    }
+    # Nothing is removed while something could still be making more.
+    assert {"probe", "download"} <= set(docker.containers)
+    assert [change[1] for change in docker.changes] == ["stop"]
+
+
+def test_quiesce_removes_the_runtime_download_work_its_runner_left(tmp_path, monkeypatch, capsys):
+    """A runner stopped mid-download leaves its install and check containers behind.
+
+    The inventory counts each as unmanaged, so release refused a node no one
+    had used (2026-10-26).
+    """
+    docker = Docker(
+        service("runner-1", _PROJECT, "runner"),
+        service("manager", _PROJECT, "sandbox-manager"),
+        # The fetch, still running once the runner that attached to it is gone.
+        work("fetch", _PROJECT, **{"org.freeinference.runtime.codex.version": "0.1.0"}),
+        # The install scripts, finished before anything removed them.
+        {**work("scripts", _PROJECT), "running": False},
+        # The check, made from the candidate image, which names its namespace.
+        {
+            **work(
+                "check",
+                _PROJECT,
+                **{NAMESPACE_LABEL: _PROJECT, RUNTIME_LABEL: "codex", VERSION_LABEL: "0.2.0"},
+            ),
+            "running": False,
+        },
+        probe("probe", _PROJECT),
+    )
+
+    assert _quiesce(tmp_path, monkeypatch, capsys, docker) == {
+        "quiesced": True,
+        # Self-tests only: the work is not counted as one.
+        "probes_removed": 1,
+    }
+    assert docker.changes[0] == ["docker", "stop", "-t", "60", "runner-1"]
+    removed = [change[3:] for change in docker.changes if change[1:3] == ["rm", "--force"]]
+    assert removed == [["probe"], ["fetch", "scripts", "check"]]
+    assert set(docker.containers) == {"runner-1", "manager"}
+
+
+def test_quiesce_removes_no_work_but_its_own_deployments(tmp_path, monkeypatch, capsys):
+    mine = {WORK_LABEL: _PROJECT}
+    docker = Docker(
+        service("runner-1", _PROJECT, "runner"),
+        work("mine", _PROJECT),
+        work("elsewhere", "ca-another"),
+        # Docker matches a label's value whole: this is a different namespace.
+        work("longer", _PROJECT + "0"),
+        {"id": "unlabeled", "running": False, "labels": {}},
+        # A container of a kept version: its image empties the work label.
+        {**work("kept", ""), "running": False},
+        # A chat's copy source, made from a version an earlier release kept
+        # with the work label of the container it was committed from.
+        {**work("source", _PROJECT, **{SOURCE_LABEL: _PROJECT}), "running": False},
+        # Chats, checkpoints and environment snapshots made from such an image.
+        sandbox("chat", _PROJECT, **mine),
+        {
+            "id": "snapshot",
+            "running": False,
+            "labels": {**mine, "org.freeinference.chat-environment-snapshot": "env-1"},
+        },
+        {"id": "namespaced", "running": False, "labels": {**mine, CHAT_NAMESPACE_LABEL: _PROJECT}},
+        # Another deployment's check, or a Compose service: never install work.
+        work("foreign-check", _PROJECT, **{NAMESPACE_LABEL: "ca-another"}),
+        {
+            **service("worker", _PROJECT, "worker"),
+            "labels": {**service("worker", _PROJECT, "worker")["labels"], **mine},
+        },
+        # Labels of this platform this script does not know are no one's work.
+        work("attestation", _PROJECT, **{"org.freeinference.storage-attestation": "true"}),
+        work("environment-test", _PROJECT, **{"hybridinference.environment-test": "1"}),
+    )
+
+    assert _quiesce(tmp_path, monkeypatch, capsys, docker) == {
+        "quiesced": True,
+        "probes_removed": 0,
+    }
+    assert docker.changes[1:] == [["docker", "rm", "--force", "mine"]]
+    assert set(docker.containers) == {
+        "runner-1",
+        "elsewhere",
+        "longer",
+        "unlabeled",
+        "kept",
+        "source",
+        "chat",
+        "snapshot",
+        "namespaced",
+        "foreign-check",
+        "worker",
+        "attestation",
+        "environment-test",
+    }
+
+
+@pytest.mark.parametrize(
+    "refused",
+    [
+        # The listing of this deployment's work.
+        f"label={WORK_LABEL}=",
+        # Reading the labels of what it found, as when one went meanwhile.
+        "container inspect",
+        # Removing it.
+        "rm --force mine",
+    ],
+)
+def test_quiesce_that_cannot_remove_its_work_fails(tmp_path, monkeypatch, capsys, refused):
+    docker = Docker(
+        service("runner-1", _PROJECT, "runner"), work("mine", _PROJECT), fails=(refused,)
+    )
+
+    assert _quiesce(tmp_path, monkeypatch, capsys, docker) == {
+        "quiesced": False,
+        "reason": "host_quiesce_failed",
+    }
+    assert "mine" in docker.containers
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "not json",
+        json.dumps({"id": "mine"}),
+        json.dumps({"id": "mine", "labels": ["not", "a", "map"]}),
+        json.dumps({"id": "mine", "labels": []}),
+        # The ID Docker reports must be the one listed.
+        json.dumps({"id": "other", "labels": {WORK_LABEL: _PROJECT}}),
+        "",
+    ],
+)
+def test_quiesce_that_cannot_read_its_works_labels_fails(tmp_path, monkeypatch, capsys, answer):
+    docker = Docker(service("runner-1", _PROJECT, "runner"), work("mine", _PROJECT))
+    listing = docker.check_output
+
+    def check_output(args, **kwargs):
+        return answer if args[1:3] == ["container", "inspect"] else listing(args, **kwargs)
+
+    monkeypatch.setattr(docker, "check_output", check_output)
+
+    assert _quiesce(tmp_path, monkeypatch, capsys, docker) == {
+        "quiesced": False,
+        "reason": "host_quiesce_failed",
+    }
+    assert "mine" in docker.containers
+
+
+def test_quiesce_never_touches_another_deployment(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "deployed"
+    root.mkdir()
+    (root / ".compute-identity.json").write_text(json.dumps({"host": "someone-else"}))
+    docker = Docker(service("runner-1", _PROJECT, "runner"), probe("probe", _PROJECT))
+
+    assert _quiesce(tmp_path, monkeypatch, capsys, docker, root=root) == {
+        "quiesced": False,
+        "reason": "deployment_identity_conflict",
+    }
+    assert docker.changes == []
+
+
+def test_inventory_reads_every_container_from_one_listing(tmp_path, monkeypatch, capsys):
+    """A container that goes between two Docker calls cannot fail the read."""
+    docker = Docker(
+        service("runner-1", _PROJECT, "runner"),
+        {**sandbox("chat", _PROJECT), "running": False},
+        {"id": "stray", "running": True, "labels": {}},
+    )
+    monkeypatch.setattr("subprocess.check_output", docker.check_output)
+    params = {
+        "root": str(tmp_path / "no-deploy-yet"),
+        "identity": {"host": INTENT.host, "node_id": INTENT.node_id},
+    }
+    monkeypatch.setattr("sys.argv", ["remote", json.dumps(params)])
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+    monkeypatch.setattr("shutil.which", lambda command: "/usr/bin/docker")
+
+    exec(_INVENTORY, {})
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["complete"] is True
+    assert result["retained_containers"] == 1
+    assert result["unknown_containers"] == 1
+
+
+def test_inventory_that_cannot_read_a_listing_is_incomplete(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "subprocess.check_output",
+        lambda args, **kwargs: "not json" if args[:2] == ["docker", "ps"] else "",
+    )
+    params = {
+        "root": str(tmp_path / "no-deploy-yet"),
+        "identity": {"host": INTENT.host, "node_id": INTENT.node_id},
+    }
+    monkeypatch.setattr("sys.argv", ["remote", json.dumps(params)])
+    monkeypatch.setattr("sys.stdin", io.StringIO("{}"))
+    monkeypatch.setattr("shutil.which", lambda command: "/usr/bin/docker")
+
+    exec(_INVENTORY, {})
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["complete"] is False
+    assert result["blocked_reasons"] == ["host_inventory_unavailable"]
+
+
+@pytest.mark.asyncio
+async def test_quiesce_returns_how_many_self_tests_it_removed(tmp_path):
+    bootstrap, profile, transport, _ = setup(tmp_path)
+    transport.run.side_effect = [json.dumps({"quiesced": True, "probes_removed": 3})]
+
+    assert await bootstrap.quiesce(NODE, profile, INTENT) == 3
+    script = shlex.split(transport.run.call_args.args[1])[4]
+    assert script == _QUIESCE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "code", "retryable"),
+    [
+        ({"quiesced": False, "reason": "host_quiesce_failed"}, "host_quiesce_failed", True),
+        (
+            {"quiesced": False, "reason": "deployment_identity_conflict"},
+            "deployment_identity_conflict",
+            False,
+        ),
+        # A node can print anything; it is believed only in our vocabulary.
+        ({"quiesced": False, "reason": "rm -rf /"}, "host_quiesce_failed", True),
+        ({"quiesced": True}, "host_quiesce_failed", True),
+    ],
+)
+async def test_quiesce_failures_keep_the_inventory_from_running(tmp_path, answer, code, retryable):
+    bootstrap, profile, transport, _ = setup(tmp_path)
+    transport.run.side_effect = [json.dumps(answer)]
+
+    with pytest.raises(ProviderError) as refused:
+        await bootstrap.quiesce(NODE, profile, INTENT)
+    assert refused.value.code == code
+    assert refused.value.retryable is retryable
+
+
+@pytest.mark.asyncio
+async def test_inventory_believes_only_its_own_reasons(tmp_path):
+    bootstrap, profile, transport, _ = setup(tmp_path)
+    transport.run.side_effect = [
+        json.dumps(
+            {
+                "complete": False,
+                "blocked_reasons": ["host_inventory_unavailable", "<script>alert(1)</script>"],
+            }
+        )
+    ]
+
+    inventory = await bootstrap.inventory(NODE, profile, INTENT)
+    assert inventory.blocked_reasons == ("host_inventory_unavailable",)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "name",
@@ -704,11 +1377,16 @@ def test_remote_inventory_only_exempts_exact_current_host_enrollment_files(
         "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY",
         "AGENT_CONTROL_TOKEN_SECRET",
         "AGENT_SESSION_SECRET",
+        "AGENT_LOCAL_SESSION_SECRET",
+        "AGENT_SMTP_PASSWORD",
     ],
 )
 async def test_deployment_environment_rejects_unrelated_and_control_plane_authority(tmp_path, name):
     bootstrap, profile, transport, secrets = setup(tmp_path)
     secrets["deployment:env"] += f"\n{name}=must-not-leave-control-plane"
+    with pytest.raises(ProviderError, match="security boundary"):
+        await bootstrap._archive(profile, INTENT, SecretStr("enrollment"))
+    transport.run.assert_not_awaited()
     with pytest.raises(ProviderError, match="security boundary"):
         await bootstrap.deploy(NODE, profile, INTENT, SecretStr("enrollment"))
     assert transport.run.await_count == 1
@@ -734,3 +1412,35 @@ async def test_a_template_can_name_the_sandbox_image_published_for_the_deployed_
         "ghcr.io/harvardmadsys/cloud-agent-sandbox:sandbox-" + profile.deployment_sha
     )
     assert env["AGENT_SANDBOX_IMAGE_PULL"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_writes_no_account_mode_and_no_inference_relay(tmp_path):
+    bootstrap, profile, _transport, _secrets = setup(tmp_path)
+    payload = await bootstrap._archive(profile, INTENT, SecretStr("enrollment"))
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+        env = dotenv_values(stream=io.StringIO(archive.extractfile(".env").read().decode()))
+        assert "AGENT_AUTH_MODE" not in env
+        assert not any(name.startswith("AGENT_TUNNEL_") for name in env)
+        assert "AGENT_MCP_TUNNEL_SSH_DESTINATION" in env
+        assert "AGENT_CONTROL_PLANE_TUNNEL_SSH_DESTINATION" in env
+        assert not any("agent_tunnel-" in name for name in archive.getnames())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stale",
+    [
+        "AGENT_AUTH_MODE=local",
+        "AGENT_AUTH_MODE=gateway",
+        "AGENT_GATEWAY_URL=http://inference:8080",
+        "AGENT_TUNNEL_SSH_DESTINATION=tunnel@inference.example",
+        "AGENT_TUNNEL_SSH_KEY=/keys/inference",
+    ],
+)
+async def test_a_profile_naming_the_retired_mode_or_inference_relay_is_refused(tmp_path, stale):
+    bootstrap, profile, transport, secrets = setup(tmp_path)
+    secrets["deployment:env"] += "\n" + stale
+    with pytest.raises(ProviderError, match="removed Gateway inference relay"):
+        await bootstrap._archive(profile, INTENT, None)
+    transport.run.assert_not_awaited()

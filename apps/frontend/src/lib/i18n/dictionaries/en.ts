@@ -1,3 +1,9 @@
+import { accountsEn } from './accounts';
+import { landingEn } from './landing';
+import { composerEn } from './composer';
+import { modelSelectionEn } from './modelSelection';
+import { usageEn } from './usage';
+
 /**
  * The source dictionary.
  *
@@ -10,6 +16,8 @@
  * Placeholders are `{name}` and are substituted by `translate()`.
  */
 export const en = {
+  ...accountsEn,
+  ...landingEn,
   'environment.title': 'Environment',
   'environment.configure': 'Configure Environment',
   'environment.sectionTitle': 'Environments',
@@ -189,6 +197,8 @@ export const en = {
   'environment.snapshot.failed': 'Prebuild failed',
   'environment.snapshot.rebuild': 'Prebuild again',
   'environment.snapshot.delete': 'Delete saved installation',
+  'environment.snapshot.deleteConfirm':
+    'Delete the saved installation of {name}? New tasks install from scratch until it is prebuilt again.',
   'environment.snapshot.prebuildAfterTest':
     'A passing test queues a prebuild of this installation. New tasks start from it while the lockfiles are unchanged.',
   'environment.choose': 'Choose environment',
@@ -278,6 +288,7 @@ export const en = {
   'workspaceFiles.binaryPreview':
     'Preview is unavailable for this file type. Download the file to open it.',
   'workspaceFiles.binaryMissing': 'This binary file has no downloadable content.',
+  'workspaceFiles.listingIncomplete': 'Some entries in this folder are not listed.',
   'transcript.display': 'Activity: {mode}',
   'transcript.displayTitle': 'Show in chat',
   'transcript.displayHint': 'Only changes the display, not how the agent runs.',
@@ -327,12 +338,6 @@ export const en = {
   'turnResults.backToWorkspace': 'Back to current workspace',
   'turnResults.recordedTurn': 'Recorded changes · Turn {number}',
   'turnResults.recordedHint': 'This view shows the changes recorded for this turn.',
-  'composer.send': 'Send',
-  'composer.sendHint': 'Send — Enter to send, Shift+Enter for a new line',
-  'composer.queue': 'Queue',
-  'composer.queueHint': 'Send after the current turn finishes',
-  'composer.steer': 'Steer now',
-  'composer.steerHint': 'Send into the current turn — ⌘Enter / Ctrl+Enter',
   'deployment.version': 'Version',
   'deployment.date': 'Deployed',
   'deployment.unavailable': 'Not available',
@@ -345,20 +350,10 @@ export const en = {
   'review.fixHint': 'Ask this review agent to fix its findings in the shared workspace',
   'watchPr.action': 'Watch PR and merge',
   'watchPr.start':
-    'Ask the agent to watch tests and reviews, then merge. Requires source-control tools with merge access.',
-  'watchPr.unavailable':
-    'This chat must be able to continue, and its latest changes must be in the PR, before starting a PR watch.',
+    'Ask the agent to watch tests and reviews, then merge. It acts on GitHub as you, so your GitHub account needs merge access.',
+  'watchPr.unavailable': 'Available once this chat can continue and nothing is running in it.',
   'watchPr.sendFailed': 'Could not start watching this PR.',
-  'publish.create': 'Create PR',
-  'publish.update': 'Update PR',
-  'publish.createHint': 'Push this workspace to an agent/… branch and open a draft PR.',
-  'publish.updateHint': 'Push the workspace’s latest changes to its draft PR.',
-  'publish.unavailable': 'Available once the running turn finishes.',
-  'publish.inProgress': 'Publishing changes…',
-  'publish.failed': 'Could not publish changes. Try again.',
-  'publish.unchanged': 'No changes to publish.',
-  'publish.unpublished': 'Changes not in the PR yet.',
-  'publish.sendFailed': 'Could not publish this workspace.',
+  'outcome.openPr': 'Open PR',
   'sideChat.new': 'New Side Chat',
   'sideChat.close': 'Close {name}',
   'sideChat.region': 'Side chat',
@@ -410,11 +405,9 @@ export const en = {
   'nav.aria': 'Product navigation',
   'nav.skipToWorkspace': 'Skip to workspace',
   'nav.status': 'Status',
-  'nav.docsAssistant': 'Docs Assistant',
   'nav.docs': 'Documentation',
   'nav.agents': 'Agents',
   'nav.admin': 'Admin',
-  'nav.dashboard': 'Dashboard',
   'nav.logOut': 'Log out',
   'nav.logOutFailed': 'Could not log out. You are still signed in; try again.',
   'nav.switchAccount': 'Switch account',
@@ -431,9 +424,9 @@ export const en = {
   'nav.expandTaskList': 'Expand task list',
   'nav.collapseTaskList': 'Collapse task list',
 
-  'shell.accessRequired.title': 'Agent access required',
-  'shell.accessRequired.body': 'This account has not been granted access to this Agent deployment.',
-  'shell.accessRequired.back': 'Back to Dashboard',
+  'shell.renderError.title': 'This page could not be displayed',
+  'shell.renderError.body':
+    'Something on it failed to render. Retry, or open another chat or page.',
 
   // ── Sidebar ─────────────────────────────────────────────────────────────
   'sidebar.pinned': 'Pinned',
@@ -474,7 +467,6 @@ export const en = {
   'sidebar.archived': 'Archived',
   'sidebar.noJobs': 'No jobs yet.',
   'sidebar.resize': 'Resize task list',
-  'sidebar.showMore': 'Show {count} more',
   'sidebar.newTaskIn': 'New task in {project}',
   'sidebar.runningOrQueued': '{count} running or queued',
   'sidebar.pin': 'Pin {title}',
@@ -537,6 +529,9 @@ export const en = {
   'settings.collapseNavigation': 'Collapse settings navigation',
   'settings.expandNavigation': 'Expand settings navigation',
   'settings.personalDescription': 'Manage your profile and notifications.',
+  'settings.models.title': 'Models',
+  'settings.models.description':
+    'Your personal model connections: the provider API keys and models your tasks run on.',
   'settings.plugins': 'Plugins & MCPs',
   'settings.pluginsDescription':
     'Connect MCP servers and manage the skills available to your agents.',
@@ -544,6 +539,10 @@ export const en = {
   'settings.ssh': 'SSH connections',
   'settings.integrationsDescription':
     'Connect your source control accounts and manage repository access.',
+  'integrations.disconnectConfirm':
+    'Disconnect {name}? Agents can no longer use it until you connect it again.',
+  'integrations.disconnect': 'Disconnect',
+  'integrations.cancel': 'Cancel',
   'settings.environments': 'Environments',
   'settings.environmentsDescription':
     'Manage repository environments, setup scripts, and personal variables.',
@@ -553,13 +552,11 @@ export const en = {
   'settings.helpEnvironment': '2. Set up a repository environment (optional)',
   'settings.helpChat': '3. Start a chat',
   'settings.title': 'My Settings',
-  'settings.description':
-    'Manage your profile, connections, skills, memory, notifications, and keyboard shortcuts.',
   'settings.shortcuts.title': 'Keyboard shortcuts',
   'settings.shortcuts.description':
     'Customize navigation shortcuts. Changes apply immediately and are saved for your account in this browser.',
   'settings.shortcuts.recordingHelp':
-    'Click a shortcut and press Command or Ctrl with a letter, optionally with Shift. Press Esc to cancel.',
+    'Click a shortcut and press {modifier} with a letter, optionally with Shift. Press Esc to cancel.',
   'settings.shortcuts.search': 'Search chats',
   'settings.shortcuts.searchHelp': 'Focus search while the task list is expanded.',
   'settings.shortcuts.sidebar': 'Toggle task list',
@@ -573,7 +570,7 @@ export const en = {
   'settings.shortcuts.disable': 'Disable',
   'settings.shortcuts.disableAction': 'Disable shortcut for {action}',
   'settings.shortcuts.reset': 'Reset to defaults',
-  'settings.shortcuts.invalid': 'Use Command or Ctrl with a letter, optionally with Shift.',
+  'settings.shortcuts.invalid': 'Use {modifier} with a letter, optionally with Shift.',
   'settings.shortcuts.reserved':
     'This combination is reserved for editing or browser controls. Choose another.',
   'settings.shortcuts.conflict': 'Already used by “{action}”. Choose another shortcut.',
@@ -626,7 +623,6 @@ export const en = {
   'settings.memory.addLabel': 'New memory',
   'settings.memory.addPlaceholder': 'A rule to follow from now on, such as: Reply in Chinese.',
   'settings.memory.add': 'Add',
-  'settings.memory.adding': 'Adding…',
   'settings.memory.memories': 'Saved memories',
   'settings.memory.count': '{count}/30',
   'settings.memory.empty':
@@ -663,6 +659,8 @@ export const en = {
   'settings.projectMemory.projectsError': 'Could not load repositories.',
   'settings.projectMemory.noProjects': 'Repositories you work in appear here.',
   'settings.projectMemory.confirmTitle': 'Clear the memory of {repo}?',
+  ...composerEn,
+  ...modelSelectionEn,
   'settings.notifications.title': 'Notifications',
   'settings.notifications.description':
     'Get browser notifications when an agent asks a question or finishes a turn. Keep the app open to receive them.',
@@ -680,83 +678,7 @@ export const en = {
     'Notifications are blocked. Allow notifications for this site in your browser settings, then return here.',
   'settings.notifications.error':
     'Could not enable notifications. Check your browser settings and try again.',
-  'settings.usage.title': 'Usage',
-  'settings.usage.description':
-    'Your containers, what they use right now, and what your work has used over time.',
-  'settings.usage.loading': 'Loading usage…',
-  'settings.usage.loadError': 'Could not load usage.',
-  'settings.usage.retry': 'Try again',
-  'settings.usage.containers': 'Containers',
-  'settings.usage.total': 'Total',
-  'settings.usage.cpuNow': 'CPU now',
-  'settings.usage.memoryNow': 'Memory now',
-  'settings.usage.cores': '{value} cores',
-  'settings.usage.unmeasured':
-    'Running containers without a recent reading are not in these sums: {count}.',
-  'settings.usage.empty': 'You have no containers yet. One starts when a chat runs its first task.',
-  'settings.usage.showMore': 'Show {count} more',
-  'settings.usage.loadingMore': 'Loading…',
-  'settings.usage.untitled': 'Untitled chat',
-  'settings.usage.archived': 'Archived',
-  'settings.usage.moreChats': '+{count} more',
-  'settings.usage.reading': 'CPU {cpu} / {cpuLimit} cores · Memory {memory} / {memoryLimit}',
-  'settings.usage.noReading': 'No recent reading',
-  'settings.usage.idleStop': 'Stops when idle {when}',
-  'settings.usage.limits': 'Limit {cpu} cores · {memory}',
-  'settings.usage.lastUsed': 'Last used {when}',
-  'settings.usage.state.running': 'Running',
-  'settings.usage.state.starting': 'Starting',
-  'settings.usage.state.stopping': 'Stopping',
-  'settings.usage.state.stopped': 'Stopped',
-  'settings.usage.state.stored': 'Saved to storage',
-  'settings.usage.state.deleting': 'Deleting',
-  'settings.usage.state.unavailable': 'Unavailable',
-  'settings.usage.stateCount.running': '{count} running',
-  'settings.usage.stateCount.starting': '{count} starting',
-  'settings.usage.stateCount.stopping': '{count} stopping',
-  'settings.usage.stateCount.stopped': '{count} stopped',
-  'settings.usage.stateCount.stored': '{count} saved to storage',
-  'settings.usage.stateCount.deleting': '{count} deleting',
-  'settings.usage.stateCount.unavailable': '{count} unavailable',
-  'settings.usage.history': 'History',
-  'settings.usage.period': 'Period',
-  'settings.usage.days': '{count} days',
-  'settings.usage.cost': 'Model cost',
-  'settings.usage.costEstimate': 'Estimate, not a bill',
-  'settings.usage.tokens': 'Tokens',
-  'settings.usage.tokensInOut': '{in} in · {out} out',
-  'settings.usage.runningTime': 'Container running time',
-  'settings.usage.cpuTime': 'CPU',
-  'settings.usage.memoryTime': 'Memory',
-  'settings.usage.hours': '{value} h',
-  'settings.usage.minutes': '{value} min',
-  'settings.usage.coreHours': '{value} core-hours',
-  'settings.usage.gbHours': '{value} GB-hours',
-  'settings.usage.partlyMeasured':
-    'CPU and memory cover {measured} of {running} running time; measurement began recently.',
-  'settings.usage.unrecorded': 'Usage of {count} turns is not recorded yet.',
-  'settings.usage.chartLabel': '{metric} by day',
-  'settings.usage.chartMetric': 'Chart',
-  'settings.usage.chart.cost': 'Cost',
-  'settings.usage.chart.tokens': 'Tokens',
-  'settings.usage.chart.running': 'Running hours',
-  'settings.usage.chart.cpu': 'CPU core-hours',
-  'settings.usage.chart.memory': 'Memory GB-hours',
-  'settings.usage.today': 'today so far',
-  'settings.usage.notRecorded': 'not recorded',
-  'settings.usage.byModel': 'By model',
-  'settings.usage.model': 'Model',
-  'settings.usage.tokensIn': 'Input tokens',
-  'settings.usage.tokensOut': 'Output tokens',
-  'settings.usage.turnsColumn': 'Turns',
-  'settings.usage.unknownModel': 'Unknown model',
-  'settings.usage.otherModels': 'Other models',
-  'settings.usage.noData': 'No turns in this period.',
-  'settings.usage.utcNote':
-    'Days start at 00:00 UTC, when the daily limit resets. A turn counts on the day it started; CPU and memory count when they were used.',
-  'settings.usage.utcNoteLocal':
-    'Days start at 00:00 UTC ({time} your time), when the daily limit resets. A turn counts on the day it started; CPU and memory count when they were used.',
-  'settings.usage.dashboardLink': 'Daily limit and account usage',
+  ...usageEn,
   'notifications.question': 'Agent needs your answer',
   'notifications.succeeded': 'Agent turn finished',
   'notifications.failed': 'Agent turn failed',
@@ -779,13 +701,11 @@ export const en = {
     'Unarchive this session to use its terminal. Git and files remain available for viewing.',
 
   'settings.appearance.title': 'Appearance',
-  'settings.appearance.theme': 'Theme',
   'settings.appearance.light': 'Light',
   'settings.appearance.dark': 'Dark',
   'settings.appearance.system': 'System',
 
   'settings.language.title': 'Language',
-  'settings.language.label': 'Display language',
 
   'settings.gettingStarted.about': 'What is getting started?',
   'settings.gettingStarted.help': 'Takes you from connecting GitHub to your first task.',
@@ -848,8 +768,7 @@ export const en = {
   'archive.deleteSession': 'Permanently delete {title}',
   'archive.deleteAll': 'Permanently delete all',
   'archive.deleteFiltered': 'Permanently delete filtered',
-  'archive.deleteBusy':
-    'This session is preparing a fork or publishing. Try again after it finishes.',
+  'archive.deleteBusy': 'This session is preparing a fork. Try again after it finishes.',
   'archive.preparing': 'Collecting matching sessions…',
   'archive.prepareFailed':
     'Could not collect all matching sessions. No changes were made. Please try again.',
@@ -857,10 +776,9 @@ export const en = {
   'archive.deleteTitle': 'Permanently delete {count} sessions?',
   'archive.deleteBody':
     'You will no longer be able to view or restore these sessions, and any running task is stopped. This cannot be undone. Forked sessions and pushed branches or pull requests are unaffected; a workspace shared with other sessions is kept.',
-  'archive.deleteSkipped': '{count} sessions preparing a fork or publishing are excluded.',
+  'archive.deleteSkipped': '{count} sessions preparing a fork are excluded.',
   'archive.noDeletableTitle': 'No sessions can be deleted yet',
-  'archive.noDeletable':
-    'All matching sessions are preparing a fork or publishing. Try again after they finish.',
+  'archive.noDeletable': 'All matching sessions are preparing a fork. Try again after they finish.',
   'archive.bulkLimit':
     'Select at most {count} sessions at a time. Narrow your search or project and status filters, then try again.',
   'archive.scopeSession': 'Session: {title}',
@@ -875,8 +793,6 @@ export const en = {
   'archive.deleting': 'Deleting…',
   'archive.deleteFailed': 'Could not delete these sessions. Check your connection and try again.',
   'archive.forkInProgress': 'A selected session is being forked. Wait for the fork to finish.',
-  'archive.publicationPending':
-    'A selected session has unfinished publication. Wait for it to finish.',
   'archive.sessionNotFound': 'A selected session is no longer available.',
   'archive.selectionChanged': 'The selection has changed. Review the refreshed list and try again.',
   'archive.deletedOne': '1 session deleted',
@@ -943,10 +859,6 @@ export const en = {
   'composer.chooseRepository': 'Choose a repository first',
   'composer.branch': 'Branch',
   'composer.agent': 'Agent',
-  'picker.search': 'Search…',
-  'picker.noResults': 'No matching options',
-  'composer.model': 'Model',
-  'composer.reasoning': 'Reasoning',
   'composer.run': 'Run',
   'composer.starting': 'Starting…',
   'composer.runTitle': 'Run — ⏎ to send, ⇧⏎ for a new line',
@@ -1092,6 +1004,7 @@ export const en = {
   'goal.resumeHint': 'Continue the goal and queue its next round',
   'goal.editHint': 'Change the objective; the round in flight is left alone',
   'goal.clearHint': 'Remove the goal and stop future rounds; the chat and its history stay',
+  'goal.clearConfirm': 'Clear this goal? Future rounds stop; the chat and its history stay.',
   // The one bound that exists is one the owner wrote, and nothing in the
   // product edits it. So Resume is what lifts it, and the band says so.
   'goal.limitResumeLifts':
@@ -1155,17 +1068,16 @@ export const en = {
     'Your repository is cloned into the sandbox. The agent only edits this copy.',
   'firstRun.workspaceCreated':
     'The sandbox starts from an empty folder. Nothing is cloned, and nothing is published.',
-  'firstRun.publishing': 'Pushing the changes to an agent/… branch and opening a draft PR.',
   'firstRun.doneTitle': 'Your first draft PR is ready',
   'firstRun.doneBody':
-    'Review it on GitHub; merging is up to you. Want changes? Reply below, then Update PR.',
+    'Review it on GitHub; merging is up to you. Want changes? Reply below and ask the agent to push them to the PR.',
 
   // ── Pending message queue ───────────────────────────────────────────────
   'queue.region': 'Queued messages',
   'queue.countOne': '1 pending',
   'queue.countMany': '{count} pending',
   'queue.afterThisTurn': 'sent after this turn',
-  'queue.steerHint': '⌘/Ctrl+↵ to add to this turn',
+  'queue.steerHint': '{keys} to add to this turn',
   'queue.state.editing': 'Editing',
   'queue.state.refused': 'Not sent',
   'queue.state.sending': 'Adding',
@@ -1290,6 +1202,8 @@ export const en = {
     'This team has too many open invitation links. Revoke one before creating another.',
   'teams.error.invitationUnavailable':
     'This invitation link is no longer valid. Ask an owner or admin for a new one.',
+  'teams.error.noLongerMember':
+    'You are no longer a member of this team. Ask an owner or admin for a new invitation link.',
   'teams.error.notFound': 'This team or member no longer exists, or you are no longer in it.',
   'teams.error.ownerCannotLeave': 'Make another member the owner, or delete the team, first.',
   'teams.error.ownerNotAdmitted':
@@ -1387,9 +1301,6 @@ export const en = {
   'ssh.rotateHint':
     'Install the new key, then test it. The old key keeps working until the new one logs in; remove the old line afterwards.',
   'ssh.testNewKey': 'Test the new key',
-  'common.loading': 'Loading…',
-  'common.retry': 'Retry',
-  'common.refreshFailed': 'Refresh failed — showing the last successful read.',
 } as const;
 
 export type TranslationKey = keyof typeof en;

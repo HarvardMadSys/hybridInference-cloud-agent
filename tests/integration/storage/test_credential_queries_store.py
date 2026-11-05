@@ -33,6 +33,7 @@ from tests.integration.storage.test_agent_job_store import (
     _shared_claim_attestation,
 )
 from tests.support.db import reset_agent_tables
+from tests.support.follow_ups import append_follow_up
 from tests.support.migrations import apply_migrations
 
 from cloud_agent.storage.assembly import Storage
@@ -323,8 +324,8 @@ async def test_a_residency_resolves_to_each_turn_it_serves_and_none_between(
         is None
     )
 
-    second = await store.conversation_commands.create_follow_up(
-        parent_job_id=first["id"], user_id=first["user_id"], prompt="and the docs"
+    second = await append_follow_up(
+        db, parent_job_id=first["id"], user_id=first["user_id"], prompt="and the docs"
     )
     second_claim = await _claim(
         store,

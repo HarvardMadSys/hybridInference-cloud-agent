@@ -2,12 +2,20 @@
 
 import { useEffect, useId, useRef, type ReactNode, type Ref } from 'react';
 
-import type { BlockedReason, ComputeField, ComputeOperation } from '@/lib/api/compute';
+import type {
+  BlockedReason,
+  ComputeAllocation,
+  ComputeField,
+  ComputeOperation,
+} from '@/lib/api/compute';
+import { Select } from '@/components/ui/Select';
 
 export const inputClass =
   'ui-input min-h-11 w-full disabled:cursor-not-allowed disabled:opacity-50 aria-[invalid=true]:border-status-error';
 export const buttonClass = 'ui-button ui-button-secondary min-h-11';
 export const primaryClass = 'ui-button ui-button-primary min-h-11';
+export const dangerClass =
+  'ui-button min-h-11 border border-status-error/25 bg-status-error/10 text-status-error hover:bg-status-error/20';
 
 export function Panel({
   title,
@@ -208,22 +216,25 @@ export function ProviderFields({
               .join(' ') || undefined,
           required: field.required,
           value: values[field.key] ?? '',
-          onChange: (
-            event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>,
-          ) => onChange({ ...values, [field.key]: event.target.value }),
+          onChange: (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
+            onChange({ ...values, [field.key]: event.target.value }),
         };
         return (
           <div key={field.key}>
             <Field label={field.label}>
               {field.type === 'select' ? (
-                <select {...common}>
-                  <option value="">Select…</option>
-                  {field.options?.map((option) => (
-                    <option value={option.value} key={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
+                <Select
+                  className={common.className}
+                  aria-invalid={common['aria-invalid']}
+                  aria-describedby={common['aria-describedby']}
+                  required={common.required}
+                  value={common.value}
+                  onValueChange={(next) => onChange({ ...values, [field.key]: next })}
+                  options={[
+                    { value: '', label: 'Select…' },
+                    ...(field.options ?? []).map(({ value, label }) => ({ value, label })),
+                  ]}
+                />
               ) : isTextArea ? (
                 <textarea {...common} rows={4} spellCheck={false} />
               ) : (
@@ -266,6 +277,16 @@ export function absoluteTime(value: string | null | undefined): string {
   const date = new Date(value);
   if (!Number.isFinite(date.getTime())) return 'Unknown';
   return date.toLocaleString(undefined, { timeZoneName: 'short' });
+}
+
+/** An absent provider resource that never existed: no identity or node was ever recorded. */
+export function neverCreated(allocation: ComputeAllocation): boolean {
+  return (
+    allocation.state === 'absent' &&
+    allocation.provider_id !== 'existing_ssh' &&
+    !allocation.external_id &&
+    allocation.nodes.length === 0
+  );
 }
 
 export function remainingTime(value: string): string {

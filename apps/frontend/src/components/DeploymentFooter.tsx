@@ -1,9 +1,12 @@
 'use client';
 
+import Link from 'next/link';
 import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
 import { useT } from '@/components/providers/LocaleProvider';
 
 // Eastern time (America/New_York) so the shown time tracks daylight saving (EST/EDT).
+const LINK_CLASS = 'hover:underline focus-visible:underline';
+
 const easternTime = new Intl.DateTimeFormat('en-US', {
   timeZone: 'America/New_York',
   hour: 'numeric',
@@ -11,8 +14,8 @@ const easternTime = new Intl.DateTimeFormat('en-US', {
   timeZoneName: 'short',
 });
 
-export function DeploymentFooter() {
-  const { deployment } = useSiteConfig();
+export function DeploymentFooter({ className = '' }: { className?: string }) {
+  const { deployment, content } = useSiteConfig();
   const t = useT();
   const version = deployment?.version ?? '';
   const shortVersion = /^[a-f\d]{40}$/i.test(version) ? version.slice(0, 7) : version;
@@ -21,7 +24,9 @@ export function DeploymentFooter() {
   const deployedTimeEastern = deployedAt ? easternTime.format(new Date(deployedAt)) : null;
 
   return (
-    <footer className="flex shrink-0 flex-wrap items-center justify-center gap-x-3 gap-y-0.5 border-t border-border bg-surface-muted px-3 py-1 text-[11px] text-muted">
+    <footer
+      className={`flex shrink-0 flex-wrap items-center justify-center gap-x-3 gap-y-0.5 border-t border-border bg-surface-muted px-3 py-1 text-[11px] text-muted ${className}`}
+    >
       <a
         href="https://seas.harvard.edu/"
         target="_blank"
@@ -38,6 +43,25 @@ export function DeploymentFooter() {
       >
         MadSys Group
       </a>
+      <Link href="/terms" className={LINK_CLASS}>
+        {t('footer.terms')}
+      </Link>
+      {/* The deployment's own site files declare these; none hides them. */}
+      {content?.team.length ? (
+        <Link href="/team" className={LINK_CLASS}>
+          {t('footer.team')}
+        </Link>
+      ) : null}
+      {content?.sourceUrl ? (
+        <a
+          href={content.sourceUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className={LINK_CLASS}
+        >
+          GitHub
+        </a>
+      ) : null}
       <span>
         {t('deployment.version')}:{' '}
         <span title={version || undefined}>{shortVersion || t('deployment.unavailable')}</span>

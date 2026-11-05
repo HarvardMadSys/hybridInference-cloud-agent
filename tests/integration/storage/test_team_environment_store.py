@@ -15,6 +15,7 @@ from tests.integration.storage.test_agent_job_store import pool, store  # noqa: 
 from tests.integration.storage.test_environment_snapshot_store import (
     IMAGE,
     _claim,
+    _claim_task,
     _enable_archives,
     _host,
     _receipt,
@@ -324,9 +325,19 @@ async def test_a_members_installation_snapshot_serves_the_whole_team(store, pool
     # binding cannot reach it.
     dave_env = await save(store, "dave", name="Dave's")
     dave_job, _ = await bind(store, pool, "dave", dave_env["id"])
+    # Each from the attempt holding its task's lease; alice's task is queued first.
+    claims = {}
+    for worker in ("w1", "w2", "w3"):
+        claim = await _claim_task(store, pool, worker)
+        claims[claim["id"]] = claim
     for job in (bob_job, dave_job):
-        await store.environment_snapshots.record_use(
-            job_id=job["id"], snapshot_id=snapshot_id, outcome="used", base_sha="c" * 40
+        assert await store.environment_snapshots.record_use(
+            job_id=job["id"],
+            attempt_id=claims[job["id"]]["attempt_id"],
+            lease_generation=claims[job["id"]]["lease_generation"],
+            snapshot_id=snapshot_id,
+            outcome="used",
+            base_sha="c" * 40,
         )
     async with pool.acquire() as conn:
         assert (

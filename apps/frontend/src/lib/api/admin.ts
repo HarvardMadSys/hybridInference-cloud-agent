@@ -189,6 +189,14 @@ export interface AgentRunnerHost {
   drain_fence_epoch: string;
   /** True while a Remove waits for this draining host's running attempts to end. */
   removal_pending?: boolean;
+  /** True while that Remove also moves this host's sandboxes to other hosts. */
+  removal_moves_out?: boolean;
+  /** Sandboxes this host can still move out while its removal moves them. */
+  sandboxes_left?: number | null;
+  /** Sandboxes on this host that can never move, while its removal moves the others. */
+  sandboxes_unmovable?: number | null;
+  /** True when the administrator agreed that sandboxes which cannot move stay. */
+  removal_leaves_unmoved?: boolean;
   /**
    * True when the host redeemed an enrollment token, which is the difference
    * between a name that is a scheduling label and a name that is an identity.
@@ -435,14 +443,6 @@ export async function forgetAgentRunnerHost(host: string): Promise<AgentRunnerHo
   return jsonOrThrow<AgentRunnerHostPool>(resp);
 }
 
-/** Stop this host taking new work; let what it has finish. */
-export async function drainAgentRunnerHost(host: string): Promise<AgentRunnerHostPool> {
-  const resp = await fetchWithAuth(API_BASE, `${HOSTS}/${encodeURIComponent(host)}/drain`, {
-    method: 'POST',
-  });
-  return jsonOrThrow<AgentRunnerHostPool>(resp);
-}
-
 /** Put a drained host back to work; this also cancels a pending removal. */
 export async function undrainAgentRunnerHost(host: string): Promise<AgentRunnerHostPool> {
   const resp = await fetchWithAuth(API_BASE, `${HOSTS}/${encodeURIComponent(host)}/undrain`, {
@@ -454,7 +454,7 @@ export async function undrainAgentRunnerHost(host: string): Promise<AgentRunnerH
 /**
  * Advertised on the heartbeat by a runner that takes its limit from
  * `slots_desired`. Mirrors `HOST_CONCURRENCY_CAPABILITY` in
- * `cloud_agent_host/shared_protocol.py`; a host without it keeps the number it
+ * `cloud_agent_shared/shared_protocol.py`; a host without it keeps the number it
  * was deployed with until it is redeployed.
  */
 export const HOST_CONCURRENCY_CAPABILITY = 'host-concurrency-v1';
@@ -539,9 +539,13 @@ export async function setAgentRunnerHostSettings(
 /**
  * Revoke this host's credential and take it out of the pool.
  *
- * Unforced, a busy host is not revoked yet: it stops taking new work, reports
- * `removal_pending`, and the control plane revokes it once its running
- * attempts end.
+ * Unforced, the host first moves its sandboxes to other hosts when they can
+ * move: it stops taking new work, reports `removal_pending` and
+ * `removal_moves_out`, and the control plane revokes it once none is left and
+ * its running attempts end. When some would stay on it, the request fails with
+ * the `no_move_target` code (nowhere to move them now) or `cannot_move` (some
+ * never can) unless `allowUnmoved`; then whatever can move still moves first,
+ * and the host is revoked once its running attempts end.
  *
  * `force` is off by default for a reason worth repeating at the call site:
  * attempts still running on that host are ended. Their leases expire at once,
@@ -551,8 +555,12 @@ export async function setAgentRunnerHostSettings(
 export async function removeAgentRunnerHost(
   host: string,
   force = false,
+  allowUnmoved = false,
 ): Promise<AgentRunnerHostPool> {
-  const query = force ? '?force=true' : '';
+  const params = new URLSearchParams();
+  if (force) params.set('force', 'true');
+  if (allowUnmoved) params.set('allow_unmoved', 'true');
+  const query = params.size > 0 ? `?${params.toString()}` : '';
   const resp = await fetchWithAuth(
     API_BASE,
     `${HOSTS}/${encodeURIComponent(host)}/remove${query}`,

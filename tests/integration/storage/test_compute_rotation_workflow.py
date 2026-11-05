@@ -178,9 +178,13 @@ class FakeNodes:
             deployment_sha=profile.deployment_sha,
         )
 
-    async def inventory(self, node, profile, intent):
+    async def inventory(self, node, profile, intent, recorded=None):
         self.calls.append(("inventory", node.display_name))
         return HostInventory(complete=True)
+
+    async def quiesce(self, node, profile, intent):
+        self.calls.append(("quiesce", node.display_name))
+        return 0
 
     async def stage(self, node, profile, intent):
         self.calls.append(("stage", node.display_name))
@@ -359,6 +363,7 @@ async def test_host_moves_to_a_staged_replacement_and_the_old_node_is_released(
         ("deploy", "t1-node"),
         ("revoke", "first-node->t1-node"),
         ("wipe", "first-node"),
+        ("quiesce", "first-node"),
         ("inventory", "first-node"),
     ]
     old = await r.repo.get_allocation(r.allocation_id)
@@ -380,7 +385,7 @@ async def test_a_move_after_an_observation_reaches_each_node_by_its_pinned_key(
             if not (node.connection and node.connection.host_key == HOST_KEY):
                 unpinned.append((effect, node.display_name))
 
-    for effect in ("deploy", "readiness", "inventory", "stage", "stop", "wipe"):
+    for effect in ("deploy", "readiness", "quiesce", "inventory", "stage", "stop", "wipe"):
 
         async def checked(node, *args, _effect=effect, _original=getattr(r.nodes, effect), **kw):
             check(_effect, node)
@@ -489,6 +494,52 @@ async def test_failed_node_type_is_released_and_the_next_type_takes_over(
     assert failed["release_committed_at"] is not None
     assert failed["observed_state"] == "terminated"
     assert r.cloud.created == ["first", "t1", "t2"]
+    target = await r.repo.get_allocation(replacement["id"])
+    assert [h["host"] for h in target["hosts"]] == [host]
+
+
+async def test_a_replacement_known_only_to_its_acquisition_is_still_released(
+    db, store, hosts, monkeypatch
+):
+    """The provider answered its create, then could not show the experiment.
+
+    The move gives that node up for the next type. Releasing it deletes the
+    experiment its acquisition was given, though no observation recorded it.
+    """
+    r = await rig(store, hosts, monkeypatch)
+    source, host = await ready_slot(r, db)
+    acquire, inspect = r.cloud.acquire, r.cloud.inspect
+    unobserved: list[str] = []
+    missed: list[str] = []
+
+    async def acquire_without_observation(request, intent):
+        receipt = await acquire(request, intent)
+        if request.config["bindings"]["phystype"] != "t1":
+            return receipt
+        unobserved.append(receipt.resource.external_id)
+        return ProviderReceipt(outcome="pending", resource=receipt.resource)
+
+    async def inspect_after_one_miss(ref):
+        if ref.external_id in unobserved and ref.external_id not in missed:
+            missed.append(ref.external_id)
+            raise ProviderError("resource_visibility_unknown", "not visible yet")
+        return await inspect(ref)
+
+    monkeypatch.setattr(r.cloud, "acquire", acquire_without_observation)
+    monkeypatch.setattr(r.cloud, "inspect", inspect_after_one_miss)
+    await r.commands.rotate(
+        r.allocation_id,
+        RotateComputeRequest(request_id="move-now", expected_revision=source["revision"]),
+        actor="admin",
+    )
+    await run_all(r, db)
+
+    rotation = await rotation_of(r, r.allocation_id)
+    assert rotation["state"] == "succeeded", rotation
+    assert r.cloud.created == ["first", "t1", "t2"]
+    assert unobserved[0] in r.cloud.released
+    abandoned, replacement = await successor_of(db, r.allocation_id)
+    assert (abandoned["external_id"], abandoned["observed_state"]) == (unobserved[0], "terminated")
     target = await r.repo.get_allocation(replacement["id"])
     assert [h["host"] for h in target["hosts"]] == [host]
 

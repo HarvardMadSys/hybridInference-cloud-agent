@@ -9,7 +9,7 @@ this page. The deployment order itself, and how to roll back, are in
 ## Before starting this release
 
 Before starting this release, run `alembic upgrade head` through
-`0083_host_move_out`. The supported deployment scripts run migrations
+`0113_sandbox_incidents`. The supported deployment scripts run migrations
 before replacing the API; every migration listed here is additive and safe
 under the running previous release unless it says otherwise. The few
 transitions that need stopped writers are listed in
@@ -19,12 +19,241 @@ After migrating, start the main control-plane listener with its existing
 complete environment: it imports newly registered settings once, as described
 in [Admin Settings](operations.md#admin-settings).
 
+## Agents open their own pull requests
+
+The platform no longer publishes workspaces. There is no **Create PR** or
+**Update PR** button, no `POST /v1/agent/threads/{thread_id}/publish`, no
+workspace snapshot and no `agent/<thread>` branch. When the owner asks, the
+agent commits, pushes a branch and opens the pull request itself, as the
+owner, through [the GitHub relay](operations.md#the-github-relay); without
+the relay configured, agents cannot push. **Watch PR and merge** has the agent
+use git and `gh api` REST calls itself. Follow-up turns always start from the
+conversation's own base. Pull requests the publisher opened before this
+release stay on GitHub as they are, and nothing pushes to their `agent/…`
+branches again.
+
+The control plane no longer reads `AGENT_GITHUB_TOKEN`,
+`AGENT_PUBLISH_BASE_BRANCH`, `AGENT_GIT_AUTHOR_NAME` or
+`AGENT_GIT_AUTHOR_EMAIL`, and Admin → Settings has no Publication group. Delete
+those lines from the control plane's `.env`. Commits are authored as the
+conversation's owner, with `AGENT_GITHUB_COAUTHOR` as co-author.
+
+The publisher's tables (`agent_sandbox_snapshots`, `agent_snapshot_jobs`,
+`agent_pr_archive_checks`) and `agent_jobs.published_commit_sha` stay in the
+schema, unused: this release neither reads nor writes them, and a migration in
+the next release drops them. This release is an ordinary rolling deploy, and
+rolling back to the previous release needs no downgrade and loses nothing.
+
+## Shorter `.env` files
+
+The example `.env` files now hold only what Admin cannot manage: the database
+connection, the root keys, the recovery token, container wiring, and on a host
+its tunnels, identity and sandbox boundaries. Every other value is set in
+Admin → Settings, or for one server on the Servers page, and a missing required
+setting is named at the top of the Admin pages.
+
+An existing `.env` keeps working unchanged. The first start of a release that
+registers a setting imports that setting's value from the environment once;
+from then on the database wins and the line is ignored. After the control plane
+(or host) has started once on this release, these lines can be deleted:
+
+| Where | Lines that can be deleted |
+|---|---|
+| Control plane | `AGENT_WEB_BASE_URL`, `AGENT_SMTP_*`, `AGENT_LOCAL_ADMIN_EMAILS`, `AGENT_SANDBOX_ARCHIVE_S3_*`, `AGENT_MAX_STREAMS_PER_USER`, `AGENT_API_DOCS`, `AGENT_RUNTIME_REGISTRY_URL` |
+| Each host | `AGENT_HOST_SLOTS`, `AGENT_SHARED_RESIDENT_CAPACITY`, `AGENT_SANDBOX_CPU_MILLICORES`, `AGENT_SANDBOX_MEMORY_MIB`, `AGENT_SANDBOX_DISK_MIB`, `AGENT_CHAT_IDLE_TIMEOUT_S`, `AGENT_SOURCE_IMPORT_MAX_MIB`, `AGENT_LEASE_TTL`, `AGENT_RUNTIME_REGISTRY_URL`, `AGENT_GIT_AUTHOR_NAME`, `AGENT_GIT_AUTHOR_EMAIL` |
+| A managed host's environment file in a deployment profile | `AGENT_HOST_SLOTS`, `AGENT_SHARED_RESIDENT_CAPACITY` |
+
+`AGENT_COMPUTE_SECRET_KEY` is imported the same way: once stored, saved compute
+credentials decrypt with the stored key and a different value in `.env` is
+ignored, so the line can be deleted too. `deploy.sh` no longer writes one: a new
+deployment's control plane generates the key into its settings on first start.
+What must be backed up with the database is the settings root key
+(`AGENT_SETTINGS_ENCRYPTION_KEY`, or `AGENT_SESSION_SECRET` where that is the
+root). Keep `AGENT_SANDBOX_MANAGER_TOKEN` on each host: it is the host's own
+copy of the credential.
+
+`ADMIN_TOKEN` is optional: the first administrator of a new deployment signs in
+with the one-time setup code. An existing deployment can keep it as its
+recovery door. `deploy.sh` now generates a new installation's database
+password and DSN, account key and settings root key. It never replaces a set
+value, never adds a settings key beside `AGENT_SESSION_SECRET`, and on a
+deployment root that has deployed before it stops with the names of any
+missing required value rather than generate one.
+
+The web app is now served only at the root of its own hostname, with the API at
+`/api` on the same origin; mounting it under a path prefix such as `/agents`
+inside another site was removed, and releases no longer carry the `web-agents`
+image. Delete `AGENT_WEB_BASE_PATH`, `AGENT_WEB_API_URL` and
+`AGENT_DEPLOYMENT_SHA` from the control plane's `.env` (`deploy.sh` exports the
+commit it deploys). An empty `AGENT_WEB_BASE_PATH` is harmless; one with a value
+stops `deploy.sh` and the release deployer, since it would now be ignored.
+`AGENT_NETWORK_NAME` can go too unless another stack's reverse proxy joins the
+network by a name other than `cloud-agent`. A distribution that resolves
+releases must accept one without the `/agents` web image before deploying it.
+
+Four values moved into Admin in this release:
+
+- **Live streams per account** (`AGENT_MAX_STREAMS_PER_USER`) and **Serve API
+  documentation** (`AGENT_API_DOCS`), in Admin → Settings → Operations. Both
+  apply without a restart.
+- **Agent package registry** (`AGENT_RUNTIME_REGISTRY_URL`), in Admin →
+  Settings → Agent versions. Hosts receive it on every heartbeat. Until every
+  online host reports it, the same tab names the hosts still missing it and
+  agent updates stay disabled.
+- **Turn lease** (`AGENT_LEASE_TTL`), for every server or one, from the admin
+  pages. Each host imports its own value once from its next heartbeat.
+
+On a deployment that skipped the releases where these settings were added, an
+old value is still imported once rather than lost.
+
+## Independent accounts cutover
+
+This release removes HybridInference Gateway sign-in, admission and inference.
+Cloud Agent keeps its own accounts, and every task runs on a model connection
+its owner adds with their own provider key. A database from an earlier
+release is keyed by Gateway owner IDs that no account holds, so it is not
+upgraded, converted or mapped: the release starts on a **new, empty
+database**, and the old one is kept untouched as the archive and rollback
+source. People register again, apply through the waiting list and add their
+model connections. Nothing migrates old tasks, connections or identities.
+
+1. **Archive the old deployment.** Drain it, stop every writer, and take a
+   custom-format `pg_dump` of the old Agent database with its checksum, the
+   old configuration and root keys. Keep the old database itself; do not
+   delete, downgrade or rebind it. Optionally confirm it is what this release
+   refuses, read-only:
+
+   ```bash
+   AGENT_DATABASE_URL='<old database>' python -m cloud_agent.identity_namespace --check
+   ```
+
+   It exits non-zero, names this runbook, and changes nothing.
+
+2. **Create a new, empty Agent database** and point `AGENT_DATABASE_URL` at
+   it. The same check must now report an empty database that will be bound on
+   first start. `deploy/control-plane/deploy.sh` runs it read-only before it
+   migrates, and stops if it refuses.
+
+3. **Give the deployment its own secrets**, none of them shared with the
+   Gateway or with another environment: `AGENT_LOCAL_SESSION_SECRET`,
+   `AGENT_SETTINGS_ENCRYPTION_KEY`, `AGENT_CONTROL_TOKEN_SECRET`,
+   `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` (each at least 32 random bytes,
+   `openssl rand -hex 32`) and a separate `ADMIN_TOKEN`. Hosts enroll again
+   with new enrollment tokens.
+
+4. **Remove every Gateway variable.** The control plane and `deploy.sh` refuse
+   `AGENT_AUTH_MODE`, `GATEWAY_*` (issuer, JWKS, authorize, base URL, grant
+   path, binding and dispatch token), `IDENTITY_*`,
+   `AGENT_SESSION_REDIRECT_URI`, `AGENT_GATEWAY_URL`,
+   `AGENT_GATEWAY_SSH_HOST`, `AGENT_WEB_GATEWAY_URL`, `AGENT_WEB_FEATURE_RAG`
+   and the on-call dispatch variables, and a host refuses `AGENT_GATEWAY_URL`,
+   `AGENT_GATEWAY_HOSTNAME` and the inference tunnel's `AGENT_TUNNEL_*`. Set
+   `AGENT_WEB_BASE_URL` (the base of every emailed link) and
+   `AGENT_PUBLIC_API_URL` (this API's public address, which
+   `AGENT_SESSION_REDIRECT_URI` used to give).
+
+5. **Mail.** An existing SMTP transport, such as the one HybridInference sends
+   with, may be reused: set `AGENT_SMTP_HOST`, `AGENT_SMTP_PORT` (587),
+   `AGENT_SMTP_SECURITY=starttls`, `AGENT_SMTP_USERNAME`,
+   `AGENT_SMTP_PASSWORD` and `AGENT_SMTP_FROM` from the operator's secret
+   store, never from the repository. Only the transport is shared: every link
+   in a message is built from `AGENT_WEB_BASE_URL` and signed with this
+   deployment's own `AGENT_LOCAL_SESSION_SECRET`, and the account data is
+   this database's.
+
+6. **Initial administrators.** List the verified addresses of the people who
+   administer the deployment in `AGENT_LOCAL_ADMIN_EMAILS`
+   (`admin-one@example.org,admin-two@example.org` are placeholders; production
+   names exactly its two administrators, staging its own list). The list,
+   like every account setting, is imported once, at the first start; after
+   that it is edited under **Admin → Settings → Accounts**, not in the
+   environment. A listed
+   account is approved and made an administrator only once its address is
+   proven, by a link sent to it. There is no grant to the first person who
+   signs up. Alternatively, or for the very first one, exchange the setup code
+   the control plane logs at startup (`agent_local_setup_pending`) at
+   `/setup/administrator`, or use `python -m cloud_agent.accounts.bootstrap_admin`
+   ([first administrator](local-accounts.md#the-first-administrator)).
+
+7. **Deploy and verify.** Run the usual deployment. Then: sign-up sends a
+   verification link at `AGENT_WEB_BASE_URL`; an administrator approves an
+   application; the applicant adds a model connection and runs a task. Model
+   connections are on by default. To hold new turns until every host and
+   control-plane replica runs this release, set
+   `AGENT_MODEL_CONNECTIONS_ENABLED=false` before deploying and unset it once
+   they all do.
+
+**Rollback.** Before the new deployment has taken writes that matter, stop it
+and redeploy the previous release against the archived database and
+configuration, which were never changed. After new writes, keep the new
+database: it holds accounts the old release cannot read, and the two
+databases are never merged.
+
+## Conversation history read contract
+
+This release changes `GET /v1/agent/jobs/{job_id}/thread` to `history_version: 2`.
+Deploy the frontend with the API: the existing message/job arrays and their
+chronological order remain, but they are a bounded page rather than the whole
+conversation. Small histories remain complete. The default page contains at
+most 50 turn/message entries, the maximum `limit` is 100, and the serialized
+response is at most 512 KiB. `current_job_id` identifies the newest turn
+independently of the page; `anchor=true` starts at the selected job instead.
+
+Pass `next_cursor` as `cursor` to load older history explicitly. For refreshes,
+retain older pages and pass `sync_cursor` as `after`; follow each returned
+`next_cursor` as `after` until it is null. This rereads the two mutable tail
+turns so an in-flight write cannot disappear behind a newly allocated ID.
+Merge messages by ID and jobs by ID/revision, preserving turn order and placing
+each opening prompt before its replies and mid-turn messages. Cursors are
+scoped to the owned, undeleted conversation on every request.
+
+Messages longer than 4,096 Unicode characters carry `content_truncated` and
+`next_offset`. Read more through
+`GET /v1/agent/jobs/{job_id}/thread/messages/{message_id}?offset=...`; each
+request returns at most 16,384 characters and offsets count Unicode characters,
+not UTF-8 bytes or JavaScript UTF-16 units. `thread_preview` marks a job whose
+wide fields need the existing single-job detail read. A false
+`pending_messages_complete` means read the unchanged queue endpoint,
+`GET /v1/agent/threads/{thread_id}/messages`; an omitted queue snapshot is not
+an empty queue. This changes the owner-facing read API only, never runtime
+session recovery or transcript replay.
+
 ## Recent migrations
 
 Newest first.
 
 | Migration | What it changes |
 |---|---|
+| `0113_sandbox_incidents` | Makes sandbox incidents idempotent and tracks what each chat's agent was told: a unique index on `agent_sandbox_events (sandbox_id, details->>'incident_id')` for `incident.*` rows, and two tables, `agent_thread_incident_cursors` and `agent_attempt_incident_marks`. A trigger on `agent_thread_sandbox_memberships` starts a chat's cursor when it joins or moves sandbox, and every existing membership gets one. The previous release never reads them and no existing row has an `incident.*` type, so it runs unchanged beside it; its membership inserts only start cursors. A downgrade drops the triggers, the tables and the index; incident rows stay. |
+| `0112_thread_pull_requests` | Adds `agent_thread_pull_requests`: the pull requests a conversation's agent opened through the GitHub relay, one row per conversation and pull request. Nothing reads it before this release, so the previous release runs unchanged beside it. A downgrade drops the table. |
+| `0111_mcp_sandbox_location` | Lets an MCP connection run inside the task sandbox: the `agent_mcp_connections.location` check constraint admits `sandbox` beside `remote`, `managed-worker` and `user-connector`, under the stable name `agent_mcp_connections_location_check`. No row changes. A downgrade restores the three-location constraint, and refuses while any sandbox connection exists rather than deleting it. |
+| `0110_host_late_settings` | Adds two columns to `agent_runner_hosts`: the host settings registered after a host's first import that it has already offered (so each is imported once, and an administrator's reset is never undone), and what the host reports it uses for configuration delivered on the heartbeat, such as the agent package registry. Existing rows get an empty list and no report. A downgrade drops both columns. |
+| `0109_local_account_parity` | Local accounts only. Splits `agent_local_password_logins` into sign-in identities (email, login name, phone) and optional password credentials, carrying every account over with its verification time and hash (a verified email is recorded as verified by its link, the only way `0108_local_accounts` had); adds the access view every SQL gate reads, the `deleted` account state with the account's name, note, language and sign-in and deletion times, phone codes, browser sessions, sign-in events, the signup domain list, first-run setup and administrator mail to accounts. It touches only the account tables. A downgrade restores the email-and-password table and drops the new tables, with the sign-in events and mail history in them; it refuses while any account signs in some other way or is deleted, rather than dropping that account. |
+| `0108_local_accounts` | Creates the tables accounts use: accounts, password sign-in, waiting-list admissions, server-side sessions, emailed tokens, abuse counters, access terminations and the account identity marker. It changes no existing row and locks no existing table. A downgrade drops them, and with them every account. |
+| `0107_attempt_context_profiles` | Adds the `agent_attempt_context_profiles` table, a rebuildable cache of each attempt's context profile (request sizes, compactions and content-size estimates derived from its stored events) behind the Context view and the Usage page's context insights. It scans and rewrites nothing; profiles are derived lazily when an owner reads them, and a stale or differently versioned row is rebuilt from the event ledger. A downgrade drops only the cache. |
+| `0106_user_model_connections` | Adds `agent_model_connections`, `agent_model_connection_checks` and `agent_model_connection_scan_keys` tables for owners' own inference endpoints (Chat Completions, Responses or Anthropic Messages), nullable source columns `agent_jobs.model_connection_id` and `agent_pending_messages.model_connection_id`, and a separate `agent_model_connection_residencies` table binding a resident member's process to one connection revision for one residency generation (a separate table, so a running previous release's prepared statements over the membership table keep working). Nothing is rewritten. Connections are admitted unless `AGENT_MODEL_CONNECTIONS_ENABLED` is set to `0`, `false` or `no`. A downgrade refuses while any connection exists, or any turn, waiting message or resident member names one, finished conversations included ([owner model connections](operations.md#owner-model-connections)). |
+| `0105_job_event_usage_summary` | Adds a nullable `usage_summary` column to `agent_job_events`. Adding it rewrites no rows and holds its lock only for the catalog change. New events store the projection of their payload that usage reads need, and those reads take it from there; events stored before the column existed are projected when read, as before. A downgrade drops the column, and usage reads project every payload again. |
+| `0104_notification_change_keyset` | Builds a `(user_id, kind, change_xid, entity_id)` index concurrently before dropping the preceding owner/XID index, so notification delta continuation pages seek directly instead of scanning the whole snapshot interval. It changes no row and does not block foreground writes. Existing v1 continuations finish in their previous kind/identity order before advancing to v2. The previous API remains functionally compatible during migration, although its delta reads may use a less selective index until it is replaced. A downgrade restores the preceding index concurrently. |
+| `0103_terminal_resume_keyset` | Rebuilds the partial terminal-resume index on `(updated_at, id)`, matching the replay keyset so every bounded continuation seeks directly instead of sorting equal-time rows again. The online build does not block foreground writes and changes no row. A downgrade restores the preceding one-column index. |
+| `0102_admin_sandbox_marker_order` | Replaces revision 0097's membership trigger so that it locks a membership's sandbox group before marking the group changed, the order every write to the group already takes. Before it, settling, abandoning, ending, releasing or reaping a turn could deadlock with the admin terminal check or a workspace start on the same group, and Postgres aborted one of the two. Only the trigger function changes: no table is locked or rewritten, and the previous release's statements run unchanged under it. A downgrade restores the 0097 trigger. |
+| `0101_notification_state_deltas` | Adds coalesced per-owner job/thread change markers, an active-job index, and a partial recent-terminal marker index. Notification clients bootstrap active and recent terminal work in bounded keyset pages from a request-time database clock baseline, then request bounded snapshot deltas; no historical jobs are backfilled or replayed. Markers age out lazily after 24 hours and stale cursors explicitly rebuild. The previous push stream remains available. A downgrade drops only derived state and restores push-only trigger behavior. |
+| `0100_memory_archive_pages` | Builds partial owner/scope indexes for active memories and archive cursor pages concurrently. Existing memory rows are unchanged. Online builds avoid blocking foreground writes; interrupted builds can be retried. Offline SQL uses ordinary index builds. Downgrade drops only these indexes. |
+| `0099_thread_stats_rollups` | Adds a derived, versioned per-attempt cache for owner thread statistics. Missing or stale attempts reduce their compact event projections in bounded 1,000-row pages; unchanged reads compare the newest indexed sequence and reuse the cache without transferring historical event rows. Event storage and the authoritative billing ledger are unchanged. A downgrade drops only this rebuildable cache. |
+| `0098_measurement_counts` | Backfills exact profiling counts into at most 64 counter shards per run and installs transactional accounting triggers. The historical scan holds a write-conflicting lock on measurements until migration commit; schedule this one-time write pause for the size of retained history. Raw samples and whole-run summaries are unchanged. Downgrade removes only counters and triggers. |
+| `0097_admin_sandbox_deltas` | Adds coalesced metadata-change markers and short-lived, content-free admin inventory snapshot pages. Admin refreshes request only changed identities after their initial snapshot; expired cursors explicitly resynchronize. Triggers cover sandboxes, membership counts, origin titles, and host heartbeats without a fleet-wide write lock. Deploy the migration before enabling the new UI; older list clients remain supported. A downgrade discards only derived inventory state and its triggers. |
+| `0096_snapshot_title_context` | Adds a bounded JSON title context to immutable sandbox snapshots, so a publisher claim never rebuilds or transfers the sandbox's unbounded transcript. Each capture continues from the newest earlier snapshot of its group that has a context, adding the turns of every snapshot since, including one whose capture failed. Existing snapshots start with an empty context; a snapshot still holding it when a publisher claims it, captured before this migration or by the previous release during the rollout, has its context built and stored at that claim, so its draft is titled from the conversation rather than from its changed files. These reads look back over at most 24 earlier snapshots and read the newest 24 turns; the older turns of a longer gap are left out of the title. A downgrade drops only this derived context. |
+| `0095_memory_retention` | Builds partial archived-time and non-null superseded-by indexes concurrently, without changing memory rows or the 90-day retention policy. Online builds avoid blocking foreground writes; interrupted builds can be retried. Offline SQL uses ordinary index builds. Downgrade drops only these indexes. |
+| `0094_thread_message_pages` | Builds a concurrent index on each job's messages in the existing prompt-first order, so history pages seek a bounded set of message IDs before reading bodies. Changes no row. An interrupted online build is dropped and retried; offline conversion builds the index plainly inside its transaction. A downgrade drops the index concurrently. |
+| `0093_recent_requests` | Adds an owner/time-indexed projection of eligible recent requests and message/thread maintenance triggers. Backfills existing eligible messages once; trigger installation holds write-conflicting locks while the backfill runs, so schedule for a low-write period on a large history. Source messages are unchanged. Downgrade removes only the projection and triggers. |
+| `0092_targeted_work_wakes` | Replaces the `agent_work_available` trigger function so that its notification names the one host that can take a retained conversation's turn, and only that host's waiting runner is woken. It changes no table or row. A control plane from the previous release ignores the name and wakes every host, as before. A downgrade restores the empty notification. |
+| `0091_env_queued_runs_index` | Builds a partial index on `agent_environment_runs` concurrently, holding only the runs still queued for a Host to claim. Idle environment-capable Hosts claim every few seconds and the prebuild maintenance pass repeats its scan; without the index every claim read the table's whole test and prebuild history, which no partial index covered since `0078`. It reads the run history without blocking the running API's inserts, and an interrupted build leaves an invalid index that the next run drops and rebuilds. Offline SQL builds it plainly instead, because a conversion transaction cannot run a concurrent build. Changes no row. A downgrade drops the index concurrently; runs already claimed stay claimed. |
+| `0090_user_model_preferences` | Adds an empty table holding each owner's pinned default model for new tasks. It changes no existing row; owners without a pin keep following the model their last task used, and the administrator's default model is a setting rather than a column. A downgrade drops the pins only. |
+| `0089_superseded_removals` | Adds an empty table recording each authorization to remove a container that a moved sandbox group left behind on a Host being released, and when the Host confirmed the removal. It changes no existing rows. A downgrade drops the records; containers already removed stay removed. |
+| `0088_sandbox_retry_budget` | Adds the automatic deletion retry window and attempt count. Existing pending requests begin their 24-hour window at their request time; retries stop after eight claims with bounded backoff. An administrator resumes an archived terminal request under its existing request ID and verified receipt. A terminal prearchive request is atomically replaced through the authorized deletion path, giving the host a fresh archive identity after an acknowledged abort. |
+| `0087_sandbox_deletion_attempts` | Adds the admin-only, secret-free attempt history for sandbox deletion. |
+| `0086_conversation_read_receipts` | Adds an empty table for each owner's latest read completion per conversation, with revision and job/attempt indexes for incremental polling and foreign-key cleanup. It changes no existing rows and takes brief foreign-key definition locks on the referenced tables. Existing browser receipts import when that browser next opens the updated UI; a downgrade drops cloud receipts but leaves browser caches intact. |
+| `0085_terminal_resume_index` | Builds a partial index on `agent_jobs` concurrently, holding only the turns whose terminals still wait to resume. It reads the whole job history without blocking the running API; an interrupted run can simply be repeated. Changes no row. |
+| `0084_host_removal_move_out` | Adds `agent_runner_hosts.removal_moves_out` and `removal_leaves_unmoved`, false for every existing host, so a removal already pending keeps its earlier meaning: revoke once its running turns end. |
 | `0083_host_move_out` | Adds the `move_out` purpose to the admission-hold check constraint. Changes no existing row. Its downgrade deletes any move-out holds; groups already moved keep their checkpoints. |
 | `0082_team_environments` | Adds nullable team columns to environments and their bindings, and lets a repository default name any environment. Changes no existing row. Its downgrade refuses while a team environment exists, archived ones included. |
 | `0081_snapshot_pushed_commit` | Adds `agent_sandbox_snapshots.pushed_commit_sha` and copies into it the commit of every snapshot that was never published. `published_commit_sha` is left as it was, so the API it replaces keeps working, and no notice fires. |
@@ -49,9 +278,8 @@ Newest first.
 
 Older revisions that need a maintenance window are listed in
 [applying migrations that are not backwards-compatible](operations.md#applying-migrations-that-are-not-backwards-compatible).
-A database still stamped with the retired pre-2026-09-10 chain cannot be
-upgraded directly; see
-[preserving an old-chain database](operations.md#preserving-an-old-chain-database).
+A database from before the independent-accounts release, on either chain, is
+not upgraded; see [the cutover](#independent-accounts-cutover).
 
 ## When you add a migration
 

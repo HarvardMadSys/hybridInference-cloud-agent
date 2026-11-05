@@ -13,6 +13,7 @@ import {
 import { APIError } from '@/lib/utils/errors';
 
 import ApplicationSettings from './ApplicationSettings';
+import { chooseOption } from '@/components/ui/__tests__/select';
 
 vi.mock('@/lib/api/adminSettings', () => ({
   getAgentAdminSettings: vi.fn(),
@@ -157,7 +158,7 @@ function selectCategory(category: string) {
 
 function editField(label: string): HTMLElement {
   let field = screen.getByLabelText(label);
-  if (!field.matches('input,select,textarea')) {
+  if (!field.matches('input,select,textarea,[role="combobox"]')) {
     const group = field.closest('form')!.parentElement!;
     const edit = within(group).queryByRole('button', { name: /^Edit .* settings$/ });
     if (edit) fireEvent.click(edit);
@@ -186,7 +187,7 @@ function saveField(label: string) {
 function resetField(label: string) {
   const group = editField(label).closest('form')!;
   fireEvent.click(within(group).getByLabelText(`More actions for ${label}`));
-  fireEvent.click(within(group).getByRole('button', { name: `Restore default for ${label}` }));
+  fireEvent.click(within(group).getByRole('menuitem', { name: `Restore default for ${label}` }));
   expect(write).not.toHaveBeenCalled();
   fireEvent.click(
     within(screen.getByRole('dialog')).getByRole('button', { name: 'Restore default' }),
@@ -211,8 +212,8 @@ function organizedSnapshot(): AgentAdminSettings {
     ],
     ['trust_proxy_headers', 'Security', 'Trust forwarded client addresses', 'boolean', false],
     ['github_app_id', 'Source control', 'GitHub App ID', 'string', '123'],
-    ['publish_base_branch', 'Publication', 'Default pull request base branch', 'string', 'dev'],
-    ['publish_git_timeout_s', 'Publication', 'Publication Git timeout', 'integer', 120],
+    ['github_coauthor', 'Source control', 'Agent commit co-author', 'string', 'Agent'],
+    ['github_request_timeout_s', 'Source control', 'GitHub request timeout', 'integer', 30],
   ];
   const definitions: AdminSettingDefinition[] = fields.map(
     ([key, category, label, kind, value]) => ({
@@ -231,10 +232,6 @@ function organizedSnapshot(): AgentAdminSettings {
     secret_configured: {},
     bootstrap: [],
   });
-}
-
-function toggleAdvanced(field: HTMLElement) {
-  fireEvent.click(field.closest('details')!.querySelector('summary')!);
 }
 
 beforeEach(() => {
@@ -257,7 +254,7 @@ describe('application settings', () => {
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Restore default/ })).not.toBeInTheDocument();
     fireEvent.change(editField('Product name'), { target: { value: 'Accidental edit' } });
-    fireEvent.change(editField('Default runtime'), { target: { value: 'claude-code' } });
+    chooseOption(editField('Default runtime'), 'claude-code');
     fireEvent.click(screen.getByRole('button', { name: 'Cancel editing Site' }));
     expect(screen.getByLabelText('Product name')).toHaveTextContent('Cloud Agent');
     expect(screen.getByLabelText('Default runtime')).toHaveTextContent('codex');
@@ -277,7 +274,7 @@ describe('application settings', () => {
     );
     render(<ApplicationSettings />);
     fireEvent.change(await loadedField('Product name'), { target: { value: 'New app' } });
-    fireEvent.change(editField('Default runtime'), { target: { value: 'claude-code' } });
+    chooseOption(editField('Default runtime'), 'claude-code');
     fireEvent.submit(editField('Product name').closest('form')!);
     const dialog = screen.getByRole('dialog', { name: 'Review changes' });
     expect(within(dialog).getByText('Cloud Agent')).toBeVisible();
@@ -361,7 +358,7 @@ describe('application settings', () => {
     render(<ApplicationSettings />);
     fireEvent.change(await loadedField('Product name'), { target: { value: 'Keep this draft' } });
     fireEvent.click(screen.getByLabelText('More actions for Product name'));
-    fireEvent.click(screen.getByRole('button', { name: 'Restore default for Product name' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Restore default for Product name' }));
     const dialog = screen.getByRole('dialog', { name: 'Restore default value?' });
     expect(within(dialog).getByText('Default value')).toBeVisible();
     expect(within(dialog).getAllByText('Cloud Agent')).toHaveLength(2);
@@ -407,7 +404,7 @@ describe('application settings', () => {
     selectCategory('Connections');
     fireEvent.click(screen.getByRole('button', { name: 'Edit Connections settings' }));
     fireEvent.click(screen.getByLabelText('More actions for Service token'));
-    fireEvent.click(screen.getByRole('button', { name: 'Clear Service token' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Clear Service token' }));
     const dialog = screen.getByRole('dialog', { name: 'Clear saved secret?' });
     expect(dialog).toHaveTextContent('secret will be cleared');
     expect(dialog).toHaveTextContent('may stop working');
@@ -433,7 +430,7 @@ describe('application settings', () => {
       ['gateway_authorize_url', 'Sign-in', 'Sign-in authorization URL'],
       ['session_cookie_secure', 'Security', 'Require HTTPS session cookies'],
       ['github_app_id', 'Source control', 'GitHub App ID'],
-      ['publish_base_branch', 'Publication', 'Default pull request base branch'],
+      ['github_coauthor', 'Source control', 'Agent commit co-author'],
       ['attachments.max_files', 'Attachments', 'Maximum upload file count'],
       ['skills.max_selected', 'Skills', 'Maximum selected skills'],
       ['task_titles.max_chars', 'Task titles', 'Maximum task title length'],
@@ -472,7 +469,7 @@ describe('application settings', () => {
     expect(screen.getByRole('heading', { name: 'Session security', level: 4 })).toBeVisible();
     for (const [category, labels] of [
       ['Identity & access', ['Sign-in authorization URL', 'Require HTTPS session cookies']],
-      ['Source control', ['GitHub App ID', 'Default pull request base branch']],
+      ['Source control', ['GitHub App ID', 'Agent commit co-author']],
       [
         'Content',
         ['Maximum upload file count', 'Maximum selected skills', 'Maximum task title length'],
@@ -486,48 +483,42 @@ describe('application settings', () => {
     expect(screen.getByLabelText('Private pgAdmin URL')).toBeInTheDocument();
   });
 
-  it('keeps Important visible and preserves Advanced drafts when closed or switched to another category', async () => {
+  it('shows related fields together and preserves drafts across category changes', async () => {
     read.mockResolvedValue(organizedSnapshot());
     render(<ApplicationSettings />);
     await loadedField('Application name');
     selectCategory('Source control');
     const appId = editField('GitHub App ID');
-    const timeout = editField('Publication Git timeout');
+    const timeout = editField('GitHub request timeout');
     expect(appId).toBeVisible();
-    expect(editField('Default pull request base branch')).toBeVisible();
-    expect(timeout).not.toBeVisible();
-    expect(timeout.closest('details')).not.toHaveAttribute('open');
-    fireEvent.change(appId, { target: { value: '456' } });
-    toggleAdvanced(timeout);
+    expect(editField('Agent commit co-author')).toBeVisible();
     expect(timeout).toBeVisible();
+    fireEvent.change(appId, { target: { value: '456' } });
     fireEvent.change(timeout, { target: { value: '180' } });
-    toggleAdvanced(timeout);
-    expect(timeout).not.toBeVisible();
-    expect(appId).toHaveValue('456');
     selectCategory('Appearance');
     selectCategory('Source control');
-    toggleAdvanced(timeout);
-    expect(editField('Publication Git timeout')).toBe(timeout);
+    expect(editField('GitHub request timeout')).toBe(timeout);
     expect(timeout).toHaveValue(180);
     expect(appId).toHaveValue('456');
     expect(write).not.toHaveBeenCalled();
   });
 
-  it('opens Advanced and focuses an initial deep link from a merged original category', async () => {
+  it('focuses an initially linked field from a merged original category without a disclosure', async () => {
     read.mockResolvedValue(organizedSnapshot());
-    window.history.replaceState(null, '', '#application-setting-publish_git_timeout_s');
+    window.history.replaceState(null, '', '#application-setting-trust_proxy_headers');
     render(<ApplicationSettings />);
-    const input = await screen.findByLabelText('Publication Git timeout');
+    const input = await screen.findByLabelText('Trust forwarded client addresses');
     await waitFor(() => expect(input).toHaveFocus());
-    expect(input.closest('details')).toHaveAttribute('open');
-    expect(screen.getByRole('region', { name: 'Source control' })).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Source control' })).toHaveAttribute(
+    expect(input).toBeVisible();
+    expect(input.closest('details')).toBeNull();
+    expect(screen.getByRole('region', { name: 'Identity & access' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Identity & access' })).toHaveAttribute(
       'aria-pressed',
       'true',
     );
   });
 
-  it('opens Advanced in the merged category when a missing setup field is selected', async () => {
+  it('focuses a missing setup field in its merged category without a disclosure', async () => {
     read.mockResolvedValue({
       ...organizedSnapshot(),
       setup: {
@@ -552,7 +543,7 @@ describe('application settings', () => {
     fireEvent.click(link);
     await waitFor(() => expect(input).toHaveFocus());
     expect(input).toBeVisible();
-    expect(input.closest('details')).toHaveAttribute('open');
+    expect(input.closest('details')).toBeNull();
     expect(screen.getByRole('region', { name: 'Identity & access' })).toBeVisible();
     expect(screen.getByLabelText('Sign-in authorization URL')).toBeVisible();
   });
@@ -756,7 +747,7 @@ describe('application settings', () => {
     expect(screen.getByLabelText('Registration')).toHaveTextContent('Enabled');
     expect(screen.queryByRole('textbox', { name: 'Product name' })).not.toBeInTheDocument();
     expect(screen.getByLabelText('Product name')).not.toBeVisible();
-    expect(screen.getByText('Deployment setup')).toBeVisible();
+    expect(screen.queryByText('Deployment setup')).not.toBeInTheDocument();
   });
 
   it('derives categories from definitions and groups uncategorized settings under General', async () => {
@@ -813,7 +804,7 @@ describe('application settings', () => {
     expect(
       screen.queryByRole('navigation', { name: 'Application setting categories' }),
     ).not.toBeInTheDocument();
-    expect(screen.getByText('Deployment setup')).toBeVisible();
+    expect(screen.queryByText('Deployment setup')).not.toBeInTheDocument();
   });
 
   it('opens and focuses an initial deep link after the definitions load', async () => {
@@ -1022,9 +1013,9 @@ describe('application settings', () => {
   it('renders typed fields, category descriptions, hidden secret status, and read-only setup', async () => {
     render(<ApplicationSettings />);
     expect(await loadedField('Product name')).toHaveValue('Cloud Agent');
-    expect(editField('Default runtime')).toHaveValue('codex');
+    expect(editField('Default runtime')).toHaveTextContent('codex');
     selectCategory('Access');
-    expect(editField('Registration')).toHaveValue('true');
+    expect(editField('Registration')).toHaveTextContent('Enabled');
     selectCategory('Limits');
     expect(editField('Retry factor')).toHaveValue(1.5);
     expect(screen.getByRole('heading', { name: 'Limits', level: 3 })).toBeInTheDocument();
@@ -1032,8 +1023,8 @@ describe('application settings', () => {
     editField('Service token');
     expect(editField('Service token')).toHaveValue('');
     expect(screen.getByRole('button', { name: 'Review Connections changes' })).toBeDisabled();
-    fireEvent.click(screen.getByText('Deployment setup'));
-    expect(screen.getByText('DATABASE_URL')).toBeInTheDocument();
+    expect(screen.queryByText('Deployment setup')).not.toBeInTheDocument();
+    expect(screen.queryByText('DATABASE_URL')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Database connection')).not.toBeInTheDocument();
   });
 
@@ -1042,7 +1033,7 @@ describe('application settings', () => {
     render(<ApplicationSettings />);
     await loadedField('Product name');
     selectCategory('Access');
-    fireEvent.change(editField('Registration'), { target: { value: 'false' } });
+    chooseOption(editField('Registration'), 'Disabled');
     saveField('Registration');
     await waitFor(() =>
       expect(write).toHaveBeenCalledWith({ enabled: false }, 1, expect.any(AbortSignal)),
@@ -1125,9 +1116,7 @@ describe('application settings', () => {
 
     selectCategory('Access');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-    fireEvent.change(editField('Registration'), {
-      target: { value: 'false' },
-    });
+    chooseOption(editField('Registration'), 'Disabled');
     saveField('Registration');
     await screen.findByText('Access settings saved.');
     expect(write).toHaveBeenCalledExactlyOnceWith({ enabled: false }, 1, expect.any(AbortSignal));

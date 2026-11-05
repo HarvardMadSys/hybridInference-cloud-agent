@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import math
 import re
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -32,6 +32,7 @@ from cloud_agent.admin_usage import (  # noqa: TC001
     AdminUsageBreakdown,
     AdminUsageDay,
 )
+from cloud_agent.usage_range import UsageRange  # noqa: TC001
 
 ContainerState = Literal[
     "starting", "running", "stopping", "stopped", "stored", "deleting", "unavailable"
@@ -85,6 +86,8 @@ MAX_SUMMED_CONTAINERS = 1000
 MAX_SAMPLE_GAP_SECONDS = 120.0
 #: Days a history read may span: the admin Usage page's bound.
 MAX_HISTORY_DAYS = 90
+#: Days a history read covers when the client names no period.
+DEFAULT_HISTORY_DAYS = 7
 
 CONTAINER_CURSOR_SCOPE = cursor_scope(["owner-containers"])
 
@@ -143,6 +146,28 @@ def measured_interval(
     if cpu_window_seconds is None or not cpu_window_seconds > 0:
         return 0.0
     return min(cpu_window_seconds, MAX_SAMPLE_GAP_SECONDS)
+
+
+def utc_day_shares(*, ended_at: datetime, seconds: float) -> list[tuple[date, float]]:
+    """How much of ``seconds`` of use ending at ``ended_at`` falls on each UTC day.
+
+    A sample stands for the time before it, which can begin on the day before:
+    one taken ten seconds after midnight, standing for thirty, used twenty of
+    them the day before. One taken exactly at midnight stands wholly for the
+    day before. Earliest day first.
+    """
+    shares: list[tuple[date, float]] = []
+    end = ended_at.astimezone(UTC)
+    left = seconds
+    while left > 0:
+        start = end.replace(hour=0, minute=0, second=0, microsecond=0)
+        if start == end:
+            start -= timedelta(days=1)
+        share = min(left, (end - start).total_seconds())
+        shares.append((start.date(), share))
+        left -= share
+        end = start
+    return shares[::-1]
 
 
 def history_window(days: int, *, now: datetime | None = None) -> tuple[datetime, datetime]:
@@ -257,7 +282,11 @@ class OwnerResourceDay(OwnerResourceTotals):
 
 
 class OwnerResourceHistory(BaseModel):
-    """The owner's container use per UTC day, summed over every container."""
+    """The owner's container use per UTC bucket, summed over every container.
+
+    ``days`` keeps its name for older clients; with a long range each entry is
+    a week or a month, which ``period.bucket`` names.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -267,6 +296,7 @@ class OwnerResourceHistory(BaseModel):
     generated_at: datetime
     totals: OwnerResourceTotals
     days: list[OwnerResourceDay]
+    period: UsageRange | None = None
 
 
 class OwnerTokenUsage(BaseModel):
@@ -278,11 +308,17 @@ class OwnerTokenUsage(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    #: Every amount is what the owner's agents reported, not a provider's bill.
+    source: Literal["runtime_reported"] = "runtime_reported"
     since: datetime
     until: datetime
     day_timezone: Literal["UTC"] = "UTC"
     time_basis: Literal["job_created_at"] = "job_created_at"
     generated_at: datetime
     summary: AdminUsageAggregate
+    #: One entry per bucket of ``period`` (a day, week or month).
     days: list[AdminUsageDay]
     by_model: AdminUsageBreakdown
+    period: UsageRange | None = None
+    #: Bounded batches the sum was read in; more than one for a long history.
+    batches: int = Field(default=1, ge=0)

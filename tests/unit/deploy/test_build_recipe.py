@@ -34,10 +34,7 @@ def manifest() -> dict[str, Any]:
         )
 
     artifacts = [{"role": "control", "image": ref("control")}]
-    for variant, base in (("root", ""), ("agents", "/agents")):
-        artifacts.append(
-            {"role": "web", "variant": variant, "base_path": base, "image": ref(f"web{variant}")}
-        )
+    artifacts.append({"role": "web", "variant": "root", "base_path": "", "image": ref("webroot")})
     for role in ("runner", "sandbox", "tunnel"):
         artifacts.append({"role": role, "image": ref(role)})
     return {"source_commit": "a" * 40, "artifacts": artifacts}
@@ -127,7 +124,7 @@ def test_the_extracted_recipe_renders_a_release_compose_without_a_checkout(
                 "--stack",
                 "control-plane",
                 "--variant",
-                "agents",
+                "root",
                 "--output",
                 str(output),
             ],
@@ -139,5 +136,45 @@ def test_the_extracted_recipe_renders_a_release_compose_without_a_checkout(
         rendered = yaml.safe_load(output.read_text())
         assert "build" not in yaml.safe_dump(rendered)
         assert rendered["services"]["web"]["image"] == next(
-            a["image"] for a in manifest()["artifacts"] if a.get("variant") == "agents"
+            a["image"] for a in manifest()["artifacts"] if a.get("variant") == "root"
         )
+
+
+def test_the_extracted_recipe_can_prepare_a_storage_verdict_without_a_checkout(
+    tmp_path: Path,
+) -> None:
+    """The host-side orchestrator must execute from the artifact deployment itself."""
+    extracted = tmp_path / "extracted"
+    extracted.mkdir()
+    with tarfile.open(fileobj=io.BytesIO(br.build(REPO_ROOT)), mode="r:gz") as archive:
+        archive.extractall(extracted, filter="data")
+
+    root = extracted / "recipe"
+    script = root / "deploy/host/storage_attestation.py"
+    verdict = tmp_path / "state/.storage-probe/verdict.json"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "prepare",
+            "--verdict-file",
+            str(verdict),
+            "--deployment-sha",
+            "packaged-sha",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=root,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert not (root / ".git").exists()
+    assert script.stat().st_mode & 0o111
+    assert json.loads(verdict.read_text()) == {
+        "schema_version": 1,
+        "written_at": json.loads(verdict.read_text())["written_at"],
+        "deployment_sha": "packaged-sha",
+        "entries": {},
+    }
+    assert verdict.stat().st_mode & 0o777 == 0o644

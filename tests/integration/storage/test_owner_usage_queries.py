@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from datetime import UTC, datetime, timedelta
 
@@ -13,10 +14,13 @@ from tests.unit.test_sandbox_resource_protocol import sample
 
 from cloud_agent.admin_observability import decode_cursor
 from cloud_agent.owner_usage import CONTAINER_CURSOR_SCOPE, OwnerContainerCursor
+from cloud_agent.usage_range import buckets
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
 DAY = datetime(2026, 9, 20, tzinfo=UTC)
+#: Far from either midnight: a sample taken then stands for time on DAY alone.
+NOON = DAY + timedelta(hours=12)
 GIB = 1024**3
 
 
@@ -97,6 +101,37 @@ async def usage_days(db, sandbox_id):
 
 def days(start, count):
     return [(start + timedelta(days=n), start + timedelta(days=n + 1)) for n in range(count)]
+
+
+@contextlib.asynccontextmanager
+async def sampled_at(db, sample_id, at):
+    """Record the sample ``sample_id`` as taken ``at``.
+
+    The database dates a sample by its own clock, which a test cannot move, so
+    the days a sample counts on would depend on when the test runs: one taken
+    just after midnight counts partly on the day before. A trigger dates this
+    one instead.
+    """
+    await execute(
+        db,
+        f"""
+        CREATE FUNCTION test_sampled_at() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            NEW.resource_sampled_at := '{at.isoformat()}'::timestamptz;
+            RETURN NEW;
+        END $$;
+        CREATE TRIGGER test_sampled_at BEFORE UPDATE OF resource_snapshot ON agent_sandboxes
+            FOR EACH ROW WHEN (NEW.resource_snapshot->>'sample_id' = '{sample_id}')
+            EXECUTE FUNCTION test_sampled_at();
+        """,
+    )
+    try:
+        yield
+    finally:
+        await execute(
+            db,
+            "DROP TRIGGER test_sampled_at ON agent_sandboxes; DROP FUNCTION test_sampled_at();",
+        )
 
 
 async def test_an_owner_sees_only_containers_behind_chats_they_can_reach(db, store):
@@ -257,6 +292,63 @@ async def test_running_time_per_utc_day_comes_from_recorded_transitions(db, stor
     assert history.totals.measured_seconds == 0
 
 
+async def test_a_day_nothing_ran_counts_no_running_time(db, store):
+    """An idle day joins to no span; it is zero, not the whole day.
+
+    Postgres's LEAST and GREATEST skip NULLs, so an unfiltered sum over the
+    empty join counted every idle bucket as running from start to end.
+    """
+    job = await _create_job(store)
+    await container(db, job, "asbx_idle", created_at=DAY - timedelta(days=2))
+    await events(
+        db,
+        "asbx_idle",
+        (DAY + timedelta(hours=1), "running"),
+        (DAY + timedelta(hours=2), "stopped"),
+    )
+    history = await store.owner_usage.resource_history("user-1", buckets=days(DAY, 3))
+    assert [day.running_seconds for day in history.days] == pytest.approx([3600.0, 0.0, 0.0])
+    nobody = await store.owner_usage.resource_history(
+        "user-without-containers", buckets=days(DAY, 2)
+    )
+    assert [day.running_seconds for day in nobody.days] == [0.0, 0.0]
+
+
+async def test_a_long_range_sums_whole_weeks_and_months_on_the_server(db, store):
+    job = await _create_job(store)
+    await container(db, job, "asbx_weeks", created_at=DAY - timedelta(days=30))
+    await events(
+        db,
+        "asbx_weeks",
+        (DAY + timedelta(hours=1), "running"),
+        (DAY + timedelta(hours=3), "stopped"),
+        (DAY + timedelta(days=8, hours=1), "running"),
+        (DAY + timedelta(days=8, hours=2), "stopped"),
+    )
+    async with db.acquire() as conn:
+        await conn.executemany(
+            """INSERT INTO agent_sandbox_usage_days
+               (sandbox_id, user_id, day, measured_seconds, cpu_core_seconds, memory_byte_seconds)
+               VALUES ($1, 'user-1', $2, $3, $3, $3)""",
+            [
+                ("asbx_weeks", DAY.date(), 100.0),
+                ("asbx_weeks", (DAY + timedelta(days=1)).date(), 20.0),
+                ("asbx_weeks", (DAY + timedelta(days=8)).date(), 7.0),
+            ],
+        )
+    since, until = DAY - timedelta(days=3), DAY + timedelta(days=20)
+    weekly = buckets(since, until, "week")
+    history = await store.owner_usage.resource_history("user-1", buckets=weekly)
+    assert sum(day.running_seconds for day in history.days) == pytest.approx(3 * 3600.0)
+    assert sum(day.measured_seconds for day in history.days) == pytest.approx(127.0)
+    assert len([day for day in history.days if day.running_seconds > 0]) == 2
+    monthly = await store.owner_usage.resource_history(
+        "user-1", buckets=buckets(since, until, "month")
+    )
+    assert monthly.totals.measured_seconds == pytest.approx(127.0)
+    assert monthly.totals.running_seconds == pytest.approx(3 * 3600.0)
+
+
 async def test_a_container_still_running_counts_until_the_window_ends(db, store):
     job = await _create_job(store)
     await container(db, job, "asbx_open", created_at=DAY - timedelta(days=1))
@@ -322,29 +414,27 @@ async def test_each_new_sample_adds_the_time_since_the_previous_one(db, store):
     job = await seed(db, store, "asbx_resources")
     first = sample(sample_id="s1", sample_age_ms=0.0, cpu_cores=2.0, cpu_window_seconds=15.0)
     first["memory_bytes"] = GIB
-    await store.sandbox.reconcile_thread_sandbox_observation(
-        **observation(job), resource_usage=first
-    )
+    async with sampled_at(db, "s1", NOON):
+        await store.sandbox.reconcile_thread_sandbox_observation(
+            **observation(job), resource_usage=first
+        )
     [day] = await usage_days(db, "asbx_resources")
     assert day["user_id"] == job["user_id"]
+    assert day["day"] == DAY.date()
     # The first sample after a start stands for its own measurement window.
     assert day["measured_seconds"] == pytest.approx(15.0)
     assert day["cpu_core_seconds"] == pytest.approx(30.0)
     assert day["memory_byte_seconds"] == pytest.approx(15.0 * GIB)
 
     # The host reports again 30 seconds later.
-    await execute(
-        db,
-        "UPDATE agent_sandboxes SET resource_sampled_at = resource_sampled_at - interval '30 seconds'"
-        " WHERE id = 'asbx_resources'",
-    )
     second = {**first, "sample_id": "s2", "cpu_cores": 1.0}
-    await store.sandbox.reconcile_thread_sandbox_observation(
-        **observation(job), resource_usage=second
-    )
+    async with sampled_at(db, "s2", NOON + timedelta(seconds=30)):
+        await store.sandbox.reconcile_thread_sandbox_observation(
+            **observation(job), resource_usage=second
+        )
     [day] = await usage_days(db, "asbx_resources")
-    assert day["measured_seconds"] == pytest.approx(45.0, abs=1.0)
-    assert day["cpu_core_seconds"] == pytest.approx(60.0, abs=1.0)
+    assert day["measured_seconds"] == pytest.approx(45.0)
+    assert day["cpu_core_seconds"] == pytest.approx(60.0)
 
     # The same sample again, or one without CPU, adds nothing.
     await store.sandbox.reconcile_thread_sandbox_observation(
@@ -361,12 +451,49 @@ async def test_each_new_sample_adds_the_time_since_the_previous_one(db, store):
 async def test_a_sample_after_a_stop_does_not_count_the_time_stopped(db, store):
     job = await seed(db, store, "asbx_resources")
     reading = sample(sample_id="before", sample_age_ms=0.0, cpu_window_seconds=10.0)
-    await store.sandbox.reconcile_thread_sandbox_observation(
-        **observation(job), resource_usage=reading
-    )
+    async with sampled_at(db, "before", NOON):
+        await store.sandbox.reconcile_thread_sandbox_observation(
+            **observation(job), resource_usage=reading
+        )
     await store.sandbox.reconcile_thread_sandbox_observation(**observation(job, running=False))
-    await store.sandbox.reconcile_thread_sandbox_observation(
-        **observation(job), resource_usage={**reading, "sample_id": "after"}
-    )
+    # Had the stop kept the earlier sample, this one would count the 30 seconds since it.
+    async with sampled_at(db, "after", NOON + timedelta(seconds=30)):
+        await store.sandbox.reconcile_thread_sandbox_observation(
+            **observation(job), resource_usage={**reading, "sample_id": "after"}
+        )
     [day] = await usage_days(db, "asbx_resources")
+    assert day["day"] == DAY.date()
     assert day["measured_seconds"] == pytest.approx(20.0)
+
+
+async def test_a_sample_across_utc_midnight_counts_on_both_days(db, store):
+    """The time a sample stands for is split at UTC midnight.
+
+    It all went to the day the sample was taken on, so up to 120 seconds a
+    container used before midnight counted on the next day.
+    """
+    job = await seed(db, store, "asbx_resources")
+    # Two samples thirty seconds apart, twenty of them before midnight.
+    before = {**sample(sample_id="before", cpu_cores=2.0), "memory_bytes": GIB}
+    await execute(
+        db,
+        "UPDATE agent_sandboxes SET resource_snapshot = $2::jsonb, resource_sampled_at = $3,"
+        " resource_received_at = $3 WHERE id = $1",
+        "asbx_resources",
+        json.dumps(before),
+        DAY - timedelta(seconds=20),
+    )
+    async with sampled_at(db, "after", DAY + timedelta(seconds=10)):
+        await store.sandbox.reconcile_thread_sandbox_observation(
+            **observation(job), resource_usage={**before, "sample_id": "after"}
+        )
+
+    rows = await usage_days(db, "asbx_resources")
+    assert [row["day"] for row in rows] == [(DAY - timedelta(days=1)).date(), DAY.date()]
+    assert [row["measured_seconds"] for row in rows] == pytest.approx([20.0, 10.0])
+    assert [row["cpu_core_seconds"] for row in rows] == pytest.approx([40.0, 20.0])
+    assert [row["memory_byte_seconds"] for row in rows] == pytest.approx([20.0 * GIB, 10.0 * GIB])
+    history = await store.owner_usage.resource_history(
+        job["user_id"], buckets=days(DAY - timedelta(days=1), 2)
+    )
+    assert [day.measured_seconds for day in history.days] == pytest.approx([20.0, 10.0])

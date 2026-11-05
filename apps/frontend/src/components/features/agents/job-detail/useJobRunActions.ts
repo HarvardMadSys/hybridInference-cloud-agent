@@ -1,5 +1,6 @@
 'use client';
 
+import { KEYBOARD_INPUT_SELECTOR } from '@/lib/keyboardShortcuts';
 import { useT } from '@/components/providers';
 import { cancelAgentJob, forkAgentJob, restoreAgentJob } from '@/lib/api/agents';
 import { useRouter } from 'next/navigation';
@@ -27,6 +28,7 @@ export function useJobRunActions({
   const contextLost = hasLostContext(job);
   const stopRequestedRef = useRef(false);
   const forkRequestedRef = useRef(false);
+  const forkGenerationRef = useRef(0);
   const [stopping, setStopping] = useState(false);
   const [forking, setForking] = useState(false);
   const [restoring, setRestoring] = useState(false);
@@ -35,7 +37,12 @@ export function useJobRunActions({
     setStopping(false);
     forkRequestedRef.current = false;
     setForking(false);
-  }, [job.id]);
+    return () => {
+      // A pending Fork belongs to the page/account that initiated it. Its
+      // completion must not navigate away from the user's next conversation.
+      forkGenerationRef.current += 1;
+    };
+  }, [job.id, userId]);
 
   useEffect(() => {
     if (!isActive) {
@@ -67,7 +74,10 @@ export function useJobRunActions({
         event.key !== 'Escape' ||
         event.repeat ||
         event.defaultPrevented ||
-        target?.closest('input, textarea, select, [contenteditable="true"]')
+        target?.closest(KEYBOARD_INPUT_SELECTOR) ||
+        // The open mobile task list hides the conversation, and Escape closes
+        // the list. It must not also stop a run the owner cannot see.
+        document.getElementById('agents-workspace')?.hidden
       ) {
         return;
       }
@@ -92,6 +102,7 @@ export function useJobRunActions({
       return;
     }
     forkRequestedRef.current = true;
+    const generation = forkGenerationRef.current;
     setForking(true);
     onError(null);
     try {
@@ -103,6 +114,7 @@ export function useJobRunActions({
           // Blocked storage only loses the prefill, never the native fork.
         }
       }
+      if (forkGenerationRef.current !== generation) return;
       toast.success('Conversation forked');
       router.push(`/${fork.id}`);
       // Keep the source mutation guard closed until the child job actually
@@ -110,6 +122,7 @@ export function useJobRunActions({
       // the source while the dynamic route loads; reopening here permits a
       // second click with a newly cleared idempotency key.
     } catch (cause: unknown) {
+      if (forkGenerationRef.current !== generation) return;
       forkRequestedRef.current = false;
       onError(cause instanceof Error ? cause.message : 'Could not fork the conversation');
       setForking(false);

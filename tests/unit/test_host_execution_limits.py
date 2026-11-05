@@ -35,7 +35,9 @@ def test_bounded_command_cleanup_preserves_a_running_sibling(monkeypatch, tmp_pa
         thread_id="athr_test", sandbox_id="asbx_test", generation=1, runtime_id="codex"
     )
     manager = ChatSandboxManager(ContainerBackend(image="test", uid=os.getuid(), gid=os.getgid()))
-    monkeypatch.setattr(manager, "_require", lambda _spec: SimpleNamespace(running=True))
+    monkeypatch.setattr(
+        manager, "_require", lambda _spec: SimpleNamespace(running=True, container_id="test")
+    )
     monkeypatch.setattr(manager, "require_network", lambda *_args, **_kw: None)
     monkeypatch.setattr(manager, "build_exec_command", lambda _spec, argv, **_kw: argv)
     monkeypatch.setattr(
@@ -88,7 +90,9 @@ def _local_receipt_manager(monkeypatch, tmp_path):
         thread_id="athr_test", sandbox_id="asbx_test", generation=1, runtime_id="codex"
     )
     manager = ChatSandboxManager(ContainerBackend(image="test", uid=os.getuid(), gid=os.getgid()))
-    monkeypatch.setattr(manager, "_require", lambda _spec: SimpleNamespace(running=True))
+    monkeypatch.setattr(
+        manager, "_require", lambda _spec: SimpleNamespace(running=True, container_id="test")
+    )
     monkeypatch.setattr(manager, "build_exec_command", lambda _spec, argv, **_kw: argv)
     monkeypatch.setattr(
         manager,

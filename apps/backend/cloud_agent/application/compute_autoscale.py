@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.capacity_protocol import FRESH_AFTER_SECONDS
@@ -75,14 +75,14 @@ def desired_slots_v1(snapshot: object) -> tuple[int | None, str | None]:
 
 def _moment(value: object) -> datetime | None:
     if isinstance(value, datetime):
-        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value
     if not isinstance(value, str):
         return None
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
-    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
 
 
 def _operation_state(member: Mapping[str, Any]) -> str | None:
@@ -125,7 +125,7 @@ class CloudLabAutoscaler:
             else expected_deployment_sha
         ).strip()
 
-    async def reconcile(self) -> None:
+    async def reconcile(self) -> None:  # noqa: PLR0912, PLR0915 complexity baseline, #771
         """Persist timers/status, size ready hosts, and queue at most one action."""
         state = await self.repository.get_cloudlab_autoscaling()
         policy = state["policy"]
@@ -134,7 +134,7 @@ class CloudLabAutoscaler:
         observation = await self.host_pool.autoscaling_observation(
             expected_deployment_sha=self.expected_deployment_sha
         )
-        now = _moment(observation.get("observed_at")) or datetime.now(timezone.utc)
+        now = _moment(observation.get("observed_at")) or datetime.now(UTC)
         enabled = bool(policy.get("enabled"))
         active_host = observation.get("active_host")
 
@@ -147,6 +147,9 @@ class CloudLabAutoscaler:
             expected_runtime_generation=int(runtime["generation"]),
         )
         runnable = max(0, int(observation.get("runnable_new_group_jobs") or 0))
+        # A turn in claim backoff is no demand for a new Host, since no claim
+        # hands it out yet, but the pool is not idle while it waits.
+        backoff = max(0, int(observation.get("backoff_new_group_jobs") or 0))
         free = max(0, int(observation.get("fresh_effective_free_slots") or 0))
         unmatched = observation.get("unmatched_new_group_jobs")
         pressure = (
@@ -166,10 +169,10 @@ class CloudLabAutoscaler:
         owned_idle = self._all_owned_capacity_idle(members, list(observation.get("hosts") or []))
         idle_since = (
             _moment(runtime.get("idle_since"))
-            if runnable == 0 and pressure == 0 and owned_idle
+            if runnable + backoff == 0 and pressure == 0 and owned_idle
             else None
         )
-        if runnable == 0 and pressure == 0 and owned_idle and idle_since is None:
+        if runnable + backoff == 0 and pressure == 0 and owned_idle and idle_since is None:
             idle_since = now
         cooldown_until = _moment(runtime.get("cooldown_until"))
 
@@ -309,7 +312,7 @@ class CloudLabAutoscaler:
         if (
             bool(policy.get("scale_down_enabled"))
             and len(capacity_members) > minimum
-            and runnable == 0
+            and runnable + backoff == 0
             and pressure == 0
             and not cooling_down
             and idle_since is not None
@@ -323,7 +326,7 @@ class CloudLabAutoscaler:
                     allocation_id=str(candidate["allocation_id"]),
                 )
 
-    async def _size_owned_hosts(
+    async def _size_owned_hosts(  # noqa: PLR0912 complexity baseline, #771
         self,
         *,
         members: list[dict[str, Any]],
@@ -471,7 +474,7 @@ class CloudLabAutoscaler:
         candidates.sort(
             key=lambda host: (
                 _moment(active[str(host["allocation_id"])].get("created_at"))
-                or datetime.min.replace(tzinfo=timezone.utc)
+                or datetime.min.replace(tzinfo=UTC)
             ),
             reverse=True,
         )

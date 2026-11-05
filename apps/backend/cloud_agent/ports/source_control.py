@@ -1,7 +1,7 @@
 """Port: repository authorization and the GitLab credentials behind it.
 
 Repo grants, OAuth state, and the stored GitLab connection. Declared here
-because the publishing path needs it without the whole store.
+because the entitlement check needs it without the whole store.
 
 Declared here, beside the code that calls it, so a caller depends on the
 operations it needs rather than on the whole persistence surface.
@@ -131,12 +131,6 @@ class GitLabAccountSession(Protocol):
 
 class SourceControlRepository(Protocol):
     """Port: repository authorization and the GitLab credentials behind it."""
-
-    async def record_repo_grant(
-        self, *, user_id: str, installation_id: int, account_login: str | None = None
-    ) -> None:
-        """Record that this user may use this installation."""
-        ...
 
     async def list_repo_grants(self, *, user_id: str) -> list[dict[str, Any]]:
         """Return the installations this user has connected."""

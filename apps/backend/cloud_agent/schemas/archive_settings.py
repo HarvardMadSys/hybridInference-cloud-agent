@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime  # noqa: TC003 — Pydantic resolves annotations at runtime.
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 from pydantic import (
     BaseModel,
@@ -26,6 +26,7 @@ from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_ARCHIVE_S3_URI,
     SandboxArchivePolicy,
     SandboxArchivePolicyError,
+    archive_bucket,
 )
 
 if TYPE_CHECKING:
@@ -42,7 +43,10 @@ class SandboxArchiveSettingsResponse(BaseModel):
     """
 
     enabled: bool = False
-    s3_uri: Literal["s3://freeinference/cloud-agent/sandbox"] = SANDBOX_ARCHIVE_S3_URI
+    s3_uri: str = Field(
+        SANDBOX_ARCHIVE_S3_URI,
+        description="Where archives go: s3://<bucket>/cloud-agent/sandbox. Only the bucket is a setting.",
+    )
     region: str = ""
     kms_key_arn: str = ""
     expected_bucket_owner: str = ""
@@ -116,6 +120,15 @@ class SetSandboxArchiveSettingsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: StrictBool
+    s3_uri: str | None = Field(
+        None,
+        max_length=128,
+        description=(
+            "s3://<bucket>/cloud-agent/sandbox. Omit it to keep the stored destination. "
+            "Checkpoints and environment snapshots are read back by object version, "
+            "so those stored in a previous bucket are not restored after a change."
+        ),
+    )
     region: str = Field("", max_length=128)
     kms_key_arn: str = Field("", max_length=2048)
     expected_bucket_owner: str = Field("", max_length=12)
@@ -160,6 +173,7 @@ class SetSandboxArchiveSettingsRequest(BaseModel):
         try:
             SandboxArchivePolicy(
                 enabled=self.enabled,
+                bucket=archive_bucket(self.s3_uri or SANDBOX_ARCHIVE_S3_URI),
                 region=self.region,
                 kms_key_arn=self.kms_key_arn,
                 expected_bucket_owner=self.expected_bucket_owner,

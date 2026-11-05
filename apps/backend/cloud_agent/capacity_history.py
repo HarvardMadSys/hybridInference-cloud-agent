@@ -36,7 +36,6 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
-from cloud_agent.capacity_protocol import CAPACITY_HISTORY_RETENTION_S
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import number_setting
 
@@ -92,9 +91,7 @@ async def _prune(store: HostCapacityRepository, *, limit: int, timeout_seconds: 
     try:
         removed = await asyncio.wait_for(
             store.prune_capacity_history(
-                older_than_seconds=number_setting(
-                    "capacity_history_retention_s", CAPACITY_HISTORY_RETENTION_S
-                ),
+                older_than_seconds=number_setting("capacity_history_retention_s"),
                 limit=limit,
             ),
             timeout=timeout_seconds,
@@ -103,7 +100,7 @@ async def _prune(store: HostCapacityRepository, *, limit: int, timeout_seconds: 
         # Shutdown, not failure. The next process resumes from whatever the
         # table already holds; nothing here is worth delaying a stop for.
         raise
-    except (TimeoutError, asyncio.TimeoutError):
+    except TimeoutError:
         logger.warning(
             "agent_host_capacity_history_prune_timeout",
             extra={"event": "agent_host_capacity_history_prune_timeout"},

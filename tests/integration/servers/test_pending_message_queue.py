@@ -30,23 +30,27 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
+from tests.support.model_connections import (
+    use_test_cipher,
+    verified_connection,
+    with_connection_capability,
+)
+from tests.support.owners import CONNECTION_ID, CONNECTION_MODELS, FakeOwners, on_connection
+from tests.support.uploads import thread_uploads
 
 from cloud_agent.api import routes, uploads, worker
 from cloud_agent.api._owner_auth import authenticate_agent_owner
-from cloud_agent.api.deps import (
-    get_agent_app_credentials,
-    get_gateway_client,
-    get_grant_client,
-    get_log_store,
-    get_storage,
-)
+from cloud_agent.api.deps import get_agent_app_credentials, get_owner_directory, get_storage
 from cloud_agent.api.worker import verify_claiming_host
 from cloud_agent.application.pending_messages import settle_queue, settle_waiting_queues
+from cloud_agent.goals.controller import run_goal_wakeups
+from cloud_agent.settings import integer_setting
 from cloud_agent.source_control_runtime import SourceControlUnavailable
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories import pending_messages as pending_message_storage
 from cloud_agent.workers.attempts import reap_expired_attempts
-from cloud_agent_host.shared_protocol import (
+from cloud_agent.workers.recovery_maintenance import run_pending_message_maintenance
+from cloud_agent_shared.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
     SHARED_SANDBOX_CAPABILITY,
     SHARED_SANDBOX_HELPER_PINS,
@@ -80,55 +84,22 @@ def _db_config() -> dict[str, Any]:
     }
 
 
-class _Gateway:
-    """The gateway's catalog, which a case can change between two sends."""
-
-    def __init__(self) -> None:
-        self.models = ["glm-5.1", "glm-4.6"]
-        self.efforts = {"glm-5.1": ["low", "medium", "high", "max"], "glm-4.6": ["low", "high"]}
-
-    async def model_catalog(self, user_id: str) -> list[str]:
-        return list(self.models)
-
-    async def model_catalog_with_aliases(self, user_id: str) -> tuple[list[str], dict[str, str]]:
-        return list(self.models), {}
-
-    async def model_reasoning_efforts(self, user_id: str) -> dict[str, list[str]]:
-        return {model: list(levels) for model, levels in self.efforts.items()}
-
-    async def agent_access(self, user_id: str) -> dict[str, Any]:
-        return {"user_id": user_id, "allowed": True, "permissions": ["agent.use"]}
-
-
-class _Grants:
-    async def mint(self, **kwargs: Any) -> dict[str, Any]:
-        return {
-            "grant_id": f"agr_{kwargs['attempt_id']}",
-            "token": "agr.token",
-            "allowed_models": list(kwargs.get("models") or []),
-        }
-
-    async def renew(self, grant_id: str) -> dict[str, Any]:
-        return {"grant_id": grant_id}
-
-    async def revoke(self, grant_id: str) -> bool:
-        return True
-
-
 def _claim_body(worker_id: str) -> dict[str, Any]:
-    return {
-        "worker_id": worker_id,
-        "attestation": {
-            "sandbox_image_digest": _IMAGE_DIGEST,
-            "runner_capabilities": [
-                SHARED_SANDBOX_CAPABILITY,
-                NATIVE_FORK_AT_ANCHOR_CAPABILITY,
-                shared_deployment_capability("test-deployment"),
-            ],
-            "runtime_versions": dict(SHARED_SANDBOX_RUNTIME_PINS),
-            "helper_versions": dict(SHARED_SANDBOX_HELPER_PINS),
-        },
-    }
+    return with_connection_capability(
+        {
+            "worker_id": worker_id,
+            "attestation": {
+                "sandbox_image_digest": _IMAGE_DIGEST,
+                "runner_capabilities": [
+                    SHARED_SANDBOX_CAPABILITY,
+                    NATIVE_FORK_AT_ANCHOR_CAPABILITY,
+                    shared_deployment_capability("test-deployment"),
+                ],
+                "runtime_versions": dict(SHARED_SANDBOX_RUNTIME_PINS),
+                "helper_versions": dict(SHARED_SANDBOX_HELPER_PINS),
+            },
+        }
+    )
 
 
 @pytest_asyncio.fixture
@@ -154,13 +125,15 @@ class Api:
     """The app, its store, and the host that runs its turns."""
 
     def __init__(
-        self, client: AsyncClient, store: Storage, pool: Any, gateway: _Gateway, app: FastAPI
+        self, client: AsyncClient, store: Storage, pool: Any, owners: FakeOwners, app: FastAPI
     ) -> None:
         self.client = client
         self.store = store
         self.pool = pool
-        self.gateway = gateway
+        self.owners = owners
         self.app = app
+        #: The owner's verified connection, listing every model these cases use.
+        self.connection: dict[str, Any] = {}
         #: The retained sandbox of each conversation, once its first turn made it.
         self._sandboxes: dict[str, dict[str, Any]] = {}
 
@@ -175,6 +148,7 @@ class Api:
                 "repo": _REPO,
                 "task_prompt": prompt,
                 "model": "glm-5.1",
+                "model_connection_id": self.connection.get("id"),
                 "base_sha": "a" * 40,
                 **fields,
             },
@@ -185,6 +159,9 @@ class Api:
     async def send(
         self, thread_id: str, prompt: str, *, key: str | None = None, **fields: Any
     ) -> Any:
+        if "model" in fields:
+            # Another model is picked from the owner's same connection.
+            fields = {"model_connection_id": self.connection.get("id"), **fields}
         return await self.client.post(
             f"/v1/agent/threads/{thread_id}/messages",
             json={"prompt": prompt, **fields},
@@ -380,6 +357,8 @@ async def api(pool, monkeypatch):
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "queue-test-secret")
     monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "queue-sandbox-manager-secret")
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", _REPO)
+    monkeypatch.setenv("AGENT_MODEL_CONNECTIONS_ENABLED", "true")
+    use_test_cipher(monkeypatch)
     store = Storage(pool)
     await store.host_pool.register_host(
         host=_HOST,
@@ -397,15 +376,13 @@ async def api(pool, monkeypatch):
         return None
 
     monkeypatch.setattr(worker, "_worker_sandbox_manager", no_sandbox_manager)
-    gateway = _Gateway()
+    owners = FakeOwners()
     app = FastAPI()
     app.include_router(routes.router)
     app.include_router(uploads.router)
     app.dependency_overrides[get_storage] = lambda: store
-    app.dependency_overrides[get_gateway_client] = lambda: gateway
-    app.dependency_overrides[get_grant_client] = _Grants
+    app.dependency_overrides[get_owner_directory] = lambda: owners
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
-    app.dependency_overrides[get_log_store] = lambda: None
     app.dependency_overrides[authenticate_agent_owner] = lambda: {
         "user_id": _OWNER,
         "role": "free",
@@ -416,7 +393,15 @@ async def api(pool, monkeypatch):
         "credential_hash": _HOST_CREDENTIAL,
     }
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        yield Api(client, store, pool, gateway, app)
+        api = Api(client, store, pool, owners, app)
+        # The connection `on_connection` names, so every body built with it runs.
+        api.connection = await verified_connection(
+            store,
+            _OWNER,
+            connection_id=CONNECTION_ID,
+            models=tuple(dict.fromkeys(("glm-5.1", "glm-4.6", *CONNECTION_MODELS))),
+        )
+        yield api
 
 
 # -- 10.1: a held message holds the line, FIFO resumes after save --------------
@@ -550,7 +535,7 @@ async def test_two_replicas_settling_at_once_create_one_turn(api: Api):
                 settle_queue(
                     replica,
                     thread_id=thread_id,
-                    gateway=api.gateway,
+                    owners=api.owners,
                     app_credentials=None,
                 )
                 for replica in replicas
@@ -670,7 +655,7 @@ async def test_a_turn_the_reaper_fails_is_paused_by_the_periodic_sweep(api: Api)
     assert [action["action"] for action in actions] == ["failed"]
     assert (await api.queue(thread_id))["queue_paused_reason"] is None
 
-    settled = await settle_waiting_queues(api.store, gateway=api.gateway, github_app=None)
+    settled = await settle_waiting_queues(api.store, owners=api.owners, github_app=None)
 
     assert settled == 1
     queue = await api.queue(thread_id)
@@ -681,8 +666,12 @@ async def test_a_turn_the_reaper_fails_is_paused_by_the_periodic_sweep(api: Api)
     assert await api.store.pending_messages.threads_to_settle() == []
 
 
-async def test_the_reaper_loop_runs_queue_and_staged_attachment_sweeps(api: Api, monkeypatch):
-    """The sweep is wired into the loop that runs in production, not only callable."""
+async def test_the_maintenance_loops_run_queue_and_staged_attachment_sweeps(api: Api, monkeypatch):
+    """The sweeps are wired into the loops that run in production, not only callable.
+
+    The staged-upload purge runs in the reaper; the queue sweep in a loop of its
+    own, so that a slow queue cannot hold up lease recovery.
+    """
     claimed_upload = await api.store.attachments.create_attachment(
         user_id=_OWNER, path="claimed.txt", content=b"claimed", content_type="text/plain"
     )
@@ -712,24 +701,38 @@ async def test_the_reaper_loop_runs_queue_and_staged_attachment_sweeps(api: Api,
     # 24-hour default: these two-hour-old rows are eligible at one hour.
     monkeypatch.setattr(
         "cloud_agent.workers.attempts.integer_setting",
-        lambda key, fallback: 1 if key == "attachments.staged_retention_hours" else fallback,
+        lambda key: 1 if key == "attachments.staged_retention_hours" else integer_setting(key),
     )
 
-    loop = asyncio.create_task(
-        reap_expired_attempts(api.store, interval_seconds=0.05, max_attempts=1, gateway=api.gateway)
-    )
+    loops = [
+        asyncio.create_task(
+            reap_expired_attempts(api.store, interval_seconds=0.05, max_attempts=1)
+        ),
+        asyncio.create_task(
+            run_pending_message_maintenance(api.store, owners=api.owners, interval_seconds=0.05)
+        ),
+    ]
     try:
         # Generous: one loop pass also reaps hosts, residencies and goals, and
         # a slow disk can make that pass take seconds.
         deadline = asyncio.get_running_loop().time() + 60
         while asyncio.get_running_loop().time() < deadline:
-            if (await api.queue(thread_id))["queue_paused_reason"] == "failed":
+            # Both effects, because two loops make them: the queue sweep can
+            # pause the queue before the reaper's pass reaches the purge.
+            async with api.pool.acquire() as conn:
+                purged = not await conn.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM agent_job_attachments WHERE id = $1)",
+                    abandoned_upload["id"],
+                )
+            if purged and (await api.queue(thread_id))["queue_paused_reason"] == "failed":
                 break
             await asyncio.sleep(0.05)
     finally:
-        loop.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await loop
+        for loop in loops:
+            loop.cancel()
+        for loop in loops:
+            with pytest.raises(asyncio.CancelledError):
+                await loop
 
     assert (await api.queue(thread_id))["queue_paused_reason"] == "failed"
     assert [turn["state"] for turn in await api.turns(thread_id)] == ["failed"]
@@ -782,11 +785,11 @@ async def test_a_github_app_that_cannot_load_holds_a_message_back_without_refusi
     assert [(row["state"], row["last_error"]) for row in queue["messages"]] == [("queued", None)]
     assert (queue["queue_paused_reason"], queue["queue_settled_job_id"]) == (None, job["id"])
     assert thread_id in await api.store.pending_messages.threads_to_settle()
-    await settle_waiting_queues(api.store, gateway=api.gateway, github_app=app)
+    await settle_waiting_queues(api.store, owners=api.owners, github_app=app)
     assert [turn["task_prompt"] for turn in await api.turns(thread_id)] == ["fix it"]
 
     app.loaded = True
-    await settle_waiting_queues(api.store, gateway=api.gateway, github_app=app)
+    await settle_waiting_queues(api.store, owners=api.owners, github_app=app)
 
     assert [turn["task_prompt"] for turn in await api.turns(thread_id)] == ["fix it", "next step"]
     assert (await api.queue(thread_id))["messages"] == []
@@ -840,7 +843,7 @@ async def test_a_github_app_that_cannot_load_does_not_stop_an_owner_withdrawing_
     # runs: nothing the owner withdrew or held is sent.
     await api.finish(running)
     app.loaded = True
-    await settle_waiting_queues(api.store, gateway=api.gateway, github_app=app)
+    await settle_waiting_queues(api.store, owners=api.owners, github_app=app)
 
     assert [turn["task_prompt"] for turn in await api.turns(thread_id)] == ["fix it"]
     queue = await api.queue(thread_id)
@@ -899,33 +902,10 @@ async def test_a_resend_finds_the_message_while_it_waits_and_its_turn_after(api:
     assert (await api.queue(thread_id))["messages"] == []
 
 
-async def _request_publication(api: Api, thread_id: str) -> int:
-    """Ask for the workspace's publication, as its owner's button does."""
-    requested = await api.store.snapshot.request_snapshot_publication(
-        thread_id=thread_id, user_id=_OWNER
-    )
-    assert requested.get("requested") is True, requested
-    return int(requested["snapshot_id"])
-
-
-async def _publish_workspace(api: Api, thread_id: str) -> None:
-    """Publish the workspace without a capture or publisher in this queue-only tier."""
-    snapshot_id = await _request_publication(api, thread_id)
-    async with api.pool.acquire() as conn:
-        published = await conn.fetchval(
-            "UPDATE agent_sandbox_snapshots SET state = 'published', "
-            "published_commit_sha = $2, published_at = NOW() WHERE id = $1 RETURNING id",
-            snapshot_id,
-            "b" * 40,
-        )
-    assert published is not None
-
-
 async def test_two_tabs_guarded_submit_creates_one_turn_under_the_thread_lock(api: Api):
     job = await api.create()
     thread_id = job["thread_id"]
     await api.run(job)
-    await _publish_workspace(api, thread_id)
 
     fields = {
         "thread_id": thread_id,
@@ -956,7 +936,6 @@ async def test_guarded_submit_sees_a_message_committed_while_it_waits_for_the_th
     job = await api.create()
     thread_id = job["thread_id"]
     await api.run(job)
-    await _publish_workspace(api, thread_id)
     task = None
     try:
         async with api.pool.acquire() as writer, writer.transaction():
@@ -1011,7 +990,6 @@ async def test_guarded_submit_replays_its_turn_after_the_chat_changes(api: Api):
     job = await api.create()
     thread_id = job["thread_id"]
     await api.run(job)
-    await _publish_workspace(api, thread_id)
     fields = {"require_idle": True, "expected_latest_job_id": job["id"]}
 
     first = await api.send(thread_id, "Watch the PR and merge", key="watch-once", **fields)
@@ -1057,7 +1035,6 @@ async def test_guarded_submit_refuses_an_ordinary_message_winning_after_the_queu
     job = await api.create()
     thread_id = job["thread_id"]
     await api.run(job)
-    await _publish_workspace(api, thread_id)
     before_locked_write = asyncio.Event()
     ordinary_won = asyncio.Event()
     original = api.store.pending_messages.submit_message
@@ -1106,7 +1083,6 @@ async def test_guarded_submit_preserves_every_waiting_message_and_a_paused_queue
     job = await api.create()
     thread_id = job["thread_id"]
     await api.run(job)
-    await _publish_workspace(api, thread_id)
     waiting = await api.store.pending_messages.submit_message(
         thread_id=thread_id,
         user_id=_OWNER,
@@ -1146,10 +1122,8 @@ async def test_guarded_submit_refuses_a_newer_completed_turn(api: Api):
     job = await api.create()
     thread_id = job["thread_id"]
     await api.run(job)
-    await _publish_workspace(api, thread_id)
     ordinary = (await api.send(thread_id, "another completed turn")).json()["job"]
     await api.run(ordinary)
-    await _publish_workspace(api, thread_id)
 
     refused = await api.send(
         thread_id,
@@ -1169,7 +1143,6 @@ async def test_guarded_submit_refuses_any_live_turn_even_when_its_id_matches(api
     job = await api.create()
     thread_id = job["thread_id"]
     await api.run(job)
-    await _publish_workspace(api, thread_id)
     ordinary = (await api.send(thread_id, "ordinary live turn")).json()["job"]
     async with api.pool.acquire() as conn:
         await conn.execute("UPDATE agent_jobs SET state = $2 WHERE id = $1", ordinary["id"], state)
@@ -1187,76 +1160,14 @@ async def test_guarded_submit_refuses_any_live_turn_even_when_its_id_matches(api
     assert (await api.queue(thread_id))["messages"] == []
 
 
-@pytest.mark.parametrize("state", ["pending", "capturing", "captured", "publishing", "failed"])
-async def test_guarded_submit_waits_for_the_current_workspace_publication(api: Api, state: str):
+async def test_guarded_submit_requires_a_known_workspace(api: Api):
     job = await api.create()
     thread_id = job["thread_id"]
     await api.run(job)
-    await _request_publication(api, thread_id)
     async with api.pool.acquire() as conn:
-        await conn.execute("UPDATE agent_sandbox_snapshots SET state = $1", state)
-
-    refused = await api.send(
-        thread_id,
-        "Watch the PR and merge",
-        require_idle=True,
-        expected_latest_job_id=job["id"],
-    )
-
-    assert refused.status_code == 409, refused.text
-    assert refused.json()["detail"]["error"]["type"] == "conversation_changed"
-    assert len(await api.turns(thread_id)) == 1
-    assert (await api.queue(thread_id))["messages"] == []
-    # Normal messages retain their existing ability to start before publication.
-    ordinary = await api.send(thread_id, "ordinary follow-up")
-    assert ordinary.status_code == 201, ordinary.text
-    assert ordinary.json()["job"]["task_prompt"] == "ordinary follow-up"
-
-
-async def test_guarded_submit_refuses_a_newer_unpublished_workspace_after_an_older_publication(
-    api: Api,
-):
-    job = await api.create()
-    thread_id = job["thread_id"]
-    await api.run(job)
-    await _publish_workspace(api, thread_id)
-    ordinary = (await api.send(thread_id, "new changes to publish")).json()["job"]
-    await api.run(ordinary)
-    async with api.pool.acquire() as conn:
-        # The new turn opened no snapshot: only its owner publishes it.
-        assert [
-            row["state"]
-            for row in await conn.fetch(
-                "SELECT state FROM agent_sandbox_snapshots ORDER BY workspace_epoch"
-            )
-        ] == ["published"]
-
-    refused = await api.send(
-        thread_id,
-        "Watch the PR and merge",
-        require_idle=True,
-        expected_latest_job_id=ordinary["id"],
-    )
-
-    assert refused.status_code == 409, refused.text
-    assert refused.json()["detail"]["error"]["type"] == "unpublished_changes"
-    assert len(await api.turns(thread_id)) == 2
-    assert (await api.queue(thread_id))["messages"] == []
-
-
-@pytest.mark.parametrize("missing", ["snapshot", "membership"])
-async def test_guarded_submit_requires_a_known_published_workspace(api: Api, missing: str):
-    job = await api.create()
-    thread_id = job["thread_id"]
-    await api.run(job)
-    await _publish_workspace(api, thread_id)
-    async with api.pool.acquire() as conn:
-        if missing == "snapshot":
-            await conn.execute("DELETE FROM agent_sandbox_snapshots")
-        else:
-            await conn.execute(
-                "DELETE FROM agent_thread_sandbox_memberships WHERE thread_id = $1", thread_id
-            )
+        await conn.execute(
+            "DELETE FROM agent_thread_sandbox_memberships WHERE thread_id = $1", thread_id
+        )
 
     refused = await api.send(
         thread_id,
@@ -1277,7 +1188,6 @@ async def test_guarded_submit_creates_its_turn_atomically_with_idle_native_sibli
     job = await api.create()
     thread_id = job["thread_id"]
     await api.run(job)
-    await _publish_workspace(api, thread_id)
     sibling = await api.fork(job)
     settlement = AsyncMock()
     monkeypatch.setattr(api.store.pending_messages, "settle_queue", settlement)
@@ -1304,7 +1214,6 @@ async def test_guarded_submit_refuses_a_native_sibling_with_a_live_turn(api: Api
     job = await api.create()
     thread_id = job["thread_id"]
     await api.run(job)
-    await _publish_workspace(api, thread_id)
     sibling = await api.fork(job)
     ordinary = (await api.send(sibling["thread_id"], "sibling changes")).json()["job"]
     if state == "running":
@@ -1331,7 +1240,6 @@ async def test_guarded_submit_refuses_a_native_siblings_waiting_messages(api: Ap
     job = await api.create()
     thread_id = job["thread_id"]
     await api.run(job)
-    await _publish_workspace(api, thread_id)
     sibling = await api.fork(job)
     message = await api.store.pending_messages.submit_message(
         thread_id=sibling["thread_id"],
@@ -1369,7 +1277,6 @@ async def test_guarded_submit_waits_for_a_siblings_active_attempt_after_its_job_
     job = await api.create()
     thread_id = job["thread_id"]
     await api.run(job)
-    await _publish_workspace(api, thread_id)
     sibling = await api.fork(job)
     ordinary = (await api.send(sibling["thread_id"], "sibling finishing")).json()["job"]
     await api.start(ordinary)
@@ -1396,7 +1303,6 @@ async def test_guarded_submit_refuses_live_shared_workspace_operations(api: Api,
     job = await api.create()
     thread_id = job["thread_id"]
     await api.run(job)
-    await _publish_workspace(api, thread_id)
     if operation == "fork":
         prepared = await api.store.session_fork.prepare_session_fork(
             source_job_id=job["id"], user_id=_OWNER, idempotency_key="fork-before-watch"
@@ -1424,7 +1330,6 @@ async def test_guarded_submit_ignores_live_work_in_an_unrelated_sandbox(api: Api
     job = await api.create()
     thread_id = job["thread_id"]
     await api.run(job)
-    await _publish_workspace(api, thread_id)
     unrelated = await api.create("unrelated work")
     await api.start(unrelated)
 
@@ -1446,7 +1351,6 @@ async def test_guarded_submit_replays_before_group_checks_when_a_sibling_becomes
     job = await api.create()
     thread_id = job["thread_id"]
     await api.run(job)
-    await _publish_workspace(api, thread_id)
     sibling = await api.fork(job)
     guard = {"require_idle": True, "expected_latest_job_id": job["id"]}
     first = await api.send(thread_id, "Watch the PR and merge", key="group-watch-once", **guard)
@@ -1483,7 +1387,6 @@ async def test_guarded_submit_waits_for_actual_sibling_admission_at_the_group_lo
     job = await api.create()
     thread_id = job["thread_id"]
     await api.run(job)
-    await _publish_workspace(api, thread_id)
     sibling = await api.fork(job)
     ordinary = (await api.send(sibling["thread_id"], "sibling's admitted work")).json()["job"]
     admission_holds_group = asyncio.Event()
@@ -1550,7 +1453,6 @@ async def test_ordinary_sibling_submit_waits_for_watch_to_commit_after_its_empty
     job = await api.create()
     thread_id = job["thread_id"]
     await api.run(job)
-    await _publish_workspace(api, thread_id)
     sibling = await api.fork(job)
     checked_empty_group = asyncio.Event()
     release_watch = asyncio.Event()
@@ -1639,93 +1541,12 @@ async def test_ordinary_submit_without_a_retained_membership_still_queues_and_re
     assert len(await api.turns(thread_id)) == 1
 
 
-async def test_guarded_submit_does_not_hold_an_included_job_while_waiting_for_publication(
-    api: Api,
-):
-    job = await api.create()
-    thread_id = job["thread_id"]
-    await api.run(job)
-    await _request_publication(api, thread_id)
-    group = await api.store.sandbox.thread_sandbox(thread_id=thread_id)
-    assert group is not None
-    watch = None
-    try:
-        async with api.pool.acquire() as publisher:
-            snapshot_id = await publisher.fetchval(
-                "UPDATE agent_sandbox_snapshots SET state = 'publishing' "
-                "WHERE sandbox_id = $1 RETURNING id",
-                group["sandbox_id"],
-            )
-            assert snapshot_id is not None
-            async with publisher.transaction():
-                # record_snapshot_publish locks snapshot -> included jobs ->
-                # group. Pause past its group boundary before the included write.
-                await publisher.execute(
-                    "UPDATE agent_sandbox_snapshots SET state = 'published', "
-                    "published_commit_sha = $2, published_at = NOW() WHERE id = $1",
-                    snapshot_id,
-                    "a" * 40,
-                )
-                await publisher.fetch(
-                    "SELECT id FROM agent_jobs WHERE id IN ("
-                    "SELECT job_id FROM agent_snapshot_jobs WHERE snapshot_id = $1) "
-                    "ORDER BY id FOR NO KEY UPDATE",
-                    snapshot_id,
-                )
-                await publisher.fetchval(
-                    "SELECT id FROM agent_sandboxes WHERE id = $1 FOR UPDATE",
-                    group["sandbox_id"],
-                )
-                publisher_pid = await publisher.fetchval("SELECT pg_backend_pid()")
-                watch = asyncio.create_task(
-                    api.send(
-                        thread_id,
-                        "Watch the PR and merge",
-                        require_idle=True,
-                        expected_latest_job_id=job["id"],
-                    )
-                )
-                async with asyncio.timeout(10), api.pool.acquire() as observer:
-                    while not await observer.fetchval(
-                        "SELECT EXISTS (SELECT 1 FROM pg_locks "
-                        "WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
-                        publisher_pid,
-                    ):
-                        await asyncio.sleep(0.01)
-                # Watch waits at the group without holding its parent, so the
-                # real included-job update and the publication's commit go
-                # through.
-                async with asyncio.timeout(10):
-                    updated = await publisher.execute(
-                        "UPDATE agent_jobs SET published_pr_url = $2, "
-                        "published_commit_sha = $3 WHERE id IN ("
-                        "SELECT job_id FROM agent_snapshot_jobs WHERE snapshot_id = $1)",
-                        snapshot_id,
-                        "https://github.com/owner/name/pull/1",
-                        "a" * 40,
-                    )
-                    assert updated == "UPDATE 1"
-                assert not watch.done()
-        accepted = await asyncio.wait_for(watch, timeout=10)
-    finally:
-        if watch is not None and not watch.done():
-            watch.cancel()
-            await asyncio.gather(watch, return_exceptions=True)
-
-    assert accepted.status_code == 201, accepted.text
-    assert accepted.json()["job"]["task_prompt"] == "Watch the PR and merge"
-    assert accepted.json()["pending"] is None
-    assert (await api.queue(thread_id))["messages"] == []
-    assert len(await api.turns(thread_id)) == 2
-
-
 async def test_guarded_submit_rolls_back_the_turn_if_a_prepared_upload_disappears(
     api: Api, monkeypatch
 ):
     job = await api.create()
     thread_id = job["thread_id"]
     await api.run(job)
-    await _publish_workspace(api, thread_id)
     upload = await api.store.attachments.create_attachment(
         user_id=_OWNER, path="notes.txt", content=b"notes", content_type="text/plain"
     )
@@ -1780,12 +1601,9 @@ async def test_guarded_submit_preserves_resolved_turn_choices_and_attachment_own
     original_upload = await api.store.attachments.create_attachment(
         user_id=_OWNER, path="original.txt", content=b"original", content_type="text/plain"
     )
-    job = await api.create(
-        reasoning_effort="high", skill_ids=[skill["id"]], attachment_ids=[original_upload["id"]]
-    )
+    job = await api.create(skill_ids=[skill["id"]], attachment_ids=[original_upload["id"]])
     thread_id = job["thread_id"]
     await api.run(job)
-    await _publish_workspace(api, thread_id)
     previous = await api.store.conversation_queries.get_job(job["id"])
     assert previous is not None
     async with api.pool.acquire() as conn:
@@ -1806,7 +1624,6 @@ async def test_guarded_submit_preserves_resolved_turn_choices_and_attachment_own
         )
         fields = {
             "model": "glm-4.6",
-            "reasoning_effort": "auto",
             "skill_ids": [skill["id"]],
             "attachment_ids": [upload["id"]],
         }
@@ -1846,7 +1663,8 @@ async def test_guarded_submit_preserves_resolved_turn_choices_and_attachment_own
             "pending_message_id": None,
         }
     else:
-        assert (made["model"], made["reasoning_effort"]) == ("glm-5.1", "high")
+        # A connection turn runs at its provider's default: no effort to inherit.
+        assert (made["model"], made["reasoning_effort"]) == ("glm-5.1", None)
         assert made_skills == previous_skills
         assert made_skills[0]["instructions"] == "Inspect the original tests."
         assert made["attachments"] is None
@@ -1924,13 +1742,15 @@ async def test_a_new_task_cannot_take_an_upload_a_waiting_message_holds(api: Api
 
     taken = await api.client.post(
         "/v1/agent/jobs",
-        json={
-            "repo": _REPO,
-            "task_prompt": "take the spec",
-            "model": "glm-5.1",
-            "base_sha": "a" * 40,
-            "attachment_ids": [upload["id"]],
-        },
+        json=on_connection(
+            {
+                "repo": _REPO,
+                "task_prompt": "take the spec",
+                "model": "glm-5.1",
+                "base_sha": "a" * 40,
+                "attachment_ids": [upload["id"]],
+            }
+        ),
     )
 
     assert taken.status_code == 400, taken.text
@@ -1993,7 +1813,7 @@ async def test_a_message_attaching_a_file_again_is_sent_and_replaces_it(api: Api
 
     turns = await api.turns(thread_id)
     assert [turn["task_prompt"] for turn in turns] == ["fix it", "use the new report"]
-    rows = await api.store.attachments.list_thread_attachments(thread_id=thread_id)
+    rows = await thread_uploads(api.pool, thread_id=thread_id)
     assert [row["id"] for row in rows] == [second["id"]]
 
 
@@ -2022,7 +1842,6 @@ async def test_an_idle_only_message_says_why_its_upload_was_refused(api: Api):
     job = await api.create(attachment_ids=[first["id"]])
     thread_id = job["thread_id"]
     await api.run(job)
-    await _publish_workspace(api, thread_id)
     later = await _stage(api, "docs/a.md")
 
     refused = await api.send(
@@ -2044,28 +1863,33 @@ async def test_an_idle_only_message_says_why_its_upload_was_refused(api: Api):
 # -- 10.1: each message keeps its own model and effort -----------------------------
 
 
-async def test_each_message_runs_with_its_own_model_and_effort(api: Api):
+async def test_each_message_runs_with_its_own_model(api: Api):
     job = await api.create()
     thread_id = job["thread_id"]
     running = await api.start(job)
-    a = await api.send(thread_id, "A on the smaller model", model="glm-4.6", reasoning_effort="low")
-    b = await api.send(thread_id, "B back on the default", model="glm-5.1", reasoning_effort="max")
+    a = await api.send(thread_id, "A on the smaller model", model="glm-4.6")
+    b = await api.send(thread_id, "B back on the default", model="glm-5.1")
     assert a.status_code == b.status_code == 201, (a.text, b.text)
 
     await api.finish(running)
     a_turn = (await api.turns(thread_id))[1]
-    assert (a_turn["task_prompt"], a_turn["model"], a_turn["reasoning_effort"]) == (
-        "A on the smaller model",
-        "glm-4.6",
-        "low",
-    )
+    assert (a_turn["task_prompt"], a_turn["model"]) == ("A on the smaller model", "glm-4.6")
     await api.run({"id": a_turn["id"]})
     b_turn = (await api.turns(thread_id))[2]
-    assert (b_turn["task_prompt"], b_turn["model"], b_turn["reasoning_effort"]) == (
-        "B back on the default",
-        "glm-5.1",
-        "max",
+    assert (b_turn["task_prompt"], b_turn["model"]) == ("B back on the default", "glm-5.1")
+
+
+async def test_a_message_naming_an_effort_on_a_connection_is_refused(api: Api):
+    """A connection turn runs at its provider's default; an effort is refused, not dropped."""
+    job = await api.create()
+    running = await api.start(job)
+    refused = await api.send(
+        job["thread_id"], "think hard", model="glm-5.1", reasoning_effort="max"
     )
+    assert refused.status_code == 400, refused.text
+    assert refused.json()["detail"]["error"]["reason"] == "effort_unsupported"
+    await api.finish(running)
+    assert len(await api.turns(job["thread_id"])) == 1
 
 
 async def test_a_message_the_checks_refuse_when_it_is_sent_is_held_with_the_reason(api: Api):
@@ -2074,14 +1898,16 @@ async def test_a_message_the_checks_refuse_when_it_is_sent_is_held_with_the_reas
     running = await api.start(job)
     await api.send(thread_id, "use the smaller model", model="glm-4.6")
     behind = (await api.send(thread_id, "and then this")).json()["pending"]
-    # The model is withdrawn while the message waits.
-    api.gateway.models = ["glm-5.1"]
+    # The owner removes the model from the connection while the message waits.
+    assert await api.store.model_connections.update_model_connection(
+        user_id=_OWNER, connection_id=api.connection["id"], changes={"models": ["glm-5.1"]}
+    )
 
     await api.finish(running)
 
     queue = await api.queue(thread_id)
     assert [row["state"] for row in queue["messages"]] == ["held", "queued"]
-    assert "glm-4.6" in queue["messages"][0]["last_error"]
+    assert "not listed on its connection" in queue["messages"][0]["last_error"]
     assert queue["messages"][1]["id"] == behind["id"]
     assert [turn["task_prompt"] for turn in await api.turns(thread_id)] == ["fix it"]
     thread = await api.thread(job["id"])
@@ -2118,6 +1944,70 @@ async def test_the_owners_waiting_message_runs_before_the_goal_continues(api: Ap
     turns = await api.turns(thread_id)
     assert [turn["turn_source"] for turn in turns] == ["human", "human", "goal"]
     assert turns[2]["parent_job_id"] == turns[1]["id"]
+
+
+#: The owner's goal writes that withdraw a queued automatic round, as the goal
+#: band sends them: method, path after ``/goal``, and body.
+_ROUND_WITHDRAWING_WRITES = {
+    "edit": ("PUT", "", {"goal": {"objective": "the export works, as CSV"}}),
+    "pause": ("POST", "/pause", None),
+    "clear": ("DELETE", "", None),
+}
+
+
+@pytest.mark.parametrize("write", list(_ROUND_WITHDRAWING_WRITES))
+async def test_a_round_the_goal_withdraws_lets_the_owners_waiting_message_go_next(
+    api: Api, write: str
+):
+    """Editing, pausing or clearing a goal is not a Stop for the owner's waiting message.
+
+    Each of the three cancels the automatic round that was waiting for a host,
+    and the owner's message was waiting behind that round. A cancelled newest
+    turn is what a settlement reads as the owner pressing Stop, so the message
+    used to sit in a queue marked ``stopped`` while an edited goal went on
+    queueing rounds ahead of it. The platform withdrew that round; nobody
+    stopped anything. One reaper pass — its goal wakeups, then its queue sweep,
+    in the loop's order — sends the message as the next turn.
+    """
+    job = await api.create(prompt="ship the export", goal={"objective": "the export works"})
+    thread_id = job["thread_id"]
+    await api.run(job)
+    assert [(turn["turn_source"], turn["state"]) for turn in await api.turns(thread_id)] == [
+        ("human", "succeeded"),
+        ("goal", "queued"),
+    ]
+    waiting = await api.send(thread_id, "use CSV, not JSON")
+    assert waiting.status_code == 201, waiting.text
+    assert waiting.json()["pending"] is not None
+    method, path, body = _ROUND_WITHDRAWING_WRITES[write]
+    written = await api.client.request(
+        method, f"/v1/agent/threads/{thread_id}/goal{path}", json=body
+    )
+    assert written.status_code == 200, written.text
+
+    await run_goal_wakeups(store=api.store, owners=api.owners)
+    await settle_waiting_queues(api.store, owners=api.owners, github_app=None)
+
+    turns = await api.turns(thread_id)
+    assert [(turn["turn_source"], turn["state"]) for turn in turns] == [
+        ("human", "succeeded"),
+        ("goal", "cancelled"),
+        ("human", "queued"),
+    ]
+    assert turns[2]["task_prompt"] == "use CSV, not JSON"
+    queue = await api.queue(thread_id)
+    assert (queue["queue_paused_reason"], queue["messages"]) == (None, [])
+    async with api.pool.acquire() as conn:
+        parked = await conn.fetch(
+            "SELECT waiting_job_id FROM agent_goal_wakeups "
+            "WHERE thread_id = $1 AND state = 'pending'",
+            thread_id,
+        )
+    # An edited goal is still active and waits behind the owner's turn; a
+    # paused or cleared one has nothing to schedule.
+    assert [row["waiting_job_id"] for row in parked] == (
+        [turns[2]["id"]] if write == "edit" else []
+    )
 
 
 # -- the rest of the design's behaviour ---------------------------------------------
@@ -2218,69 +2108,15 @@ async def test_deleting_the_conversation_removes_its_waiting_messages_and_their_
         )
 
 
-async def test_the_owner_publishes_a_finished_workspace_over_http(api: Api):
-    """A finished turn waits for its owner; a repeated request returns the same snapshot."""
+async def test_a_finished_workspace_is_not_published_by_the_platform(api: Api):
+    """Agents open their own pull requests; the owner's publish route is gone."""
     job = await api.create()
     thread_id = job["thread_id"]
     await api.run(job)
-    waiting = (await api.client.get(f"/v1/agent/jobs/{job['id']}")).json()
-    assert waiting["workspace_publication_state"] is None
-    assert waiting["workspace_unpublished_changes"] is True
-    assert waiting["workspace_pr_url"] is None
+    view = (await api.client.get(f"/v1/agent/jobs/{job['id']}")).json()
+    assert view["workspace_pr_url"] is None
+    for retired in ("workspace_publication_state", "workspace_unpublished_changes"):
+        assert retired not in view
 
-    opened = await api.client.post(f"/v1/agent/threads/{thread_id}/publish")
-
-    assert opened.status_code == 202, opened.text
-    body = opened.json()
-    assert body["thread_id"] == thread_id
-    assert body["state"] == "pending" and body["requested"] is True
-    again = await api.client.post(f"/v1/agent/threads/{thread_id}/publish")
-    assert again.status_code == 202, again.text
-    assert again.json() == {**body, "requested": False}
-    requested = (await api.client.get(f"/v1/agent/jobs/{job['id']}")).json()
-    assert requested["workspace_publication_state"] == "pending"
-    assert requested["workspace_unpublished_changes"] is False
-
-
-async def test_a_publication_takes_the_workspaces_own_turns_and_not_a_forks_copies(api: Api):
-    """A Fork copies its source's turns; the copies ran nowhere and publish nothing."""
-    job = await api.create()
-    await api.run(job)
-    child = await api.fork(job)
-    child_view = await api.store.sandbox.thread_sandbox(thread_id=child["thread_id"])
-    assert child_view is not None
-    # The workspace both chats share holds the source's unpublished turn.
-    assert child_view["workspace_unpublished_changes"] is True
-
-    opened = await api.client.post(f"/v1/agent/threads/{child['thread_id']}/publish")
-
-    assert opened.status_code == 202, opened.text
-    async with api.pool.acquire() as conn:
-        included = await conn.fetchval(
-            "SELECT array_agg(job_id) FROM agent_snapshot_jobs WHERE snapshot_id = $1",
-            opened.json()["snapshot_id"],
-        )
-    assert included == [job["id"]]
-    child_view = await api.store.sandbox.thread_sandbox(thread_id=child["thread_id"])
-    assert child_view is not None and child_view["workspace_unpublished_changes"] is False
-
-
-async def test_a_publication_request_says_why_it_was_refused(api: Api):
-    missing = await api.client.post("/v1/agent/threads/no-such-thread/publish")
-    assert missing.status_code == 404, missing.text
-    assert missing.json()["detail"]["error"]["type"] == "not_found"
-
-    job = await api.create()
-    thread_id = job["thread_id"]
-    unstarted = await api.client.post(f"/v1/agent/threads/{thread_id}/publish")
-    assert unstarted.status_code == 409, unstarted.text
-    assert unstarted.json()["detail"]["error"]["type"] == "nothing_to_publish"
-
-    turn = await api.start(job)
-    running = await api.client.post(f"/v1/agent/threads/{thread_id}/publish")
-    assert running.status_code == 409, running.text
-    assert running.json()["detail"]["error"]["type"] == "turn_running"
-
-    await api.finish(turn)
-    finished = await api.client.post(f"/v1/agent/threads/{thread_id}/publish")
-    assert finished.status_code == 202, finished.text
+    retired_route = await api.client.post(f"/v1/agent/threads/{thread_id}/publish")
+    assert retired_route.status_code in {404, 405}, retired_route.text

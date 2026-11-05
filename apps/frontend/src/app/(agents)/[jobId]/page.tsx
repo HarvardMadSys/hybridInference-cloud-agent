@@ -6,6 +6,7 @@ import { useAuth } from '@/components/providers';
 import { useT } from '@/components/providers/LocaleProvider';
 import { markConversationRead } from '@/components/features/agents/useConversationReadState';
 import { usePathname } from 'next/navigation';
+import { ThreadHistoryButton } from '@/components/features/agents/ThreadHistoryButton';
 import { JobDetail } from '@/components/features/agents/JobDetail';
 import { useAgentJob } from '@/components/features/agents/useAgentJobs';
 
@@ -22,7 +23,7 @@ export default function AgentJobPage() {
 
 function AgentJobContent({ jobId, userId }: { jobId: string; userId?: string }) {
   const t = useT();
-  const { job, events, threadJobs, loading, error, reload } = useAgentJob(jobId);
+  const { job, events, threadJobs, history, loading, error, reload } = useAgentJob(jobId);
   useEffect(() => {
     if (!userId || !job || job.id !== jobId || loading || error) return;
     markConversationRead(
@@ -92,6 +93,7 @@ function AgentJobContent({ jobId, userId }: { jobId: string; userId?: string }) 
           </button>
         </p>
       )}
+      <ThreadHistoryButton history={history} />
       <JobDetail
         key={job.threadId ?? job.id}
         job={job}

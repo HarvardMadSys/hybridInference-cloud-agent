@@ -15,8 +15,10 @@ honest about *this* surface while saying nothing about the gate.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
@@ -25,12 +27,12 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from tests.support.owners import connection_claim
 from tests.support.storage import AllCapabilities
 
 from cloud_agent import sandbox_manager_routing
 from cloud_agent.api import admin_hosts, hosts
-from cloud_agent.api.deps import get_grant_client, get_storage, verify_admin_access
-from cloud_agent.application import residency
+from cloud_agent.api.deps import get_storage, verify_admin_access
 from cloud_agent.host_pool import (
     HOST_DISABLED,
     HOST_DRAINING,
@@ -48,6 +50,7 @@ from cloud_agent.sandbox_manager_routing import (
     validate_sandbox_manager_url,
 )
 from cloud_agent_shared.host_settings import default_values
+from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicyError
 
 ADMIN = {"Authorization": "Bearer test-admin"}
 
@@ -85,6 +88,18 @@ class FakeHostPoolStore(AllCapabilities):
         self.linked: list[tuple[str, int, str]] = []
         self.link_ok = True
         self.beat_answers: dict[tuple[str, int], str | None] = {}
+        #: Every batch of residency beats, as the store was asked for it.
+        self.beat_batches: list[list[tuple[str, int]]] = []
+        self.fail_beats = False
+        #: The stored archive policy does not decode, as a hand-edited row may not.
+        self.archive_settings_undecodable = False
+        #: Nor the global settings, or the agent version selection and updates.
+        self.host_settings_undecodable = False
+        self.runtime_policy_undecodable = False
+        #: How many times a heartbeat tried to switch new chats to an update.
+        self.activation_attempts = 0
+        #: ``(sandbox_id, thread_id, generation)`` residencies already released.
+        self.closed_residencies: set[tuple[str, str, int]] = set()
         self.release_answer: str | None = None
         self.release_calls: list[tuple[str, int, str, int | None]] = []
         self.sandbox_observations: list[dict[str, Any]] = []
@@ -214,10 +229,13 @@ class FakeHostPoolStore(AllCapabilities):
         sandbox_archive_settings_applied_revision: int | None = None,
         sandbox_archive_settings_revision_reported: bool = False,
         runtime_downloads: list[dict[str, Any]] | None = None,
+        config_reports: dict[str, str] | None = None,
     ) -> dict[str, Any] | None:
         row = self.rows.get(host)
         if row is None:
             return None
+        if config_reports is not None:
+            row["config_reports"] = dict(config_reports)
         if runtime_downloads is not None:
             row["runtime_downloads"] = [dict(report) for report in runtime_downloads]
         if row["status"] in (HOST_ENROLLING, HOST_OFFLINE):
@@ -257,7 +275,26 @@ class FakeHostPoolStore(AllCapabilities):
                 capacity=capacity,
                 sample_age_ms=capacity_sample_age_ms,
             )
-        return dict(row)
+        # What the store reads off the policy row in the same statement: a
+        # part that does not decode is None.
+        runtime = not self.runtime_policy_undecodable
+        return {
+            **row,
+            "runner_policy": {
+                "host_settings": (
+                    None if self.host_settings_undecodable else dict(self.global_settings)
+                ),
+                "sandbox_archive_settings": (
+                    None if self.archive_settings_undecodable else dict(self.archive_settings)
+                ),
+                "runtime_download_targets": self._download_targets() if runtime else None,
+                "runtime_upgrade_waiting": (
+                    any(not target.get("activated_at") for target in self.runtime_upgrades.values())
+                    if runtime
+                    else None
+                ),
+            },
+        }
 
     def _apply_capacity(
         self,
@@ -378,12 +415,27 @@ class FakeHostPoolStore(AllCapabilities):
             return "ok", row["drain_fence_epoch"]
         return "ok", epoch
 
-    async def remove_host(self, *, host: str, force: bool = False) -> str:
+    async def remove_host(
+        self, *, host: str, force: bool = False, allow_unmoved: bool = False
+    ) -> str:
         row = self.rows.get(host)
         if row is None:
             return "unknown"
         if row["drain_fence_active"] and not force:
             return "fenced"
+        # The sandboxes the real store would have to strand: set by a test.
+        if row.get("stranded") and not force and not allow_unmoved:
+            return "no_move_target"
+        if row.get("unmovable") and not force and not allow_unmoved:
+            return "cannot_move"
+        if row.get("movable") and not force:
+            row["status"] = HOST_DRAINING
+            row["removal_requested_at"] = row["removal_requested_at"] or datetime.now(UTC)
+            row["removal_moves_out"] = True
+            row["sandboxes_left"] = row["movable"]
+            row["sandboxes_unmovable"] = row.get("unmovable", 0)
+            row["removal_leaves_unmoved"] = allow_unmoved
+            return "moving_out"
         if row["slots_used"] > 0 and not force:
             if not transition_allowed(row["status"], HOST_DRAINING):
                 return "busy"
@@ -417,15 +469,25 @@ class FakeHostPoolStore(AllCapabilities):
         return rows, self.active_host, dict(self.runtime_versions), datetime.now(UTC)
 
     async def host_settings(self) -> dict[str, Any]:
+        if self.host_settings_undecodable:
+            raise TypeError("host settings: dictionary update sequence element #0 has length 1")
         return dict(self.global_settings)
 
     async def runtime_download_targets(self) -> list[dict[str, str]]:
+        if self.runtime_policy_undecodable:
+            raise TypeError("agent versions: dictionary update sequence element #0 has length 1")
+        return self._download_targets()
+
+    def _download_targets(self) -> list[dict[str, str]]:
         return [
             {key: target[key] for key in ("version", "before", "nonce")} | {"runtime": runtime}
             for runtime, target in sorted(self.runtime_upgrades.items())
         ]
 
     async def activate_ready_runtime_upgrades(self) -> list[str]:
+        self.activation_attempts += 1
+        if self.runtime_policy_undecodable:
+            raise AttributeError("'list' object has no attribute 'values'")
         # The store's decision: every online, enrolled host offers the version.
         menus = [
             row.get("runtime_versions_available") or {}
@@ -443,6 +505,8 @@ class FakeHostPoolStore(AllCapabilities):
         return switched
 
     async def sandbox_archive_settings(self) -> dict[str, Any]:
+        if self.archive_settings_undecodable:
+            raise SandboxArchivePolicyError("region is required when sandbox archives are enabled")
         return dict(self.archive_settings)
 
     async def host_capacity_history(
@@ -504,9 +568,27 @@ class FakeHostPoolStore(AllCapabilities):
     ) -> str | None:
         return self.beat_answers.get((thread_id, generation))
 
+    async def heartbeat_residencies(
+        self, *, residencies: list[tuple[str, int]], host: str, ttl_seconds: float
+    ) -> dict[tuple[str, int], str]:
+        self.beat_batches.append(list(residencies))
+        if self.fail_beats:
+            raise RuntimeError("database unavailable")
+        return {
+            beat: answer
+            for beat in residencies
+            if (answer := self.beat_answers.get(beat)) is not None
+        }
+
     async def release_residency(self, *, thread_id: str, generation: int, host: str) -> str | None:
         self.release_calls.append((thread_id, generation, host, None))
         return self.release_answer
+
+    async def open_shared_residencies(
+        self, *, residencies: list[tuple[str, str, int]]
+    ) -> set[tuple[str, str, int]]:
+        # Open unless a test closed it: released on an earlier beat.
+        return set(residencies) - self.closed_residencies
 
     async def release_shared_residency_if_quiescent(
         self,
@@ -524,6 +606,18 @@ class FakeHostPoolStore(AllCapabilities):
         self.sandbox_observations.append(dict(kwargs))
         return "running" if kwargs["running"] else "stopped"
 
+    async def reconcile_thread_sandbox_observations(
+        self, *, host: str, observations: list[dict[str, Any]]
+    ) -> list[str | None]:
+        return [
+            await self.reconcile_thread_sandbox_observation(host=host, **observation)
+            for observation in observations
+        ]
+
+    async def recorded_sandbox_checkpoints(self, *, checkpoint_ids: list[str]) -> set[str]:
+        stored = {recorded["checkpoint"]["checkpoint_id"] for recorded in self.checkpoints}
+        return {checkpoint_id for checkpoint_id in checkpoint_ids if checkpoint_id in stored}
+
     async def record_sandbox_checkpoint(self, **kwargs: Any) -> bool:
         if self.fail_checkpoint_record:
             raise RuntimeError("database unavailable")
@@ -532,31 +626,6 @@ class FakeHostPoolStore(AllCapabilities):
 
     async def due_thread_sandbox_stop(self, **_kwargs: Any) -> dict[str, Any] | None:
         return self.sandbox_stop_due
-
-
-class RecordingGrants:
-    """The grant client's shape, recording every call; mint can be scripted."""
-
-    def __init__(self) -> None:
-        self.minted: list[dict[str, Any]] = []
-        self.renewed: list[str] = []
-        self.revoked: list[str] = []
-        self.fail_mint = False
-
-    async def mint(self, **kwargs: Any) -> dict[str, Any]:
-        if self.fail_mint:
-            raise RuntimeError("gateway is down")
-        self.minted.append(kwargs)
-        n = len(self.minted)
-        return {"grant_id": f"agr-{n}", "token": f"tok-{n}"}
-
-    async def renew(self, grant_id: str) -> dict[str, Any]:
-        self.renewed.append(grant_id)
-        return {}
-
-    async def revoke(self, grant_id: str) -> bool:
-        self.revoked.append(grant_id)
-        return True
 
 
 def _build_app(store: FakeHostPoolStore) -> FastAPI:
@@ -600,12 +669,10 @@ async def residency_client(monkeypatch):
     monkeypatch.setattr(admin_hosts, "get_client_ip", lambda _request: "127.0.0.1")
 
     store = FakeHostPoolStore()
-    grants = RecordingGrants()
     app = _build_app(store)
-    app.dependency_overrides[get_grant_client] = lambda: grants
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as async_client:
-        yield async_client, store, grants
+        yield async_client, store
 
 
 def _registration_body(token: str, name: str, **overrides) -> dict[str, Any]:
@@ -1033,19 +1100,6 @@ async def test_a_heartbeat_does_not_undo_a_drain(client):
     assert response.json()["status"] == HOST_DRAINING
 
 
-async def test_a_heartbeat_only_overwrites_what_it_carries(client):
-    """A liveness-only beat must not blank what enrollment declared."""
-    async_client, store = client
-    credential = await _enroll(async_client, store, slots_total=4, capabilities=["kata"])
-
-    await async_client.post(
-        "/v1/agent/host/heartbeat", json={}, headers={"Authorization": f"Bearer {credential}"}
-    )
-
-    assert store.rows["runner-a"]["slots_total"] == 4
-    assert store.rows["runner-a"]["capabilities"] == ["kata"]
-
-
 async def test_a_heartbeat_can_update_capacity_and_version(client):
     async_client, store = client
     credential = await _enroll(async_client, store, slots_total=1)
@@ -1093,6 +1147,57 @@ async def test_a_heartbeat_carries_the_version_stamp_to_the_admin_page(client):
     assert shown["sandbox_runtime"] == ""
     assert shown["sandbox_image_digest"] == "sha256:abc123"
     assert shown["runtime_versions"] == {"claude-code": "1.2.3"}
+
+
+async def test_a_host_holding_more_versions_than_a_menu_may_list_is_still_heard(
+    client, monkeypatch
+):
+    """The host cuts its menu to the cap: a refused beat takes it out of the pool.
+
+    That a longer menu is refused is the schema's own test
+    (``test_host_report_bounds.py``).
+    """
+    from cloud_agent.schemas import HOST_VERSION_MENU_MAX_ITEMS, WorkerClaimAttestation
+    from cloud_agent_host.sandbox import ContainerBackend
+
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+    downloaded = "\n".join(
+        f"default-agent-runtime:claude-code_2.1.{n}_0123456789ab" for n in range(70)
+    )
+    inspected = json.dumps(
+        {
+            "Id": "sha256:local",
+            "Config": {"Labels": {"org.freeinference.runtime.claude-code.version": "2.1.220"}},
+        }
+    )
+
+    def docker(argv, **_kwargs):
+        if argv[1:3] == ["image", "ls"] and "--quiet" not in argv:
+            return SimpleNamespace(returncode=0, stdout=downloaded, stderr="")
+        if argv[1:3] == ["image", "inspect"]:
+            return SimpleNamespace(returncode=0, stdout=inspected, stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with monkeypatch.context() as patched:
+        patched.setattr("cloud_agent_host.sandbox.subprocess.run", docker)
+        stamp = ContainerBackend(image="img:1").version_stamp()
+
+    response = await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={
+            "runtime_versions": stamp["runtime_versions"],
+            "runtime_versions_available": stamp["runtime_versions_available"],
+        },
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200, response.text
+    offered = store.rows["runner-a"]["runtime_versions_available"]["claude-code"]
+    assert len(offered) == HOST_VERSION_MENU_MAX_ITEMS
+    assert offered[0] == "2.1.220"
+    # A claim attests the same menu.
+    WorkerClaimAttestation(runtime_versions_available=stamp["runtime_versions_available"])
 
 
 _TARGET = {
@@ -1622,10 +1727,12 @@ async def test_request_body_host_identity_is_rejected(claim_client):
 
     response = await async_client.post(
         "/v1/agent/worker/claim",
-        json={
-            "worker_id": "w1",
-            "host": "runner-b",
-        },
+        json=connection_claim(
+            {
+                "worker_id": "w1",
+                "host": "runner-b",
+            }
+        ),
         headers={"Authorization": f"Bearer {credential}"},
     )
 
@@ -1639,7 +1746,7 @@ async def test_pool_wide_token_is_not_a_claim_credential(claim_client):
 
     response = await async_client.post(
         "/v1/agent/worker/claim",
-        json={"worker_id": "w1"},
+        json=connection_claim({"worker_id": "w1"}),
         headers={"Authorization": "Bearer pool-wide-token"},
     )
 
@@ -1657,7 +1764,7 @@ async def test_a_revoked_host_credential_cannot_claim(claim_client):
 
     response = await async_client.post(
         "/v1/agent/worker/claim",
-        json={"worker_id": "w1"},
+        json=connection_claim({"worker_id": "w1"}),
         headers={"Authorization": f"Bearer {credential}"},
     )
 
@@ -1672,7 +1779,7 @@ async def test_a_host_credential_for_an_unknown_host_cannot_claim(claim_client):
 
     response = await async_client.post(
         "/v1/agent/worker/claim",
-        json={"worker_id": "w1"},
+        json=connection_claim({"worker_id": "w1"}),
         headers={"Authorization": f"Bearer {mint_host_token(host='ghost')}"},
     )
 
@@ -1769,6 +1876,30 @@ async def test_a_parked_wait_is_answered_when_work_is_queued(wait_client):
     assert response.status_code == 200
     assert response.json() == {"token": signal.token} != {"token": held}
     assert store.claims == [], "the wait never claims; the host does that next"
+
+
+async def test_a_turn_only_another_host_can_take_leaves_the_wait_parked(wait_client):
+    async_client, store, app = wait_client
+    headers = _enrolled_host(store)
+    signal = app.state.work_signal
+    held = signal.token_for("runner-a")
+
+    parked = asyncio.create_task(
+        async_client.post(
+            "/v1/agent/worker/wait",
+            json={"since": held, "timeout_seconds": 30},
+            headers=headers,
+        )
+    )
+    await asyncio.sleep(0.05)
+    signal.notified("runner-b")
+    await asyncio.sleep(0.05)
+    assert not parked.done()
+
+    signal.notified("runner-a")
+
+    response = await asyncio.wait_for(parked, 5)
+    assert response.json() == {"token": signal.token_for("runner-a")} != {"token": held}
 
 
 async def test_with_nothing_queued_a_wait_ends_at_its_timeout(wait_client):
@@ -2291,6 +2422,58 @@ async def test_removing_an_idle_host_revokes_it(client):
     assert store.rows["runner-a"]["credential_hash"] is None
 
 
+async def test_removing_a_host_whose_sandboxes_cannot_move_asks_first(client):
+    """They would stay on the removed host, and their chats could not continue."""
+    async_client, store = client
+    store.seed("runner-a", credential_hash="abc", enrolled=True)
+    store.rows["runner-a"]["stranded"] = True
+
+    refused = await async_client.post("/admin/agent/runner-hosts/runner-a/remove", headers=ADMIN)
+
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["error"]["type"] == "no_move_target"
+    assert store.rows["runner-a"]["status"] != HOST_DISABLED
+
+    anyway = await async_client.post(
+        "/admin/agent/runner-hosts/runner-a/remove?allow_unmoved=true", headers=ADMIN
+    )
+
+    assert anyway.status_code == 200
+    assert store.rows["runner-a"]["status"] == HOST_DISABLED
+
+
+async def test_removing_a_host_with_sandboxes_that_never_move_asks_first(client):
+    """A stopped sandbox whose checkpoint failed would stay on the removed host."""
+    async_client, store = client
+    store.seed("runner-a", credential_hash="abc", enrolled=True)
+    store.rows["runner-a"]["unmovable"] = 1
+
+    refused = await async_client.post("/admin/agent/runner-hosts/runner-a/remove", headers=ADMIN)
+
+    assert refused.status_code == 409
+    error = refused.json()["detail"]["error"]
+    assert error["type"] == "cannot_move"
+    assert "allow_unmoved=true" in error["message"]
+    assert store.rows["runner-a"]["status"] != HOST_DISABLED
+
+
+async def test_removing_a_host_moves_its_sandboxes_out_and_reports_progress(client):
+    async_client, store = client
+    store.seed("runner-a", credential_hash="abc", enrolled=True)
+    store.rows["runner-a"]["movable"] = 3
+
+    response = await async_client.post("/admin/agent/runner-hosts/runner-a/remove", headers=ADMIN)
+
+    assert response.status_code == 200
+    [host] = response.json()["hosts"]
+    assert host["status"] == HOST_DRAINING
+    assert host["removal_pending"] is True
+    assert host["removal_moves_out"] is True
+    assert host["sandboxes_left"] == 3
+    assert host["sandboxes_unmovable"] == 0
+    assert host["removal_leaves_unmoved"] is False
+
+
 async def test_forced_removal_takes_a_busy_host_out_anyway(client):
     async_client, store = client
     store.seed("runner-a", slots_used=2, credential_hash="abc")
@@ -2521,8 +2704,8 @@ def test_an_origin_allowlist_entry_pins_the_scheme_and_port(monkeypatch) -> None
 
 
 async def test_legacy_host_residency_mutations_are_not_executable(residency_client):
-    """Only attempt-fenced worker routes may create or release member grants."""
-    client, store, grants = residency_client
+    """Only attempt-fenced worker routes may create or release a member residency."""
+    client, store = residency_client
     credential = await _enroll(client, store)
     headers = {"Authorization": f"Bearer {credential}"}
 
@@ -2539,122 +2722,36 @@ async def test_legacy_host_residency_mutations_are_not_executable(residency_clie
 
     assert establish.status_code == 404
     assert release.status_code == 404
-    assert grants.minted == []
-    assert grants.revoked == []
 
 
-async def test_the_beat_that_extends_a_residency_renews_its_grant(residency_client):
-    client, store, grants = residency_client
-    credential = await _enroll(client, store)
-    store.beat_answers = {
-        ("th-linked", 1): "agr-1",  # extended, grant linked → renew
-        ("th-grantless", 1): "",  # extended, workspace-only → nothing to renew
-        # th-lost absent → not extended → reported lost
+def _live_group(*members: tuple[str, int]) -> dict[str, Any]:
+    """One running retained group whose members are live on these residencies."""
+    return {
+        "thread_id": members[0][0],
+        "sandbox_id": "asbx_1",
+        "container_id": "0123456789abcdef",
+        "generation": 3,
+        "activation_generation": 7,
+        "running": True,
+        "activity_active": True,
+        "idle_remaining_seconds": 1799.5,
+        "shared_live": True,
+        "members": [
+            {
+                "thread_id": thread_id,
+                "native_session_id": f"native-{slot}",
+                "process_generation": 2,
+                "residency_generation": generation,
+                "resident_state": "live",
+                "resident_slot_id": slot,
+            }
+            for slot, (thread_id, generation) in enumerate(members)
+        ],
     }
-
-    response = await client.post(
-        "/v1/agent/host/heartbeat",
-        json={
-            "residencies": [
-                {"thread_id": "th-linked", "generation": 1},
-                {"thread_id": "th-grantless", "generation": 1},
-                {"thread_id": "th-lost", "generation": 3},
-            ]
-        },
-        headers={"Authorization": f"Bearer {credential}"},
-    )
-
-    assert response.status_code == 200, response.text
-    assert grants.renewed == ["agr-1"]
-    assert response.json()["residencies_lost"] == [{"thread_id": "th-lost", "generation": 3}]
-
-
-async def test_a_slow_gateway_does_not_hold_the_heartbeat_reply():
-    """Renewals run after the reply, together, and once per grant.
-
-    A host's heartbeat times out at 15 s, and each renewal may take the
-    gateway's full request timeout. Awaited one by one before the reply, two
-    slow renewals were enough to time the beat out — and the host then never
-    received the stops and lost residencies the reply carries. Here every
-    renewal blocks until all of them have started: awaited inline the reply
-    never comes, and awaited one at a time the renewals never finish.
-    """
-    from fastapi import BackgroundTasks
-
-    from cloud_agent.schemas import HostHeartbeatRequest
-
-    class GatedGrants(RecordingGrants):
-        def __init__(self, expected: int) -> None:
-            super().__init__()
-            self.started: list[str] = []
-            self._expected = expected
-            self._all_started = asyncio.Event()
-
-        async def renew(self, grant_id: str) -> dict[str, Any]:
-            self.started.append(grant_id)
-            if len(self.started) >= self._expected:
-                self._all_started.set()
-            await self._all_started.wait()
-            return await super().renew(grant_id)
-
-    store = FakeHostPoolStore()
-    store.seed("runner-a", credential_hash="credential-hash", enrolled=True)
-    store.beat_answers = {("th-1", 1): "agr-1", ("th-2", 1): "agr-2"}
-    grants = GatedGrants(expected=2)
-    body = HostHeartbeatRequest.model_validate(
-        {
-            "residencies": [
-                {"thread_id": "th-1", "generation": 1},
-                {"thread_id": "th-2", "generation": 1},
-            ],
-            # The same member again, as a live member of its retained group:
-            # one extended residency is one renewal, however it was reported.
-            "retained_sandboxes": [
-                {
-                    "thread_id": "th-1",
-                    "sandbox_id": "asbx_1",
-                    "container_id": "0123456789abcdef",
-                    "generation": 3,
-                    "activation_generation": 7,
-                    "running": True,
-                    "activity_active": True,
-                    "idle_remaining_seconds": 1799.5,
-                    "shared_live": True,
-                    "members": [
-                        {
-                            "thread_id": "th-1",
-                            "native_session_id": "native-1",
-                            "process_generation": 2,
-                            "residency_generation": 1,
-                            "resident_state": "live",
-                            "resident_slot_id": 0,
-                        }
-                    ],
-                }
-            ],
-        }
-    )
-    background = BackgroundTasks()
-
-    reply = await asyncio.wait_for(
-        hosts.heartbeat_host(
-            body,
-            background_tasks=background,
-            host={"host": "runner-a", "credential_hash": "credential-hash"},
-            store=store,
-            grants=grants,
-        ),
-        timeout=5,
-    )
-
-    assert reply.residencies_lost == []
-    assert grants.started == [], "the reply waited on the gateway"
-    await asyncio.wait_for(background(), timeout=5)
-    assert sorted(grants.renewed) == ["agr-1", "agr-2"]
 
 
 async def test_host_heartbeat_reconciles_exact_retained_docker_observations(residency_client):
-    client, store, _grants = residency_client
+    client, store = residency_client
     credential = await _enroll(client, store)
 
     response = await client.post(
@@ -2697,7 +2794,7 @@ async def test_host_heartbeat_reconciles_exact_retained_docker_observations(resi
 async def test_host_heartbeat_forwards_optional_container_telemetry(residency_client):
     from tests.unit.test_sandbox_resource_protocol import beat, sample
 
-    client, store, _grants = residency_client
+    client, store = residency_client
     credential = await _enroll(client, store)
     measured = sample()
     response = await client.post(
@@ -2714,7 +2811,7 @@ async def test_host_heartbeat_forwards_optional_container_telemetry(residency_cl
 async def test_host_heartbeat_drops_bad_telemetry_and_still_reports_lifecycle(residency_client):
     from tests.unit.test_sandbox_resource_protocol import beat, sample
 
-    client, store, _grants = residency_client
+    client, store = residency_client
     credential = await _enroll(client, store)
     response = await client.post(
         "/v1/agent/host/heartbeat",
@@ -2729,7 +2826,7 @@ async def test_host_heartbeat_drops_bad_telemetry_and_still_reports_lifecycle(re
 
 
 async def test_host_heartbeat_rejects_a_non_shared_sandbox_observation(residency_client):
-    client, store, _grants = residency_client
+    client, store = residency_client
     credential = await _enroll(client, store)
 
     response = await client.post(
@@ -2758,7 +2855,7 @@ async def test_host_heartbeat_rejects_a_non_shared_sandbox_observation(residency
 async def test_host_heartbeat_returns_only_durable_due_idle_stop_fences(
     residency_client, member_generations
 ):
-    client, store, _grants = residency_client
+    client, store = residency_client
     credential = await _enroll(client, store)
     store.sandbox_stop_due = {
         "thread_id": "athr_1",
@@ -2791,15 +2888,16 @@ async def test_host_heartbeat_returns_only_durable_due_idle_stop_fences(
     ]
 
 
-async def test_host_heartbeat_accepts_a_generation_zero_fork_target_idle_stop(residency_client):
-    """A sandbox-manager-reconstructed pre-turn fork target has no activation yet."""
-    client, store, _grants = residency_client
+async def test_host_heartbeat_accepts_a_fenced_generation_zero_group_stop(residency_client):
+    """A generation-zero target stops only through its explicit group fence."""
+    client, store = residency_client
     credential = await _enroll(client, store)
     store.sandbox_stop_due = {
         "thread_id": "athr_fork",
         "generation": 1,
         "activation_generation": 0,
-        "reason": "idle",
+        "reason": "orphaned_attempt",
+        "member_activation_generations": {"athr_fork": 0},
     }
 
     response = await client.post(
@@ -2818,62 +2916,10 @@ async def test_host_heartbeat_accepts_a_generation_zero_fork_target_idle_stop(re
         },
         headers={"Authorization": f"Bearer {credential}"},
     )
-
     assert response.status_code == 200, response.text
     assert response.json()["retained_sandboxes_stop"] == [
-        {**store.sandbox_stop_due, "shared_live": True, "member_activation_generations": None}
+        {**store.sandbox_stop_due, "shared_live": True}
     ]
-
-
-async def test_stopped_shared_group_releases_and_revokes_each_member_residency(residency_client):
-    client, store, grants = residency_client
-    credential = await _enroll(client, store)
-    store.release_answer = "agr-stopped"
-
-    response = await client.post(
-        "/v1/agent/host/heartbeat",
-        json={
-            "retained_sandboxes": [
-                {
-                    "thread_id": "athr_source",
-                    "sandbox_id": "asbx_shared",
-                    "container_id": "0123456789abcdef",
-                    "generation": 1,
-                    "activation_generation": 2,
-                    "running": False,
-                    "shared_live": True,
-                    "members": [
-                        {
-                            "thread_id": "athr_source",
-                            "native_session_id": "native-source",
-                            "process_generation": 11,
-                            "residency_generation": 7,
-                            "resident_state": "stopped",
-                            "resident_slot_id": 0,
-                        },
-                        {
-                            "thread_id": "athr_child",
-                            "native_session_id": "native-child",
-                            "process_generation": 12,
-                            "residency_generation": 8,
-                            "resident_state": "stopped",
-                            "resident_slot_id": 1,
-                        },
-                    ],
-                }
-            ]
-        },
-        headers={"Authorization": f"Bearer {credential}"},
-    )
-
-    assert response.status_code == 200, response.text
-    assert store.release_calls == [
-        ("athr_source", 7, "runner-a", 11),
-        ("athr_child", 8, "runner-a", 12),
-    ]
-    assert grants.renewed == []
-    assert grants.revoked == ["agr-stopped", "agr-stopped"]
-    assert response.json()["residencies_lost"] == []
 
 
 # ── residency grant minting ────────────────────────────────────────────
@@ -2893,55 +2939,6 @@ def _residency_row() -> dict[str, Any]:
         "user_id": "user-1",
         "model": "claude-sonnet-4",
     }
-
-
-async def test_a_grant_with_no_token_is_revoked_rather_than_abandoned() -> None:
-    """A named grant with no credential is dead weight until its TTL expires.
-
-    The gateway answering with a ``grant_id`` but no ``token`` is not a shape
-    anything can use, so the mint hands the grant back rather than leaving it
-    live with no owner. The caller reads ``None`` as "no credential" and
-    releases the residency it just established.
-    """
-    store = FakeHostPoolStore()
-    grants = RecordingGrants()
-    grants.mint = AsyncMock(return_value={"grant_id": "agr-orphan", "token": ""})
-
-    credential = await residency._mint_residency_grant(store, grants, row=_residency_row())
-
-    assert credential is None
-    assert grants.revoked == ["agr-orphan"]
-    assert store.linked == []
-
-
-async def test_a_refused_revoke_still_reports_no_credential() -> None:
-    """The cleanup is best-effort, not a new way for the mint to fail.
-
-    Before the revoke existed this path made no network call at all, so a
-    gateway that refuses the revoke must not turn "there is no credential"
-    into a 500.
-    """
-    store = FakeHostPoolStore()
-    grants = RecordingGrants()
-    grants.mint = AsyncMock(return_value={"grant_id": "agr-orphan", "token": ""})
-    grants.revoke = AsyncMock(side_effect=RuntimeError("gateway is down"))
-
-    credential = await residency._mint_residency_grant(store, grants, row=_residency_row())
-
-    assert credential is None
-
-
-async def test_an_answer_without_a_grant_id_has_nothing_to_revoke() -> None:
-    """An empty ``grant_id`` names nothing, so nothing is handed to revoke."""
-    store = FakeHostPoolStore()
-    grants = RecordingGrants()
-    grants.mint = AsyncMock(return_value={"grant_id": "", "token": "tok-1"})
-
-    credential = await residency._mint_residency_grant(store, grants, row=_residency_row())
-
-    assert credential is None
-    assert grants.revoked == []
-    assert store.linked == []
 
 
 # ── Host capacity: the optional block and the history endpoint ─────────
@@ -3302,6 +3299,45 @@ async def test_a_checkpoint_bookkeeping_failure_keeps_the_heartbeat(client):
     assert len(store.sandbox_observations) == 1
 
 
+async def test_a_recorded_checkpoint_receipt_is_not_offered_again(client):
+    """Hosts repeat their latest receipt on every beat; only a new one is recorded."""
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+    later = {**_CHECKPOINT, "checkpoint_id": "f" * 32}
+
+    for checkpoint in (_CHECKPOINT, _CHECKPOINT, later, later):
+        response = await async_client.post(
+            "/v1/agent/host/heartbeat",
+            json={"retained_sandboxes": [_retained_with_checkpoint(checkpoint)]},
+            headers={"Authorization": f"Bearer {credential}"},
+        )
+        assert response.status_code == 200
+
+    assert [recorded["checkpoint"]["checkpoint_id"] for recorded in store.checkpoints] == [
+        "c" * 32,
+        "f" * 32,
+    ]
+    assert len(store.sandbox_observations) == 4
+
+
+async def test_a_failed_checkpoint_lookup_still_offers_the_receipt(client, monkeypatch):
+    async_client, store = client
+    credential = await _enroll(async_client, store)
+
+    async def unavailable(*, checkpoint_ids: list[str]) -> set[str]:
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(store, "recorded_sandbox_checkpoints", unavailable)
+    response = await async_client.post(
+        "/v1/agent/host/heartbeat",
+        json={"retained_sandboxes": [_retained_with_checkpoint(_CHECKPOINT)]},
+        headers={"Authorization": f"Bearer {credential}"},
+    )
+
+    assert response.status_code == 200
+    assert [recorded["checkpoint"]["checkpoint_id"] for recorded in store.checkpoints] == ["c" * 32]
+
+
 async def test_a_due_stop_is_fenced_to_the_activation_the_beat_reported(residency_client):
     """The database answers a placeholder; the stop must name the live activation.
 
@@ -3309,7 +3345,7 @@ async def test_a_due_stop_is_fenced_to_the_activation_the_beat_reported(residenc
     member's, so a placeholder made every control-plane stop of a used chat
     stale (staging: activation 0 sent, 3 current).
     """
-    client, store, _grants = residency_client
+    client, store = residency_client
     credential = await _enroll(client, store)
     store.sandbox_stop_due = {
         "thread_id": "athr_1",

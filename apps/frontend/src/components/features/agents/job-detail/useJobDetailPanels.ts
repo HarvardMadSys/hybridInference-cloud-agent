@@ -9,12 +9,13 @@ import {
   type RunTab,
   type StepTab,
 } from '../trajectoryInspectorTabs';
-import { buildTrajectorySteps, turnContextFromJobs } from '../trajectorySteps';
+import { buildTrajectorySteps, turnContextFromJobs, type TrajectoryStep } from '../trajectorySteps';
 import type { AgentEvent, AgentJob } from '../types';
 import { useResizablePane } from '../useResizablePane';
-import { useWorkspaceTabs, type WorkspaceTab } from '../useWorkspaceTabs';
+import { useWorkspaceTabs, type SideChatTab, type WorkspaceTab } from '../useWorkspaceTabs';
+import { opensContext } from '../context/contextPresent';
 import { useKeyboardShortcuts } from '@/components/features/settings/keyboardShortcutPreferences';
-import { matchesShortcut } from '@/lib/keyboardShortcuts';
+import { KEYBOARD_INPUT_SELECTOR, matchesShortcut } from '@/lib/keyboardShortcuts';
 
 export const WORKSPACE_WIDTH_STORAGE_KEY = 'agents.workspace.width';
 const WORKSPACE_DEFAULT_WIDTH = 560;
@@ -30,6 +31,9 @@ const INSPECTOR_DEFAULT_WIDTH = 400;
 const INSPECTOR_MIN_WIDTH = 320;
 const INSPECTOR_MAX_WIDTH = 640;
 const TRAJECTORY_MIN_WIDTH = 420;
+
+/** The conversation's main views: its chat, its trajectory of steps, and its context. */
+export type ConversationView = 'chat' | 'trajectory' | 'context';
 
 /** A delegated agent, named by the turn that started it and its overview key. */
 export interface SubagentTarget {
@@ -53,7 +57,11 @@ export function useJobDetailPanels({
 }) {
   const [shortcuts] = useKeyboardShortcuts(userId);
   const workspaceScope = JSON.stringify([userId, job.threadId ?? job.id]);
-  const [tab, setTab] = useState<'chat' | 'trajectory'>('chat');
+  const [tab, setTab] = useState<ConversationView>('chat');
+  // Context insights link a conversation straight to its Context view.
+  useEffect(() => {
+    if (opensContext(window.location.search)) setTab('context');
+  }, []);
   // The subagent being read, if any. Chat shows its own conversation and the
   // trajectory its steps; without one, both show the whole conversation.
   const [subagent, setSubagent] = useState<SubagentTarget | null>(null);
@@ -89,6 +97,11 @@ export function useJobDetailPanels({
   // Mount a panel only when first used, then retain it while hidden so closing
   // the workspace preserves terminals, file previews, and side chat drafts.
   const workspaceInitialized = workspaceOpen || initializedWorkspace?.scope === workspaceScope;
+  // Git included: a large diff is the heaviest thing the workspace draws, and a
+  // workspace opened on another tab has no reason to draw it.
+  const gitInitialized =
+    (workspaceOpen && workspaceTab === 'git') ||
+    (initializedWorkspace?.scope === workspaceScope && initializedWorkspace.tabs.has('git'));
   const terminalInitialized =
     (workspaceOpen && workspaceTab === 'terminal') ||
     (initializedWorkspace?.scope === workspaceScope && initializedWorkspace.tabs.has('terminal'));
@@ -179,7 +192,15 @@ export function useJobDetailPanels({
     [inspectorContainerRef, workspaceContainerRef],
   );
 
-  function openWorkspace(tab: WorkspaceTab) {
+  // Every Markdown link in the transcript and every retained workspace panel
+  // holds these actions. They keep one identity and read the latest state
+  // through this ref, so a keystroke or a streamed event does not draw all of
+  // those again just to hand them the same action.
+  const latest = useRef({ workspaceOpen, workspaceScope, workspaceTabs, setWorkspaceOpen });
+  latest.current = { workspaceOpen, workspaceScope, workspaceTabs, setWorkspaceOpen };
+
+  const openWorkspace = useCallback((tab: WorkspaceTab) => {
+    const { workspaceOpen, workspaceTabs, setWorkspaceOpen } = latest.current;
     if (!workspaceOpen) {
       const active = document.activeElement;
       workspaceTriggerRef.current = active instanceof HTMLElement ? active : null;
@@ -189,21 +210,31 @@ export function useJobDetailPanels({
     workspaceTabs.select(tab);
     setWorkspaceOpen(true);
     setInspector(null);
-  }
+  }, []);
 
-  function openWorkspaceFile(path: string) {
-    setRequestedFile((current) => ({
-      scope: workspaceScope,
-      path,
-      token: (current?.token ?? 0) + 1,
-    }));
-    openWorkspace('files');
-  }
+  const openWorkspaceFile = useCallback(
+    (path: string) => {
+      const scope = latest.current.workspaceScope;
+      setRequestedFile((current) => ({ scope, path, token: (current?.token ?? 0) + 1 }));
+      openWorkspace('files');
+    },
+    [openWorkspace],
+  );
 
-  function openRecordedFile(selection: RecordedFileSelection) {
-    openWorkspace('git');
-    setRecordedFile({ scope: workspaceScope, selection });
-  }
+  const openRecordedFile = useCallback(
+    (selection: RecordedFileSelection) => {
+      openWorkspace('git');
+      setRecordedFile({ scope: latest.current.workspaceScope, selection });
+    },
+    [openWorkspace],
+  );
+
+  // The side chat tab actions, with one identity for the memoized workspace panels.
+  const addSideChat = useCallback(() => latest.current.workspaceTabs.add(), []);
+  const closeSideChat = useCallback(
+    (id: SideChatTab['id']) => latest.current.workspaceTabs.close(id),
+    [],
+  );
 
   const toggleWorkspace = useCallback(() => {
     if (workspaceOpen) {
@@ -303,6 +334,37 @@ export function useJobDetailPanels({
     [rememberInspectorTrigger, setWorkspaceOpen],
   );
 
+  // The Context view names a request by its stored event. Its step opens when
+  // this page has read that event; otherwise the turn it belongs to does.
+  const openContextPoint = useCallback(
+    ({ jobId, turnNo, eventId }: { jobId: string; turnNo: number; eventId: number | null }) => {
+      const holds = (candidate: TrajectoryStep) =>
+        candidate.jobId === jobId && candidate.sourceEvents.some((event) => event.id === eventId);
+      const step = eventId === null ? undefined : getTrajectorySteps().find(holds);
+      if (!step) {
+        openRun(jobId, turnNo);
+        return;
+      }
+      setTab('trajectory');
+      selectStep(step.key);
+    },
+    [getTrajectorySteps, openRun, selectStep],
+  );
+
+  // `/context` opens the main Context view, beside Chat and Trajectory. The
+  // workspace panel is left as it is: Context is not one of its tabs.
+  const openContextView = useCallback(() => setTab('context'), []);
+
+  // The trajectory's subagent filter, as its menu value: `[jobId, key]` or empty.
+  const setSubagentFilter = useCallback((value: string) => {
+    if (!value) {
+      setSubagent(null);
+      return;
+    }
+    const [jobId, key] = JSON.parse(value) as [string, string];
+    setSubagent({ jobId, key });
+  }, []);
+
   const selectInspectorTab = useCallback((next: StepTab | RunTab) => {
     setInspector((current) => {
       if (!current) return current;
@@ -328,7 +390,7 @@ export function useJobDetailPanels({
       const target = event.target instanceof Element ? event.target : null;
       if (
         target?.closest(
-          'input, textarea, select, [contenteditable="true"], [role="dialog"], [role="menu"], #job-workspace-pane',
+          `${KEYBOARD_INPUT_SELECTOR}, [role="dialog"], [role="menu"], #job-workspace-pane`,
         )
       ) {
         return;
@@ -356,17 +418,21 @@ export function useJobDetailPanels({
   }, [toggleWorkspace, shortcuts.workspace]);
 
   return {
+    /** The turn the panels were opened for. */
+    job,
     workspaceShortcut: shortcuts.workspace,
     workspaceScope,
     tab,
     setTab,
     subagent,
     setSubagent,
+    setSubagentFilter,
     workspaceOpen,
     setWorkspaceOpen,
     workspaceTabs,
     workspaceTab,
     workspaceInitialized,
+    gitInitialized,
     terminalInitialized,
     filesInitialized,
     wideLayout,
@@ -391,9 +457,13 @@ export function useJobDetailPanels({
     openWorkspace,
     openWorkspaceFile,
     openRecordedFile,
+    addSideChat,
+    closeSideChat,
     toggleWorkspace,
     closeInspector,
     selectStep,
+    openContextPoint,
+    openContextView,
     inspectTranscriptEvent,
     openRun,
     selectInspectorTab,

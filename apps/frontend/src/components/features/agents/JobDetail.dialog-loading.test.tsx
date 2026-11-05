@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
+import { offering } from '@/test/connectionConfig';
 import '@testing-library/jest-dom/vitest';
 
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 
 import { cancelAgentJob } from '@/lib/api/agents';
@@ -33,12 +34,13 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
   getAgentConfig: vi.fn().mockResolvedValue({
     repos: ['owner/repository'],
     runtimes: ['claude-code'],
-    models: ['qwen-test'],
+    ...offering(['qwen-test']),
     github_connected: true,
   }),
   getAgentJobUsage: vi.fn().mockResolvedValue(null),
   refreshAgentJobUsage: vi.fn().mockResolvedValue(null),
   getAgentThreadStats: vi.fn().mockResolvedValue(null),
+  getAgentThreadModelTtft: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock('@/lib/api/mcp', async (importOriginal) => ({
@@ -80,8 +82,6 @@ const job: AgentJob = {
   branch: 'agent/task',
   runtime: 'claude-code',
   model: 'qwen-test',
-  spentUsd: 0,
-  hasLedger: false,
   timeoutLabel: '',
   sandbox: 'container',
   attempts: [{ no: 1, status: 'live' }],
@@ -90,7 +90,6 @@ const job: AgentJob = {
   diffFiles: [],
   diffStat: { add: 0, del: 0 },
   gates: [],
-  usage: { tokensIn: '0', tokensOut: '0', cachePct: 0, turns: 1 },
 };
 
 afterEach(() => cleanup());
@@ -125,7 +124,9 @@ it('owns focus and Escape while the skills dialog downloads without stopping the
     await skillLoad.pending;
   });
   await screen.findByRole('button', { name: 'Apply' });
-  expect(listSkills).toHaveBeenCalledTimes(1);
+  // The dialog asks for the list in an effect, which React can run after the
+  // button first appears.
+  await waitFor(() => expect(listSkills).toHaveBeenCalledTimes(1));
   fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   expect(cancelAgentJob).not.toHaveBeenCalled();

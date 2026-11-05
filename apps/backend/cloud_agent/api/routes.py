@@ -1,11 +1,11 @@
 """The agent API's single mount point: surface routers behind one prefix.
 
 The handlers live in the surface modules this mounts — ``jobs``, ``turns``,
-``prompt_rewrite``, ``threads``, ``changes``, ``workspace``, ``worker``,
-``source_control``, ``catalog`` and ``config`` — each owns its own prefix, its own
-dependencies and the capabilities it reaches the store for. This module
-exists so that ``app.py`` mounts one router, and so that the surfaces have a
-fixed order.
+``threads``, ``changes``, ``workspace``, ``worker``,
+``worker_events``, ``source_control``, ``catalog`` and ``config`` — each owns
+its own prefix, its own dependencies and the capabilities it reaches the store
+for. This module exists so that ``app.py`` mounts one router, and so that the
+surfaces have a fixed order.
 
 The prefix is composed by FastAPI rather than by string concatenation: this
 router carries none and each surface carries ``/v1/agent``, so the effective
@@ -30,11 +30,11 @@ from cloud_agent.api import (
     changes,
     config,
     jobs,
-    prompt_rewrite,
     source_control,
     threads,
     turns,
     worker,
+    worker_events,
     workspace,
 )
 
@@ -48,13 +48,13 @@ SURFACE_ROUTERS = (
     config.router,
     source_control.router,
     jobs.router,
-    prompt_rewrite.router,
     catalog.router,
     turns.router,
     threads.router,
     changes.router,
     workspace.router,
     worker.router,
+    worker_events.router,
 )
 
 for _surface in SURFACE_ROUTERS:

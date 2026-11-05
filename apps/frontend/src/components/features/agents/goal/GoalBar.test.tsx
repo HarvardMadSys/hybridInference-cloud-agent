@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { clearAgentGoal, pauseAgentGoal, resumeAgentGoal, setAgentGoal } from '@/lib/api/agents';
+import { onPlatform } from '@/lib/platformTestSupport';
 import { APIError } from '@/lib/utils/errors';
 
 import { GoalBar } from './GoalBar';
@@ -137,6 +138,26 @@ describe('GoalBar', () => {
       "the sandbox context was lost · the conversation's session is gone",
     );
     expect(screen.getByRole('button', { name: 'Resume' })).toBeInTheDocument();
+  });
+
+  it('says only that it stopped for a reason this build does not know', () => {
+    // Reasons are the platform's to name. `constructor` is not an entry of the
+    // table, and must not find Object.prototype's in its place.
+    render(
+      <GoalBar
+        threadId="thread_1"
+        goal={goal({
+          state: 'paused',
+          pauseReason: 'constructor' as AgentGoal['pauseReason'],
+          pauseDetail: 'a reason added after this build',
+        })}
+        state={idle}
+        onChanged={() => {}}
+      />,
+    );
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'it stopped · a reason added after this build',
+    );
   });
 
   it('says a fork will not continue on its own, whatever else it says', () => {
@@ -380,18 +401,26 @@ describe('GoalBar controls', () => {
     expect(setAgentGoal).not.toHaveBeenCalled();
   });
 
-  it('saves on Cmd/Ctrl+Enter, and leaves plain Enter to break the line', async () => {
-    render(<GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={() => {}} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Goal options' }));
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit goal' }));
-    const field = screen.getByLabelText('Objective');
-    fireEvent.change(field, { target: { value: 'ship the release notes' } });
-    // Enter is a newline: an objective is prose and may run to several lines.
-    fireEvent.keyDown(field, { key: 'Enter' });
-    expect(setAgentGoal).not.toHaveBeenCalled();
-    fireEvent.keyDown(field, { key: 'Enter', metaKey: true });
-    await waitFor(() => expect(setAgentGoal).toHaveBeenCalledTimes(1));
-  });
+  it.each([
+    ['MacIntel', { metaKey: true }, { ctrlKey: true }],
+    ['Win32', { ctrlKey: true }, { metaKey: true }],
+  ])(
+    'saves on %s with %j+Enter, and leaves plain or %j+Enter alone',
+    async (platform, primary, other) => {
+      onPlatform(platform);
+      render(<GoalBar threadId="thread_1" goal={goal()} state={idle} onChanged={() => {}} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Goal options' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Edit goal' }));
+      const field = screen.getByLabelText('Objective');
+      fireEvent.change(field, { target: { value: 'ship the release notes' } });
+      // Enter is a newline: an objective is prose and may run to several lines.
+      fireEvent.keyDown(field, { key: 'Enter' });
+      fireEvent.keyDown(field, { key: 'Enter', ...other });
+      expect(setAgentGoal).not.toHaveBeenCalled();
+      fireEvent.keyDown(field, { key: 'Enter', ...primary });
+      await waitFor(() => expect(setAgentGoal).toHaveBeenCalledTimes(1));
+    },
+  );
 
   it('leaves a paused goal paused when its objective is edited', async () => {
     // Changing the words is not resuming it: the owner stopped this goal, and
@@ -425,8 +454,50 @@ describe('GoalBar controls', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: 'Goal options' }));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Clear goal' }));
-    await waitFor(() => expect(clearAgentGoal).toHaveBeenCalledWith('thread_1'));
+    fireEvent.click(screen.getByRole('button', { name: 'Clear goal' }));
+    await waitFor(() => expect(clearAgentGoal).toHaveBeenCalledWith('thread_1', 3));
     expect(pauseAgentGoal).not.toHaveBeenCalled();
+  });
+
+  it('asks before clearing, and clears the goal revision it showed', async () => {
+    const cleared = vi.fn();
+    render(
+      <GoalBar
+        threadId="thread_1"
+        goal={goal()}
+        state={idle}
+        onChanged={() => {}}
+        onCleared={cleared}
+      />,
+    );
+    const trigger = screen.getByRole('button', { name: 'Goal options' });
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Clear goal' }));
+    const prompt = screen.getByRole('group', { name: /Clear this goal\?/ });
+    expect(within(prompt).getByRole('button', { name: 'Cancel' })).toHaveFocus();
+    expect(clearAgentGoal).not.toHaveBeenCalled();
+    fireEvent.click(within(prompt).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('group', { name: /Clear this goal\?/ })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+
+    // Escape answers the question. It must not travel on to the page, where
+    // an unhandled Escape is the Stop shortcut.
+    const page = vi.fn();
+    window.addEventListener('keydown', page);
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Clear goal' }));
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+    window.removeEventListener('keydown', page);
+    expect(page).not.toHaveBeenCalled();
+    expect(screen.queryByRole('group', { name: /Clear this goal\?/ })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+    expect(clearAgentGoal).not.toHaveBeenCalled();
+
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Clear goal' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Clear goal' }));
+    await waitFor(() => expect(cleared).toHaveBeenCalledOnce());
+    expect(clearAgentGoal).toHaveBeenCalledExactlyOnceWith('thread_1', 3);
   });
 
   it('resumes a goal whose stated bound is spent, and says what that does', async () => {

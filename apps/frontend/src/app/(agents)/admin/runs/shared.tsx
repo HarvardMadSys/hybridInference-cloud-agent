@@ -9,7 +9,7 @@ export const CARD = 'ui-card rounded-2xl';
 // Shared semantic controls retain a solid, offset theme-aware focus indicator.
 export const BUTTON = 'ui-button ui-button-secondary min-h-11';
 //: A compact select for a toolbar, sized to sit beside a segmented control.
-export const TOOLBAR_SELECT = 'ui-input min-h-11 pl-3 pr-8 transition-colors hover:border-accent';
+export const TOOLBAR_SELECT = 'ui-input min-h-11 px-3 transition-colors hover:border-accent';
 //: An icon-only toolbar button; its label lives in aria-label and the tooltip.
 export const ICON_BUTTON = 'ui-icon-button ui-button-ghost h-11 w-11 shrink-0';
 export const INPUT = 'ui-input min-h-11 w-full placeholder:text-muted';
@@ -130,12 +130,6 @@ export function ago(value: string | null | undefined, now: number = Date.now()):
   });
 }
 
-/** A UTC calendar day, without a time, for bucket labels. */
-export function utcDate(value: string | null | undefined): string {
-  if (!value || !Number.isFinite(Date.parse(value))) return 'Unavailable';
-  return new Date(value).toLocaleDateString('en-US', { dateStyle: 'medium', timeZone: 'UTC' });
-}
-
 export function number(value: number | null | undefined): string {
   // Any finite number is shown, including a negative one. Hiding a value the
   // code produced behind "Unavailable" is how a wrong count goes unnoticed.
@@ -145,7 +139,7 @@ export function number(value: number | null | undefined): string {
 }
 
 /**
- * Format a recorded amount without losing what the Gateway reported.
+ * Format a recorded amount without losing what was reported.
  *
  * The value is a decimal string and is never parsed as a float: the display
  * keeps at most four places, a smaller non-zero amount reads as such rather

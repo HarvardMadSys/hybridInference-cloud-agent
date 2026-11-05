@@ -11,7 +11,6 @@ from pydantic import BaseModel, Field, StrictInt, field_validator
 from cloud_agent.capacity_protocol import (
     AgentHostCapacity,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
-from cloud_agent.schemas._sandbox_manager_wire import _SandboxManagerWireNames
 from cloud_agent_shared.host_settings import (
     HOST_SETTINGS,
     MAX_SETTINGS_KEYS,
@@ -25,7 +24,7 @@ from cloud_agent_shared.shared_protocol import (
 )
 
 
-class AgentRunnerHost(_SandboxManagerWireNames):
+class AgentRunnerHost(BaseModel):
     """One machine in the agent runner pool.
 
     Most fields below ``seconds_since_seen`` arrived with the dynamic pool
@@ -95,9 +94,6 @@ class AgentRunnerHost(_SandboxManagerWireNames):
         None,
         description="Where this host's sandbox manager listens, as the control plane reaches it.",
     )
-    broker_url: str | None = Field(
-        default=None, deprecated=True, description="Compatibility alias for sandbox_manager_url."
-    )
     last_heartbeat_at: datetime | None = None
     drain_fence_token: UUID | None = Field(
         None,
@@ -130,6 +126,34 @@ class AgentRunnerHost(_SandboxManagerWireNames):
         description=(
             "True while an operator's Remove waits for this draining host's running "
             "attempts to end; the host is revoked once they have."
+        ),
+    )
+    removal_moves_out: bool = Field(
+        False,
+        description=(
+            "True while that Remove also moves this host's sandboxes to other hosts "
+            "through their checkpoints; the host is revoked once none is left."
+        ),
+    )
+    sandboxes_left: int | None = Field(
+        None,
+        description=(
+            "Sandboxes this host can still move out while its removal moves them; null otherwise."
+        ),
+    )
+    sandboxes_unmovable: int | None = Field(
+        None,
+        description=(
+            "Sandboxes on this host that can never move, such as a stopped one whose "
+            "checkpoint failed, while its removal moves the others; null otherwise. "
+            "They stay on the removed host."
+        ),
+    )
+    removal_leaves_unmoved: bool = Field(
+        False,
+        description=(
+            "True when the administrator agreed that sandboxes which cannot move stay "
+            "on the removed host. Without it they hold the removal."
         ),
     )
     sandbox_runtime: str | None = Field(

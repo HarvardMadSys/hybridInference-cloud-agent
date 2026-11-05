@@ -8,7 +8,9 @@ wrong installation, or a private key leaking into a log line.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 import time
 from urllib.parse import parse_qs, urlparse
 
@@ -71,6 +73,15 @@ def test_config_absent_is_none_not_an_error():
     assert AppConfig.from_env({"AGENT_GITHUB_APP_ID": "1"}) is None
 
 
+def _real_pem_load(*args, **kwargs):
+    """The unpatched cryptography parse, immune to the module shadowing the
+    editable install does (the .pth pins ``cloud_agent`` to whichever tree is
+    on sys.path first, so the tests patch PyJWT's own binding instead)."""
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+    return load_pem_private_key(*args, **kwargs)
+
+
 def test_config_unescapes_a_pasted_key(keypair):
     """A key pasted into an env var arrives with literal \\n sequences."""
     private_pem, _ = keypair
@@ -103,6 +114,71 @@ def test_unusable_private_key_is_a_clear_error():
     """A malformed key must fail with a message, not a stack trace."""
     with pytest.raises(GitHubAppError):
         build_app_jwt(AppConfig(app_id="1", private_key="not a key"))
+
+
+def test_jwt_signing_parses_the_key_once(keypair, monkeypatch):
+    """Issue #772: the PEM must be parsed once per config, not per signature.
+
+    ``jwt.encode`` with a PEM string re-validates the RSA key on every call
+    (~43 ms measured, on the event loop, on the claim path); with a parsed
+    key object the same signature costs ~0.7 ms. The observable is PyJWT's
+    own parse entry point (``jwt.algorithms.load_pem_private_key``): at the
+    baseline every signature parses, so three signatures count three parses;
+    with the fix's memo the count stays at one. The memo lives on the config
+    object itself, which is replaced wholesale when settings change — so a
+    rotated key can never be served from a stale memo.
+    """
+    import jwt.algorithms
+
+    import cloud_agent.github_app as github_app_module
+
+    calls = 0
+
+    def counting_load(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return _real_pem_load(*args, **kwargs)
+
+    # PyJWT's parse entry point, for the baseline where the PEM string still
+    # reaches jwt.encode, and the fix's own binding when present — so a
+    # regression that leaks the PEM back into jwt.encode raises the count
+    # even though the memo still fires.
+    monkeypatch.setattr(jwt.algorithms, "load_pem_private_key", counting_load)
+    if hasattr(github_app_module, "load_pem_private_key"):
+        monkeypatch.setattr(github_app_module, "load_pem_private_key", counting_load)
+
+    config = AppConfig(app_id="12345", private_key=keypair[0])
+    for i in range(3):
+        assert build_app_jwt(config, now=1_000_000 + i)
+    assert calls == 1
+
+
+def test_a_second_config_with_the_same_key_parses_again(keypair, monkeypatch):
+    """The memo is per config object, not global: two holders of the same PEM
+    each parse once, and a config rebuilt after a settings change cannot see
+    a memo computed for an earlier key."""
+    import jwt.algorithms
+
+    import cloud_agent.github_app as github_app_module
+
+    calls = 0
+
+    def counting_load(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return _real_pem_load(*args, **kwargs)
+
+    # See test_jwt_signing_parses_the_key_once: hook both PyJWT's binding and,
+    # when present, the fix's module-level parse.
+    monkeypatch.setattr(jwt.algorithms, "load_pem_private_key", counting_load)
+    if hasattr(github_app_module, "load_pem_private_key"):
+        monkeypatch.setattr(github_app_module, "load_pem_private_key", counting_load)
+
+    first = AppConfig(app_id="12345", private_key=keypair[0])
+    second = AppConfig(app_id="12345", private_key=keypair[0])
+    assert build_app_jwt(first)
+    assert build_app_jwt(second)
+    assert calls == 2
 
 
 def test_user_authorization_uses_oauth_even_when_app_is_already_installed(config):
@@ -355,6 +431,26 @@ async def test_a_repository_s_installation_is_not_remembered_forever(config, mon
     assert len(lookups) == 2
 
 
+async def test_a_fresh_installation_lookup_bypasses_and_refreshes_the_cache(config):
+    """An authorization fence cannot trust the token minter's remembered id."""
+    installation_ids = iter((1, 2))
+    lookups: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        installation_id = next(installation_ids)
+        lookups.append(installation_id)
+        return httpx.Response(200, json={"id": installation_id})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        assert await credentials.installation_id_for("o/n") == 1
+        assert await credentials.installation_id_for("o/n") == 1
+        assert await credentials.installation_id_for("o/n", fresh=True) == 2
+        assert await credentials.installation_id_for("o/n") == 2
+
+    assert lookups == [1, 2]
+
+
 def test_private_key_never_appears_in_an_error(config):
     """A failure message must not carry the key it failed to use."""
     # Assembled rather than written out. A PEM header is a credential shape,
@@ -427,6 +523,184 @@ async def test_a_narrowed_token_is_not_served_from_the_full_token_cache(config):
     assert (write, read) == ("ghs_rw", "ghs_ro")
     assert read_again == "ghs_ro"
     assert len(minted) == 2, "the second read should have come from cache"
+
+
+_WRITE = {"contents": "write", "pull_requests": "write"}
+
+
+def _minting(minted: list[str]):
+    """Answer every mint with a new token that lives until 2099."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/installation"):
+            return httpx.Response(200, json={"id": 1})
+        minted.append(f"ghs_{len(minted) + 1}")
+        return httpx.Response(201, json={"token": minted[-1], "expires_at": "2099-01-01T00:00:00Z"})
+
+    return httpx.MockTransport(respond)
+
+
+async def test_a_token_handed_to_a_holder_is_its_own(config):
+    """A sandbox's token is neither the publisher's nor another conversation's.
+
+    Whoever holds an installation token can revoke it, with no permission at
+    all. Served from one slot, a token one sandbox revoked was refused for the
+    publisher and every other sandbox while the slot went on serving it.
+    """
+    minted: list[str] = []
+    async with httpx.AsyncClient(transport=_minting(minted)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+
+        async def token(holder: str | None = None) -> str:
+            return await credentials.token_for(
+                "o/n", permissions=_WRITE, repository_scoped=True, holder=holder
+            )
+
+        publisher, first, second = await token(), await token("athr_1"), await token("athr_2")
+        # Each stays cached for its own holder, so a follow-up keeps its token.
+        assert [await token(), await token("athr_1"), await token("athr_2")] == minted
+
+    assert minted == [publisher, first, second] == ["ghs_1", "ghs_2", "ghs_3"]
+
+
+async def test_holder_token_cache_is_bounded_lru(config, monkeypatch):
+    """Holder churn cannot retain a token for every conversation ever seen."""
+    import cloud_agent.github_app as github_app
+
+    monkeypatch.setattr(github_app, "_INSTALLATION_TOKEN_CACHE_MAX", 2)
+    minted: list[str] = []
+    async with httpx.AsyncClient(transport=_minting(minted)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+
+        async def token(holder: str) -> str:
+            return await credentials.token_for("o/n", holder=holder)
+
+        first, second = await token("athr_1"), await token("athr_2")
+        first_key, second_key = list(credentials._tokens)
+        second_cached = credentials._tokens[second_key]
+        assert second_cached.token == second
+        assert await token("athr_1") == first
+        third = await token("athr_3")
+
+    assert {cached.token for cached in credentials._tokens.values()} == {first, third}
+    assert first_key in credentials._tokens and second_key not in credentials._tokens
+    assert second_cached.token == ""
+
+
+async def test_cache_access_prunes_expired_token_strings(config, monkeypatch):
+    """A cache hit also releases expired slots that belong to other holders."""
+    import cloud_agent.github_app as github_app
+
+    now = [1_000_000.0]
+    monkeypatch.setattr(github_app.time, "time", lambda: now[0])
+    minted: list[str] = []
+    async with httpx.AsyncClient(transport=_minting(minted)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        await credentials.token_for("o/n", holder="expired")
+        live = await credentials.token_for("o/n", holder="live")
+        expired_key, _ = list(credentials._tokens)
+        expired = credentials._tokens[expired_key]
+        expired.expires_at = now[0] - 1
+
+        assert await credentials.token_for("o/n", holder="live") == live
+
+    assert expired_key not in credentials._tokens
+    assert expired.token == ""
+    assert len(credentials._tokens) == 1
+
+
+async def test_failed_mint_still_prunes_expired_token_strings(config, monkeypatch):
+    """A GitHub outage cannot keep already expired holder secrets resident."""
+    import cloud_agent.github_app as github_app
+
+    now = [1_000_000.0]
+    monkeypatch.setattr(github_app.time, "time", lambda: now[0])
+    fail_mint = [False]
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/installation"):
+            return httpx.Response(200, json={"id": 1})
+        if fail_mint[0]:
+            return httpx.Response(503, json={"message": "Unavailable"})
+        return httpx.Response(201, json={"token": "ghs_first"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        await credentials.token_for("o/n", holder="expired")
+        expired = next(iter(credentials._tokens.values()))
+        expired.expires_at = now[0] - 1
+        fail_mint[0] = True
+
+        with pytest.raises(GitHubAppError):
+            await credentials.token_for("o/n", holder="new")
+
+    assert not credentials._tokens
+    assert expired.token == ""
+
+
+async def test_retirement_and_close_release_cached_token_strings(config):
+    """Lifecycle cleanup drops secrets without breaking a retired caller."""
+    minted: list[str] = []
+    async with httpx.AsyncClient(transport=_minting(minted)) as client:
+        retired = GitHubAppCredentials(config, client=client)
+        await retired.token_for("o/n", holder="athr_1")
+        retired_cached = next(iter(retired._tokens.values()))
+        retired.retire()
+        assert not retired._tokens and retired_cached.token == ""
+        assert await retired.token_for("o/n", holder="athr_2") == "ghs_2"
+        assert not retired._tokens
+
+        closed = GitHubAppCredentials(config, client=client)
+        await closed.token_for("o/n", holder="athr_3")
+        closed_cached = next(iter(closed._tokens.values()))
+        await closed.aclose()
+        assert not closed._tokens and closed_cached.token == ""
+
+
+async def test_cross_thread_retirement_clears_tokens_on_the_owning_loop(config, monkeypatch):
+    """A settings refresh cannot mutate the event loop's token map from its worker."""
+    minted: list[str] = []
+    owner_thread = threading.get_ident()
+    cleanup_threads: list[int] = []
+    cleaned = asyncio.Event()
+    async with httpx.AsyncClient(transport=_minting(minted)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        await credentials.token_for("o/n", holder="athr_1")
+        cached = next(iter(credentials._tokens.values()))
+        original_clear = credentials._clear_tokens
+
+        def tracked_clear() -> None:
+            cleanup_threads.append(threading.get_ident())
+            original_clear()
+            cleaned.set()
+
+        monkeypatch.setattr(credentials, "_clear_tokens", tracked_clear)
+        await asyncio.to_thread(credentials.retire)
+        await asyncio.wait_for(cleaned.wait(), timeout=1)
+
+        assert cleanup_threads == [owner_thread]
+        assert not credentials._tokens and cached.token == ""
+
+
+async def test_an_expired_holder_s_token_is_not_kept(config, monkeypatch):
+    """A slot per conversation must not grow with every conversation ever held."""
+    import cloud_agent.github_app as github_app
+
+    now = [1_000_000.0]
+    monkeypatch.setattr(github_app.time, "time", lambda: now[0])
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/installation"):
+            return httpx.Response(200, json={"id": 1})
+        return httpx.Response(201, json={"token": "ghs_x"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        await credentials.token_for("o/n", holder="athr_1")
+        now[0] += 3601
+        await credentials.token_for("o/n", holder="athr_2")
+
+    assert len(credentials._tokens) == 1
 
 
 async def test_an_uninstalled_repository_is_distinguishable_from_an_outage(config):
@@ -946,6 +1220,67 @@ async def test_only_repositories_the_user_can_push_to_are_theirs(config):
     assert found[-1] == "acme/last"
 
 
+@pytest.mark.parametrize("push", [True, False])
+async def test_one_repository_permission_is_read_directly_as_the_user(config, push):
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={"permissions": {"pull": True, "push": push}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        allowed = await GitHubAppCredentials(config, client=client).user_can_push_repository(
+            "ghu_user", "acme/service"
+        )
+
+    assert allowed is push
+    [request] = requests
+    assert request.url.path == "/repos/acme/service"
+    assert request.headers["authorization"] == "Bearer ghu_user"
+
+
+@pytest.mark.parametrize("status", [403, 404])
+async def test_a_plain_targeted_permission_refusal_is_no_access(config, status):
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(status, json={}))
+    ) as client:
+        assert not await GitHubAppCredentials(config, client=client).user_can_push_repository(
+            "ghu_user", "acme/service"
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "body"),
+    [
+        (429, {}, {}),
+        (403, {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "0"}, {}),
+        (200, {}, {"permissions": {"pull": True}}),
+    ],
+)
+async def test_an_unsettled_targeted_permission_answer_is_an_outage(config, status, headers, body):
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(status, headers=headers, json=body)
+        )
+    ) as client:
+        with pytest.raises(GitHubAppError):
+            await GitHubAppCredentials(config, client=client).user_can_push_repository(
+                "ghu_user", "acme/service"
+            )
+
+
+async def test_a_refused_token_during_a_targeted_permission_check_requires_reconnect(config):
+    from cloud_agent.github_app import UserAuthorizationRevoked
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(401, json={}))
+    ) as client:
+        with pytest.raises(UserAuthorizationRevoked):
+            await GitHubAppCredentials(config, client=client).user_can_push_repository(
+                "ghu_user", "acme/service"
+            )
+
+
 @pytest.mark.parametrize(("status", "expected"), [(404, []), (403, [])])
 async def test_an_installation_the_user_lost_contributes_nothing(config, status, expected):
     async with httpx.AsyncClient(
@@ -953,6 +1288,30 @@ async def test_an_installation_the_user_lost_contributes_nothing(config, status,
     ) as client:
         credentials = GitHubAppCredentials(config, client=client)
         assert await credentials.writable_repositories_for_user("ghu_user", 77) == expected
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "body", "wait"),
+    [
+        (403, {"retry-after": "30"}, {}, 30.0),
+        (403, {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "0"}, {}, 0.0),
+        (403, {}, {"message": "You have exceeded a secondary rate limit."}, 0.0),
+        (429, {}, {}, 0.0),
+    ],
+)
+async def test_a_rate_limited_listing_is_an_outage_not_a_lost_installation(
+    config, status, headers, body, wait
+):
+    """GitHub answers its rate limits with 403 too, and a limit says nothing about access."""
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(status, headers=headers, json=body)
+        )
+    ) as client:
+        credentials = GitHubAppCredentials(config, client=client)
+        with pytest.raises(GitHubAppError) as raised:
+            await credentials.writable_repositories_for_user("ghu_user", 77)
+    assert (raised.value.status, raised.value.retry_after_s) == (status, wait)
 
 
 async def test_a_refused_user_token_is_a_revoked_authorization_and_an_outage_is_not(config):
@@ -1000,20 +1359,102 @@ def test_a_users_repositories_are_remembered_for_a_minute_and_forgotten_on_chang
     import cloud_agent.github_app as github_app
 
     now = [1000.0]
+    ttl = [60.0]
     monkeypatch.setattr(github_app.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(github_app, "number_setting", lambda _name: ttl[0])
     credentials = GitHubAppCredentials(config)
-    credentials.remember_user_repositories("alice", (77,), ["acme/service"])
+    repositories = ["acme/service"]
+    credentials.remember_user_repositories("alice", (77,), repositories)
+    credentials.remember_user_installation_repositories("alice", 77, repositories)
+    credentials.remember_user_repository_permission("alice", 77, "Acme/Other", False)
+    repositories.append("acme/mutated-after-store")
 
+    combined = credentials.cached_user_repositories("alice", (77,))
+    installation = credentials.cached_user_installation_repositories("alice", 77)
+    assert combined == ["acme/service"]
+    assert installation == ["acme/service"]
+    assert credentials.cached_user_repository_permission("alice", 77, "acme/other") is False
+    combined.append("acme/mutated-after-read")
+    installation.append("acme/mutated-after-read")
     assert credentials.cached_user_repositories("alice", (77,)) == ["acme/service"]
+    assert credentials.cached_user_installation_repositories("alice", 77) == ["acme/service"]
     # Another set of installations is another question.
     assert credentials.cached_user_repositories("alice", (77, 88)) is None
     assert credentials.cached_user_repositories("bob", (77,)) is None
-    now[0] += 61
+    # The current setting applies to existing entries; reads do not extend it.
+    now[0] += 30
+    ttl[0] = 20
     assert credentials.cached_user_repositories("alice", (77,)) is None
+    assert credentials.cached_user_installation_repositories("alice", 77) is None
+    assert credentials.cached_user_repository_permission("alice", 77, "acme/other") is None
+    assert len(credentials._user_repositories) == 0
+    assert len(credentials._user_installation_repositories) == 0
+    assert len(credentials._user_repository_permissions) == 0
 
+    ttl[0] = 60
     credentials.remember_user_repositories("alice", (77,), ["acme/service"])
+    credentials.remember_user_installation_repositories("alice", 77, ["acme/service"])
+    credentials.remember_user_repository_permission("alice", 77, "acme/other", True)
     credentials.forget_user("alice")
     assert credentials.cached_user_repositories("alice", (77,)) is None
+    assert credentials.cached_user_installation_repositories("alice", 77) is None
+    assert credentials.cached_user_repository_permission("alice", 77, "acme/other") is None
+
+
+def test_targeted_repository_permission_cache_is_bounded(config, monkeypatch):
+    import cloud_agent.github_app as github_app
+
+    monkeypatch.setattr(github_app, "_USER_REPOSITORY_PERMISSIONS_MAX", 2)
+    credentials = GitHubAppCredentials(config)
+
+    credentials.remember_user_repository_permission("alice", 77, "Acme/One", False)
+    credentials.remember_user_repository_permission("alice", 77, "acme/two", True)
+    assert credentials.cached_user_repository_permission("alice", 77, "acme/ONE") is False
+    credentials.remember_user_repository_permission("alice", 77, "acme/three", True)
+
+    assert credentials.cached_user_repository_permission("alice", 77, "acme/one") is False
+    assert credentials.cached_user_repository_permission("alice", 77, "acme/two") is None
+    assert credentials.cached_user_repository_permission("alice", 77, "acme/three") is True
+
+
+async def test_repository_caches_bound_distinct_key_churn(config, monkeypatch):
+    import cloud_agent.github_app as github_app
+    from cloud_agent.github_cache import REPOSITORY_CACHE_SIZE
+
+    async def request(*args, **kwargs):
+        return {"id": 77}
+
+    assert github_app._USER_REPOSITORY_PERMISSIONS_MAX == 4096
+    monkeypatch.setattr(github_app, "_USER_REPOSITORY_PERMISSIONS_MAX", REPOSITORY_CACHE_SIZE)
+    credentials = GitHubAppCredentials(config)
+    monkeypatch.setattr(credentials, "_request", request)
+    for index in range(REPOSITORY_CACHE_SIZE + 10):
+        user_id = str(index)
+        repo = f"Owner/Repo-{index}"
+        await credentials.installation_id_for(repo)
+        credentials.remember_user_repositories(user_id, (77,), [repo])
+        credentials.remember_user_installation_repositories(user_id, 77, [repo])
+        credentials.remember_user_repository_permission(user_id, 77, repo, index % 2 == 0)
+    assert len(credentials._installations) == REPOSITORY_CACHE_SIZE
+    assert len(credentials._user_repositories) == REPOSITORY_CACHE_SIZE
+    assert len(credentials._user_installation_repositories) == REPOSITORY_CACHE_SIZE
+    assert len(credentials._user_repository_permissions) == REPOSITORY_CACHE_SIZE
+    assert credentials.cached_user_repositories("0", (77,)) is None
+    assert credentials.cached_user_installation_repositories("0", 77) is None
+    assert credentials.cached_user_repository_permission("0", 77, "owner/repo-0") is None
+    latest = str(REPOSITORY_CACHE_SIZE + 9)
+    answer = credentials.cached_user_repositories(latest, (77,))
+    assert answer == [f"Owner/Repo-{latest}"]
+    answer.clear()
+    assert credentials.cached_user_repositories(latest, (77,)) == [f"Owner/Repo-{latest}"]
+    assert credentials.cached_user_installation_repositories(latest, 77) == [f"Owner/Repo-{latest}"]
+    assert (
+        credentials.cached_user_repository_permission(latest, 77, f"owner/repo-{latest}") is False
+    )
+    credentials.forget_user(latest)
+    assert credentials.cached_user_repositories(latest, (77,)) is None
+    assert credentials.cached_user_installation_repositories(latest, 77) is None
+    assert credentials.cached_user_repository_permission(latest, 77, f"owner/repo-{latest}") is None
 
 
 @pytest.mark.parametrize("private", [True, False])

@@ -39,7 +39,6 @@ from cloud_agent_host.member_resources import (
     ThreadReading,
     WindowAccumulator,
     WindowSample,
-    exit_events_from_processes,
     instance_key,
     parse_window_sample,
     parse_window_samples,
@@ -677,38 +676,6 @@ class TestJournalParsing:
         samples = parse_window_samples(payload, measurement_id=MEASUREMENT, boot_id=BOOT)
 
         assert [item.sample_seq for item in samples] == [0, 1, 2]
-
-
-class TestExitEventProjection:
-    """Turning observed process rows into exit events without guessing."""
-
-    class Row:
-        def __init__(self, **kwargs: object) -> None:
-            self.uid = 11001
-            self.pid = 42
-            self.started_guest_mono_ns = 1_000_000_000
-            self.exited_guest_mono_ns = 2_000_000_000
-            self.observed_exit = True
-            self.cpu_usec = 1_500
-            self.io_read_bytes = 10
-            self.io_write_bytes = 2
-            for key, value in kwargs.items():
-                setattr(self, key, value)
-
-    def test_a_settled_row_becomes_one_event(self) -> None:
-        events = exit_events_from_processes([self.Row()], boot_id=BOOT)
-
-        assert len(events) == 1
-        assert events[0].cpu_ns == 1_500_000
-        assert events[0].read_bytes == 10
-
-    def test_a_row_that_never_exited_is_not_an_exit(self) -> None:
-        """A process still running at close has no settled figure to report."""
-        assert exit_events_from_processes([self.Row(observed_exit=False)], boot_id=BOOT) == []
-
-    def test_a_row_without_a_start_time_is_not_keyed_by_pid(self) -> None:
-        """Without the kernel's start time there is no stable identity."""
-        assert exit_events_from_processes([self.Row(started_guest_mono_ns=0)], boot_id=BOOT) == []
 
 
 class TestTheGuestCycleBits:

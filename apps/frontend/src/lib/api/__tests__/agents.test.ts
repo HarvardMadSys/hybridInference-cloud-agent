@@ -20,29 +20,29 @@ import {
   getAgentIntegrations,
   getAgentJob,
   getAgentAttemptTelemetry,
+  getAgentTrajectoryTimings,
   getAgentJobFiles,
   getAgentJobGit,
+  getAgentJobGitMetadata,
   getAgentJobUsage,
   getAgentJobThread,
   listAllAgentThreadEvents,
   listAgentConversations,
   listAgentTerminals,
   pauseAgentGoal,
-  publishAgentThread,
   pinAgentJob,
   renameAgentJob,
   resizeAgentTerminal,
   resumeAgentGoal,
-  refreshAgentJobUsage,
   restoreAgentJob,
   setAgentGoal,
   streamAgentTerminal,
   streamAgentJob,
   unpinAgentJob,
   writeAgentTerminalInput,
-  writeAgentJobFile,
 } from '../agents';
 import * as client from '../client';
+import { contractErrors } from './contract';
 
 function sseResponse(chunks: string[]): Response {
   const encoder = new TextEncoder();
@@ -172,31 +172,40 @@ describe('agents api', () => {
     );
   });
 
-  it('reads and refreshes owner-scoped usage without rounding decimal costs', async () => {
-    const body = { ledger: { totals: { spent_usd: '0.12345678' } } };
+  it('posts one bounded list for compact trajectory timing', async () => {
+    fetchWithAuth.mockResolvedValue(jsonResponse({ jobs: [] }));
+    const { signal } = new AbortController();
+
+    await expect(getAgentTrajectoryTimings(['job/one', 'job-two'], signal)).resolves.toEqual({
+      jobs: [],
+    });
+    expect(fetchWithAuth).toHaveBeenCalledWith(
+      expect.any(String),
+      '/v1/agent/jobs/trajectory-telemetry',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_ids: ['job/one', 'job-two'] }),
+        signal,
+      },
+    );
+  });
+
+  it('reads owner-scoped usage as sent', async () => {
+    const body = { runtime: { source: 'runtime', output_tokens: 42 } };
     fetchWithAuth.mockResolvedValue(jsonResponse(body));
     const { signal } = new AbortController();
-    expect((await getAgentJobUsage('job/one', signal))?.ledger.totals?.spent_usd).toBe(
-      '0.12345678',
-    );
+    expect((await getAgentJobUsage('job/one', signal))?.runtime.output_tokens).toBe(42);
     expect(fetchWithAuth).toHaveBeenLastCalledWith(
       expect.any(String),
       '/v1/agent/jobs/job%2Fone/usage',
       { signal },
     );
-    fetchWithAuth.mockResolvedValue(jsonResponse(body));
-    expect(await refreshAgentJobUsage('job/one', signal)).toEqual(body);
-    expect(fetchWithAuth).toHaveBeenLastCalledWith(
-      expect.any(String),
-      '/v1/agent/jobs/job%2Fone/usage/refresh',
-      { method: 'POST', signal },
-    );
   });
 
-  it('treats a pre-ledger 404 as unavailable while preserving real API failures', async () => {
+  it('treats a 404 as unavailable while preserving real API failures', async () => {
     fetchWithAuth.mockResolvedValue(jsonResponse({ detail: 'Not Found' }, 404));
     expect(await getAgentJobUsage('ajob_1')).toBeNull();
-    expect(await refreshAgentJobUsage('ajob_1')).toBeNull();
     fetchWithAuth.mockResolvedValue(jsonResponse({ detail: 'Unavailable' }, 503));
     await expect(getAgentJobUsage('ajob_1')).rejects.toMatchObject({ statusCode: 503 });
   });
@@ -505,20 +514,6 @@ describe('agents api', () => {
     );
   });
 
-  it('writes a live workspace file with an encoded path', async () => {
-    fetchWithAuth.mockResolvedValue(
-      jsonResponse({ path: 'src/a file.ts', kind: 'file', content: 'updated' }),
-    );
-
-    await writeAgentJobFile('job/one', 'src/a file.ts', 'updated');
-
-    expect(fetchWithAuth).toHaveBeenCalledWith(
-      expect.any(String),
-      '/v1/agent/jobs/job%2Fone/files?path=src%2Fa%20file.ts',
-      expect.objectContaining({ method: 'PUT', body: JSON.stringify({ content: 'updated' }) }),
-    );
-  });
-
   it('can include the sandbox manager session limit without changing the legacy list result', async () => {
     fetchWithAuth.mockResolvedValueOnce(jsonResponse({ terminals: [], max_sessions: 2 }));
     await expect(listAgentTerminals('job/one', { includeLimits: true })).resolves.toEqual({
@@ -544,6 +539,15 @@ describe('agents api', () => {
       .mockResolvedValueOnce(new Response(null, { status: 204 }))
       .mockResolvedValueOnce(new Response(null, { status: 204 }))
       .mockResolvedValueOnce(
+        jsonResponse({
+          available: true,
+          revision: 'a'.repeat(64),
+          branch: 'agent/x',
+          changes: [],
+          change_count: 0,
+        }),
+      )
+      .mockResolvedValueOnce(
         jsonResponse({ available: true, branch: 'agent/x', changes: [], patch: '', commits: [] }),
       );
 
@@ -552,6 +556,7 @@ describe('agents api', () => {
     await writeAgentTerminalInput('job/one', 'term/1', 'λ\r');
     await resizeAgentTerminal('job/one', 'term/1', 30, 100);
     await deleteAgentTerminal('job/one', 'term/1');
+    await getAgentJobGitMetadata('ajob_1');
     await getAgentJobGit('ajob_1');
 
     expect(fetchWithAuth).toHaveBeenNthCalledWith(
@@ -588,6 +593,11 @@ describe('agents api', () => {
     );
     expect(fetchWithAuth).toHaveBeenNthCalledWith(
       6,
+      expect.any(String),
+      '/v1/agent/jobs/ajob_1/git/metadata',
+    );
+    expect(fetchWithAuth).toHaveBeenNthCalledWith(
+      7,
       expect.any(String),
       '/v1/agent/jobs/ajob_1/git',
     );
@@ -1169,18 +1179,7 @@ describe('agents api', () => {
     );
   });
 
-  it('publishes a conversation’s workspace only on its owner’s request', async () => {
-    const opened = { thread_id: 'thread-1', snapshot_id: 4, state: 'pending', requested: true };
-    fetchWithAuth.mockResolvedValue(jsonResponse(opened));
-    await expect(publishAgentThread('thread/1')).resolves.toEqual(opened);
-    expect(fetchWithAuth).toHaveBeenLastCalledWith(
-      expect.any(String),
-      '/v1/agent/threads/thread%2F1/publish',
-      { method: 'POST' },
-    );
-  });
-
-  it('pauses, resumes and clears without a revision, because those buttons are idempotent', async () => {
+  it('pauses and resumes without a revision, because those buttons are idempotent', async () => {
     fetchWithAuth.mockResolvedValue(jsonResponse({ thread_id: 'thread-1', revision: 6 }));
     await pauseAgentGoal('thread-1');
     expect(fetchWithAuth).toHaveBeenLastCalledWith(
@@ -1195,18 +1194,25 @@ describe('agents api', () => {
       '/v1/agent/threads/thread-1/goal/resume',
       { method: 'POST' },
     );
+  });
+
+  it('clears only the goal revision its owner confirmed', async () => {
+    // Clearing is not idempotent across a replacement: without the revision,
+    // a goal set from another tab would be removed unseen.
     fetchWithAuth.mockResolvedValue(
       jsonResponse({ thread_id: 'thread-1', cleared: true, revision: 8 }),
     );
-    await expect(clearAgentGoal('thread-1')).resolves.toEqual({
+    await expect(clearAgentGoal('thread-1', 7)).resolves.toEqual({
       thread_id: 'thread-1',
       cleared: true,
       revision: 8,
     });
+    const body = JSON.stringify({ revision: 7 });
     expect(fetchWithAuth).toHaveBeenLastCalledWith(
       expect.any(String),
       '/v1/agent/threads/thread-1/goal',
-      { method: 'DELETE' },
+      { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body },
     );
+    expect(contractErrors('DELETE', '/v1/agent/threads/thread-1/goal', body)).toEqual([]);
   });
 });

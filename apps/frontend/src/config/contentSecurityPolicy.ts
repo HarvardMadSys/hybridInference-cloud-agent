@@ -1,11 +1,10 @@
 // The Content-Security-Policy on every document this app serves.
 //
-// This app shares an origin with the gateway, which keeps its access token in
-// `sessionStorage`, so the line that matters is the one
-// `Markdown.untrusted.test.tsx` pins: model output and repository content never
-// become script. The policy is the second line behind it. A page whose markup
-// someone else managed to influence still runs only the scripts this
-// deployment served, and cannot be framed into a page that tricks a click.
+// The line that matters is the one `Markdown.untrusted.test.tsx` pins: model
+// output and repository content never become script. The policy is the second
+// line behind it. A page whose markup someone else managed to influence still
+// runs only the scripts this deployment served, and cannot be framed into a
+// page that tricks a click.
 //
 // **Scripts are allowed by nonce, not by origin.** Next renders inline
 // bootstrap scripts of its own (the RSC payload pushes), so `'self'` alone
@@ -86,6 +85,9 @@ export function contentSecurityPolicy({
     ['style-src', ["'self'", "'unsafe-inline'"]],
     ['img-src', ["'self'", 'data:', 'blob:', 'https:']],
     ['connect-src', ["'self'", ...(apiOrigin ? [apiOrigin] : [])]],
+    // The Turnstile challenge on the sign-up and phone-code forms is an iframe
+    // from Cloudflare; nothing else may be framed in.
+    ['frame-src', ["'self'", 'https://challenges.cloudflare.com']],
     ['object-src', ["'none'"]],
     ['base-uri', ["'none'"]],
     ['form-action', ["'self'"]],

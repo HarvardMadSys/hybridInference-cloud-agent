@@ -7,8 +7,10 @@ import io
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -16,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud_agent_host import chat_sandbox as chat_sandbox_mod
+from cloud_agent_host import chat_sandbox as chat_sandbox_mod, chat_sandbox_writers as writers
 from cloud_agent_host.chat_sandbox import (
     ACTIVATION_TMPFS,
     ARCHIVE_IMPORT_TIMEOUT_PER_GIB_S,
@@ -30,8 +32,7 @@ from cloud_agent_host.chat_sandbox import (
     CHAT_STATE_DIR,
     CHAT_THREAD_LABEL,
     CHAT_WORKDIR,
-    FINAL_ARCHIVE_MARKER_NAME,
-    INITIAL_ARCHIVE_MARKER_ROOT,
+    MEMBER_REAPER_TARGET,
     MEMBER_TMPFS_ROOT,
     MEMBER_UID_BASE,
     TURN_NETWORK_PROOF_S,
@@ -45,12 +46,16 @@ from cloud_agent_host.chat_sandbox import (
     _RetainedTerminalProcess,
     claude_member_config_dir,
 )
+from cloud_agent_host.chat_sandbox_markers import (
+    FINAL_ARCHIVE_MARKER_NAME,
+    INITIAL_ARCHIVE_MARKER_ROOT,
+)
+from cloud_agent_host.chat_sandbox_network import ChatSandboxNetwork
 from cloud_agent_host.guest_observer import (
     GUEST_OBSERVER_BINARY,
     GUEST_OBSERVER_ROOT,
-    GUEST_OBSERVER_ROTATE_BYTES,
     GUEST_OBSERVER_VERSION,
-    GuestObservation,
+    MAX_OBSERVATION_BYTES,
     GuestObserverController,
     GuestObserverCursor,
     GuestObserverSnapshot,
@@ -69,6 +74,46 @@ def _spec() -> ChatSandboxSpec:
         runtime_version="2.1.220",
         sandbox_image_digest="sha256:image-pinned",
     )
+
+
+def test_a_reaper_probe_never_waits_on_an_install_into_another_container(monkeypatch):
+    """A runtime copy into one chat must not hold up every other chat's turn."""
+    manager = ChatSandboxManager(ContainerBackend(image="image", sandbox_namespace="deployment-a"))
+    spec = _spec()
+    other = replace(spec, thread_id="athr_02", sandbox_id="asbx_02")
+    assert spec.container_name != other.container_name
+    installing = threading.Event()
+    finish = threading.Event()
+
+    def exec_capture(target, _argv, **_kwargs):
+        if target.container_name == spec.container_name and not installing.is_set():
+            installing.set()
+            finish.wait(5)
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(manager, "exec_capture", exec_capture)
+
+    def ensure_reaper(target):
+        thread = threading.Thread(
+            target=manager.ensure_member_process_reaper, args=(target,), daemon=True
+        )
+        thread.start()
+        return thread
+
+    held = ensure_reaper(spec)
+    try:
+        assert installing.wait(5), "the install never started"
+        elsewhere = ensure_reaper(other)
+        elsewhere.join(1)
+        assert not elsewhere.is_alive(), "a probe waited on another container's install"
+        same = ensure_reaper(spec)
+        same.join(0.2)
+        assert same.is_alive(), "two installs into one container interleaved"
+    finally:
+        finish.set()
+    held.join(5)
+    same.join(5)
+    assert not held.is_alive() and not same.is_alive()
 
 
 def test_archive_export_is_stopped_exact_id_and_metadata_excludes_secrets(monkeypatch, tmp_path):
@@ -322,31 +367,24 @@ def test_archive_export_rejects_oversize_and_changed_identity_after_export(monke
 def _plain_group_network(monkeypatch):
     """Keep these tests on one fixed bridge; the group network is tested elsewhere.
 
-    Everything here is about exec, terminals, observers and ownership. Their
-    containers sit on ``agent-net`` and the group network's own lifecycle
-    (creation, relays, host exceptions, release, pruning, the in-guest check)
-    is covered against a model of Docker in ``test_chat_group_network.py``.
+    Exec, terminals, observers and ownership use ``agent-net`` here; group
+    lifecycle (creation, relays, host exceptions, release, pruning, guest check)
+    is tested against a Docker model in ``test_chat_group_network.py``.
     """
-    monkeypatch.setattr(ChatSandboxManager, "network_for", lambda _self, _spec: "agent-net")
-    monkeypatch.setattr(ChatSandboxManager, "require_host_rules", lambda _self: None)
+    monkeypatch.setattr(ChatSandboxNetwork, "network_for", lambda _self, _spec: "agent-net")
+    monkeypatch.setattr(ChatSandboxNetwork, "require_host_rules", lambda _self: None)
+    monkeypatch.setattr(ChatSandboxNetwork, "verify_host_rules", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
-        ChatSandboxManager, "_ensure_group_network", lambda _self, _spec: "agent-net"
-    )
-    monkeypatch.setattr(
-        ChatSandboxManager,
+        ChatSandboxNetwork,
         "_require_group_network",
-        lambda self, spec, _current, *_snapshot: self._require(spec),
+        lambda self, spec, _current, *_snapshot: self._containers._require(spec),
     )
-    monkeypatch.setattr(ChatSandboxManager, "_sync_kata_guest_network", lambda *_args: None)
+    monkeypatch.setattr(ChatSandboxNetwork, "_sync_kata_guest_network", lambda *_args: None)
+    monkeypatch.setattr(ChatSandboxNetwork, "_verify_guest_network", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
-        ChatSandboxManager,
-        "_verify_guest_network",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        ChatSandboxManager,
+        ChatSandboxNetwork,
         "_release_sandbox_networks",
-        lambda self, spec, _current, *, expected_container_id: self._require_exact(
+        lambda self, spec, _current, *, expected_container_id: self._containers._require_exact(
             spec, expected_container_id
         ),
     )
@@ -373,6 +411,19 @@ def _observer_snapshot_payload(snapshot: GuestObserverSnapshot) -> bytes:
         },
         separators=(",", ":"),
     ).encode()
+
+
+def _observer_drain_payload(
+    closing: GuestObserverSnapshot,
+    flushed: GuestObserverSnapshot,
+    payload: bytes = b"",
+) -> bytes:
+    """The drain script's output: both publications on one line, then the slice."""
+    header = {
+        "closing": json.loads(_observer_snapshot_payload(closing)),
+        "flushed": json.loads(_observer_snapshot_payload(flushed)),
+    }
+    return json.dumps(header, separators=(",", ":")).encode() + b"\n" + payload
 
 
 def _inspect_payload(
@@ -521,19 +572,16 @@ def test_finishing_guest_observation_flushes_after_the_turn_end_fence():
         journal_size=0,
         guest_mono_ns=2_050_000_000,
     )
-    waits: list[int | None] = []
+    drains: list[list[str]] = []
+    published = [flushed]
 
     def capture(argv, _timeout_s):
-        if GUEST_OBSERVER_BINARY in argv:
-            wanted = int(argv[-2])
-            waits.append(None if wanted < 0 else wanted)
-            snapshot = closing if wanted < 0 else flushed
-            return SimpleNamespace(
-                returncode=0,
-                stdout=_observer_snapshot_payload(snapshot),
-                stderr=b"",
-            )
-        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        drains.append(list(argv))
+        return SimpleNamespace(
+            returncode=0,
+            stdout=_observer_drain_payload(closing, published[-1]),
+            stderr=b"",
+        )
 
     controller = GuestObserverController(
         capture=capture,
@@ -556,8 +604,14 @@ def test_finishing_guest_observation_flushes_after_the_turn_end_fence():
     assert observation.complete is True
     # The first post-turn publication can have completed its poll before the
     # closing status was read.  Crossing the following publication proves a
-    # full drain happened after that read.
-    assert waits == [None, 21]
+    # full drain happened after that read: the one guest exec, fenced on this
+    # cursor's journal, waits for it, and a drain reporting less is refused.
+    assert len(drains) == 1
+    assert drains[0][-5:] == ["0", "7", "19", str(MAX_OBSERVATION_BYTES), "3.0"]
+    published.append(replace(flushed, status=replace(flushed.status, poll_seq=21)))
+    refused = controller.finish(cursor)
+    assert refused.complete is False
+    assert "full poll" in (refused.detail or "")
 
 
 def test_stale_guest_observer_cleanup_only_signals_the_trusted_binary():
@@ -586,9 +640,9 @@ def test_stale_guest_observer_cleanup_only_signals_the_trusted_binary():
     cleanup_argv, cleanup_detached = calls[0]
     assert cleanup_detached is False
     assert cleanup_argv[-1] == GUEST_OBSERVER_BINARY
-    compile(cleanup_argv[2], "<guest-observer-cleanup>", "exec")
-    assert "os.path.samefile" in cleanup_argv[2]
-    assert "stale guest observer did not exit" in cleanup_argv[2]
+    compile(cleanup_argv[3], "<guest-observer-cleanup>", "exec")
+    assert "os.path.samefile" in cleanup_argv[3]
+    assert "stale guest observer did not exit" in cleanup_argv[3]
     assert calls[1] == ([GUEST_OBSERVER_BINARY], True)
 
 
@@ -624,9 +678,9 @@ def test_guest_observer_snapshot_verifies_the_status_pid_binary(monkeypatch):
 
     assert snapshot.status.poll_seq == 22
     command = calls[0]
-    compile(command[2], "<guest-observer-snapshot>", "exec")
+    compile(command[3], "<guest-observer-snapshot>", "exec")
     assert command[-3:] == [GUEST_OBSERVER_BINARY, "21", "3.0"]
-    assert "os.path.samefile" in command[2]
+    assert "os.path.samefile" in command[3]
 
 
 def test_short_guest_journal_read_is_unavailable_not_a_false_complete_census():
@@ -635,9 +689,10 @@ def test_short_guest_journal_read_is_unavailable_not_a_false_complete_census():
         journal_size=10,
         guest_mono_ns=2_050_000_000,
     )
+    closing = replace(snapshot, status=replace(snapshot.status, poll_seq=19))
 
-    def capture(argv, _timeout_s):
-        stdout = _observer_snapshot_payload(snapshot) if GUEST_OBSERVER_BINARY in argv else b"short"
+    def capture(_argv, _timeout_s):
+        stdout = _observer_drain_payload(closing, snapshot, b"short")
         return SimpleNamespace(returncode=0, stdout=stdout, stderr=b"")
 
     controller = GuestObserverController(
@@ -660,69 +715,6 @@ def test_short_guest_journal_read_is_unavailable_not_a_false_complete_census():
     assert observation.source is None
     assert observation.complete is False
     assert "published fence" in (observation.detail or "")
-
-
-def test_retained_guest_journal_rotates_only_without_active_turns(monkeypatch):
-    manager = ChatSandboxManager(ContainerBackend(image="registry/agent:1", runtime=KATA_RUNTIME))
-
-    class Controller:
-        def __init__(self):
-            self.pid = 91
-            self.size = 0
-            self.starts = 0
-            self.restart_choices: list[bool] = []
-
-        def snapshot(self, **_kwargs):
-            return GuestObserverSnapshot(
-                status=GuestObserverStatus(self.pid, 1, 0, 0, 0, self.size),
-                journal_size=self.size,
-                guest_mono_ns=1,
-            )
-
-        def start(self):
-            self.starts += 1
-            self.pid += 1
-            self.size = 0
-
-        def rotate_if_needed(self, *, threshold):
-            if self.size < threshold:
-                return False
-            self.start()
-            return True
-
-        def begin(self, *, user_uid, restart_if_missing=True, measurement_id=None):
-            self.restart_choices.append(restart_if_missing)
-            return GuestObserverCursor(
-                uid=user_uid,
-                observer_pid=self.pid,
-                offset=self.size,
-                available=True,
-                measurement_id=measurement_id,
-            )
-
-        def finish(self, _cursor):
-            return GuestObservation(
-                source="kata-guest-ebpf-v1",
-                complete=True,
-                lost_events=0,
-                truncated=False,
-            )
-
-    controller = Controller()
-    monkeypatch.setattr(manager, "_guest_observer_controller", lambda _spec: controller)
-
-    first = manager.begin_guest_observation(_spec(), user_uid=MEMBER_UID_BASE)
-    controller.size = GUEST_OBSERVER_ROTATE_BYTES
-    second = manager.begin_guest_observation(_spec(), user_uid=MEMBER_UID_BASE + 1)
-    assert controller.starts == 0
-
-    manager.finish_guest_observation(_spec(), first)
-    manager.finish_guest_observation(_spec(), second)
-    third = manager.begin_guest_observation(_spec(), user_uid=MEMBER_UID_BASE)
-
-    assert controller.starts == 1
-    assert controller.restart_choices == [True, False, True]
-    assert third.observer_pid == 92
 
 
 def test_retained_tool_marks_are_read_as_the_shared_state_owner(monkeypatch):
@@ -773,12 +765,12 @@ def test_retained_tool_hooks_are_installed_inside_docker_owned_state(monkeypatch
 
     argv = captured["argv"]
     assert isinstance(argv, list)
-    compile(argv[2], "<retained-tool-hooks>", "exec")
+    compile(argv[3], "<retained-tool-hooks>", "exec")
     assert argv[-2:] == [claude_member_config_dir(0, "athr_01"), "/agent-state/tool-marks.log"]
     assert json.loads(captured["input"]) == update
     assert captured["uid"] == MEMBER_UID_BASE
-    assert "fcntl.flock" in argv[2]
-    assert "os.O_APPEND" in argv[2]
+    assert "fcntl.flock" in argv[3]
+    assert "os.O_APPEND" in argv[3]
 
     config = tmp_path / "member-home" / ".claude"
     config.mkdir(parents=True)
@@ -786,7 +778,7 @@ def test_retained_tool_hooks_are_installed_inside_docker_owned_state(monkeypatch
     marks = tmp_path / "agent-state" / "tool-marks.log"
     marks.parent.mkdir()
     subprocess.run(
-        ["python3", "-c", argv[2], str(config), str(marks)],
+        ["python3", "-I", "-c", argv[3], str(config), str(marks)],
         input=captured["input"],
         check=True,
     )
@@ -1520,7 +1512,7 @@ def test_every_runtime_credential_reaches_a_resident_exec_by_name_only(monkeypat
     arguments = {
         "workdir": CHAT_WORKDIR,
         "model": "glm-5.1",
-        "gateway_base_url": "http://agent-gateway:8080",
+        "model_base_url": "http://agent-gateway:8080",
         "credential": grant,
         "provides_isolation": True,
         "mcp_config": RuntimeMCPConfig(
@@ -1611,18 +1603,20 @@ def test_member_permission_normalization_prunes_platform_and_sibling_provider_ho
     )
 
     script = calls[0][0][2]
-    assert script.count("-path /agent-state/.platform") == 2
-    assert script.count("-path /agent-state/claude ") == 2
-    assert "normalize_dirs /agent-state/claude/projects" in script
-    assert "normalize_files /agent-state/claude/projects" in script
+    # One walk of /agent-state, and it prunes every one of these.
+    walks = script.count("find /agent-state ")
+    assert walks == 1
+    assert script.count("-path /agent-state/.platform") == walks
+    assert script.count("-path /agent-state/claude ") == walks
+    assert "normalize /agent-state/claude/projects" in script
     assert "/home/agent-member-" not in script
-    assert script.count("-path /agent-state/codex-members") == 2
-    assert script.count("-path /agent-state/opencode-members") == 2
-    assert script.count("-path /agent-state/kilo-members") == 2
+    assert script.count("-path /agent-state/codex-members") == walks
+    assert script.count("-path /agent-state/opencode-members") == walks
+    assert script.count("-path /agent-state/kilo-members") == walks
     # The trusted collections hold other members' 0700 homes; a traversal
     # into them would fail on the first one it cannot open.
     for runtime_id in ("codex", "opencode", "kilo"):
-        assert script.count(f"-path /agent-state/{runtime_id}-homes ") == 2
+        assert script.count(f"-path /agent-state/{runtime_id}-homes ") == walks
     # A member's provider home is never widened, not even by its owner: the
     # pass no longer enters the collections at all.
     assert "-members/" not in script
@@ -1805,7 +1799,7 @@ def test_member_replacement_reaps_pidfile_group_and_every_same_uid_leftover(monk
 
     def fake_exec(_spec, argv, **kwargs):
         calls.append((list(argv), kwargs))
-        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        return SimpleNamespace(returncode=0, stdout=b'{"status":0,"stderr":""}\n' * 2, stderr=b"")
 
     monkeypatch.setattr(manager, "exec_capture", fake_exec)
 
@@ -1816,16 +1810,16 @@ def test_member_replacement_reaps_pidfile_group_and_every_same_uid_leftover(monk
         user_gid=manager.backend.gid,
     )
 
-    assert len(calls) == 3
+    # The reaper's root probe, then one exec as the member: the reap, then the removal.
+    assert len(calls) == 2
     assert "stat -c %u:%g:%a" in calls[0][0][2]
-    assert calls[1][0] == [
-        "/usr/local/bin/member-process-reaper",
-        "reap",
-        str(MEMBER_UID_BASE),
-    ]
-    assert calls[1][1]["input_bytes"] == b""
+    assert calls[1][0][:3] == ["python3", "-I", "-c"]
     assert calls[1][1]["user_uid"] == MEMBER_UID_BASE
-    assert "resident-*.pid" in calls[2][0][2]
+    reap, stale = json.loads(calls[1][1]["input_bytes"])
+    assert reap["argv"] == ["python3", "-I", MEMBER_REAPER_TARGET, "reap", str(MEMBER_UID_BASE)]
+    assert reap["input"] == "" and reap["reaps"], "only the runner itself joins the baseline"
+    assert "resident-*.pid" in stale["argv"][2]
+    assert stale["input"] is None
 
 
 def test_member_turn_census_is_pid_reuse_fenced_and_canonical(monkeypatch):
@@ -1864,16 +1858,8 @@ def test_member_turn_census_is_pid_reuse_fenced_and_canonical(monkeypatch):
 
     assert baseline == ((41, 400), (42, 500))
     assert calls[3][1]["input_bytes"] == b"41 400\n42 500\n"
-    assert calls[1][0] == [
-        "/usr/local/bin/member-process-reaper",
-        "capture",
-        str(MEMBER_UID_BASE),
-    ]
-    assert calls[3][0] == [
-        "/usr/local/bin/member-process-reaper",
-        "reap",
-        str(MEMBER_UID_BASE),
-    ]
+    assert calls[1][0] == ["python3", "-I", MEMBER_REAPER_TARGET, "capture", str(MEMBER_UID_BASE)]
+    assert calls[3][0] == ["python3", "-I", MEMBER_REAPER_TARGET, "reap", str(MEMBER_UID_BASE)]
 
     with pytest.raises(SandboxError, match="malformed"):
         manager._parse_member_processes(b"41 nope\n")
@@ -2085,7 +2071,7 @@ def test_shared_writer_census_rejects_exiting_nonleaders_even_with_matching_coun
         [
             "/bin/sh",
             "-c",
-            ChatSandboxManager._shared_writer_task_state_script() + 'writer_state "$1"',
+            writers.TASK_STATE_SCRIPT + 'writer_state "$1"',
             "sh",
             str(proc),
         ],
@@ -2097,20 +2083,24 @@ def test_shared_writer_census_rejects_exiting_nonleaders_even_with_matching_coun
     assert result.stdout == b"unknown"
 
 
+def _local_shared_writer_command(argv, tmp_path, owned_processes):
+    """Confine a generated script's census traversal to owned PIDs."""
+    command = list(argv)
+    targets = " ".join(f"/proc/{process.pid}" for process in owned_processes)
+    assert targets
+    command[2] = command[2].replace("/proc/[0-9]*", targets)
+    assert "/proc/[0-9]*" not in command[2]
+    return [argument.replace(ACTIVATION_TMPFS, str(tmp_path)) for argument in command]
+
+
 def _local_shared_writer_manager(monkeypatch, tmp_path, owned_processes):
     """Run the generated scripts with census traversal confined to owned PIDs."""
     manager = ChatSandboxManager(ContainerBackend(image="img", uid=os.getuid(), gid=os.getgid()))
 
     def local_exec(_spec, argv, **kwargs):
         assert kwargs["user_uid"] == os.getuid()
-        command = list(argv)
-        targets = " ".join(f"/proc/{process.pid}" for process in owned_processes)
-        assert targets
-        command[2] = command[2].replace("/proc/[0-9]*", targets)
-        assert "/proc/[0-9]*" not in command[2]
-        command = [argument.replace(ACTIVATION_TMPFS, str(tmp_path)) for argument in command]
         return subprocess.run(
-            command,
+            _local_shared_writer_command(argv, tmp_path, owned_processes),
             input=kwargs.get("input_bytes"),
             capture_output=True,
             timeout=5,
@@ -2227,14 +2217,16 @@ def test_shared_writer_freeze_and_thaw_keep_live_writers_fenced_beside_zombies(
 
     manifest = manager.freeze_shared_writers(_spec(), slot_ids=[], token="d" * 32)
 
-    receipt = manager._parse_frozen_processes(
+    receipt, already_stopped = writers.parse_frozen_processes(
         (tmp_path / Path(manifest).name).read_bytes(), allowed_uids={os.getuid()}
     )
     assert [(pid, uid) for pid, uid, _started in receipt] == [(writer.pid, os.getuid())]
+    assert already_stopped == []
     assert _shared_writer_process_state(writer.pid) == "T"
     manager.thaw_shared_writers(_spec(), slot_ids=[], manifest=manifest)
     assert _shared_writer_process_state(writer.pid) not in {"T", "t"}
     assert _shared_writer_process_state(zombie.pid) == "Z"
+    assert list(tmp_path.glob("snapshot-*")) == []
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="writer census uses Linux /proc")
@@ -2267,10 +2259,11 @@ def test_shared_writer_freeze_and_thaw_fence_live_threads_behind_a_zombie_leader
 
     manifest = manager.freeze_shared_writers(_spec(), slot_ids=[], token="f" * 32)
 
-    receipt = manager._parse_frozen_processes(
+    receipt, already_stopped = writers.parse_frozen_processes(
         (tmp_path / Path(manifest).name).read_bytes(), allowed_uids={os.getuid()}
     )
     assert [(pid, uid) for pid, uid, _started in receipt] == [(writer.pid, os.getuid())]
+    assert already_stopped == []
     task_states = {
         task_stat.read_text().rsplit(") ", 1)[1].split()[0]
         for task_stat in Path(f"/proc/{writer.pid}/task").glob("*/stat")
@@ -2337,6 +2330,239 @@ def test_shared_writer_freeze_failure_resumes_live_threads_behind_a_zombie_leade
     _wait_for_shared_writer_growth(writes_path, writes_path.stat().st_size)
 
 
+def _after_census_stops_a_new_writer(argv, command):
+    """Run ``command`` in the guest census right after it stops an unseen writer."""
+    anchor = 'receipt="$receipt $item"; stable=0;;'
+    assert argv[2].count(anchor) == 1
+    script = argv[2].replace(anchor, f'receipt="$receipt $item"; stable=0; {command};;')
+    return [*argv[:2], script, *argv[3:]]
+
+
+def _wait_for_shared_writer_state(pid, state):
+    # A stop signal takes effect once its target next runs, not when it is sent.
+    deadline = time.monotonic() + 2
+    while _shared_writer_process_state(pid) != state:
+        assert time.monotonic() < deadline, f"process {pid} did not reach state {state}"
+        time.sleep(0.01)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="writer census uses Linux /proc")
+@pytest.mark.parametrize("census_end", ["committed", "killed"])
+def test_shared_writer_freeze_failure_resumes_a_census_whose_reply_was_lost(
+    monkeypatch, tmp_path, owned_shared_writer_processes, census_end
+):
+    # The guest census has stopped the writer, then either committed its
+    # receipt or died before its trap could run; the host never sees a reply.
+    writer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    owned_shared_writer_processes.append(writer)
+    manager = _local_shared_writer_manager(monkeypatch, tmp_path, owned_shared_writer_processes)
+    local_exec = manager.exec_capture
+
+    def lose_census_reply(spec, argv, **kwargs):
+        if "resume_receipt()" not in argv[2]:
+            return local_exec(spec, argv, **kwargs)
+        if census_end == "killed":
+            argv = _after_census_stops_a_new_writer(argv, "kill -KILL $$")
+        census = local_exec(spec, argv, **kwargs)
+        assert census.returncode == (0 if census_end == "committed" else -signal.SIGKILL)
+        _wait_for_shared_writer_state(writer.pid, "T")
+        raise SandboxError("chat sandbox exec failed: reply lost")
+
+    monkeypatch.setattr(manager, "exec_capture", lose_census_reply)
+
+    with pytest.raises(SandboxError, match="reply lost"):
+        manager.freeze_shared_writers(_spec(), slot_ids=[], token="3" * 32)
+
+    assert _shared_writer_process_state(writer.pid) not in {"T", "t"}
+    assert list(tmp_path.glob("snapshot-*")) == []
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="writer census uses Linux /proc")
+def test_shared_writer_freeze_failure_kills_a_census_still_running_before_resuming(
+    monkeypatch, tmp_path, owned_shared_writer_processes
+):
+    writer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    owned_shared_writer_processes.append(writer)
+    manager = _local_shared_writer_manager(monkeypatch, tmp_path, owned_shared_writer_processes)
+    local_exec = manager.exec_capture
+    censuses = []
+
+    def abandon_census(spec, argv, **kwargs):
+        if "resume_receipt()" not in argv[2]:
+            return local_exec(spec, argv, **kwargs)
+        # The guest census is descheduled mid-scan, and the host gives up on it.
+        argv = _after_census_stops_a_new_writer(argv, "kill -STOP $$")
+        census = subprocess.Popen(
+            _local_shared_writer_command(argv, tmp_path, owned_shared_writer_processes),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        censuses.append(census)
+        owned_shared_writer_processes.append(census)
+        _wait_for_shared_writer_state(census.pid, "T")
+        _wait_for_shared_writer_state(writer.pid, "T")
+        raise SandboxError("chat sandbox exec failed: connection reset")
+
+    monkeypatch.setattr(manager, "exec_capture", abandon_census)
+
+    with pytest.raises(SandboxError, match="connection reset"):
+        manager.freeze_shared_writers(_spec(), slot_ids=[], token="4" * 32)
+
+    (census,) = censuses
+    # Scheduled again, a census left alive would stop the writer once more.
+    os.kill(census.pid, signal.SIGCONT)
+    assert census.wait(timeout=5) == -signal.SIGKILL
+    assert _shared_writer_process_state(writer.pid) not in {"T", "t"}
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="writer census uses Linux /proc")
+def test_shared_writer_census_past_its_deadline_resumes_through_its_own_trap(
+    monkeypatch, tmp_path, owned_shared_writer_processes
+):
+    writer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    owned_shared_writer_processes.append(writer)
+    manager = _local_shared_writer_manager(monkeypatch, tmp_path, owned_shared_writer_processes)
+    local_exec = manager.exec_capture
+    monkeypatch.setattr(writers, "CENSUS_BUDGET_S", 0)
+    censuses = []
+
+    def census_only(spec, argv, **kwargs):
+        # Nothing the host sends after the census reaches the guest.
+        if "resume_receipt()" not in argv[2]:
+            raise SandboxError("chat sandbox exec failed: connection refused")
+        censuses.append(local_exec(spec, argv, **kwargs))
+        return censuses[-1]
+
+    monkeypatch.setattr(manager, "exec_capture", census_only)
+
+    with pytest.raises(SandboxError, match="writer freeze failed"):
+        manager.freeze_shared_writers(_spec(), slot_ids=[], token="5" * 32)
+
+    assert [census.returncode for census in censuses] == [47]
+    assert _shared_writer_process_state(writer.pid) not in {"T", "t"}
+
+
+def _spawn_suspended_process(owned_processes):
+    """Start a process stopped before any census, as a suspended terminal is."""
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    owned_processes.append(process)
+    os.kill(process.pid, signal.SIGSTOP)
+    _wait_for_shared_writer_state(process.pid, "T")
+    return process
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="writer census uses Linux /proc")
+@pytest.mark.parametrize("require_exact_census", [True, False])
+def test_shared_writer_thaw_does_not_resume_a_process_stopped_before_the_freeze(
+    monkeypatch, tmp_path, owned_shared_writer_processes, require_exact_census
+):
+    # Owner terminals are suspended before environment preparation and group
+    # snapshot capture, whose freezes thaw without and with the exact census.
+    suspended = _spawn_suspended_process(owned_shared_writer_processes)
+    writer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    owned_shared_writer_processes.append(writer)
+    manager = _local_shared_writer_manager(monkeypatch, tmp_path, owned_shared_writer_processes)
+
+    manifest = manager.freeze_shared_writers(_spec(), slot_ids=[], token="6" * 32)
+    receipt = (tmp_path / Path(manifest).name).read_bytes()
+    assert _shared_writer_process_state(writer.pid) == "T"
+    manager.thaw_shared_writers(
+        _spec(), slot_ids=[], manifest=manifest, require_exact_census=require_exact_census
+    )
+
+    assert _shared_writer_process_state(writer.pid) not in {"T", "t"}
+    assert _shared_writer_process_state(suspended.pid) == "T"
+    frozen, already_stopped = writers.parse_frozen_processes(receipt, allowed_uids={os.getuid()})
+    assert [pid for pid, _uid, _started in frozen] == [writer.pid]
+    assert [pid for pid, _uid, _started in already_stopped] == [suspended.pid]
+    assert list(tmp_path.glob("snapshot-*")) == []
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="writer census uses Linux /proc")
+@pytest.mark.parametrize(
+    ("failure", "error"),
+    [
+        ("census", "writer freeze failed"),
+        ("reply", "reply lost"),
+        ("manifest", "writer manifest failed"),
+    ],
+)
+def test_shared_writer_freeze_failure_does_not_resume_a_process_stopped_before_it(
+    monkeypatch, tmp_path, owned_shared_writer_processes, failure, error
+):
+    # The census's own trap, its guest receipt, and the host's copy of its
+    # reply each resume the writer it stopped, and nothing else.
+    suspended = _spawn_suspended_process(owned_shared_writer_processes)
+    writer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    owned_shared_writer_processes.append(writer)
+    manager = _local_shared_writer_manager(monkeypatch, tmp_path, owned_shared_writer_processes)
+    local_exec = manager.exec_capture
+
+    def failing_exec(spec, argv, **kwargs):
+        if "resume_receipt()" in argv[2]:
+            if failure == "census":
+                argv = [*argv[:2], argv[2].replace("committed=1", "exit 45"), *argv[3:]]
+            census = local_exec(spec, argv, **kwargs)
+            if failure == "reply":
+                raise SandboxError("chat sandbox exec failed: reply lost")
+            return census
+        if failure == "manifest" and kwargs.get("input_bytes") is not None:
+            return SimpleNamespace(returncode=1, stdout=b"", stderr=b"injected manifest failure")
+        return local_exec(spec, argv, **kwargs)
+
+    monkeypatch.setattr(manager, "exec_capture", failing_exec)
+
+    with pytest.raises(SandboxError, match=error):
+        manager.freeze_shared_writers(_spec(), slot_ids=[], token="7" * 32)
+
+    assert _shared_writer_process_state(writer.pid) not in {"T", "t"}
+    assert _shared_writer_process_state(suspended.pid) == "T"
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="writer census uses Linux /proc")
+def test_shared_writer_census_takes_over_a_stopped_process_resumed_during_it(
+    monkeypatch, tmp_path, owned_shared_writer_processes
+):
+    # Resumed after the census first saw it stopped, the process is a live
+    # writer again: a later round stops it, and so the thaw resumes it.
+    process = _spawn_suspended_process(owned_shared_writer_processes)
+    manager = _local_shared_writer_manager(monkeypatch, tmp_path, owned_shared_writer_processes)
+    local_exec = manager.exec_capture
+    anchor = 'already="$already $item"; stable=0;'
+
+    def resume_once_seen(spec, argv, **kwargs):
+        if "resume_receipt()" in argv[2]:
+            assert argv[2].count(anchor) == 1
+            script = argv[2].replace(anchor, f'{anchor} kill -CONT "$pid";')
+            argv = [*argv[:2], script, *argv[3:]]
+        return local_exec(spec, argv, **kwargs)
+
+    monkeypatch.setattr(manager, "exec_capture", resume_once_seen)
+
+    manifest = manager.freeze_shared_writers(_spec(), slot_ids=[], token="8" * 32)
+
+    assert _shared_writer_process_state(process.pid) == "T"
+    manager.thaw_shared_writers(_spec(), slot_ids=[], manifest=manifest)
+    assert _shared_writer_process_state(process.pid) not in {"T", "t"}
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="writer census uses Linux /proc")
+def test_shared_writer_exact_thaw_rejects_a_new_writer_even_once_stopped(
+    monkeypatch, tmp_path, owned_shared_writer_processes
+):
+    # Only a process the census itself found stopped is known to the thaw.
+    writer = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    owned_shared_writer_processes.append(writer)
+    manager = _local_shared_writer_manager(monkeypatch, tmp_path, owned_shared_writer_processes)
+    manifest = manager.freeze_shared_writers(_spec(), slot_ids=[], token="9" * 32)
+    _spawn_suspended_process(owned_shared_writer_processes)
+
+    with pytest.raises(SandboxError, match="writer census changed"):
+        manager.thaw_shared_writers(_spec(), slot_ids=[], manifest=manifest)
+
+    assert _shared_writer_process_state(writer.pid) not in {"T", "t"}
+
+
 def test_shared_writer_thaw_detects_replacement_after_exact_id_cleanup(monkeypatch):
     spec = ChatSandboxSpec(
         thread_id="athr_shared",
@@ -2397,13 +2623,15 @@ def test_shared_writer_thaw_detects_replacement_after_exact_id_cleanup(monkeypat
         b"31 0 300\n",
         b"31 10001 0\n",
         b"31 10001 300 extra\n",
+        b"31 10001 300 stopped extra\n",
         b"31 10001 300\n31 10001 301\n",
+        b"31 10001 300\n31 10001 301 stopped\n",
         "31 10001 300\N{SNOWMAN}\n".encode(),
     ],
 )
 def test_shared_writer_manifest_rejects_values_outside_the_identity_fence(payload):
     with pytest.raises(SandboxError, match="snapshot writer census"):
-        ChatSandboxManager._parse_frozen_processes(payload, allowed_uids={10001})
+        writers.parse_frozen_processes(payload, allowed_uids={10001})
 
 
 def test_retained_terminal_keeps_the_shell_in_the_docker_tty_process_group(
@@ -2569,10 +2797,13 @@ def test_base_bundle_import_uses_activation_tmpfs_and_preserves_git_state(monkey
     monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
     commit = "a" * 40
 
-    manager.import_base_bundle(spec, b"bundle bytes", commit=commit, env={"SAFE": "1"})
+    bundle = io.BytesIO(b"bundle bytes")
+    manager.import_base_bundle(spec, bundle, commit=commit, env={"SAFE": "1"})
 
     command, kwargs = calls[-1]
-    assert kwargs["input"] == b"bundle bytes"
+    assert kwargs["stdin"] is bundle
+    assert kwargs["input"] is None
+    assert bundle.tell() == 0
     assert command[command.index("--workdir") + 1] == CHAT_WORKDIR
     assert ACTIVATION_TMPFS in command[-4]
     assert "git bundle unbundle" in command[-4]
@@ -2624,7 +2855,7 @@ def test_retained_backend_reports_the_cli_version_pinned_in_its_container(monkey
     monkeypatch.setattr(
         manager.backend,
         "version_stamp",
-        lambda: {
+        lambda **_: {
             "sandbox_image_digest": "sha256:new-runner-image",
             "runtime_versions": {"claude-code": "2.1.999"},
             "runtime_versions_available": {"claude-code": ["2.1.999"]},
@@ -2796,7 +3027,7 @@ def test_a_peer_that_vanished_mid_reconcile_is_simply_absent(monkeypatch):
             "AGENT_EGRESS_CHAT_NETWORK_POOL": "10.240.0.0/16",
             "AGENT_EGRESS_DNS_SERVER": "1.1.1.1",
             "AGENT_RELAY_NETWORK": "agent-relays",
-            "AGENT_GATEWAY_URL": "http://agent-gateway:8080",
+            "AGENT_SANDBOX_MCP_URL": "http://agent-gateway:8080",
         }
     )
     manager = ChatSandboxManager(ContainerBackend(image="img", sandbox_network=network))
@@ -2827,7 +3058,7 @@ def test_a_peer_that_vanished_mid_reconcile_is_simply_absent(monkeypatch):
         ),
     )
 
-    assert manager._relay_owners() == {"gw": ["agent-gateway"]}
+    assert manager._network_lifecycle._relay_owners() == {"gw": ["agent-gateway"]}
 
 
 class TestSandboxActionFacts:

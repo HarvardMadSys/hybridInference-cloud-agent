@@ -13,7 +13,8 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from cloud_agent import identity, settings
+from cloud_agent import settings
+from cloud_agent.accounts.config import LOCAL_SESSION_COOKIE, LOCAL_SESSION_COOKIE_INSECURE
 from cloud_agent.api._cross_site import CrossSiteWriteGuard
 from cloud_agent.app import create_app, create_mcp_app
 
@@ -46,7 +47,7 @@ async def client():
         yield async_client
 
 
-def _session(name: str = identity.SESSION_COOKIE) -> dict[str, str]:
+def _session(name: str = LOCAL_SESSION_COOKIE) -> dict[str, str]:
     return {"Cookie": f"{name}=the-session"}
 
 
@@ -64,7 +65,7 @@ async def test_a_write_from_another_site_with_the_session_is_refused(client, met
 async def test_the_pre_rename_cookie_name_is_guarded_too(client):
     response = await client.post(
         "/write",
-        headers={**_session(identity.LEGACY_SESSION_COOKIE), "Sec-Fetch-Site": "same-site"},
+        headers={**_session(LOCAL_SESSION_COOKIE_INSECURE), "Sec-Fetch-Site": "same-site"},
     )
     assert response.status_code == 403
 
@@ -169,7 +170,7 @@ async def test_the_main_listener_installs_the_guard_and_the_relay_does_not():
 
 
 async def test_the_main_listener_refuses_a_cross_site_sign_out():
-    """End to end on a real route that needs no database or gateway."""
+    """End to end on a real route that needs no database for a cookie naming no session."""
     async with AsyncClient(
         transport=ASGITransport(app=create_app()), base_url="https://agents.example.org"
     ) as main:

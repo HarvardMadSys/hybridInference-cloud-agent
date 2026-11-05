@@ -110,7 +110,7 @@ function focusIsFree(pane: HTMLElement | null): boolean {
   const active = document.activeElement;
   if (!active || active === document.body || pane?.contains(active)) return true;
   return !active.closest(
-    'input, textarea, select, [contenteditable]:not([contenteditable="false"])',
+    'input, textarea, select, [role="combobox"], [role="listbox"], [contenteditable]:not([contenteditable="false"])',
   );
 }
 

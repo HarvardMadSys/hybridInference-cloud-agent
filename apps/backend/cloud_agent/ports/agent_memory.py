@@ -11,7 +11,9 @@ if TYPE_CHECKING:
 class AgentMemoryRepository(Protocol):
     """Store one row per memory, scoped to its owner and optional repository."""
 
-    async def list_memories(self, user_id: str, repo: str | None) -> dict[str, Any]:
+    async def list_memories(
+        self, user_id: str, repo: str | None, *, archive_cursor: str | None = None
+    ) -> dict[str, Any]:
         """Read one scope's active and archived memories and its enabled setting."""
         ...
 

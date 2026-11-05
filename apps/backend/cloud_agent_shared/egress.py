@@ -5,7 +5,7 @@ deployment's address pool, and the host enforces one fixed rule set on it:
 
 - public IPv4 unicast on TCP 80 and 443;
 - the one named DNS resolver, TCP/UDP 53;
-- the group's own two relays (inference and MCP), by exact address and port;
+- the group's own MCP relay, by exact address and port;
 - the exact public ``IPv4:port`` of each SSH server its owner registered,
   verified and enabled for one of the group's chats (``ssh_targets``);
 - nothing else: not the host, not private, link-local (cloud metadata), CGNAT,
@@ -42,8 +42,8 @@ only new connections, so deleting an element cuts a live SSH session too.
 **Ports, not protocols.** TCP 80/443 is a port rule. Nothing inspects what
 travels inside, so this is not a promise that only HTTP leaves, and it does not
 stop a sandbox sending the repository or its own short-lived tokens to a public
-host. Those tokens are refused at the public entrances of the gateway and the
-control plane; that, not this module, is what stops their direct replay.
+host. Those tokens are refused at the control plane's public entrance; that,
+not this module, is what stops their direct replay.
 """
 
 from __future__ import annotations
@@ -96,8 +96,14 @@ PROTECTED_IPV4: tuple[str, ...] = (
     "240.0.0.0/4",
 )
 
-#: A group bridge is a /29: its gateway, the sandbox and the two relays.
+#: A group bridge is a /29: its gateway, the sandbox and its relay, with room to spare.
 GROUP_PREFIX_LENGTH = 29
+
+#: Where a deployment's group bridges may be carved from. Not ``is_private``,
+#: which also admits loopback, link-local, "this network", reserved space and
+#: the documentation and benchmarking blocks: a bridge from 169.254.169.0/24
+#: would route the host's own traffic for the metadata service into a sandbox.
+RFC1918_IPV4: tuple[str, ...] = ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
 
 #: Every table this code installs starts with this, so a deployment can find
 #: its neighbours' address pools without being told about them.
@@ -112,6 +118,10 @@ _HOSTNAME = re.compile(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?")
 
 class SandboxNetworkError(SandboxError):
     """The sandbox network cannot be configured safely."""
+
+
+#: The names the GitHub relay's tunnel carries on a group bridge.
+GITHUB_RELAY_NAMES = ("github.com", "api.github.com")
 
 
 @dataclass(frozen=True)
@@ -206,7 +216,8 @@ def network_from_env(env: dict[str, str] | None = None) -> SandboxNetwork:
             "AGENT_EGRESS_CHAT_NETWORK_POOL must name this deployment's group address pool"
         )
     pool = _ipv4_network(pool_raw, var="AGENT_EGRESS_CHAT_NETWORK_POOL")
-    if not pool.is_private or pool.prefixlen > GROUP_PREFIX_LENGTH:
+    rfc1918 = any(pool.subnet_of(ipaddress.IPv4Network(block)) for block in RFC1918_IPV4)
+    if not rfc1918 or pool.prefixlen > GROUP_PREFIX_LENGTH:
         raise SandboxNetworkError(
             f"AGENT_EGRESS_CHAT_NETWORK_POOL={pool} must be RFC1918 space holding at "
             f"least one /{GROUP_PREFIX_LENGTH}"
@@ -227,7 +238,7 @@ def network_from_env(env: dict[str, str] | None = None) -> SandboxNetwork:
     relay_network = (source.get("AGENT_RELAY_NETWORK") or "").strip()
     if not relay_network:
         raise SandboxNetworkError(
-            "AGENT_RELAY_NETWORK must name the network the two relays are discovered on"
+            "AGENT_RELAY_NETWORK must name the network the MCP relay is discovered on"
         )
 
     extra = tuple(
@@ -237,9 +248,12 @@ def network_from_env(env: dict[str, str] | None = None) -> SandboxNetwork:
     )
 
     relays: list[RelayEndpoint] = []
-    for var in ("AGENT_GATEWAY_URL", "AGENT_SANDBOX_MCP_URL"):
-        if relay := _relay(source.get(var) or "", var=var):
-            relays.append(relay)
+    if relay := _relay(source.get("AGENT_SANDBOX_MCP_URL") or "", var="AGENT_SANDBOX_MCP_URL"):
+        relays.append(relay)
+    if (source.get("AGENT_SANDBOX_GITHUB_RELAY_CA_FILE") or "").strip():
+        # The GitHub relay's tunnel answers for both names on every bridge;
+        # git and gh reach it as GitHub itself, over TLS on 443.
+        relays += [RelayEndpoint(host=name, port=443) for name in GITHUB_RELAY_NAMES]
     return SandboxNetwork(
         namespace=namespace,
         pool=pool,
@@ -405,6 +419,7 @@ __all__ = [
     "PROTECTED_IPV4",
     "PUBLIC_TCP_PORTS",
     "RELAY_FAMILIES",
+    "RFC1918_IPV4",
     "SSH_TARGETS_SET",
     "SSH_TARGET_FAMILIES",
     "TABLE_PREFIX",

@@ -24,6 +24,9 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - pytest fixtures
     client,
     store,
 )
+from tests.support.owners import on_connection
+
+from cloud_agent.goals.controller import client_request_id_for
 
 if TYPE_CHECKING:
     from httpx import AsyncClient
@@ -72,7 +75,7 @@ async def _set(
     thread_id: str,
     *,
     objective: str = GOAL["objective"],
-    max_rounds: int | None | object = OMITTED,
+    max_rounds: int | object | None = OMITTED,
     revision: int | None = None,
 ) -> dict[str, Any]:
     """Write the goal and hand back the response body.
@@ -94,16 +97,30 @@ async def _set(
 
 
 async def _goal_round(store: FakeStorage, job_id: str, *, round_number: int = 1) -> dict:
-    """One automatic round of the conversation, queued the way the platform does."""
-    return await store.conversation_commands.create_follow_up(
-        parent_job_id=job_id,
-        user_id=_OWNER,
+    """One automatic work round of the conversation, queued the way the controller does.
+
+    Through ``create_goal_round``, the controller's write, for the identity and
+    revision of the goal the conversation has now.
+    """
+    thread_id = str(store.jobs[job_id]["thread_id"])
+    goal = store.thread_goals[thread_id]
+    created = await store.conversation_commands.create_goal_round(
+        thread_id=thread_id,
+        goal_id=str(goal["goal_id"]),
+        revision=int(goal["revision"]),
+        kind="work",
+        round_number=round_number,
         prompt=f'<goal_round kind="work" round="{round_number}">',
-        turn_source="goal",
-        goal_round=round_number,
-        goal_round_kind="work",
-        goal_revision=1,
+        client_request_id=client_request_id_for(
+            thread_id=thread_id,
+            goal_id=str(goal["goal_id"]),
+            kind="work",
+            trigger_ref=f"test:{round_number}",
+        ),
+        client_request_fingerprint=f"goal-round:work:{round_number}",
     )
+    assert created is not None
+    return created
 
 
 def _error_type(response) -> str:
@@ -140,12 +157,14 @@ async def test_a_job_created_with_a_goal_carries_it_on_the_conversation(client, 
     """The composer's path: one submission sets the objective and starts the work."""
     response = await client.post(
         "/v1/agent/jobs",
-        json={
-            "repo": "owner/name",
-            "task_prompt": "fix it",
-            "model": "glm-5.1",
-            "goal": GOAL,
-        },
+        json=on_connection(
+            {
+                "repo": "owner/name",
+                "task_prompt": "fix it",
+                "model": "glm-5.1",
+                "goal": GOAL,
+            }
+        ),
     )
     assert response.status_code == 201, response.text
 
@@ -423,6 +442,23 @@ async def test_clear_removes_the_goal_and_cancels_its_queued_round(client, store
     # objective can never match whatever the owner sets next.
     read_back = await client.get(_path(thread_id))
     assert read_back.json() == {"thread_id": thread_id, "goal": None, "revision": 2}
+
+
+async def test_a_clear_against_a_stale_revision_is_refused(client, store):
+    """A confirmed clear removes the goal its owner saw, never a newer one."""
+    _, thread_id = await _conversation(client, store)
+    await _set(client, thread_id)
+    await _set(client, thread_id, objective="ship it safely", revision=1)
+
+    stale = await client.request("DELETE", _path(thread_id), json={"revision": 1})
+    assert stale.status_code == 409
+    assert _error_type(stale) == "goal_revision_conflict"
+    current = await client.get(_path(thread_id))
+    assert current.json()["goal"]["objective"] == "ship it safely"
+
+    cleared = await client.request("DELETE", _path(thread_id), json={"revision": 2})
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json() == {"thread_id": thread_id, "cleared": True, "revision": 3}
 
 
 async def test_clearing_a_conversation_with_no_goal_changes_nothing(client, store):

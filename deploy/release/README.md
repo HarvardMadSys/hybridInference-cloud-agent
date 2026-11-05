@@ -12,24 +12,44 @@ own reviewed lock. The manifest, in turn, pins the recipe archive and images.
 
 | File | Purpose |
 |---|---|
+| [artifact_catalog.json](artifact_catalog.json) | One dependency-free source for build cells, native platforms, web mount/API variants, runner labels, and smoke keys. |
 | [manifest.schema.json](manifest.schema.json) | Published manifest schema; consumers validate against it. |
 | [release_manifest.py](release_manifest.py) | Generates a complete manifest from build records. |
+| [generate_artifact_contracts.py](generate_artifact_contracts.py) | Deterministically projects the catalog into the published schema vocabulary/cardinality and publication matrix. |
 | [build_recipe.py](build_recipe.py) | Packages the explicit recipe file list into a deterministic archive. |
 | [release_env.py](release_env.py), [artifact_compose.py](artifact_compose.py) | Validate release configuration and render digest-bound deployment inputs. |
 
+After editing catalog metadata, regenerate and check its reviewed projections:
+
+```bash
+python3 deploy/release/generate_artifact_contracts.py --write
+python3 deploy/release/generate_artifact_contracts.py --check
+```
+
+Manifest-visible changes (role, variant, base path, platform, or cell
+cardinality) are locked by `manifest_contract.artifact_shape_sha256`. Review
+their compatibility and schema-version impact, then acknowledge that decision
+explicitly with `--write --accept-contract-change`; ordinary generation will
+refuse to bless it. Behavior remains independent: a new catalog cell still
+needs a Dockerfile, a real case in `smoke.py`, deployment integration, and an
+independent contract fixture when compatibility changes.
+
 ## What the generator checks, and what it deliberately does not
 
-The generator requires all six artifacts, with distinct digests and exactly
+The generator requires all five artifacts, with distinct digests and exactly
 these platforms:
 
 | Role | Variant | Platform |
 |---|---|---|
 | `control` | — | `linux/arm64` |
 | `web` | `root`, base path `""` | `linux/arm64` |
-| `web` | `agents`, base path `/agents` | `linux/arm64` |
 | `runner` | — | `linux/amd64` |
 | `sandbox` | — | `linux/amd64` |
 | `tunnel` | — | `linux/amd64` |
+
+The `agents` web variant (base path `/agents`) is retired: it is no longer
+built, and the schema keeps accepting it in published v1 manifests
+(`manifest_contract.retired_web_variants`) so a rollback still validates.
 
 Image references must use digests under this organization's registry. The
 schema enforces role and web-variant cardinality, and the generator validates
@@ -118,7 +138,7 @@ The tests also check `org.opencontainers.image.revision`,
 `io.hybridinference.artifact.role`, and the web variant's
 `io.hybridinference.artifact.base_path`. Dockerfiles default the revision to
 `unknown`; publication must supply the source commit. These checks establish
-startup behavior, not successful job execution, real Gateway integration, or
+startup behavior, not successful job execution or
 Kata readiness on an execution host.
 
 ## Control-plane integration acceptance
@@ -133,7 +153,7 @@ compares running containers with the manifest through
 |---|---|
 | Checkout-free installation with no image build | Execution host, Kata, and real jobs |
 | Registry pulls and digest identity of running containers | Any additional architecture |
-| Real Postgres migrations and identity-namespace check | Gateway contracts and browser sign-in |
+| The read-only account-namespace check, then real Postgres migrations | Browser sign-in |
 | Healthy API and MCP listeners; correct web variant labels | User-visible console behavior |
 | Refusal of conflicting configured images before pulling | Independent registry validation by the downstream resolver |
 
@@ -158,7 +178,7 @@ tags are storage conventions; deployments select the manifest's digests.
 | `ghcr.io/harvardmadsys/cloud-agent-sandbox` | Sandbox, with a separate visibility setting for bundled third-party CLIs |
 
 After its smoke test passes, each digest receives a tag such as
-`control-<sha>`, `web-agents-<sha>`, or `sandbox-<sha>`. These tags help people
+`control-<sha>`, `web-root-<sha>`, or `sandbox-<sha>`. These tags help people
 inspect images and are not deployment selectors.
 
 Tags such as `buildcache-sandbox-2026-w42` are the publication workflow's layer
@@ -214,14 +234,16 @@ Keep `DEPLOY_ROOT` stable across releases. Its `.env`, `.deployed-sha`, and
 `.shared-live-ready` describe the persistent deployment, while each extracted
 recipe can live elsewhere. For a new installation, create that root and fill
 its `.env` using the appropriate recipe's control-plane or host `.env.example`.
+On the control plane, leave the database, account and settings keys empty: the
+first `prepare` phase generates them into that `.env`, as described in
+[the new-installation steps](../../docs/developer/operations.md#admin-settings).
 For an existing installation, retain its configuration, Compose project name,
 host enrollment root, and Docker data root. Generated Compose files stay under
 `DEPLOY_ROOT` so relative mounts preserve their data paths; the edge proxy
 configuration comes from the selected recipe.
 
-Select `AGENT_WEB_VARIANT=root` or `agents` in the control-plane configuration.
-If omitted, `AGENT_WEB_BASE_PATH` selects the variant: empty or unset selects
-`root`, and `/agents` selects `agents`.
+`AGENT_WEB_VARIANT` may be omitted or set to `root`, the only web image. A
+leftover `AGENT_WEB_BASE_PATH` with a value is refused.
 
 Set the artifact environment on the control-plane machine:
 

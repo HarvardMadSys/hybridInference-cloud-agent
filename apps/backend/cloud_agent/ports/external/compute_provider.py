@@ -120,6 +120,10 @@ class ResourceObservation(ComputeValue):
     state: Literal["pending", "ready", "failed", "terminated", "unknown"]
     raw_state: str
     observed_at: datetime
+    provider_http_status: int | None = Field(default=None, ge=100, le=599)
+    provider_request_id: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    )
     expires_at: datetime | None = None
     lease_known: bool = False
     nodes: tuple[NodeObservation, ...] = ()
@@ -132,6 +136,7 @@ class ProviderReceipt(ComputeValue):
     outcome: Literal["confirmed", "pending", "unknown"]
     resource: ResourceRef | None = None
     observation: ResourceObservation | None = None
+    diagnostics: dict[str, str | int | bool] = Field(default_factory=dict)
 
 
 class AcquisitionResolution(ComputeValue):
@@ -160,10 +165,20 @@ class ExtendRequest(ComputeValue):
 class ProviderError(Exception):
     """A deliberately safe diagnostic; never include HTTP/SSH output or secrets."""
 
-    def __init__(self, code: str, message: str, *, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        diagnostics: dict[str, str | int | bool] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+        # Optional, provider-owned safe metadata. Existing exception consumers
+        # continue to receive the same code, message, and retryability fields.
+        self.diagnostics = dict(diagnostics or {})
 
 
 class UnsupportedCapability(ProviderError):

@@ -2,7 +2,9 @@
 
 import { useState } from 'react';
 import { useT } from '@/components/providers';
+import { Select } from '@/components/ui/Select';
 import type { EnvironmentPhase, EnvironmentVariable, VariableEdit } from '@/lib/api/environments';
+import type { Translator } from '@/lib/i18n/translate';
 
 export function variableEdits(values: EnvironmentVariable[]): VariableEdit[] {
   return values.map(({ name, secret, phase, value }) => ({
@@ -24,6 +26,14 @@ function asSaved(value: VariableEdit): Partial<VariableEdit> | null {
     return value.value ? null : { operation: 'keep', value: undefined };
   }
   return value.value === value.original_value ? { operation: 'keep' } : null;
+}
+
+/** Whether a variable is a write-only Secret or an ordinary value. */
+export function kindOptions(t: Translator) {
+  return [
+    { value: 'secret', label: t('environment.secret') },
+    { value: 'ordinary', label: t('environment.ordinary') },
+  ];
 }
 
 export function RemoveIcon() {
@@ -165,12 +175,13 @@ export function VariableEditor({
                     }
                     onChange={(e) => update(index, { value: e.target.value, operation: 'replace' })}
                   />
-                  <select
+                  <Select
                     aria-label={`${t('environment.type')} ${value.name}`}
                     className="ui-input col-span-2 sm:col-span-1"
                     value={value.secret ? 'secret' : 'ordinary'}
-                    onChange={(e) => {
-                      const secret = e.target.value === 'secret';
+                    options={kindOptions(t)}
+                    onValueChange={(next) => {
+                      const secret = next === 'secret';
                       // A typed or saved Secret is never shown in a plain field.
                       // A saved ordinary value that was only marked Secret is
                       // kept as it was.
@@ -183,10 +194,7 @@ export function VariableEditor({
                           : {}),
                       });
                     }}
-                  >
-                    <option value="secret">{t('environment.secret')}</option>
-                    <option value="ordinary">{t('environment.ordinary')}</option>
-                  </select>
+                  />
                 </div>
                 {value.phase !== 'both' && !open ? (
                   <p className="px-1 text-xs text-muted">{t(PHASE_LABELS[value.phase])}</p>
@@ -195,18 +203,17 @@ export function VariableEditor({
                   <div className="space-y-1 rounded-md bg-surface-muted p-2">
                     <label className="flex flex-wrap items-center gap-2 text-sm">
                       <span className="text-muted">{t('environment.phase')}</span>
-                      <select
+                      <Select<EnvironmentPhase>
                         aria-label={`${t('environment.phase')} ${value.name}`}
                         className="ui-input"
                         value={value.phase}
-                        onChange={(e) =>
-                          update(index, { phase: e.target.value as EnvironmentPhase })
-                        }
-                      >
-                        <option value="both">{t('environment.both')}</option>
-                        <option value="setup">{t('environment.setupOnly')}</option>
-                        <option value="runtime">{t('environment.runtimeOnly')}</option>
-                      </select>
+                        onValueChange={(phase) => update(index, { phase })}
+                        options={[
+                          { value: 'both', label: t('environment.both') },
+                          { value: 'setup', label: t('environment.setupOnly') },
+                          { value: 'runtime', label: t('environment.runtimeOnly') },
+                        ]}
+                      />
                     </label>
                     <p className="text-xs text-muted">{t('environment.phaseHelp')}</p>
                   </div>

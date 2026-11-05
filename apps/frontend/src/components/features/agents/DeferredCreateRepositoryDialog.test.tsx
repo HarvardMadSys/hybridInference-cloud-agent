@@ -24,7 +24,6 @@ const config = (repos: string[] = []): AgentConfigApi => ({
   repos,
   github_connected: true,
   github_install_url: null,
-  models: [],
   runtimes: [],
 });
 

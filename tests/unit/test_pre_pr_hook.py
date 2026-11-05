@@ -106,7 +106,21 @@ def test_an_attached_or_later_head_branch_is_read(args: str) -> None:
     assert pr_target.parse_command(f"gh pr create {args}", "/s") == ("/s", "topic", None)
 
 
-@pytest.mark.parametrize("args", ["--repo Owner/other", "-R Owner/other", "--repo=Owner/other"])
+@pytest.mark.parametrize("args", ["-dH topic", "-dHtopic", "-dH=topic", "-fdH topic"])
+def test_a_head_branch_after_other_short_flags_is_read(args: str) -> None:
+    # `gh` reads `-dH topic` as `-d -H topic`: a letter that takes no value
+    # leaves the next one to be an option of its own.
+    assert pr_target.parse_command(f"gh pr create {args}", "/s") == ("/s", "topic", None)
+
+
+def test_a_short_option_value_ends_its_cluster() -> None:
+    # `-tdH` is a title of "dH", as `gh` reads it, and names no head.
+    assert pr_target.parse_command("gh pr create -tdH --fill", "/s") == ("/s", None, None)
+
+
+@pytest.mark.parametrize(
+    "args", ["--repo Owner/other", "-R Owner/other", "--repo=Owner/other", "-dR Owner/other"]
+)
 def test_the_repository_is_read(args: str) -> None:
     assert pr_target.parse_command(f"gh pr create {args}", "/s") == ("/s", None, "Owner/other")
 

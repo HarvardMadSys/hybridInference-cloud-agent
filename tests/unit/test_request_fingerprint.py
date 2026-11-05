@@ -31,8 +31,9 @@ def _previous_rule(kind: str, payload: dict[str, Any]) -> str:
             key in {"environment_id", "environment_revision", "global_revision"} and value is None
         )
         and not (key == "environment_overrides" and not value)
-        # Added after every stored fingerprint: no earlier send carried it.
+        # Added after every stored fingerprint: no earlier send carried them.
         and not (key == "ssh_server_ids" and value is None)
+        and not (key == "model_connection_id" and value is None)
     }
     canonical = json.dumps(
         {"kind": kind, **kept}, sort_keys=True, separators=(",", ":"), default=str

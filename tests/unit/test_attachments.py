@@ -9,12 +9,12 @@ from typing import Any
 import pytest
 
 from cloud_agent.attachments.models import (
-    MAX_ATTACHMENT_FILES,
     MAX_ATTACHMENT_PATH_LENGTH,
     MAX_THREAD_ATTACHMENT_BYTES,
     MAX_THREAD_ATTACHMENT_FILES,
     SANDBOX_UPLOAD_DIR,
     AttachmentError,
+    attachment_max_files,
     check_paths,
     check_thread_total,
     current_uploads,
@@ -30,6 +30,7 @@ from cloud_agent_shared.errors import SandboxError
 from cloud_agent_shared.git.source_archive import (
     DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES,
     build_upload_archive,
+    upload_archive_size,
 )
 
 
@@ -65,6 +66,35 @@ def test_ordinary_relative_paths_are_kept_verbatim(path: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "path", [" report.csv ", "notes.txt ", " specs/api.md ", "  two  spaces.md  "]
+)
+def test_surrounding_whitespace_is_part_of_the_name(path: str) -> None:
+    """A name the browser accepts is stored under the name it was given.
+
+    ``isSafeUploadPath`` accepts surrounding whitespace, and on Linux
+    ``" report.csv "`` and ``"report.csv"`` are different files. Trimming here
+    would store a path the user never attached.
+    """
+    assert safe_attachment_path(path) == path
+
+
+def test_names_differing_only_in_whitespace_stay_distinct() -> None:
+    """The trim cannot collapse two names the browser keeps apart.
+
+    Trimming used to make these one stored path, so the second upload silently
+    took the first one's name.
+    """
+    assert safe_attachment_path(" report.csv ") != safe_attachment_path("report.csv")
+
+
+@pytest.mark.parametrize("path", [" ", "   ", "\t", "\n", " \t "])
+def test_a_path_that_is_only_whitespace_is_still_refused(path: str) -> None:
+    """Keeping surrounding whitespace does not make a blank path a name."""
+    with pytest.raises(AttachmentError):
+        safe_attachment_path(path)
+
+
+@pytest.mark.parametrize(
     "path",
     [
         "../escape.txt",
@@ -91,6 +121,60 @@ def test_a_backslash_is_normalized_to_a_separator_then_checked() -> None:
     assert safe_attachment_path("specs\\api.md") == "specs/api.md"
     with pytest.raises(AttachmentError):
         safe_attachment_path("specs\\..\\..\\escape.md")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "a\nb.txt",
+        "a\rb.txt",
+        "line\nbreak.md",
+        "tab\tname.txt",
+        "nul\x00name.txt",
+        "delete\x7fname.txt",
+        "a/b\nc.txt",
+    ],
+)
+def test_a_name_cannot_carry_a_control_character(path: str) -> None:
+    """A control character would break a file reference out of its line.
+
+    ``prompt_with_attachments`` lists files one per line, so a name carrying a
+    newline reads as a second file that does not exist.
+    """
+    with pytest.raises(AttachmentError):
+        safe_attachment_path(path)
+
+
+def test_the_listing_has_exactly_one_line_per_file() -> None:
+    """The listing's line count is the file count, so no name can add a line."""
+    prompt = prompt_with_attachments("go", [{"path": "a.txt"}, {"path": "specs/api.md"}])
+    listed = [line for line in prompt.splitlines() if line.startswith("- ")]
+    assert listed == [
+        f'- "{SANDBOX_UPLOAD_DIR}/a.txt"',
+        f'- "{SANDBOX_UPLOAD_DIR}/specs/api.md"',
+    ]
+
+
+@pytest.mark.parametrize("path", ["notes.txt ", " report.csv", "  two  spaces.md  "])
+def test_the_listing_shows_the_whitespace_a_name_keeps(path: str) -> None:
+    """Quoted, a trailing space is still there for the agent to open.
+
+    Unquoted, ``- /uploads/notes.txt `` ends in a space nobody can see, and the
+    agent opens ``notes.txt``, which does not exist.
+    """
+    prompt = prompt_with_attachments("go", [{"path": path}])
+    listed = [line for line in prompt.splitlines() if line.startswith("- ")]
+    assert listed == [f'- "{SANDBOX_UPLOAD_DIR}/{path}"']
+
+
+def test_a_quoted_name_stays_one_readable_path() -> None:
+    """A quote or a non-ASCII letter in a name neither ends the path nor is escaped away."""
+    prompt = prompt_with_attachments("go", [{"path": 'say "hi".txt'}, {"path": "报告.csv"}])
+    listed = [line for line in prompt.splitlines() if line.startswith("- ")]
+    assert listed == [
+        f'- "{SANDBOX_UPLOAD_DIR}/say \\"hi\\".txt"',
+        f'- "{SANDBOX_UPLOAD_DIR}/报告.csv"',
+    ]
 
 
 async def test_resolution_preserves_the_order_the_caller_asked_for() -> None:
@@ -208,11 +292,77 @@ def test_the_conversation_cap_fits_the_host_archive_with_its_worst_headers() -> 
     assert MAX_THREAD_ATTACHMENT_BYTES + overhead <= DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES
 
 
+def _deepest_upload(first: str) -> str:
+    """The longest path the control plane admits, a one-letter folder every other character."""
+    parts = [first]
+    while len("/".join([*parts, "d", "f"])) <= MAX_ATTACHMENT_PATH_LENGTH:
+        parts.append("d")
+    return "/".join([*parts, "f"])
+
+
+def _deepest_uploads() -> list[tuple[str, bytes]]:
+    """As many one-byte files as a conversation holds, each in a folder chain of its own."""
+    return [(_deepest_upload(f"{index:03d}"), b"x") for index in range(MAX_THREAD_ATTACHMENT_FILES)]
+
+
+def test_a_conversation_never_holds_more_than_the_host_imports() -> None:
+    """Every folder level is one more tar header, which the byte cap never counted.
+
+    At the control plane's own limits, almost no content makes an archive of
+    headers alone, over the host's limit, and every turn of the conversation
+    on a fresh container failed to import what the claim had accepted.
+    """
+    files = _deepest_uploads()
+    rows = [_row(index, path, size=len(content)) for index, (path, content) in enumerate(files)]
+    assert [safe_attachment_path(row["path"]) for row in rows] == [path for path, _ in files]
+
+    with pytest.raises(SandboxError, match="upload import size limit"):
+        build_upload_archive(files)
+    with pytest.raises(AttachmentError, match="Start a new chat"):
+        check_thread_total(rows)
+
+
+def test_the_most_a_conversation_may_hold_is_what_the_host_imports() -> None:
+    """At the limits the two agree to the file: one more and the claim refuses."""
+    files = _deepest_uploads()
+    rows = [_row(index, path, size=len(content)) for index, (path, content) in enumerate(files)]
+
+    def accepted(count: int) -> bool:
+        try:
+            check_thread_total(rows[:count])
+        except AttachmentError:
+            return False
+        return True
+
+    low, high = 1, len(rows)
+    while low < high:
+        middle = (low + high + 1) // 2
+        low, high = (middle, high) if accepted(middle) else (low, middle - 1)
+    assert accepted(low) and not accepted(low + 1)
+    build_upload_archive(files[:low])
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        [("a.txt", b"x"), ("block.bin", b"y" * 512), ("over.bin", b"z" * 513)],
+        [("docs/a.md", b"a"), ("docs/b.md", b"b"), ("docs/sub/c.md", b"c" * 1000)],
+        [("空格 和中文.md", b"cv"), ("\U00020000/\U00020001/f", b"x"), ("é" * 101, b"e")],
+        [("d" * 99 + "/f", b"x"), ("e" * 100 + "/f", b"x"), ("g" * 300 + "/" + "h" * 211, b"x")],
+        [(_deepest_upload(f"{index:03d}"), b"x" * index) for index in range(3)],
+    ],
+)
+def test_the_claim_measures_the_upload_archive_exactly(files: list[tuple[str, bytes]]) -> None:
+    """The control plane holds paths and sizes; its count is the archive's own length."""
+    sized = [(path, len(content)) for path, content in files]
+    assert upload_archive_size(sized) == len(build_upload_archive(files))
+
+
 def test_the_server_bounds_the_selection_as_well_as_the_browser() -> None:
     """A browser check is a convenience; this one is the boundary."""
-    check_selection([_row(i, f"{i}.txt") for i in range(MAX_ATTACHMENT_FILES)])
+    check_selection([_row(i, f"{i}.txt") for i in range(attachment_max_files())])
     with pytest.raises(AttachmentError):
-        check_selection([_row(i, f"{i}.txt") for i in range(MAX_ATTACHMENT_FILES + 1)])
+        check_selection([_row(i, f"{i}.txt") for i in range(attachment_max_files() + 1)])
     with pytest.raises(AttachmentError):
         check_selection([_row(1, "big", size=21 * 1024 * 1024)])
 
@@ -299,7 +449,6 @@ def _job(**overrides: Any) -> Any:
             "runtime": "claude-code",
             "model": "m",
             "worker_token": "w",
-            "sandbox_token": "s",
             **overrides,
         }
     )
@@ -315,7 +464,12 @@ class _Control:
 
     def list_attachments(self) -> list[dict[str, Any]]:
         self.listed += 1
-        return [{"id": index} for index, _ in enumerate(self.files)]
+        return current_uploads(
+            [
+                {"id": index, "path": path, "size_bytes": len(content)}
+                for index, (path, content) in enumerate(self.files)
+            ]
+        )
 
     def read_attachment(self, attachment_id: int) -> tuple[str, bytes]:
         self.read += 1
@@ -329,7 +483,29 @@ class _Manager:
         self.imports: list[tuple[str, bytes]] = []
 
     def import_archive(self, spec: Any, path: str, archive: bytes) -> None:
-        self.imports.append((path, archive))
+        self.imports.append((path, archive if isinstance(archive, bytes) else archive.read()))
+
+
+@pytest.fixture(autouse=True)
+def _upload_receipts(tmp_path, monkeypatch):
+    monkeypatch.delenv("AGENT_UPLOAD_RECEIPT_DIR", raising=False)
+    monkeypatch.setattr(
+        "cloud_agent_host.upload_import.credential_path", lambda: tmp_path / "host.json"
+    )
+
+
+def test_upload_receipt_directory_can_be_shared_without_host_credential(tmp_path, monkeypatch):
+    from cloud_agent_host import upload_import
+
+    shared = tmp_path / "shared-upload-receipts"
+    monkeypatch.setenv("AGENT_UPLOAD_RECEIPT_DIR", str(shared))
+    monkeypatch.setattr(
+        upload_import,
+        "credential_path",
+        lambda: pytest.fail("the dedicated receipt path must not read the host credential path"),
+    )
+
+    assert {path.parent for path in upload_import._paths("sandbox")} == {shared}
 
 
 @pytest.mark.parametrize(
@@ -350,12 +526,27 @@ def test_uploads_are_fetched_only_when_the_container_needs_them(
 
     control = _Control([("a.txt", b"x"), ("b.txt", b"y")])
     manager = _Manager()
+    from types import SimpleNamespace
+
+    spec = SimpleNamespace(container_name="test-container")
+    if not fresh and not turn and thread:
+        _import_uploads(
+            job=_job(thread_attachment_count=thread, turn_attachment_count=thread),
+            control=control,
+            manager=manager,
+            spec=spec,
+            fresh_container=True,
+            container_id="container-1",
+        )
+        control.read = control.listed = 0
+        manager.imports.clear()
     imported = _import_uploads(
         job=_job(thread_attachment_count=thread, turn_attachment_count=turn),
         control=control,
         manager=manager,
-        spec=object(),
+        spec=spec,
         fresh_container=fresh,
+        container_id="container-1",
     )
     assert bool(imported) is expected
     assert bool(manager.imports) is expected
@@ -364,6 +555,8 @@ def test_uploads_are_fetched_only_when_the_container_needs_them(
 
 def test_the_imported_archive_is_written_outside_the_worktree() -> None:
     """The one invariant that keeps an upload out of the user's own diff."""
+    from types import SimpleNamespace
+
     from cloud_agent_host.runner import _import_uploads
 
     manager = _Manager()
@@ -371,9 +564,231 @@ def test_the_imported_archive_is_written_outside_the_worktree() -> None:
         job=_job(thread_attachment_count=1, turn_attachment_count=1),
         control=_Control([("notes.md", b"hello")]),
         manager=manager,
-        spec=object(),
+        spec=SimpleNamespace(container_name="test-container"),
         fresh_container=True,
+        container_id="container-1",
     )
     path, archive = manager.imports[0]
     assert path == CHAT_UPLOADS_DIR
     assert "notes.md" in _members(archive)
+
+
+def test_retained_upload_import_transfers_only_new_or_replaced_bodies():
+    from types import SimpleNamespace
+
+    from cloud_agent_host.upload_import import import_uploads
+
+    control = _Control([(f"{i}.txt", b"x" * 1024) for i in range(199)])
+    manager = _Manager()
+    spec = SimpleNamespace(container_name="test-container")
+
+    def run():
+        return import_uploads(
+            job=_job(thread_attachment_count=len(control.files), turn_attachment_count=1),
+            control=control,
+            manager=manager,
+            spec=spec,
+            fresh_container=False,
+            container_id="container-1",
+        )
+
+    assert run() == 199
+    control.files.append(("new.txt", b"new"))
+    control.read = 0
+    assert run() == 1
+    assert control.read == 1
+    assert set(_members(manager.imports[-1][1])) == {"new.txt"}
+    control.files.append(("0.txt", b"replacement"))
+    control.read = 0
+    assert run() == 1
+    assert control.read == 1
+    assert set(_members(manager.imports[-1][1])) == {"0.txt"}
+
+
+def test_cumulative_deltas_still_obey_the_full_archive_limit(monkeypatch):
+    from types import SimpleNamespace
+
+    from cloud_agent_host import upload_import as upload_import_module
+
+    content = b"x" * (6 * 1024)
+    control = _Control([("a.bin", content)])
+    manager = _Manager()
+    spec = SimpleNamespace(container_name="test-container")
+    single_archive = upload_archive_size([("a.bin", len(content))])
+    monkeypatch.setattr(upload_import_module, "DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES", single_archive)
+
+    def run():
+        return upload_import_module.import_uploads(
+            job=_job(thread_attachment_count=len(control.files), turn_attachment_count=1),
+            control=control,
+            manager=manager,
+            spec=spec,
+            fresh_container=False,
+            container_id="container-1",
+        )
+
+    assert run() == 1
+    control.files.append(("b.bin", content))
+    control.read = 0
+    with pytest.raises(SandboxError, match="upload import size limit"):
+        run()
+    assert control.read == 0
+    assert len(manager.imports) == 1
+
+
+def test_interrupted_import_retries_without_requiring_new_turn_uploads():
+    from types import SimpleNamespace
+
+    from cloud_agent_host.upload_import import import_uploads
+
+    control = _Control([("a.txt", b"old")])
+    manager = _Manager()
+    spec = SimpleNamespace(container_name="test-container")
+
+    def run(turn=1, container="container-1"):
+        return import_uploads(
+            job=_job(thread_attachment_count=len(control.files), turn_attachment_count=turn),
+            control=control,
+            manager=manager,
+            spec=spec,
+            fresh_container=False,
+            container_id=container,
+        )
+
+    assert run() == 1
+    original = manager.import_archive
+
+    def interrupted(*args):
+        original(*args)
+        raise RuntimeError("Docker copied bytes before the reply was lost")
+
+    manager.import_archive = interrupted
+    control.files.append(("b.txt", b"new"))
+    with pytest.raises(RuntimeError, match="reply was lost"):
+        run()
+    manager.import_archive = original
+    control.read = 0
+    assert run(turn=0) == 2
+    assert control.read == 2
+    control.read = 0
+    assert run(turn=0) == 0
+    assert control.read == 0
+    assert run(turn=0, container="replacement") == 2
+
+
+def test_streaming_upload_archive_memory_does_not_scale_with_total_bytes():
+    import tempfile
+    import tracemalloc
+
+    from cloud_agent_shared.git.source_archive import write_upload_archive
+
+    tracemalloc.start()
+    try:
+        with tempfile.TemporaryFile() as archive:
+            write_upload_archive(((f"{i}.bin", b"x" * (1024 * 1024)) for i in range(60)), archive)
+            assert archive.tell() > 60 * 1024 * 1024
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 8 * 1024 * 1024
+
+
+def test_a_sibling_overwrite_is_restored_even_without_new_uploads(tmp_path):
+    from types import SimpleNamespace
+
+    from cloud_agent_host.upload_import import import_uploads
+
+    original = _Control([("shared.txt", b"original")])
+    sibling = _Control([("shared.txt", b"original"), ("shared.txt", b"sibling")])
+    manager = _Manager()
+    spec = SimpleNamespace(container_name="shared-container")
+
+    def run(thread, control):
+        return import_uploads(
+            job=_job(
+                thread_id=thread,
+                thread_attachment_count=len(control.files),
+                turn_attachment_count=0,
+            ),
+            control=control,
+            manager=manager,
+            spec=spec,
+            fresh_container=False,
+            container_id="container-1",
+        )
+
+    assert run("origin", original) == 1
+    assert run("sibling", sibling) == 1
+    assert run("origin", original) == 1
+    assert original.read == 2
+    with tarfile.open(fileobj=io.BytesIO(manager.imports[-1][1])) as archive:
+        assert archive.extractfile("shared.txt").read() == b"original"
+    assert run("origin", original) == 0
+
+    # Losing host-local state must cause restoration, not trusting the count.
+    receipt = next((tmp_path / "upload-receipts").glob("*.json"))
+    receipt.unlink()
+    assert run("origin", original) == 1
+
+
+def test_deleted_container_forgets_only_its_upload_receipt(tmp_path):
+    from types import SimpleNamespace
+
+    from cloud_agent_host.upload_import import (
+        _paths,
+        forget_deleted_container_uploads,
+        import_uploads,
+    )
+
+    manager = _Manager()
+
+    def import_for(container_name):
+        return import_uploads(
+            job=_job(thread_attachment_count=1, turn_attachment_count=1),
+            control=_Control([("notes.md", b"hello")]),
+            manager=manager,
+            spec=SimpleNamespace(container_name=container_name),
+            fresh_container=True,
+            container_id=f"id-{container_name}",
+        )
+
+    assert import_for("deleted") == 1
+    assert import_for("retained") == 1
+    root = tmp_path / "upload-receipts"
+    deleted = set(_paths("deleted"))
+    retained = set(_paths("retained"))
+    assert set(root.iterdir()) == deleted | retained
+
+    forget_deleted_container_uploads("deleted")
+
+    assert set(root.iterdir()) == retained
+    forget_deleted_container_uploads("deleted")
+    assert set(root.iterdir()) == retained
+
+
+def test_upload_receipt_cleanup_retries_a_failed_directory_sync(tmp_path, monkeypatch):
+    from cloud_agent_host import upload_import
+
+    path, lock_path = upload_import._paths("deleted")
+    path.parent.mkdir(parents=True)
+    path.write_text("{}")
+    lock_path.touch()
+    syncs = 0
+
+    def fsync(_descriptor):
+        nonlocal syncs
+        syncs += 1
+        if syncs == 1:
+            raise OSError("directory sync failed")
+
+    monkeypatch.setattr(upload_import.os, "fsync", fsync)
+
+    with pytest.raises(OSError, match="directory sync"):
+        upload_import.forget_deleted_container_uploads("deleted")
+
+    assert not path.exists()
+    assert not lock_path.exists()
+    upload_import.forget_deleted_container_uploads("deleted")
+    assert syncs == 2
+    assert not path.exists()
+    assert not lock_path.exists()
