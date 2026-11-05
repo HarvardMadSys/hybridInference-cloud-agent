@@ -88,10 +88,14 @@ test('signup asks for the Terms, validates the reused password policy and explai
     return route.fulfill({ json: { ok: true } });
   });
   await page.goto('/signup');
-  // Nothing can be sent before the Terms of Service are agreed to.
+  // Nothing can be sent before the Terms of Service are agreed to, in the
+  // dialog that opens over the form. Short Terms fit, so Agree is ready.
   await expect(page.getByRole('button', { name: 'Create account', exact: true })).toBeDisabled();
+  const terms = page.getByRole('dialog', { name: 'Terms of Service' });
+  await expect(terms.getByText('Be kind.', { exact: true })).toBeVisible();
+  await terms.getByRole('button', { name: 'Agree', exact: true }).click();
+  await expect(terms).toBeHidden();
   await page.getByLabel('How will you use Cloud Agent?').fill('Research tooling');
-  await page.getByRole('checkbox').check();
   await page.getByLabel('Email', { exact: true }).fill('new@example.test');
   await page.getByLabel('Password', { exact: true }).fill('Example123');
   await page.getByLabel('Confirm password', { exact: true }).fill('Different123');

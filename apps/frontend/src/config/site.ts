@@ -34,6 +34,8 @@ export type LocalizedText = Readonly<Record<string, string>>;
 
 export interface TeamMember {
   name: string;
+  /** An optional HTTPS or inline raster portrait, loaded directly by the browser. */
+  photoUrl?: string;
   /** An absolute http(s) URL, or empty. */
   website: string;
   badge: LocalizedText;
@@ -236,14 +238,32 @@ function optionalHttpUrl(value: unknown): string {
 function parseMember(value: unknown): TeamMember[] {
   if (!isRecord(value) || typeof value.name !== 'string' || !value.name.trim()) return [];
   const roles = Array.isArray(value.roles) ? value.roles.map(parseLabel) : [];
+  const photoUrl = optionalPhotoUrl(value.photoUrl);
   return [
     {
       name: value.name.trim(),
+      ...(photoUrl ? { photoUrl } : {}),
       website: optionalHttpUrl(value.website),
       badge: parseLabel(value.badge) ?? {},
       roles: roles.filter((role): role is LocalizedText => role !== null),
     },
   ];
+}
+
+function optionalPhotoUrl(value: unknown): string {
+  if (
+    typeof value === 'string' &&
+    /^data:image\/(?:jpeg|png|webp);base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+      value,
+    ) &&
+    !value.endsWith(',')
+  ) {
+    return value;
+  }
+  const url = optionalHttpUrl(value);
+  if (!url) return '';
+  const parsed = new URL(url);
+  return parsed.protocol === 'https:' && !parsed.username && !parsed.password ? url : '';
 }
 
 /**

@@ -157,7 +157,7 @@ describe('sign-up with Turnstile on', () => {
       .mockRejectedValueOnce(new Error('The check failed. Try again.'))
       .mockResolvedValueOnce({ ok: true });
     render(<SignupPage />);
-    fireEvent.click(await screen.findByRole('checkbox'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Agree' }));
     fill('How will you use Cloud Agent?', 'Thesis');
     fill('Email', 'ada@example.edu');
     fill('Password', 'Goodpass123');
@@ -178,7 +178,7 @@ describe('sign-up with Turnstile on', () => {
 
   it('keeps the phone form after a code, and asks for a new token to send again', async () => {
     render(<SignupPage />);
-    fireEvent.click(await screen.findByRole('checkbox'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Agree' }));
     fireEvent.click(screen.getByRole('tab', { name: 'Phone number' }));
     fill('Phone number', '13800138000');
     await waitFor(() => expect(challenges).toHaveLength(1));

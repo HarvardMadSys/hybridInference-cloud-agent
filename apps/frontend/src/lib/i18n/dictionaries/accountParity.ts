@@ -42,8 +42,6 @@ export const accountParityEn = {
   'signup.haveAccount': 'Already have an account? Sign in',
 
   'terms.title': 'Terms of Service',
-  'terms.agree': 'I have read and agree to the',
-  'terms.readAt': 'Read the Terms of Service',
   'terms.none': 'This deployment has not published its terms here. Ask its operator.',
 
   'account.resetReclaimed':
@@ -140,8 +138,6 @@ export const accountParityZh: Record<keyof typeof accountParityEn, string> = {
   'signup.haveAccount': '已有账号？去登录',
 
   'terms.title': '服务条款',
-  'terms.agree': '我已阅读并同意',
-  'terms.readAt': '阅读服务条款',
   'terms.none': '本部署尚未在此发布条款，请联系运营方。',
 
   'account.resetReclaimed':
