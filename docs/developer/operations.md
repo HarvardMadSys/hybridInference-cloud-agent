@@ -1249,6 +1249,36 @@ explains it.
   server's own output is in `/run/agent-mcp-slots/<slot>/<alias>.log`, readable
   as `agent-mcp-<slot>`. Admissions are in `/run/agent-mcp-admissions`.
 
+## Sandbox incidents
+
+A host records what goes wrong in each retained sandbox as **incidents**, in
+the sandbox's event list on the admin sandbox page; the sandbox list shows the
+newest one within a day under the sandbox's name. The
+[design](../agents/specs/2026-11-04-sandbox-incidents.md) explains it.
+
+- **What is recorded.** `out_of_memory` (Docker's `oom`: the OOM killer killed
+  some process in the container), `container_exited` (a `die` with no `kill`
+  before it, so nobody asked for it), `memory_high` and `pids_high` (a reading
+  at 90% of the limit), `browser_crashed` (Chromium exited with no stop
+  requested), and `mcp_server_failed` (a program could not start, or exited
+  on its own; it names the chat and the server). A stop, idle stop or deletion
+  the platform made is not an incident.
+- **Repeats.** The first of a kind goes out at once; repeats within the next
+  minute become one `.repeated` row with a count. A sandbox records at most 60
+  rows an hour, and one `dropped` row counts the rest.
+- **What people see.** A chat shows one line in a running turn for
+  `out_of_memory`, `container_exited` and its own `mcp_server_failed`. The
+  agent's next prompt lists what happened since it was last told, and a chat's
+  first prompt says the sandbox has a browser.
+- **What it carries.** Kinds, times, exit codes, limits and MCP aliases only:
+  no stderr, URL, command line or environment.
+- **Where to look.** The browser service journals to
+  `/run/agent-browser/events.jsonl`, each slot's MCP runner to
+  `/run/agent-mcp-slots/<slot>/events.jsonl`. The sandbox manager reads them
+  every minute and holds the rows until a heartbeat answer says
+  `incidents: "accepted"`; a control plane older than this release never
+  does, and the rows wait.
+
 ## Before a job can run for real
 
 Complete host provisioning, network checks, enrollment, and credentials before

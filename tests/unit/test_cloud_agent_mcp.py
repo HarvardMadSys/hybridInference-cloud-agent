@@ -229,6 +229,8 @@ for line in sys.stdin:
     if "id" not in message or method is None:
         continue
     if method == "initialize":
+        if os.environ.get("FAKE_DIE_AT_START"):
+            sys.exit(2)
         result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
                   "serverInfo": {"name": "fake", "version": "1"}}
         if not asked:
@@ -241,8 +243,13 @@ for line in sys.stdin:
             continue
         result = {"tools": [{"name": "echo", "inputSchema": {"type": "object"}},
                             {"name": "slow", "inputSchema": {"type": "object"}}]}
+        if os.environ.get("FAKE_EXIT_AFTER_LIST"):
+            print(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}), flush=True)
+            sys.exit(3)
     elif method == "tools/call":
         name = message["params"]["name"]
+        if name == "die":
+            sys.exit(4)  # exits on its own, mid-call
         if name == "slow":
             time.sleep(float(message["params"]["arguments"].get("s", 1)))
         text = json.dumps({"args": sys.argv[1:], "arguments": message["params"]["arguments"],
@@ -386,6 +393,193 @@ def test_a_server_that_cannot_start_reports_an_error_not_a_hang(served):
             await runner.call_tool("missing__echo", {})
 
     asyncio.run(asyncio.wait_for(scenario(), 30))
+    # A server that could not start is journalled for the host, as a start.
+    assert [entry["phase"] for entry in _incidents(served)] == ["start"] * 2
+
+
+def _incidents(paths, slot=0):
+    """The slot's incident journal, as the host reads it."""
+    try:
+        text = Path(paths.runner_incidents(slot)).read_text()
+    except FileNotFoundError:
+        return []
+    return [json.loads(line) for line in text.splitlines()]
+
+
+def test_only_a_failure_nobody_asked_for_is_journalled(served):
+    """Codex's P2: an idle or withdrawn stop must not read as a server failing."""
+    _admit(
+        served,
+        0,
+        _server("idle", "pkg@1.0.0"),
+        _server("dies", "pkg@2.0.0", env={"FAKE_DIE_AT_START": "1"}),
+        _server("crashes", "pkg@3.0.0", env={"FAKE_EXIT_AFTER_LIST": "1"}),
+    )
+
+    async def scenario():
+        runner = gateway.Runner(served, 0, idle_s=0.01)
+        await runner.list_tools()
+        crashed = next(b for b in runner.backends.values() if b.spec.alias == "crashes")
+        for _ in range(100):
+            if any(entry["phase"] == "crashed" for entry in _incidents(served)):
+                break
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.05)
+        runner.retire()  # the idle server stops: asked for
+        gateway.admit(served, 0, _admission())
+        runner.retire()  # everything withdrawn: asked for
+        assert not crashed.alive and not runner.backends
+
+    asyncio.run(asyncio.wait_for(scenario(), 30))
+    entries = _incidents(served)
+    assert {(entry["alias"], entry["phase"]) for entry in entries} == {
+        ("dies", "start"),
+        ("crashes", "crashed"),
+    }
+    crash = next(entry for entry in entries if entry["phase"] == "crashed")
+    assert crash["exit_code"] == 3 and crash["kind"] == "mcp_server_failed"
+    # Each names the member it happened to by its credential's digest, as the
+    # admission held it then: the host never guesses from the slot.
+    assert {entry["member"] for entry in entries} == {hashlib.sha256(TOKEN.encode()).hexdigest()}
+    assert [entry["seq"] for entry in entries] == list(range(1, len(entries) + 1))
+    assert len({entry["journal"] for entry in entries}) == 1
+    assert os.stat(served.runner_incidents(0)).st_mode & 0o777 == 0o640
+
+
+# -- whose failure it was, from the real journal ----------------------------------------
+
+OLD_TOKEN = "old-member-credential-" + "1" * 24
+NEW_TOKEN = "new-member-credential-" + "2" * 24
+
+
+def _digest(token):
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _host_observer(paths):
+    """The host's observer, reading this slot's real journal through its drain script."""
+    import subprocess
+
+    from cloud_agent_host.sandbox_incidents import (
+        DRAIN_SCRIPT,
+        MemberCredentials,
+        SandboxIncidents,
+        slot_journal,
+    )
+
+    host_path, real_path = slot_journal(0), paths.runner_incidents(0)
+
+    def read_journals(_sandbox, request):
+        asked = json.loads(request)
+        cursors = asked["journals"]
+        asked["journals"] = {real_path: cursors.get(host_path)} if host_path in cursors else {}
+        out = subprocess.run(
+            [sys.executable, "-I", "-c", DRAIN_SCRIPT],
+            input=json.dumps(asked).encode(),
+            capture_output=True,
+            check=True,
+        ).stdout
+        return json.dumps({host_path: json.loads(out).get(real_path, [])}).encode()
+
+    members = MemberCredentials()
+    # As admit_sandbox_mcp records each admission it writes.
+    members.admitted("sb", _digest(OLD_TOKEN), thread_id="old-thread", slot=0)
+    members.admitted("sb", _digest(NEW_TOKEN), thread_id="new-thread", slot=0)
+    observer = SandboxIncidents(read_journals=read_journals, members=members)
+    observer.sync([{"sandbox_id": "sb", "container_id": "c" * 64, "running": True}], {"sb": {}})
+    return observer
+
+
+async def _dies(backend, served):
+    """Make a running server exit on its own, and wait for its runner to journal it."""
+    before = len(_incidents(served))
+    with contextlib.suppress(gateway.GatewayError, gateway.RemoteError):
+        await backend.call_tool("die", {})
+    for _ in range(100):
+        if len(_incidents(served)) > before:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("the runner journalled no failure")
+
+
+def _blamed(served):
+    observer = _host_observer(served)
+    observer.drain("sb")
+    return [(row["thread_id"], row["details"]["phase"]) for row in observer.pending("sb")]
+
+
+@pytest.mark.parametrize("successor", ["another member", "nobody"])
+def test_a_servers_failure_is_its_starting_members_whoever_holds_the_slot_now(served, successor):
+    """Review P2: the journal asked the slot's admission at failure time, not at start.
+
+    old-thread's server runs; the slot passes to new-thread (or is revoked)
+    before the runner retires the old server; then it exits on its own. It
+    is old-thread's failure either way: not new-thread's, and not lost.
+    """
+    _admit(served, 0, _server("srv", "pkg@1.0.0"), token=OLD_TOKEN)
+
+    async def scenario():
+        runner = gateway.Runner(served, 0, idle_s=60)
+        try:
+            await runner.list_tools()
+            [old] = runner.backends.values()
+            if successor == "nobody":
+                gateway.admit(served, 0, _admission())
+            else:
+                _admit(served, 0, _server("srv", "pkg@1.0.0"), token=NEW_TOKEN)
+            await _dies(old, served)
+        finally:
+            _stop_all(runner)
+
+    asyncio.run(asyncio.wait_for(scenario(), 30))
+    assert _blamed(served) == [("old-thread", "crashed")]
+
+
+def test_a_new_members_server_is_its_own_and_retiring_the_old_one_is_no_failure(served):
+    _admit(served, 0, _server("srv", "pkg@1.0.0"), token=OLD_TOKEN)
+
+    async def scenario():
+        runner = gateway.Runner(served, 0, idle_s=60)
+        try:
+            await runner.list_tools()
+            [old] = runner.backends.values()
+            _admit(served, 0, _server("srv", "pkg@1.0.0"), token=NEW_TOKEN)
+            # The new member is served by a server started for it, not by old-thread's.
+            await runner.list_tools()
+            [new] = [b for b in runner.backends.values() if b is not old]
+            assert old.alive and new.alive
+            runner.retire()  # old-thread's server is withdrawn: asked for
+            assert not old.alive and list(runner.backends.values()) == [new]
+            assert _incidents(served) == []
+            await _dies(new, served)
+        finally:
+            _stop_all(runner)
+
+    asyncio.run(asyncio.wait_for(scenario(), 30))
+    assert _blamed(served) == [("new-thread", "crashed")]
+
+
+def test_a_start_that_fails_is_the_starting_members(served):
+    _admit(served, 0, _server("srv", "pkg@1.0.0", env={"FAKE_DIE_AT_START": "1"}), token=OLD_TOKEN)
+
+    async def scenario():
+        runner = gateway.Runner(served, 0, idle_s=60)
+        try:
+            await runner.list_tools()
+        finally:
+            _stop_all(runner)
+
+    asyncio.run(asyncio.wait_for(scenario(), 30))
+    assert _blamed(served) == [("old-thread", "start")]
+
+
+def test_an_incident_journal_keeps_its_newest_lines_within_its_bound(tmp_path):
+    path = str(tmp_path / "events.jsonl")
+    for _ in range(40):
+        gateway.append_incident(path, "mcp_server_failed", alias="a" * 40, pad="x" * 8000)
+    lines = [json.loads(line) for line in Path(path).read_text().splitlines()]
+    assert sum(len(json.dumps(line)) for line in lines) <= gateway.INCIDENT_JOURNAL_BYTES
+    assert lines[-1]["seq"] == 40 and lines[0]["seq"] > 1
 
 
 # -- the gateway, through real sockets ------------------------------------------------

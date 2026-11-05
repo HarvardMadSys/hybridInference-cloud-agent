@@ -52,6 +52,7 @@ from cloud_agent.api.deps import (
 from cloud_agent.application.model_connections import claim_model_connection, residency_credential
 from cloud_agent.application.pending_messages import settle_queue_when_possible
 from cloud_agent.application.residency import residency_ttl_s
+from cloud_agent.application.sandbox_incidents import sandbox_notes
 from cloud_agent.application.ssh_servers import (
     build_ssh_access,
     push_ssh_access,
@@ -170,6 +171,7 @@ if TYPE_CHECKING:
     )
     from cloud_agent.ports.environment_snapshots import EnvironmentSnapshotRepository
     from cloud_agent.ports.environments import EnvironmentExecutionRepository
+    from cloud_agent.ports.sandbox_incidents import SandboxIncidentRepository
     from cloud_agent.sandbox_manager_client import SandboxManagerClient
     from cloud_agent_shared.sandbox_mcp import SandboxMcpServer
 
@@ -254,6 +256,7 @@ class _WorkerStorage(Protocol):
     pending_messages: PendingMessageRepository
     residency: ResidencyRepository
     sandbox: SandboxRepository
+    sandbox_incidents: SandboxIncidentRepository
     skills: SkillRepository
     source_control: SourceControlPort
 
@@ -809,7 +812,6 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
     ssh_state = await job_store.ssh_servers.ssh_group_state(thread_id=str(claim["thread_id"]))
     ssh_access = None
     if ssh_state is not None:
-        capabilities = attestation.runner_capabilities if attestation else []
         try:
             if SSH_ACCESS_CAPABILITY not in capabilities:
                 raise SandboxManagerError(503, "Host cannot apply SSH access")
@@ -866,13 +868,10 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
         if claim["runtime"] in runtimes_supporting_mcp()
         else None
     )
-    # Attachments are named inside the user task, then the skill selection
-    # wraps the whole thing: the files are context for the task, and the
-    # skills are guidance about how to approach it. The goal goes outermost
-    # of all, and reaches human and automatic turns alike — the turn that set
-    # the objective is the first one that should be working toward it. The
-    # goal preamble is the same for every runtime and every turn. What each
-    # wrapper added is recorded by size for the Context view (never its text).
+    # Files inside the task, then memories, skills, SSH servers and the sandbox
+    # notes; the goal outermost, for human and automatic turns alike. What
+    # each wrapper added is recorded by size for the Context view, never text.
+    notes = await sandbox_notes(job_store.sandbox_incidents, claim, capabilities)
     task_prompt, context_injections = claim_prompt(
         claim["task_prompt"],
         attachments=claim.get("attachments"),
@@ -881,6 +880,7 @@ async def _hand_over_claim(  # noqa: C901, PLR0912, PLR0915 complexity baseline,
         ssh_servers=servers_for_thread(ssh_state, str(claim["thread_id"])),
         goal=claim.get("goal"),
         plugins=claim.get("plugins") or [],
+        sandbox=notes,
     )
     response = WorkerClaimResponse(
         thread_attachment_count=thread_attachment_count,

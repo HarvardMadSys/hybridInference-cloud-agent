@@ -850,6 +850,7 @@ class ResidentTransportFactory:
             # The chat's environment, for the servers' ${NAME} references.
             environment=launch.environment.values("runtime") if launch.environment else {},
             mcp_base_url=launch.mcp_base_url,
+            thread_id=launch.thread_id,
         )
         # HTTP dialects always use the trusted live bridge, and pi its
         # wrapper and MCP bridge, including turns without MCP. Refresh
