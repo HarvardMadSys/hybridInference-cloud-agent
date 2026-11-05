@@ -25,7 +25,7 @@ from cloud_agent_host.container.chat_sandbox import (
 )
 from cloud_agent_host.container.sandbox import ContainerBackend, SandboxError
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
-from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_shared.environment import (
     BoundEnvironment,
     EnvironmentVariable,

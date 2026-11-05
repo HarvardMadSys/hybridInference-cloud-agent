@@ -34,11 +34,11 @@ from typing import TYPE_CHECKING
 
 from cloud_agent_host.container.chat_sandbox import TURN_NETWORK_PROOF_S, RetainedChatLost
 from cloud_agent_host.container.chat_sandbox_exec import standing_network_proof
-from cloud_agent_host.group_lifecycle import Operation
+from cloud_agent_host.supervisor.group_lifecycle import Operation
 
 if TYPE_CHECKING:
-    from cloud_agent_host.group_lifecycle_controller import GroupLifecycleController
-    from cloud_agent_host.shared_session_state import _Group, _SameRun
+    from cloud_agent_host.supervisor.group_lifecycle_controller import GroupLifecycleController
+    from cloud_agent_host.supervisor.shared_session_state import _Group, _SameRun
 
 
 def admit_running(

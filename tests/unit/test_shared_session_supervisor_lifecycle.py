@@ -495,7 +495,7 @@ def test_absent_cleanup_fences_registration_until_callback_returns():
 
 
 def test_deletion_retries_upload_receipt_cleanup_after_failure(monkeypatch):
-    from cloud_agent_host import group_lifecycle_controller as supervisor_module
+    from cloud_agent_host.supervisor import group_lifecycle_controller as supervisor_module
 
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)

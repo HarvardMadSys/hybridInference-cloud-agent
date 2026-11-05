@@ -20,7 +20,7 @@ from tests.unit.test_chat_group_network import (
 
 from cloud_agent_host.container.chat_sandbox import CHAT_NAMESPACE_LABEL, CHAT_NETWORK_LABEL
 from cloud_agent_host.environment_tests import environment_run_spec
-from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 
 
 def test_a_stale_orphan_bridge_and_its_exceptions_are_pruned(monkeypatch):

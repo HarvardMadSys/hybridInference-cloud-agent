@@ -26,15 +26,15 @@ from cloud_agent_host.container.chat_sandbox import (
     RetainedChatLost,
 )
 from cloud_agent_host.container.sandbox import SandboxError
-from cloud_agent_host.group_lifecycle import Operation
 from cloud_agent_host.network.guarded_workloads import (
     sandbox_spec_from_inspection,
 )
 from cloud_agent_host.session_lifecycle import (
     SessionLeaseLost,
 )
-from cloud_agent_host.shared_session_recovery import SharedSessionRecovery
-from cloud_agent_host.shared_session_state import (
+from cloud_agent_host.supervisor.group_lifecycle import Operation
+from cloud_agent_host.supervisor.shared_session_recovery import SharedSessionRecovery
+from cloud_agent_host.supervisor.shared_session_state import (
     SharedMemberManifest,
     SharedSessionDescriptor,
     SharedSessionState,
@@ -48,10 +48,10 @@ if TYPE_CHECKING:
     import builtins
 
     from cloud_agent_host.drivers import DialectRuntime
-    from cloud_agent_host.group_lifecycle_controller import GroupLifecycleController
     from cloud_agent_host.resident_transport import (
         ResidentTransport,
     )
+    from cloud_agent_host.supervisor.group_lifecycle_controller import GroupLifecycleController
 
 # The supervisor's operational log names are stable: this component logs
 # under the supervisor's logger, as it did before it was split out.

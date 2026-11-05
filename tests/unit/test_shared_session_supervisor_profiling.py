@@ -661,7 +661,7 @@ def test_a_collection_cut_short_by_the_deadline_says_so(monkeypatch):
             recorder.deadline_mono = time.monotonic() - 1
         return recorder
 
-    monkeypatch.setattr("cloud_agent_host.member_sessions.start_stage_recording", lapsed)
+    monkeypatch.setattr("cloud_agent_host.supervisor.member_sessions.start_stage_recording", lapsed)
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager, transport_factory=_TransportFactory())
 

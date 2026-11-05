@@ -33,8 +33,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from cloud_agent_host.archive.sandbox_deletion_backup import ArchiveIdentity
-    from cloud_agent_host.shared_session_state import _Group
-    from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+    from cloud_agent_host.supervisor.shared_session_state import _Group
+    from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 
 logger = get_logger("cloud_agent_host.sandbox_deletion_diagnostics")
 

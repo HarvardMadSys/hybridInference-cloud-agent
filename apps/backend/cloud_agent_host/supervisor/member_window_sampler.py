@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from cloud_agent_host.resident_transport import (
         ResidentTurn,
     )
-    from cloud_agent_host.shared_session_state import (
+    from cloud_agent_host.supervisor.shared_session_state import (
         SharedSessionState,
     )
 

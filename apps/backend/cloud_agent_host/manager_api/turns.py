@@ -22,7 +22,6 @@ from cloud_agent_host.manager_api.models import (
     SharedTurnRequest,  # noqa: TC001 — FastAPI resolves it.
 )
 from cloud_agent_host.manager_api.routing import route
-from cloud_agent_host.member_sessions import SharedTurnBoundaryError, SharedTurnTelemetry
 from cloud_agent_host.observe.guest_observer import (
     GuestObservation,
     add_process_counts,
@@ -31,13 +30,14 @@ from cloud_agent_host.observe.guest_observer import (
 )
 from cloud_agent_host.observe.resources import shared_member_resource_rollup
 from cloud_agent_host.observe.tool_windows import ToolWindowTracker, attribute, tool_time_ms
+from cloud_agent_host.supervisor.member_sessions import SharedTurnBoundaryError, SharedTurnTelemetry
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Generator, Iterator
 
     from cloud_agent_host.manager_api.context import ManagerContext
     from cloud_agent_host.resident_transport import ResidentTurn
-    from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+    from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 
 # The sandbox manager's own logger: one line per turn's tool marks keeps its name.
 logger = get_logger("cloud_agent_host.sandbox_manager")

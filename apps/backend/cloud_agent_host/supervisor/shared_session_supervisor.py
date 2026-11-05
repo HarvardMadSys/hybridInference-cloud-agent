@@ -2,7 +2,7 @@
 
 :class:`SharedChatSessionSupervisor` is the entry point the sandbox manager,
 the runner and the tests use. It owns the background threads and constructs
-one :class:`~cloud_agent_host.shared_session_state.SharedSessionState`, the
+one :class:`~cloud_agent_host.supervisor.shared_session_state.SharedSessionState`, the
 groups, members and metadata lock, which it hands to each of its components.
 Each public call is delegated to the component that implements it:
 
@@ -33,15 +33,6 @@ from cloud_agent_host.archive.archive_failure_diagnostics import (
     _safe_error_type,
     archive_failure_http_detail,
 )
-from cloud_agent_host.group_archive_policy import GroupArchivePolicy, NullArchivePolicy
-from cloud_agent_host.group_environment import GroupEnvironmentPreparation
-from cloud_agent_host.group_lifecycle_controller import GroupLifecycleController
-from cloud_agent_host.group_reconciliation import GroupReconciler
-from cloud_agent_host.group_registration import GroupRegistration
-from cloud_agent_host.initial_archive_capture import InitialArchiveCapture
-from cloud_agent_host.member_sessions import MemberSessions
-from cloud_agent_host.member_window_sampler import WindowSampler
-from cloud_agent_host.native_session_fork import ForkService, NativeForker
 from cloud_agent_host.observe.member_resources import (
     MEMBER_WINDOW_SAMPLE_INTERVAL_MS,
     RUNNING_CHECKPOINT_INTERVAL_S,
@@ -57,7 +48,16 @@ from cloud_agent_host.session_lifecycle import (
     SessionBusy,
     SessionLeaseLost,
 )
-from cloud_agent_host.shared_session_state import (
+from cloud_agent_host.supervisor.group_archive_policy import GroupArchivePolicy, NullArchivePolicy
+from cloud_agent_host.supervisor.group_environment import GroupEnvironmentPreparation
+from cloud_agent_host.supervisor.group_lifecycle_controller import GroupLifecycleController
+from cloud_agent_host.supervisor.group_reconciliation import GroupReconciler
+from cloud_agent_host.supervisor.group_registration import GroupRegistration
+from cloud_agent_host.supervisor.initial_archive_capture import InitialArchiveCapture
+from cloud_agent_host.supervisor.member_sessions import MemberSessions
+from cloud_agent_host.supervisor.member_window_sampler import WindowSampler
+from cloud_agent_host.supervisor.native_session_fork import ForkService, NativeForker
+from cloud_agent_host.supervisor.shared_session_state import (
     _SAME_RUN,
     SharedMemberManifest,
     SharedSessionDescriptor,
@@ -65,7 +65,7 @@ from cloud_agent_host.shared_session_state import (
     SharedSessionState,
     _SameRun,
 )
-from cloud_agent_host.workspace_references import WorkspaceReferences
+from cloud_agent_host.supervisor.workspace_references import WorkspaceReferences
 
 if TYPE_CHECKING:
     import builtins
@@ -79,15 +79,15 @@ if TYPE_CHECKING:
         SandboxActionFacts,
     )
     from cloud_agent_host.drivers import DialectRuntime, InputOutcome
-    from cloud_agent_host.member_sessions import SharedTurnTelemetry
-    from cloud_agent_host.native_session_fork import NativeSessionForkResult
+    from cloud_agent_host.supervisor.member_sessions import SharedTurnTelemetry
+    from cloud_agent_host.supervisor.native_session_fork import NativeSessionForkResult
     from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef
     from cloud_agent_shared.operation_profiling import (
         StageRecorder,
     )
     from cloud_agent_shared.sandbox_manager_wire import ContextStatus
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("cloud_agent_host.shared_session_supervisor")
 
 
 class SharedChatSessionSupervisor:

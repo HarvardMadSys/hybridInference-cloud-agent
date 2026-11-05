@@ -32,8 +32,8 @@ from cloud_agent_host.container.sandbox import ProcessBackend, SandboxError
 from cloud_agent_host.logging_utils import _FORMAT
 from cloud_agent_host.sandbox_manager import create_app
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
-from cloud_agent_host.shared_session_state import SharedMemberManifest
-from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+from cloud_agent_host.supervisor.shared_session_state import SharedMemberManifest
+from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_shared.logging_utils import JsonLogFormatter
 
 _CONTAINER = "0f1e2d3c4b5a" + "0" * 52

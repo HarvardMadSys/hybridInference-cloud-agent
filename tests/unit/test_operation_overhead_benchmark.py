@@ -23,7 +23,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud_agent_host.shared_session_state import SharedSessionDescriptor, SharedSessionLease
+from cloud_agent_host.supervisor.shared_session_state import (
+    SharedSessionDescriptor,
+    SharedSessionLease,
+)
 from cloud_agent_shared import operation_profiling as profiling
 
 #: The script is not a package; it is loaded by path the way a runner would.

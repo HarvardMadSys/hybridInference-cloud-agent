@@ -57,7 +57,7 @@ if TYPE_CHECKING:
         ChatSandboxSpec,
         RetainedChatBackend,
     )
-    from cloud_agent_host.shared_session_state import SharedMemberManifest
+    from cloud_agent_host.supervisor.shared_session_state import SharedMemberManifest
     from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef
 
 logger = logging.getLogger(__name__)

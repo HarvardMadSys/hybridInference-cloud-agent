@@ -18,7 +18,7 @@ from cloud_agent.sandbox_manager.sandbox_manager_client import (
 from cloud_agent_host.container.chat_sandbox import ChatSandboxSpec
 from cloud_agent_host.manager_api.models import SharedForkRequest, SharedSandboxIdentityRequest
 from cloud_agent_host.sandbox_manager_client import _group_identity
-from cloud_agent_host.shared_session_state import SharedMemberManifest
+from cloud_agent_host.supervisor.shared_session_state import SharedMemberManifest
 from cloud_agent_shared.sandbox_manager_wire import MEMBER_FIELDS, member_manifest
 
 #: One member as the control plane's sandbox read shape carries it, with the

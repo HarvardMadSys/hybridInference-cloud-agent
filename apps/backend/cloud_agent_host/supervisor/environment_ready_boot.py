@@ -13,11 +13,11 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent_host.container.chat_sandbox import RetainedChatBackend
 from cloud_agent_host.environment_preparation import prepared_in
-from cloud_agent_host.group_lifecycle import Operation
 from cloud_agent_host.session_lifecycle import SessionBusy
+from cloud_agent_host.supervisor.group_lifecycle import Operation
 
 if TYPE_CHECKING:
-    from cloud_agent_host.shared_session_state import SharedSessionState
+    from cloud_agent_host.supervisor.shared_session_state import SharedSessionState
 
 
 def ready_boot(

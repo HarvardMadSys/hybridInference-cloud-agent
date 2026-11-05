@@ -43,7 +43,7 @@ from cloud_agent_host.container.chat_sandbox import (
 )
 from cloud_agent_host.container.sandbox import ContainerBackend, SandboxError
 from cloud_agent_host.network.chat_sandbox_network import ChatSandboxNetwork
-from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 _BASE_IMAGE = "ghcr.io/harvardmadsys/cloud-agent-sandbox@sha256:" + "a" * 64

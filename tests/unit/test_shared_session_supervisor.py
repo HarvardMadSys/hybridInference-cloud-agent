@@ -51,8 +51,11 @@ from cloud_agent_host.runtimes.codex import member as codex_member
 from cloud_agent_host.runtimes.http_bridge import member as http_member
 from cloud_agent_host.sandbox_manager import create_app
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
-from cloud_agent_host.shared_session_state import SharedMemberManifest, SharedSessionDescriptor
-from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+from cloud_agent_host.supervisor.shared_session_state import (
+    SharedMemberManifest,
+    SharedSessionDescriptor,
+)
+from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.errors import SandboxArchiveBlocked
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy

@@ -3,7 +3,7 @@
 Preparation holds the group's exclusive-workspace barrier (``snapshotting``)
 and freezes the members' writers around any script it runs. A boot whose
 receipt is already ready for the exact running container is answered without
-either (:func:`~cloud_agent_host.environment_ready_boot.ready_boot`).
+either (:func:`~cloud_agent_host.supervisor.environment_ready_boot.ready_boot`).
 """
 
 from __future__ import annotations
@@ -19,13 +19,13 @@ from cloud_agent_host.container.chat_sandbox import (
     RetainedChatLost,
 )
 from cloud_agent_host.environment_preparation import prepared_in, runs_no_script
-from cloud_agent_host.environment_ready_boot import ready_boot
-from cloud_agent_host.group_lifecycle import Operation
 from cloud_agent_host.session_lifecycle import (
     SessionBusy,
     SessionLeaseLost,
 )
-from cloud_agent_host.shared_session_state import (
+from cloud_agent_host.supervisor.environment_ready_boot import ready_boot
+from cloud_agent_host.supervisor.group_lifecycle import Operation
+from cloud_agent_host.supervisor.shared_session_state import (
     _SAME_RUN,
     SharedSessionState,
     _Group,
@@ -34,7 +34,7 @@ from cloud_agent_host.shared_session_state import (
 )
 
 if TYPE_CHECKING:
-    from cloud_agent_host.group_lifecycle_controller import GroupLifecycleController
+    from cloud_agent_host.supervisor.group_lifecycle_controller import GroupLifecycleController
 
 # The supervisor's operational log names are stable: this component logs
 # under the supervisor's logger, as it did before it was split out.

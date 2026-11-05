@@ -25,18 +25,17 @@ from cloud_agent_host.container.chat_sandbox import (
     RetainedChatLost,
 )
 from cloud_agent_host.container.sandbox import SandboxError
-from cloud_agent_host.group_lifecycle import GroupLifecycle, Operation
 from cloud_agent_host.session_lifecycle import (
     SessionBusy,
     SessionLeaseLost,
 )
+from cloud_agent_host.supervisor.group_lifecycle import GroupLifecycle, Operation
 
 if TYPE_CHECKING:
     import builtins
     from collections.abc import Callable
 
     from cloud_agent_host.drivers import DialectRuntime, PendingInput
-    from cloud_agent_host.group_archive_policy import GroupArchivePolicy
     from cloud_agent_host.observe.guest_observer import (
         GuestObserverCursor,
     )
@@ -46,6 +45,7 @@ if TYPE_CHECKING:
         ResidentTransport,
         ResidentTurn,
     )
+    from cloud_agent_host.supervisor.group_archive_policy import GroupArchivePolicy
     from cloud_agent_shared.sandbox_manager_wire import ContextStatus, ResidentState
 
 

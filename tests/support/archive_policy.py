@@ -7,8 +7,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from cloud_agent_host.group_archive_policy import NullArchivePolicy
-from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+from cloud_agent_host.supervisor.group_archive_policy import NullArchivePolicy
+from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 
 Hook = Callable[..., Any]
 

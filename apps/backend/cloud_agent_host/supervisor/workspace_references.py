@@ -2,7 +2,7 @@
 
 Opening one admits it like any workspace mutation and proves the group network,
 or stands on a proof that still holds
-(:func:`~cloud_agent_host.shared_admission_proof.admit_running`).
+(:func:`~cloud_agent_host.supervisor.shared_admission_proof.admit_running`).
 """
 
 from __future__ import annotations
@@ -16,15 +16,15 @@ from cloud_agent_host.container.chat_sandbox import (
     RetainedChatBackend,
 )
 from cloud_agent_host.container.sandbox import SandboxError
-from cloud_agent_host.group_lifecycle import Operation
 from cloud_agent_host.session_lifecycle import (
     SessionLeaseLost,
 )
-from cloud_agent_host.shared_admission_proof import admit_running, backend_proved_at
+from cloud_agent_host.supervisor.group_lifecycle import Operation
+from cloud_agent_host.supervisor.shared_admission_proof import admit_running, backend_proved_at
 
 if TYPE_CHECKING:
-    from cloud_agent_host.group_lifecycle_controller import GroupLifecycleController
-    from cloud_agent_host.shared_session_state import (
+    from cloud_agent_host.supervisor.group_lifecycle_controller import GroupLifecycleController
+    from cloud_agent_host.supervisor.shared_session_state import (
         SharedSessionDescriptor,
         SharedSessionState,
         _Group,

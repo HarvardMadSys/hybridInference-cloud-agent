@@ -47,11 +47,6 @@ from cloud_agent_host.container.sandbox import (
     TerminalProcess,
 )
 from cloud_agent_host.drivers import InputOutcome
-from cloud_agent_host.group_archive_policy import (
-    ControllerArchivePolicy,
-    NullArchivePolicy,
-    ServiceArchivePolicy,
-)
 from cloud_agent_host.manager_api import archives as archives_mod, workspaces as workspaces_mod
 from cloud_agent_host.manager_api.models import SharedIdleStopRequest, SharedTurnRequest
 from cloud_agent_host.manager_api.terminal_manager import (
@@ -60,7 +55,6 @@ from cloud_agent_host.manager_api.terminal_manager import (
 )
 from cloud_agent_host.manager_api.terminals import _terminal_sse_frame
 from cloud_agent_host.manager_api.workspace_commands import _run_git, _run_sandbox
-from cloud_agent_host.member_sessions import SharedTurnTelemetry
 from cloud_agent_host.observe.guest_observer import GuestObservation, GuestProcess
 from cloud_agent_host.observe.tool_windows import ToolMark
 from cloud_agent_host.resident_transport import ResidentLaunch
@@ -70,7 +64,16 @@ from cloud_agent_host.sandbox_manager_client import (
     SandboxManagerClient,
     SandboxManagerError,
 )
-from cloud_agent_host.shared_session_state import SharedSessionDescriptor, SharedSessionLease
+from cloud_agent_host.supervisor.group_archive_policy import (
+    ControllerArchivePolicy,
+    NullArchivePolicy,
+    ServiceArchivePolicy,
+)
+from cloud_agent_host.supervisor.member_sessions import SharedTurnTelemetry
+from cloud_agent_host.supervisor.shared_session_state import (
+    SharedSessionDescriptor,
+    SharedSessionLease,
+)
 from cloud_agent_host.terminal_session import (
     MAX_TERMINAL_BUFFER_BYTES,
     MAX_TERMINAL_BUFFER_EVENTS,

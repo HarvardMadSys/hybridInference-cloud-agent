@@ -26,7 +26,7 @@ from cloud_agent_host.upload_import import forget_deleted_container_uploads
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+    from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 
 # Single-object S3 PUT maximum. A larger sandbox needs a separate multipart
 # workflow; it must remain retained instead of silently creating a partial backup.

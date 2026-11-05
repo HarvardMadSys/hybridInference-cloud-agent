@@ -18,9 +18,14 @@ from cloud_agent_host.container.chat_sandbox import (
     ChatSandboxStatus,
     RetainedChatLost,
 )
-from cloud_agent_host.group_lifecycle import ADMISSION, Blocker, GroupLifecycle, Operation
 from cloud_agent_host.session_lifecycle import SessionBusy
-from cloud_agent_host.shared_session_state import _Group, _Member
+from cloud_agent_host.supervisor.group_lifecycle import (
+    ADMISSION,
+    Blocker,
+    GroupLifecycle,
+    Operation,
+)
+from cloud_agent_host.supervisor.shared_session_state import _Group, _Member
 
 CHECK = "shared sandbox lifecycle check is in progress"
 CAPTURE = "shared workspace snapshot capture is in progress"

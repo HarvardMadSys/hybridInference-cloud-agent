@@ -30,7 +30,6 @@ from cloud_agent_host.container.chat_sandbox import (
     SandboxActionFacts,
 )
 from cloud_agent_host.container.sandbox import SandboxError
-from cloud_agent_host.group_lifecycle import Operation
 from cloud_agent_host.network.guarded_workloads import (
     GuardedWorkload,
     exact_stop_unguarded,
@@ -46,8 +45,9 @@ from cloud_agent_host.session_lifecycle import (
     SessionLeaseLost,
     StaleStartFence,
 )
-from cloud_agent_host.shared_admission_proof import ensure_running
-from cloud_agent_host.shared_session_state import (
+from cloud_agent_host.supervisor.group_lifecycle import Operation
+from cloud_agent_host.supervisor.shared_admission_proof import ensure_running
+from cloud_agent_host.supervisor.shared_session_state import (
     _SAME_RUN,
     SharedMemberManifest,
     SharedSessionDescriptor,

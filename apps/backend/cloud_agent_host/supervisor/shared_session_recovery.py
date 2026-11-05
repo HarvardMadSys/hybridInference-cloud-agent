@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from cloud_agent_host.container.chat_sandbox import ChatSandboxInspection
-    from cloud_agent_host.shared_session_state import (
+    from cloud_agent_host.supervisor.shared_session_state import (
         SharedSessionDescriptor,
         SharedSessionState,
         _LifecycleCheck,

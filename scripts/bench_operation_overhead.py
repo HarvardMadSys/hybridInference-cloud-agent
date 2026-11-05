@@ -1782,7 +1782,7 @@ class BenchTransportFactory:
 
 def _startup_manifest(*, native_session_id: str | None) -> list[Any]:
     """Return the control plane's member manifest for the one bench member."""
-    from cloud_agent_host.shared_session_state import SharedMemberManifest
+    from cloud_agent_host.supervisor.shared_session_state import SharedMemberManifest
 
     return [
         SharedMemberManifest(
@@ -2014,7 +2014,7 @@ def _activate_path(
     ``timed`` exists for the warmup: a warmup activation runs the same code with
     no measurement open, and its duration is discarded.
     """
-    from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+    from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 
     def run(supervisor: Any, **kwargs: Any) -> tuple[int, str, str, Any]:
         if not timed:
