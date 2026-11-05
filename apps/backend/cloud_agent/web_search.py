@@ -693,111 +693,73 @@ def _contains_secret(value: Any, secret: str) -> bool:
     return False
 
 
-async def search(  # noqa: C901, PLR0915 complexity baseline, #771
-    arguments: Mapping[str, Any], *, client: httpx.AsyncClient | None = None
-) -> dict[str, Any]:
-    """Call one selected provider and return a bounded, provider-neutral result."""
-    provider = _provider_config()
-    if provider is None:
+def _raise_for_status(status_code: int) -> None:
+    """Refuse every provider status the tool cannot pass on as a result."""
+    if status_code in {401, 403}:
         raise WebSearchError(
-            "Web search is not configured. Ask an administrator to select a provider "
-            "and add its API key.",
-            kind="not_configured",
+            "Web search credentials were rejected. Ask an administrator to "
+            "update the selected provider API key.",
+            kind="credential_rejected",
         )
-    request = validate(arguments, provider=provider.name)
-    body = request_body(request, provider.name)
-    headers = {provider.header: provider.api_key, "Accept": "application/json"}
-    if provider.name == "brave":
-        headers["Api-Version"] = _BRAVE_API_VERSION
-        headers["Cache-Control"] = "no-cache"
+    if status_code == 402:
+        raise WebSearchError(
+            "Web search provider credits are exhausted. Ask an administrator "
+            "to review the selected provider account.",
+            kind="quota_exhausted",
+        )
+    if status_code == 408:
+        raise WebSearchError(
+            "Web search timed out. Try again.",
+            kind="timeout",
+        )
+    if status_code == 429:
+        raise WebSearchError(
+            "Web search is rate limited. Try again later.",
+            kind="rate_limited",
+        )
+    if status_code >= 500:
+        raise WebSearchError(
+            "Web search is temporarily unavailable. Try again.",
+            kind="provider_unavailable",
+        )
+    if 300 <= status_code < 400:
+        raise WebSearchError(
+            "Web search returned an unexpected redirect.",
+            kind="unexpected_redirect",
+        )
+    if status_code >= 400:
+        raise WebSearchError("Web search request was rejected.", kind="request_rejected")
 
-    async def send(http: httpx.AsyncClient) -> bytes:  # noqa: PLR0912 complexity baseline, #771
+
+async def _read_bounded(response: httpx.Response) -> bytes:
+    """Read the provider body, refusing one over the response size cap."""
+    length = response.headers.get("content-length")
+    if length is not None:
         try:
-            async with asyncio.timeout(_REQUEST_TIMEOUT_S):
-                async with http.stream(
-                    "POST",
-                    provider.url,
-                    headers=headers,
-                    json=body,
-                    timeout=_REQUEST_TIMEOUT_S,
-                    # Override even an injected client configured to follow redirects:
-                    # the shared credential must never travel to another origin.
-                    follow_redirects=False,
-                ) as response:
-                    if response.status_code in {401, 403}:
-                        raise WebSearchError(
-                            "Web search credentials were rejected. Ask an administrator to "
-                            "update the selected provider API key.",
-                            kind="credential_rejected",
-                        )
-                    if response.status_code == 402:
-                        raise WebSearchError(
-                            "Web search provider credits are exhausted. Ask an administrator "
-                            "to review the selected provider account.",
-                            kind="quota_exhausted",
-                        )
-                    if response.status_code == 408:
-                        raise WebSearchError(
-                            "Web search timed out. Try again.",
-                            kind="timeout",
-                        )
-                    if response.status_code == 429:
-                        raise WebSearchError(
-                            "Web search is rate limited. Try again later.",
-                            kind="rate_limited",
-                        )
-                    if response.status_code >= 500:
-                        raise WebSearchError(
-                            "Web search is temporarily unavailable. Try again.",
-                            kind="provider_unavailable",
-                        )
-                    if 300 <= response.status_code < 400:
-                        raise WebSearchError(
-                            "Web search returned an unexpected redirect.",
-                            kind="unexpected_redirect",
-                        )
-                    if response.status_code >= 400:
-                        raise WebSearchError(
-                            "Web search request was rejected.", kind="request_rejected"
-                        )
-
-                    length = response.headers.get("content-length")
-                    if length is not None:
-                        try:
-                            if int(length) > _MAX_RESPONSE_BYTES:
-                                raise WebSearchError(
-                                    "Web search returned too much data.",
-                                    kind="response_too_large",
-                                )
-                        except ValueError:
-                            pass
-                    chunks: list[bytes] = []
-                    size = 0
-                    async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
-                        size += len(chunk)
-                        if size > _MAX_RESPONSE_BYTES:
-                            raise WebSearchError(
-                                "Web search returned too much data.",
-                                kind="response_too_large",
-                            )
-                        chunks.append(chunk)
-                    return b"".join(chunks)
-        except (TimeoutError, httpx.TimeoutException) as exc:
-            raise WebSearchError("Web search timed out. Try again.", kind="timeout") from exc
-        except httpx.HTTPError as exc:
+            if int(length) > _MAX_RESPONSE_BYTES:
+                raise WebSearchError(
+                    "Web search returned too much data.",
+                    kind="response_too_large",
+                )
+        except ValueError:
+            pass
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in response.aiter_bytes(chunk_size=64 * 1024):
+        size += len(chunk)
+        if size > _MAX_RESPONSE_BYTES:
             raise WebSearchError(
-                "Web search is temporarily unavailable. Try again.", kind="network_error"
-            ) from exc
+                "Web search returned too much data.",
+                kind="response_too_large",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
-    if client is None:
-        async with httpx.AsyncClient(
-            timeout=_REQUEST_TIMEOUT_S,
-            follow_redirects=False,
-        ) as owned:
-            content = await send(owned)
-    else:
-        content = await send(client)
 
+def _bounded_result(
+    content: bytes, provider: _ProviderConfig, request: SearchRequest
+) -> dict[str, Any]:
+    """Parse and project the provider body, refusing one that reflects the credential."""
     try:
         result = json.loads(content)
     except ValueError as exc:
@@ -818,6 +780,58 @@ async def search(  # noqa: C901, PLR0915 complexity baseline, #771
     if _contains_secret(provider_fields, provider.api_key):
         raise WebSearchError("Web search returned an unsafe response.", kind="unsafe_response")
     return normalized
+
+
+async def search(
+    arguments: Mapping[str, Any], *, client: httpx.AsyncClient | None = None
+) -> dict[str, Any]:
+    """Call one selected provider and return a bounded, provider-neutral result."""
+    provider = _provider_config()
+    if provider is None:
+        raise WebSearchError(
+            "Web search is not configured. Ask an administrator to select a provider "
+            "and add its API key.",
+            kind="not_configured",
+        )
+    request = validate(arguments, provider=provider.name)
+    body = request_body(request, provider.name)
+    headers = {provider.header: provider.api_key, "Accept": "application/json"}
+    if provider.name == "brave":
+        headers["Api-Version"] = _BRAVE_API_VERSION
+        headers["Cache-Control"] = "no-cache"
+
+    async def send(http: httpx.AsyncClient) -> bytes:
+        try:
+            async with asyncio.timeout(_REQUEST_TIMEOUT_S):
+                async with http.stream(
+                    "POST",
+                    provider.url,
+                    headers=headers,
+                    json=body,
+                    timeout=_REQUEST_TIMEOUT_S,
+                    # Override even an injected client configured to follow redirects:
+                    # the shared credential must never travel to another origin.
+                    follow_redirects=False,
+                ) as response:
+                    _raise_for_status(response.status_code)
+                    return await _read_bounded(response)
+        except (TimeoutError, httpx.TimeoutException) as exc:
+            raise WebSearchError("Web search timed out. Try again.", kind="timeout") from exc
+        except httpx.HTTPError as exc:
+            raise WebSearchError(
+                "Web search is temporarily unavailable. Try again.", kind="network_error"
+            ) from exc
+
+    if client is None:
+        async with httpx.AsyncClient(
+            timeout=_REQUEST_TIMEOUT_S,
+            follow_redirects=False,
+        ) as owned:
+            content = await send(owned)
+    else:
+        content = await send(client)
+
+    return _bounded_result(content, provider, request)
 
 
 __all__ = [

@@ -87,6 +87,7 @@ from cloud_agent_shared.workspace_browser import WorkspacePathError, normalize_w
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
+    from cloud_agent.measurement.operation_measurement import Selection
     from cloud_agent.ports import (
         ConversationQueries,
         HostPoolRepository,
@@ -281,8 +282,61 @@ async def _terminal_control(
         raise _terminal_sandbox_manager_http_error(exc) from exc
 
 
+def _confirm_file_answer(measure: Selection, frame: str | None, body: dict[str, Any]) -> bool:
+    """Record a file answer's facts, or discard a measurement it does not belong to.
+
+    False when the answer is another operation's: the measurement is then
+    discarded and the caller answers unmeasured.
+    """
+    kind = str(body.get("kind") or "")
+    kind_operation = measure.result_operation(body, default=FILES_LIST)
+    sandbox_manager_operation = str(body.get("profiling_operation") or "").strip()
+    result_operation = (
+        ""
+        if sandbox_manager_operation and sandbox_manager_operation != kind_operation
+        else kind_operation
+    )
+    if not measure.confirm(result_operation):
+        measure.discard()
+        return False
+    measure.record_answer(FILE_READ_STAGE, frame, body)
+    measure.measurement.facts["kind"] = kind
+    if kind == "directory":
+        measure.measurement.facts["entry_count"] = len(body.get("entries") or [])
+    else:
+        measure.measurement.facts["content_truncated"] = bool(body.get("truncated"))
+        measure.measurement.facts["binary"] = bool(body.get("binary"))
+    measure.outcome = "completed"
+    return True
+
+
+def _settle_failed_file_read(
+    job_store: _WorkspaceStorage,
+    job: dict[str, Any],
+    measure: Selection | None,
+    *,
+    safe_path: str,
+) -> None:
+    """Report a file read that ended without an answer."""
+    if measure is not None and safe_path and measure.request_kind == "files.read":
+        # The failed read never produced the kind that decides
+        # list versus open. Filing it under the provisional first
+        # candidate corrupts that operation's failure rate.
+        measure.discard()
+        local_writer = measurement_writer.writer()
+        local_writer.counts.rejected += 1
+        local_writer.counts.note("ambiguous_file_kind")
+    else:
+        record_measurement(
+            store=job_store,
+            job=job,
+            measure=measure,
+            failure="failed",
+        )
+
+
 @router.get("/jobs/{job_id}/files", response_model=AgentWorkspaceResponse)
-async def get_agent_job_workspace_file(  # noqa: PLR0912, PLR0915 complexity baseline, #771
+async def get_agent_job_workspace_file(
     job_id: str,
     request: Request,
     path: str = Query("", max_length=4096),
@@ -333,27 +387,9 @@ async def get_agent_job_workspace_file(  # noqa: PLR0912, PLR0915 complexity bas
                         409, "workspace_unavailable", "This chat has no retained workspace."
                     ) from exc
                 raise _sandbox_manager_http_error(exc) from exc
-            if measure is not None:
-                kind = str(body.get("kind") or "")
-                kind_operation = measure.result_operation(body, default=FILES_LIST)
-                sandbox_manager_operation = str(body.get("profiling_operation") or "").strip()
-                result_operation = (
-                    ""
-                    if sandbox_manager_operation and sandbox_manager_operation != kind_operation
-                    else kind_operation
-                )
-                if not measure.confirm(result_operation):
-                    measure.discard()
-                    recorded = True
-                    return measured_response(AgentWorkspaceResponse, None, body)
-                measure.record_answer(FILE_READ_STAGE, frame, body)
-                measure.measurement.facts["kind"] = kind
-                if kind == "directory":
-                    measure.measurement.facts["entry_count"] = len(body.get("entries") or [])
-                else:
-                    measure.measurement.facts["content_truncated"] = bool(body.get("truncated"))
-                    measure.measurement.facts["binary"] = bool(body.get("binary"))
-                measure.outcome = "completed"
+            if measure is not None and not _confirm_file_answer(measure, frame, body):
+                recorded = True
+                return measured_response(AgentWorkspaceResponse, None, body)
             response = measured_response(AgentWorkspaceResponse, measure, body)
             record_measurement(
                 store=job_store,
@@ -364,21 +400,7 @@ async def get_agent_job_workspace_file(  # noqa: PLR0912, PLR0915 complexity bas
             return response
         finally:
             if not recorded:
-                if measure is not None and safe_path and measure.request_kind == "files.read":
-                    # The failed read never produced the kind that decides
-                    # list versus open. Filing it under the provisional first
-                    # candidate corrupts that operation's failure rate.
-                    measure.discard()
-                    local_writer = measurement_writer.writer()
-                    local_writer.counts.rejected += 1
-                    local_writer.counts.note("ambiguous_file_kind")
-                else:
-                    record_measurement(
-                        store=job_store,
-                        job=job,
-                        measure=measure,
-                        failure="failed",
-                    )
+                _settle_failed_file_read(job_store, job, measure, safe_path=safe_path)
 
 
 #: Characters a downloaded file's name cannot carry on common filesystems.

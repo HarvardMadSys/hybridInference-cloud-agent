@@ -162,7 +162,240 @@ def _placement_rows(
     return placement
 
 
-async def shared_live_readiness(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+def _empty_placement_readiness(
+    rows: list[dict[str, Any]],
+    *,
+    active_host: str | None,
+    not_before: datetime,
+    expected_deployment_sha: str,
+) -> SharedLiveReadiness:
+    """Explain why the pool has no new-chat placement host to prove."""
+    if active_host is not None:
+        return SharedLiveReadiness(
+            False,
+            f"pinned host {active_host!r} follows this release only after the control "
+            "plane runs it, and no draining host proves the target",
+        )
+    reasons = [
+        f"{row.get('host') or 'unknown'!s}: "
+        f"{_host_rejection(row, not_before=not_before, expected_deployment_sha=expected_deployment_sha)}"
+        for row in rows
+    ]
+    detail = "; ".join(reasons) if reasons else "no host is registered"
+    return SharedLiveReadiness(False, f"host pool is not shared-live ready: {detail}")
+
+
+def _placement_rejections(
+    placement_rows: list[dict[str, Any]],
+    *,
+    draining_host: str | None,
+    not_before: datetime,
+    expected_deployment_sha: str,
+) -> list[str]:
+    """Reject each new-chat placement host that has not proved the target."""
+    rejected: list[str] = []
+    for row in placement_rows:
+        host = str(row.get("host") or "unknown")
+        is_draining_target = host == draining_host
+        reason = _host_rejection(
+            row,
+            not_before=not_before,
+            expected_deployment_sha=expected_deployment_sha,
+            required_status=HOST_DRAINING if is_draining_target else HOST_ONLINE,
+            require_idle=is_draining_target,
+        )
+        if reason is not None:
+            rejected.append(f"{host}: {reason}")
+    return rejected
+
+
+def _retained_probe_rows(
+    placement_rows: list[dict[str, Any]],
+    rows_by_host: dict[str, dict[str, Any]],
+    retained_hosts: set[str],
+    rejected: list[str],
+    *,
+    not_before: datetime,
+    expected_deployment_sha: str,
+) -> list[dict[str, Any]]:
+    """Add every online retained owner to the probe set, recording rejections."""
+    probe_rows = list(placement_rows)
+    probed_hosts = {str(row.get("host")) for row in probe_rows}
+    for owner in sorted(retained_hosts):
+        owner_row = rows_by_host.get(owner)
+        if owner_row is None or owner_row.get("status") != HOST_ONLINE or owner in probed_hosts:
+            continue
+        reason = _host_rejection(
+            owner_row,
+            not_before=not_before,
+            expected_deployment_sha=expected_deployment_sha,
+            require_target_deployment=False,
+            require_native_fork=False,
+            require_two_slots=False,
+        )
+        if reason is not None:
+            rejected.append(f"retained owner {owner}: {reason}")
+            continue
+        probe_rows.append(owner_row)
+        probed_hosts.add(owner)
+    return probe_rows
+
+
+async def _probe_sandbox_managers(
+    probe_rows: list[dict[str, Any]],
+    rejected: list[str],
+    sandbox_manager_probe: SandboxManagerProbe,
+) -> list[str]:
+    """Dial each host's sandbox manager in order; return the hosts that answered."""
+    ready_hosts: list[str] = []
+    for row in probe_rows:
+        host = str(row.get("host") or "unknown")
+        sandbox_manager_url = str(row["sandbox_manager_url"]).strip()
+        sandbox_manager_error = await sandbox_manager_probe(host, sandbox_manager_url, force=True)
+        if sandbox_manager_error is not None:
+            rejected.append(
+                f"{host}: control plane cannot use its sandbox manager: {sandbox_manager_error}"
+            )
+            continue
+        ready_hosts.append(host)
+    return ready_hosts
+
+
+def _probed_host_change(
+    probe_rows: list[dict[str, Any]],
+    current_by_host: dict[str, dict[str, Any]],
+    current_placement_names: set[str],
+    *,
+    draining_host: str | None,
+    not_before: datetime,
+    expected_deployment_sha: str,
+) -> SharedLiveReadiness | None:
+    """Reject a probed host whose fresh row no longer matches what was probed."""
+    for row in probe_rows:
+        host = str(row["host"])
+        current = current_by_host.get(host)
+        if current is None:
+            return SharedLiveReadiness(
+                False, f"host {host} disappeared while its sandbox manager was probed"
+            )
+        placement = host in current_placement_names
+        reason = _host_rejection(
+            current,
+            not_before=not_before,
+            expected_deployment_sha=expected_deployment_sha,
+            required_status=HOST_DRAINING if host == draining_host else HOST_ONLINE,
+            require_idle=host == draining_host,
+            require_target_deployment=placement,
+            require_native_fork=placement,
+            require_two_slots=placement,
+        )
+        if reason is not None:
+            return SharedLiveReadiness(
+                False,
+                f"host {host} changed while its sandbox manager was probed: {reason}",
+            )
+        if (
+            str(current.get("sandbox_manager_url") or "").strip()
+            != str(row.get("sandbox_manager_url") or "").strip()
+        ):
+            return SharedLiveReadiness(
+                False,
+                f"host {host} changed sandbox manager URL while its previous sandbox manager was probed",
+            )
+    return None
+
+
+async def _recheck_after_probes(
+    store: HostPoolRepository,
+    probe_rows: list[dict[str, Any]],
+    placement_host_names: list[str],
+    *,
+    active_host: str | None,
+    retained_hosts: set[str],
+    draining_host: str | None,
+    not_before: datetime,
+    expected_deployment_sha: str,
+) -> tuple[SharedLiveReadiness | None, list[dict[str, Any]]]:
+    """Re-read the pool and reject any placement change made during the probes."""
+    (
+        current_rows,
+        current_active_host,
+        _,
+        current_retained_hosts,
+    ) = await store.deployment_runner_pool()
+    current_by_host = {str(row.get("host")): row for row in current_rows if row.get("host")}
+    if current_active_host != active_host or set(current_retained_hosts) != set(retained_hosts):
+        return (
+            SharedLiveReadiness(
+                False,
+                "host placement or retained ownership changed while sandbox managers were probed",
+            ),
+            current_rows,
+        )
+    current_placement_names = {
+        str(row["host"])
+        for row in _placement_rows(
+            current_rows, current_by_host, active_host=active_host, draining_host=draining_host
+        )
+    }
+    if current_placement_names != set(placement_host_names):
+        return (
+            SharedLiveReadiness(
+                False,
+                "new-chat placement changed while sandbox managers were probed",
+            ),
+            current_rows,
+        )
+    changed = _probed_host_change(
+        probe_rows,
+        current_by_host,
+        current_placement_names,
+        draining_host=draining_host,
+        not_before=not_before,
+        expected_deployment_sha=expected_deployment_sha,
+    )
+    return changed, current_rows
+
+
+def _ready_verdict(
+    ready_hosts: list[str],
+    placement_host_names: list[str],
+    current_rows: list[dict[str, Any]],
+    *,
+    expected_deployment_sha: str,
+) -> SharedLiveReadiness:
+    """Describe the successful barrier for the deploy log."""
+    placement_hosts = ", ".join(placement_host_names)
+    retained_owner_hosts = sorted(set(ready_hosts) - set(placement_host_names))
+    retained_detail = (
+        "; compatible retained owners also answered: " + ", ".join(retained_owner_hosts)
+        if retained_owner_hosts
+        else ""
+    )
+    following_hosts = sorted(
+        str(row["host"])
+        for row in current_rows
+        if row.get("host")
+        and row.get("status") == HOST_ONLINE
+        and _follows_control_plane(row)
+        and str(row["host"]) not in placement_host_names
+    )
+    if following_hosts:
+        retained_detail += (
+            "; the control plane rolls its managed hosts forward after activation: "
+            + ", ".join(following_hosts)
+        )
+    return SharedLiveReadiness(
+        True,
+        f"new-chat placement hosts {placement_hosts} completed target deployment "
+        f"{expected_deployment_sha}, sent fresh {SHARED_SANDBOX_CAPABILITY} and "
+        f"{NATIVE_FORK_AT_ANCHOR_CAPABILITY} heartbeats, and their sandbox_managers answered"
+        f"{retained_detail}",
+        host=ready_hosts[0],
+    )
+
+
+async def shared_live_readiness(
     store: HostPoolRepository,
     *,
     not_before: datetime,
@@ -201,33 +434,19 @@ async def shared_live_readiness(  # noqa: C901, PLR0912, PLR0915 complexity base
         rows, rows_by_host, active_host=active_host, draining_host=draining_host
     )
     if not placement_rows:
-        if active_host is not None:
-            return SharedLiveReadiness(
-                False,
-                f"pinned host {active_host!r} follows this release only after the control "
-                "plane runs it, and no draining host proves the target",
-            )
-        reasons = [
-            f"{row.get('host') or 'unknown'!s}: "
-            f"{_host_rejection(row, not_before=not_before, expected_deployment_sha=expected_deployment_sha)}"
-            for row in rows
-        ]
-        detail = "; ".join(reasons) if reasons else "no host is registered"
-        return SharedLiveReadiness(False, f"host pool is not shared-live ready: {detail}")
-
-    rejected: list[str] = []
-    for row in placement_rows:
-        host = str(row.get("host") or "unknown")
-        is_draining_target = host == draining_host
-        reason = _host_rejection(
-            row,
+        return _empty_placement_readiness(
+            rows,
+            active_host=active_host,
             not_before=not_before,
             expected_deployment_sha=expected_deployment_sha,
-            required_status=HOST_DRAINING if is_draining_target else HOST_ONLINE,
-            require_idle=is_draining_target,
         )
-        if reason is not None:
-            rejected.append(f"{host}: {reason}")
+
+    rejected = _placement_rejections(
+        placement_rows,
+        draining_host=draining_host,
+        not_before=not_before,
+        expected_deployment_sha=expected_deployment_sha,
+    )
     if rejected:
         scope = f"pinned host {active_host!r}" if active_host is not None else "host pool"
         return SharedLiveReadiness(
@@ -240,25 +459,14 @@ async def shared_live_readiness(  # noqa: C901, PLR0912, PLR0915 complexity base
     # SHA or the v2 historical-fork capability (v1 retained containers may
     # serve ordinary follow-ups), but the new control plane must prove a fresh
     # compatible heartbeat and that it can still authenticate to that sandbox manager.
-    probe_rows = list(placement_rows)
-    probed_hosts = {str(row.get("host")) for row in probe_rows}
-    for owner in sorted(retained_hosts):
-        owner_row = rows_by_host.get(owner)
-        if owner_row is None or owner_row.get("status") != HOST_ONLINE or owner in probed_hosts:
-            continue
-        reason = _host_rejection(
-            owner_row,
-            not_before=not_before,
-            expected_deployment_sha=expected_deployment_sha,
-            require_target_deployment=False,
-            require_native_fork=False,
-            require_two_slots=False,
-        )
-        if reason is not None:
-            rejected.append(f"retained owner {owner}: {reason}")
-            continue
-        probe_rows.append(owner_row)
-        probed_hosts.add(owner)
+    probe_rows = _retained_probe_rows(
+        placement_rows,
+        rows_by_host,
+        retained_hosts,
+        rejected,
+        not_before=not_before,
+        expected_deployment_sha=expected_deployment_sha,
+    )
     if rejected:
         return SharedLiveReadiness(
             False,
@@ -266,17 +474,7 @@ async def shared_live_readiness(  # noqa: C901, PLR0912, PLR0915 complexity base
             + "; ".join(rejected),
         )
 
-    ready_hosts: list[str] = []
-    for row in probe_rows:
-        host = str(row.get("host") or "unknown")
-        sandbox_manager_url = str(row["sandbox_manager_url"]).strip()
-        sandbox_manager_error = await sandbox_manager_probe(host, sandbox_manager_url, force=True)
-        if sandbox_manager_error is not None:
-            rejected.append(
-                f"{host}: control plane cannot use its sandbox manager: {sandbox_manager_error}"
-            )
-            continue
-        ready_hosts.append(host)
+    ready_hosts = await _probe_sandbox_managers(probe_rows, rejected, sandbox_manager_probe)
 
     scope = (
         f"pinned host {active_host!r} and online retained owners"
@@ -294,88 +492,23 @@ async def shared_live_readiness(  # noqa: C901, PLR0912, PLR0915 complexity base
     # went offline, or changed placement while those probes ran cannot satisfy
     # the deployment with a stale snapshot. Claim admission independently
     # enforces the same exact SHA; this closes the deploy-time availability gap.
-    (
+    changed, current_rows = await _recheck_after_probes(
+        store,
+        probe_rows,
+        placement_host_names,
+        active_host=active_host,
+        retained_hosts=retained_hosts,
+        draining_host=draining_host,
+        not_before=not_before,
+        expected_deployment_sha=expected_deployment_sha,
+    )
+    if changed is not None:
+        return changed
+    return _ready_verdict(
+        ready_hosts,
+        placement_host_names,
         current_rows,
-        current_active_host,
-        _,
-        current_retained_hosts,
-    ) = await store.deployment_runner_pool()
-    current_by_host = {str(row.get("host")): row for row in current_rows if row.get("host")}
-    if current_active_host != active_host or set(current_retained_hosts) != set(retained_hosts):
-        return SharedLiveReadiness(
-            False,
-            "host placement or retained ownership changed while sandbox managers were probed",
-        )
-    current_placement_names = {
-        str(row["host"])
-        for row in _placement_rows(
-            current_rows, current_by_host, active_host=active_host, draining_host=draining_host
-        )
-    }
-    if current_placement_names != set(placement_host_names):
-        return SharedLiveReadiness(
-            False,
-            "new-chat placement changed while sandbox managers were probed",
-        )
-    for row in probe_rows:
-        host = str(row["host"])
-        current = current_by_host.get(host)
-        if current is None:
-            return SharedLiveReadiness(
-                False, f"host {host} disappeared while its sandbox manager was probed"
-            )
-        placement = host in current_placement_names
-        reason = _host_rejection(
-            current,
-            not_before=not_before,
-            expected_deployment_sha=expected_deployment_sha,
-            required_status=HOST_DRAINING if host == draining_host else HOST_ONLINE,
-            require_idle=host == draining_host,
-            require_target_deployment=placement,
-            require_native_fork=placement,
-            require_two_slots=placement,
-        )
-        if reason is not None:
-            return SharedLiveReadiness(
-                False,
-                f"host {host} changed while its sandbox manager was probed: {reason}",
-            )
-        if (
-            str(current.get("sandbox_manager_url") or "").strip()
-            != str(row.get("sandbox_manager_url") or "").strip()
-        ):
-            return SharedLiveReadiness(
-                False,
-                f"host {host} changed sandbox manager URL while its previous sandbox manager was probed",
-            )
-
-    placement_hosts = ", ".join(placement_host_names)
-    retained_owner_hosts = sorted(set(ready_hosts) - set(placement_host_names))
-    retained_detail = (
-        "; compatible retained owners also answered: " + ", ".join(retained_owner_hosts)
-        if retained_owner_hosts
-        else ""
-    )
-    following_hosts = sorted(
-        str(row["host"])
-        for row in current_rows
-        if row.get("host")
-        and row.get("status") == HOST_ONLINE
-        and _follows_control_plane(row)
-        and str(row["host"]) not in placement_host_names
-    )
-    if following_hosts:
-        retained_detail += (
-            "; the control plane rolls its managed hosts forward after activation: "
-            + ", ".join(following_hosts)
-        )
-    return SharedLiveReadiness(
-        True,
-        f"new-chat placement hosts {placement_hosts} completed target deployment "
-        f"{expected_deployment_sha}, sent fresh {SHARED_SANDBOX_CAPABILITY} and "
-        f"{NATIVE_FORK_AT_ANCHOR_CAPABILITY} heartbeats, and their sandbox_managers answered"
-        f"{retained_detail}",
-        host=ready_hosts[0],
+        expected_deployment_sha=expected_deployment_sha,
     )
 
 
