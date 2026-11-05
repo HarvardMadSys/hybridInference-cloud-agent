@@ -12,18 +12,32 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent.domain.execution import CANCELLED, SUCCEEDED, TERMINAL_STATES
 from cloud_agent.domain.ids import new_job_id, new_session_fork_id, new_thread_id
-from cloud_agent.domain.sandbox_group import DELETED_GROUP_STATES, GroupState
+from cloud_agent.domain.sandbox_group import DELETED_GROUP_STATES
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_entry
 from cloud_agent.storage._sql.hosts import refuse_start_on_revoked_host
 from cloud_agent.storage._sql.jobs import JOB_SELECT, read_job
-from cloud_agent.storage._sql.mcp_residency import mint_residency_sql
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json, sandbox_row_to_dict
 from cloud_agent.storage._sql.sandbox import (
-    FENCE_START_SQL,
     NATIVE_FORK_CAPABLE,
     THREAD_SANDBOX_SOURCE,
     lock_memberships,
-    quiet_idle_deadline,
+)
+from cloud_agent.storage._sql.sandbox_transitions import (
+    ESTABLISH_SESSION_FORK_RESIDENCIES_MEMBERS_2_SQL,
+    ESTABLISH_SESSION_FORK_RESIDENCIES_MEMBERS_SQL,
+    FINALIZE_SESSION_FORK_GROUP_SQL,
+    FINALIZE_SESSION_FORK_MEMBERS_2_SQL,
+    FINALIZE_SESSION_FORK_MEMBERS_SQL,
+    PREPARE_SESSION_FORK_GROUP_SQL,
+    PREPARE_SESSION_FORK_MEMBERS_2_SQL,
+    PREPARE_SESSION_FORK_MEMBERS_3_SQL,
+    PREPARE_SESSION_FORK_MEMBERS_SQL,
+    REAP_STALLED_SESSION_FORKS_GROUP_SQL,
+    REAP_STALLED_SESSION_FORKS_MEMBERS_2_SQL,
+    REAP_STALLED_SESSION_FORKS_MEMBERS_3_SQL,
+    REAP_STALLED_SESSION_FORKS_MEMBERS_SQL,
+    RECORD_SESSION_FORK_MATERIALIZED_GROUP_SQL,
+    RECORD_SESSION_FORK_MATERIALIZED_MEMBERS_SQL,
 )
 from cloud_agent.storage.repositories.goals import new_goal_id
 
@@ -217,23 +231,7 @@ class PostgresSessionForkRepository:
             # order every other writer takes. A member skipped now is
             # reclaimed by a later Fork.
             await conn.execute(
-                """
-                UPDATE agent_thread_sandbox_memberships
-                SET resident_slot_id = NULL, updated_at = NOW()
-                WHERE thread_id IN (
-                    SELECT m.thread_id
-                    FROM agent_thread_sandbox_memberships m
-                    JOIN agent_threads t ON t.id = m.thread_id
-                    WHERE m.sandbox_id = $1
-                      AND m.resident_slot_id IS NOT NULL
-                      AND t.deleted_at IS NOT NULL
-                      AND m.resident_state IN ('stopped', 'lost')
-                      AND m.residency_status = 'none'
-                      AND m.active_attempt_id IS NULL
-                      AND m.fork_operation_id IS NULL
-                    FOR UPDATE OF m SKIP LOCKED
-                )
-                """,
+                PREPARE_SESSION_FORK_MEMBERS_SQL,
                 row["sandbox_id"],
             )
             occupied_rows = await conn.fetch(
@@ -365,12 +363,7 @@ class PostgresSessionForkRepository:
                 target_slot,
             )
             await conn.execute(
-                """
-                INSERT INTO agent_thread_sandbox_memberships (
-                    thread_id, user_id, sandbox_id, resident_slot_id,
-                    forked_from_thread_id, fork_anchor_job_id, fork_operation_id
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-                """,
+                PREPARE_SESSION_FORK_MEMBERS_2_SQL,
                 target_thread_id,
                 user_id,
                 row["sandbox_id"],
@@ -380,25 +373,13 @@ class PostgresSessionForkRepository:
                 operation_id,
             )
             await conn.execute(
-                """
-                UPDATE agent_thread_sandbox_memberships
-                SET native_state = 'fork_preparing', fork_operation_id = $2,
-                    updated_at = NOW()
-                WHERE thread_id = $1
-                """,
+                PREPARE_SESSION_FORK_MEMBERS_3_SQL,
                 source["thread_id"],
                 operation_id,
             )
             # A fork starts the source container if it is stopped.
             await conn.execute(
-                f"""
-                UPDATE agent_sandboxes
-                SET active_operation_count = active_operation_count + 1,
-                    {FENCE_START_SQL},
-                    idle_deadline = NULL, archived_at = NULL,
-                    last_activity_at = NOW(), updated_at = NOW()
-                WHERE id = $1
-                """,
+                PREPARE_SESSION_FORK_GROUP_SQL,
                 row["sandbox_id"],
             )
             return await self._session_fork_details(conn, operation_id)
@@ -489,15 +470,7 @@ class PostgresSessionForkRepository:
                     current["residency_grant_id"] or operation[f"previous_{role}_grant_id"]
                 )
                 created = await conn.fetchrow(
-                    f"""
-                    UPDATE agent_thread_sandbox_memberships m
-                    SET {mint_residency_sql("$3")},
-                        updated_at = NOW()
-                    FROM agent_sandboxes g
-                    WHERE m.thread_id = $1 AND m.sandbox_id = $2
-                      AND g.id = m.sandbox_id AND g.generation = $4
-                    RETURNING m.residency_generation AS generation
-                    """,
+                    ESTABLISH_SESSION_FORK_RESIDENCIES_MEMBERS_SQL,
                     thread_id,
                     operation["sandbox_id"],
                     ttl_seconds,
@@ -524,12 +497,7 @@ class PostgresSessionForkRepository:
                 previous["target"],
             )
             await conn.execute(
-                """
-                UPDATE agent_thread_sandbox_memberships
-                SET resident_state = 'restarting', updated_at = NOW()
-                WHERE thread_id = $1 AND residency_generation = $2
-                  AND fork_operation_id = $3
-                """,
+                ESTABLISH_SESSION_FORK_RESIDENCIES_MEMBERS_2_SQL,
                 operation["source_thread_id"],
                 generations["source"],
                 operation_id,
@@ -719,24 +687,14 @@ class PostgresSessionForkRepository:
                 json.dumps(receipt),
             )
             await conn.execute(
-                """
-                UPDATE agent_thread_sandbox_memberships
-                SET process_generation = $2, residency_generation = $3,
-                    resident_state = 'live', updated_at = NOW()
-                WHERE thread_id = $1 AND fork_operation_id = $4
-                """,
+                RECORD_SESSION_FORK_MATERIALIZED_MEMBERS_SQL,
                 operation["source_thread_id"],
                 source_process,
                 operation["source_residency_generation"],
                 operation_id,
             )
             await conn.execute(
-                f"""
-                UPDATE agent_sandboxes
-                SET state = {GroupState.RUNNING.sql}, archived_at = NULL,
-                    last_activity_at = NOW(), updated_at = NOW()
-                WHERE id = $1 AND generation = $2 AND container_id = $3
-                """,
+                RECORD_SESSION_FORK_MATERIALIZED_GROUP_SQL,
                 operation["sandbox_id"],
                 operation["sandbox_generation"],
                 operation["container_id"],
@@ -898,16 +856,7 @@ class PostgresSessionForkRepository:
                 anchor_id = copied[str(source["id"])]
                 # Preparation made the member; finalization makes it live.
                 await conn.execute(
-                    """
-                    UPDATE agent_thread_sandbox_memberships
-                    SET native_session_id = $3, native_state = 'ready',
-                        context_status = 'live', process_generation = $4,
-                        residency_generation = $5, resident_state = 'live',
-                        resident_slot_id = $6, last_settled_job_id = $7,
-                        fork_operation_id = NULL, last_error = NULL,
-                        updated_at = NOW()
-                    WHERE thread_id = $1 AND sandbox_id = $2 AND fork_operation_id = $8
-                    """,
+                    FINALIZE_SESSION_FORK_MEMBERS_SQL,
                     operation["target_thread_id"],
                     operation["sandbox_id"],
                     operation["target_native_session_id"],
@@ -918,13 +867,7 @@ class PostgresSessionForkRepository:
                     operation_id,
                 )
                 await conn.execute(
-                    """
-                    UPDATE agent_thread_sandbox_memberships
-                    SET native_state = 'ready', fork_operation_id = NULL,
-                        process_generation = $2, residency_generation = $3,
-                        resident_state = 'live', updated_at = NOW()
-                    WHERE thread_id = $1 AND fork_operation_id = $4
-                    """,
+                    FINALIZE_SESSION_FORK_MEMBERS_2_SQL,
                     operation["source_thread_id"],
                     operation["source_process_generation"],
                     operation["source_residency_generation"],
@@ -956,14 +899,7 @@ class PostgresSessionForkRepository:
                     anchor_id,
                 )
                 await conn.execute(
-                    f"""
-                    UPDATE agent_sandboxes g
-                    SET active_operation_count = GREATEST(active_operation_count - 1, 0),
-                        last_activity_at = NOW(),
-                        idle_deadline = {quiet_idle_deadline("g", "idle_timeout_seconds", operations=1)},
-                        updated_at = NOW()
-                    WHERE g.id = $1
-                    """,
+                    FINALIZE_SESSION_FORK_GROUP_SQL,
                     operation["sandbox_id"],
                 )
             else:
@@ -1060,33 +996,13 @@ class PostgresSessionForkRepository:
                 if changed is None:
                     continue
                 await conn.execute(
-                    """
-                    UPDATE agent_thread_sandbox_memberships
-                    SET native_state = CASE
-                            WHEN context_status = 'lost' THEN 'lost' ELSE 'ready' END,
-                        fork_operation_id = NULL,
-                        resident_state = CASE
-                            WHEN context_status = 'lost' THEN 'lost'
-                            WHEN native_session_id IS NULL
-                                 OR native_session_id !~ '[^[:space:]]'
-                                THEN 'stopped'
-                            ELSE 'restarting'
-                        END,
-                        last_error = $3, updated_at = NOW()
-                    WHERE thread_id = $1 AND fork_operation_id = $2
-                    """,
+                    REAP_STALLED_SESSION_FORKS_MEMBERS_SQL,
                     operation["source_thread_id"],
                     operation["id"],
                     changed["last_error"],
                 )
                 await conn.execute(
-                    f"""
-                    UPDATE agent_sandboxes g
-                    SET active_operation_count = GREATEST(active_operation_count - 1, 0),
-                        idle_deadline = {quiet_idle_deadline("g", "idle_timeout_seconds", operations=1)},
-                        updated_at = NOW()
-                    WHERE id = $1
-                    """,
+                    REAP_STALLED_SESSION_FORKS_GROUP_SQL,
                     operation["sandbox_id"],
                 )
                 cleanup: list[dict[str, Any]] = []
@@ -1110,16 +1026,7 @@ class PostgresSessionForkRepository:
                     if generation is None:
                         continue
                     residency = await conn.fetchrow(
-                        """
-                        UPDATE agent_thread_sandbox_memberships m
-                        SET residency_status = 'none', residency_last_active_at = NOW()
-                        FROM agent_sandboxes g
-                        WHERE m.thread_id = $1 AND m.residency_generation = $2
-                          AND g.id = m.sandbox_id AND g.host = $3
-                          AND m.residency_status <> 'none'
-                        RETURNING m.thread_id, m.residency_generation AS generation,
-                                  m.residency_grant_id AS grant_id
-                        """,
+                        REAP_STALLED_SESSION_FORKS_MEMBERS_2_SQL,
                         operation[thread_column],
                         generation,
                         sandbox_host,
@@ -1133,13 +1040,7 @@ class PostgresSessionForkRepository:
                 # owner's delete tombstones a chat, and its resident slot is
                 # given back to the group.
                 await conn.execute(
-                    """
-                    UPDATE agent_thread_sandbox_memberships
-                    SET resident_slot_id = NULL, native_state = 'lost',
-                        context_status = 'lost', resident_state = 'lost',
-                        fork_operation_id = NULL, last_error = $3, updated_at = NOW()
-                    WHERE thread_id = $1 AND fork_operation_id = $2
-                    """,
+                    REAP_STALLED_SESSION_FORKS_MEMBERS_3_SQL,
                     operation["target_thread_id"],
                     operation["id"],
                     changed["last_error"],

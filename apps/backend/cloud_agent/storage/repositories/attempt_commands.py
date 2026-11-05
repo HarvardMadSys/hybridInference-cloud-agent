@@ -61,11 +61,19 @@ from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage._sql.sandbox import (
     THREAD_SANDBOX_CLAIM_SOURCE,
     THREAD_SANDBOX_SOURCE,
-    group_has_live_peer,
-    group_is_quiet,
-    member_turn_running,
     release_restore,
     restore_claim_due,
+)
+from cloud_agent.storage._sql.sandbox_transitions import (
+    CLAIM_COLD_GROUP_FOR_RESTORE_SQL,
+    REAP_ATTEMPT_GROUP_SQL,
+    REAP_ATTEMPT_MEMBERS_2_SQL,
+    REAP_ATTEMPT_MEMBERS_3_SQL,
+    REAP_ATTEMPT_MEMBERS_SQL,
+    RELEASE_CLAIM_MEMBERS_SQL,
+    SET_RESTORE_ATTEMPT_SQL,
+    TRANSITION_GROUP_SQL,
+    TRANSITION_MEMBERS_SQL,
 )
 from cloud_agent.storage.deadlocks import retry_deadlock_victim
 from cloud_agent_shared.sandbox_archive_settings import (
@@ -472,13 +480,7 @@ class PostgresAttemptCommands:
                 # source. Anything the previous host still holds names the old
                 # generation and is refused from here on.
                 await conn.execute(
-                    f"""
-                    UPDATE agent_sandboxes
-                    SET state = {GroupState.RESTORING.sql}, host = $2, generation = generation + 1,
-                        container_id = NULL, restore_attempts = restore_attempts + 1,
-                        idle_deadline = NULL, last_error = NULL, updated_at = NOW()
-                    WHERE id = $1 AND state = {GroupState.COLD.sql}
-                    """,
+                    CLAIM_COLD_GROUP_FOR_RESTORE_SQL,
                     thread_sandbox["sandbox_id"],
                     host,
                 )
@@ -557,7 +559,7 @@ class PostgresAttemptCommands:
                 # However this attempt ends before the recreated container is
                 # confirmed, ``release_restore`` finds the group by it.
                 await conn.execute(
-                    "UPDATE agent_sandboxes SET restore_attempt_id = $2 WHERE id = $1",
+                    SET_RESTORE_ATTEMPT_SQL,
                     thread_sandbox["sandbox_id"],
                     attempt["id"],
                 )
@@ -709,20 +711,7 @@ class PostgresAttemptCommands:
             # group this attempt was restoring is left to the restore release
             # below, which reads this reservation to tell whether it began.
             await conn.execute(
-                """
-                UPDATE agent_thread_sandbox_memberships m
-                SET active_attempt_id = NULL,
-                    resident_state = CASE
-                        WHEN m.native_session_id IS NULL
-                             OR m.native_session_id !~ '[^[:space:]]'
-                            THEN 'stopped'
-                        ELSE 'restarting'
-                    END,
-                    updated_at = NOW()
-                FROM agent_sandboxes g
-                WHERE m.active_attempt_id = $1 AND g.id = m.sandbox_id
-                  AND g.restore_attempt_id IS DISTINCT FROM $1
-                """,
+                RELEASE_CLAIM_MEMBERS_SQL,
                 attempt_id,
             )
             # All close-attempt paths take locks in attempt -> job -> host
@@ -958,59 +947,7 @@ class PostgresAttemptCommands:
                 # on an attempt the reaper will no longer visit.
                 if updated["thread_id"] is not None:
                     sandbox_transition = await conn.fetchrow(
-                        """
-                        UPDATE agent_thread_sandbox_memberships m
-                        SET context_status = CASE
-                                WHEN m.last_settled_job_id IS DISTINCT FROM $1
-                                     AND (
-                                        m.admitted_job_id = $1
-                                        OR g.container_id IS NULL
-                                     ) THEN 'lost'
-                                ELSE m.context_status
-                            END,
-                            native_state = CASE
-                                WHEN m.last_settled_job_id IS DISTINCT FROM $1
-                                     AND (
-                                        m.admitted_job_id = $1
-                                        OR g.container_id IS NULL
-                                     ) THEN 'lost'
-                                ELSE m.native_state
-                            END,
-                            resident_state = CASE
-                                WHEN m.last_settled_job_id = $1 THEN m.resident_state
-                                WHEN m.admitted_job_id = $1 OR g.container_id IS NULL
-                                    THEN 'lost'
-                                WHEN m.native_session_id IS NULL
-                                     OR m.native_session_id !~ '[^[:space:]]'
-                                    THEN 'stopped'
-                                ELSE 'restarting'
-                            END,
-                            active_attempt_id = CASE
-                                WHEN m.active_attempt_id = $2 THEN NULL
-                                ELSE m.active_attempt_id
-                            END,
-                            admitted_job_id = CASE
-                                WHEN m.admitted_job_id = $1 THEN NULL
-                                ELSE m.admitted_job_id
-                            END,
-                            admitted_at = CASE
-                                WHEN m.admitted_job_id = $1 THEN NULL
-                                ELSE m.admitted_at
-                            END,
-                            last_error = CASE
-                                WHEN m.last_settled_job_id = $1 THEN m.last_error
-                                ELSE COALESCE($4, 'retained turn ended before settlement')
-                            END,
-                            updated_at = NOW()
-                        FROM agent_sandboxes g
-                        WHERE m.thread_id = $3 AND g.id = m.sandbox_id
-                          AND (
-                                m.active_attempt_id = $2
-                                OR m.admitted_job_id = $1
-                          )
-                        RETURNING m.context_status, m.sandbox_id,
-                                  m.last_settled_job_id = $1 AS settled
-                        """,
+                        TRANSITION_MEMBERS_SQL,
                         job_id,
                         attempt_id,
                         updated["thread_id"],
@@ -1018,30 +955,7 @@ class PostgresAttemptCommands:
                     )
                     if sandbox_transition is not None:
                         await conn.execute(
-                            f"""
-                            UPDATE agent_sandboxes g
-                            SET state = CASE
-                                    WHEN $3 AND g.container_id IS NULL THEN {GroupState.LOST.sql}
-                                    WHEN $2 THEN {GroupState.RUNNING.sql}
-                                    WHEN g.active_operation_count > 0 OR {member_turn_running("g")} THEN {GroupState.RUNNING.sql}
-                                    WHEN {group_has_live_peer("g", excluding="$4")} THEN {GroupState.RUNNING.sql}
-                                    ELSE {GroupState.STOPPING.sql}
-                                END,
-                                last_activity_at = NOW(),
-                                idle_deadline = CASE
-                                    WHEN (
-                                        $2 OR {group_has_live_peer("g", excluding="$4")}
-                                     )
-                                     AND {group_is_quiet("g")}
-                                    THEN COALESCE(
-                                        g.idle_deadline,
-                                        clock_timestamp() + make_interval(secs => g.idle_timeout_seconds)
-                                    )
-                                    ELSE NULL
-                                END,
-                                updated_at = NOW()
-                            WHERE g.id = $1
-                            """,
+                            TRANSITION_GROUP_SQL,
                             sandbox_transition["sandbox_id"],
                             bool(sandbox_transition["settled"]),
                             sandbox_transition["context_status"] == "lost",
@@ -1716,33 +1630,7 @@ class PostgresAttemptCommands:
             # that a retry is safe; ordinary CLI/process replacement
             # at a clean turn boundary remains supported.
             lost_member = await conn.fetchrow(
-                """
-                UPDATE agent_thread_sandbox_memberships
-                SET native_state = 'lost', context_status = 'lost',
-                    resident_state = 'lost',
-                    active_attempt_id = CASE
-                        WHEN active_attempt_id = $2 THEN NULL
-                        ELSE active_attempt_id
-                    END,
-                    admitted_job_id = CASE
-                        WHEN admitted_job_id = $1 THEN NULL
-                        ELSE admitted_job_id
-                    END,
-                    admitted_at = CASE
-                        WHEN admitted_job_id = $1 THEN NULL
-                        ELSE admitted_at
-                    END,
-                    last_error = CASE
-                        WHEN admitted_job_id = $1
-                            THEN 'attempt lease expired after prompt admission'
-                        ELSE 'retained activation lease expired'
-                    END,
-                    updated_at = NOW()
-                WHERE thread_id = $3 AND sandbox_id = $4
-                  AND last_settled_job_id IS DISTINCT FROM $1
-                  AND (active_attempt_id = $2 OR admitted_job_id = $1)
-                RETURNING residency_generation
-                """,
+                REAP_ATTEMPT_MEMBERS_SQL,
                 job_id,
                 attempt_id,
                 sandbox_thread_id,
@@ -1750,44 +1638,13 @@ class PostgresAttemptCommands:
             )
             if lost_member is not None:
                 await conn.execute(
-                    f"""
-                    UPDATE agent_sandboxes g
-                    SET state = CASE
-                            WHEN g.container_id IS NULL THEN {GroupState.LOST.sql}
-                            WHEN g.active_operation_count > 0 OR {member_turn_running("g")} THEN {GroupState.RUNNING.sql}
-                            WHEN {group_has_live_peer("g")} THEN {GroupState.RUNNING.sql}
-                            ELSE {GroupState.STOPPING.sql}
-                        END,
-                        last_activity_at = NOW(),
-                        idle_deadline = CASE
-                            WHEN g.container_id IS NOT NULL
-                             AND {group_is_quiet("g")}
-                             AND {group_has_live_peer("g")}
-                            THEN clock_timestamp() + make_interval(
-                                secs => g.idle_timeout_seconds
-                            )
-                            ELSE NULL
-                        END,
-                        updated_at = NOW()
-                    WHERE g.id = $1
-                    """,
+                    REAP_ATTEMPT_GROUP_SQL,
                     row["sandbox_id"],
                 )
                 residency_generation = int(lost_member["residency_generation"] or 0)
                 if residency_generation > 0:
                     released = await conn.fetchrow(
-                        """
-                        UPDATE agent_thread_sandbox_memberships m
-                        SET residency_status = 'none',
-                            residency_last_active_at = NOW()
-                        FROM agent_sandboxes g
-                        WHERE m.thread_id = $1 AND m.residency_generation = $2
-                          AND m.residency_status <> 'none'
-                          AND g.id = m.sandbox_id
-                        RETURNING m.thread_id,
-                                  m.residency_generation AS generation,
-                                  g.host, m.residency_grant_id AS grant_id
-                        """,
+                        REAP_ATTEMPT_MEMBERS_2_SQL,
                         sandbox_thread_id,
                         residency_generation,
                     )
@@ -1815,25 +1672,7 @@ class PostgresAttemptCommands:
             # preserve the settled idle deadline, and fail the job for
             # explicit operator/user review.
             await conn.execute(
-                """
-                UPDATE agent_thread_sandbox_memberships
-                SET active_attempt_id = CASE
-                        WHEN active_attempt_id = $2 THEN NULL
-                        ELSE active_attempt_id
-                    END,
-                    admitted_job_id = CASE
-                        WHEN admitted_job_id = $1 THEN NULL
-                        ELSE admitted_job_id
-                    END,
-                    admitted_at = CASE
-                        WHEN admitted_job_id = $1 THEN NULL
-                        ELSE admitted_at
-                    END,
-                    last_error = 'job finalization expired after context settlement',
-                    updated_at = NOW()
-                WHERE thread_id = $3
-                  AND last_settled_job_id = $1
-                """,
+                REAP_ATTEMPT_MEMBERS_3_SQL,
                 job_id,
                 attempt_id,
                 sandbox_thread_id,

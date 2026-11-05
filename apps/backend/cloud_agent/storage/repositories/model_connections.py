@@ -10,6 +10,9 @@ import asyncpg
 from cloud_agent.domain.model_connections import ModelConnectionAccessEnded, ModelConnectionConflict
 from cloud_agent.storage._sql.accounts import local_access_ended
 from cloud_agent.storage._sql.rows import load_json
+from cloud_agent.storage._sql.sandbox_transitions import (
+    RELEASE_STALE_RESIDENCIES_MEMBERS_SQL,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -25,15 +28,6 @@ _UPDATABLE = frozenset({"name", "base_url", "models", "api_key_ciphertext", "ena
 #: and no model's verification describes the endpoint any more.
 _ENDPOINT_COLUMNS = ("base_url", "api_key_ciphertext")
 _ARRAY_COLUMNS = frozenset({"models"})
-
-#: A connection a residency may still run on: the owner's, live, enabled, and
-#: at the revision the residency was started with. ``b`` is its generation-bound binding.
-_STILL_CURRENT = """EXISTS (
-    SELECT 1 FROM agent_model_connections c
-    WHERE c.id = b.connection_id
-      AND c.deleted_at IS NULL AND c.enabled
-      AND c.credential_revision = b.credential_revision
-)"""
 
 
 def _connection(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -436,20 +430,7 @@ class PostgresModelConnectionRepository:
         """Release the open residencies a change to this connection left behind."""
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                f"""
-                UPDATE agent_thread_sandbox_memberships m
-                SET residency_status = 'none', residency_last_active_at = NOW()
-                FROM agent_sandboxes g, agent_threads t, agent_model_connection_residencies b
-                WHERE b.thread_id = m.thread_id
-                  AND b.residency_generation = m.residency_generation
-                  AND b.connection_id = $1
-                  AND m.residency_status <> 'none'
-                  AND g.id = m.sandbox_id
-                  AND t.id = m.thread_id AND t.user_id = $2
-                  AND NOT {_STILL_CURRENT}
-                RETURNING m.thread_id, m.residency_generation AS generation, g.host,
-                          COALESCE(m.residency_grant_id, '') AS grant_id
-                """,
+                RELEASE_STALE_RESIDENCIES_MEMBERS_SQL,
                 connection_id,
                 user_id,
             )

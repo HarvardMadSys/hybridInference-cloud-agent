@@ -25,7 +25,7 @@ from cloud_agent.domain.compute import (
     provider_resource_absent,
     retirement_cancellable,
 )
-from cloud_agent.domain.sandbox_group import DeletionState, GroupState
+from cloud_agent.domain.sandbox_group import DeletionState
 from cloud_agent.ports.compute_resources import ComputeSchedulingSnapshot
 from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.storage._sql import environment_runs
@@ -57,6 +57,10 @@ from cloud_agent.storage._sql.move_out import (
 )
 from cloud_agent.storage._sql.rotation_candidates import candidate_work_stoppable
 from cloud_agent.storage._sql.rows import load_json
+from cloud_agent.storage._sql.sandbox_transitions import (
+    LOSE_RECLAIMED_GROUP_MEMBERS_SQL,
+    LOSE_RECLAIMED_GROUP_SQL,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -2902,17 +2906,11 @@ class PostgresComputeResourceRepository:
             if group is None:
                 return False
             await conn.execute(
-                f"""UPDATE agent_sandboxes
-                   SET state={GroupState.LOST.sql}, idle_deadline=NULL, stop_requested_at=NULL,
-                       last_error='the server holding this sandbox was reclaimed by its provider',
-                       updated_at=NOW() WHERE id=$1""",
+                LOSE_RECLAIMED_GROUP_SQL,
                 sandbox_id,
             )
             await conn.execute(
-                """UPDATE agent_thread_sandbox_memberships
-                   SET native_state='lost', context_status='lost', resident_state='lost',
-                       updated_at=NOW()
-                   WHERE sandbox_id=$1""",
+                LOSE_RECLAIMED_GROUP_MEMBERS_SQL,
                 sandbox_id,
             )
             await conn.execute(
