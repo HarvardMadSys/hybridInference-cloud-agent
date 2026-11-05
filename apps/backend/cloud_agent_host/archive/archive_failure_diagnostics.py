@@ -22,14 +22,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
+from cloud_agent_host.archive.sandbox_deletion_diagnostics import _container, _render, _safe_id
 from cloud_agent_host.chat_sandbox_models import RetainedChatLost
 from cloud_agent_host.logging_utils import get_logger
-from cloud_agent_host.sandbox_deletion_diagnostics import _container, _render, _safe_id
 
 if TYPE_CHECKING:
     from cloud_agent_host.chat_sandbox_models import ChatSandboxSpec
 
-logger = get_logger(__name__)
+logger = get_logger("cloud_agent_host.archive_failure_diagnostics")
 
 _ARCHIVE_FAILURE_DIAGNOSTICS_ATTR = "_cloud_agent_archive_failure_diagnostics"
 _ARCHIVE_ERROR_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")

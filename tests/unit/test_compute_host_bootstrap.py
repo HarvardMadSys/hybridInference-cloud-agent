@@ -784,7 +784,7 @@ def _saved_checkpoint(archives: Path, sandbox_id: str = "asbx_one") -> dict:
     """Have the Host's checkpoint store keep a receipt; return what the control plane recorded."""
     from tests.unit.test_sandbox_checkpoints import _receipt
 
-    from cloud_agent_host.sandbox_checkpoints import SandboxCheckpointStore
+    from cloud_agent_host.archive.sandbox_checkpoints import SandboxCheckpointStore
 
     receipt = _receipt(sandbox_id)
     SandboxCheckpointStore(archives / "checkpoints").save(receipt)
@@ -800,11 +800,11 @@ def _discarded(
     """
     from tests.unit.test_sandbox_deletion_backup import _Manager
 
-    from cloud_agent_host.chat_sandbox import ChatSandboxSpec
-    from cloud_agent_host.sandbox_deletion_backup import (
+    from cloud_agent_host.archive.sandbox_deletion_backup import (
         ArchiveIdentity,
         SandboxDeletionBackupService,
     )
+    from cloud_agent_host.chat_sandbox import ChatSandboxSpec
     from cloud_agent_host.shared_session_state import SharedMemberManifest
     from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
 

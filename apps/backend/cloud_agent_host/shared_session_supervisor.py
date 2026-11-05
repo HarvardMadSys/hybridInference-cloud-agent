@@ -29,7 +29,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
-from cloud_agent_host.archive_failure_diagnostics import (
+from cloud_agent_host.archive.archive_failure_diagnostics import (
     _safe_error_type,
     archive_failure_http_detail,
 )
@@ -71,6 +71,7 @@ if TYPE_CHECKING:
     import builtins
     from collections.abc import Callable
 
+    from cloud_agent_host.archive.sandbox_checkpoints import CheckpointRestore
     from cloud_agent_host.chat_sandbox import (
         ChatSandboxManager,
         ChatSandboxSpec,
@@ -80,7 +81,6 @@ if TYPE_CHECKING:
     from cloud_agent_host.drivers import DialectRuntime, InputOutcome
     from cloud_agent_host.member_sessions import SharedTurnTelemetry
     from cloud_agent_host.native_session_fork import NativeSessionForkResult
-    from cloud_agent_host.sandbox_checkpoints import CheckpointRestore
     from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef
     from cloud_agent_shared.operation_profiling import (
         StageRecorder,

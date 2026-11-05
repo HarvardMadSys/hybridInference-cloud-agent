@@ -1,6 +1,6 @@
 """The host-wide capture slots every archive, checkpoint and restore shares.
 
-:mod:`cloud_agent_host.sandbox_archives` re-exports :class:`CaptureGate`.
+:mod:`cloud_agent_host.archive.sandbox_archives` re-exports :class:`CaptureGate`.
 """
 
 from __future__ import annotations

@@ -5,8 +5,8 @@ as an OCI image archive that omits every layer the sandbox image already
 provides. A host holding the same base image can load it and recreate the
 container, which is what will let a chat move between hosts. This module is the
 Docker capture and restore orchestration; the archive codec is in
-:mod:`cloud_agent_host.sandbox_checkpoint_oci` and the receipt store in
-:mod:`cloud_agent_host.sandbox_checkpoint_store`.
+:mod:`cloud_agent_host.archive.sandbox_checkpoint_oci` and the receipt store in
+:mod:`cloud_agent_host.archive.sandbox_checkpoint_store`.
 
 Docker has no command that saves a single layer. When containerd's content
 store is mounted read-only into the broker, the new layers are read straight
@@ -31,9 +31,9 @@ import time
 from datetime import UTC, datetime
 from typing import IO, TYPE_CHECKING, Any, BinaryIO, Final, TypeVar, cast
 
-from cloud_agent_host.sandbox_archive_bundle import BoundedDigestWriter
-from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveDownloadError
-from cloud_agent_host.sandbox_checkpoint_oci import (
+from cloud_agent_host.archive.sandbox_archive_bundle import BoundedDigestWriter
+from cloud_agent_host.archive.sandbox_archive_s3 import SandboxArchiveDownloadError
+from cloud_agent_host.archive.sandbox_checkpoint_oci import (
     _DIGEST_RE,
     _MAX_METADATA_BYTES,
     CheckpointArchive,
@@ -47,7 +47,7 @@ from cloud_agent_host.sandbox_checkpoint_oci import (
     prepare_restore_archive,
     read_base_layers,
 )
-from cloud_agent_host.sandbox_checkpoint_store import (
+from cloud_agent_host.archive.sandbox_checkpoint_store import (
     CheckpointArchiveInvalid,
     SandboxCheckpointError,
     SandboxCheckpointStore,
@@ -68,12 +68,12 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from pathlib import Path
 
+    from cloud_agent_host.archive.sandbox_archive_s3 import SandboxArchiveReceipt
     from cloud_agent_host.chat_sandbox import ChatSandboxInspection, ChatSandboxSpec
-    from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveReceipt
     from cloud_agent_host.shared_session_state import SharedMemberManifest
     from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("cloud_agent_host.sandbox_checkpoints")
 
 _T = TypeVar("_T")
 

@@ -14,14 +14,17 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from cloud_agent_host import sandbox_deletion_backup as deletion_backup
+from cloud_agent_host.archive import sandbox_deletion_backup as deletion_backup
+from cloud_agent_host.archive.sandbox_deletion_backup import (
+    ArchiveIdentity,
+    SandboxDeletionBackupService,
+)
 from cloud_agent_host.chat_sandbox import (
     ChatSandboxInspection,
     ChatSandboxSpec,
     ChatSandboxStatus,
 )
 from cloud_agent_host.sandbox import ProcessBackend, SandboxError
-from cloud_agent_host.sandbox_deletion_backup import ArchiveIdentity, SandboxDeletionBackupService
 from cloud_agent_host.sandbox_manager import create_app
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
 from cloud_agent_host.shared_session_state import SharedMemberManifest
@@ -236,7 +239,7 @@ def test_discard_completes_stale_membership_after_proving_container_absent(
     discard = replace(identity, request_id="discard-absent", archive_key="")
     forgotten: list[str] = []
     monkeypatch.setattr(
-        "cloud_agent_host.sandbox_deletion_backup.forget_deleted_container_uploads",
+        "cloud_agent_host.archive.sandbox_deletion_backup.forget_deleted_container_uploads",
         forgotten.append,
     )
 
@@ -278,7 +281,7 @@ def test_absent_discard_retries_when_upload_receipt_cleanup_fails(archive_setup,
             raise OSError("cleanup failed")
 
     monkeypatch.setattr(
-        "cloud_agent_host.sandbox_deletion_backup.forget_deleted_container_uploads",
+        "cloud_agent_host.archive.sandbox_deletion_backup.forget_deleted_container_uploads",
         fail_once,
     )
 

@@ -32,11 +32,11 @@ from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost, St
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cloud_agent_host.sandbox_deletion_backup import ArchiveIdentity
+    from cloud_agent_host.archive.sandbox_deletion_backup import ArchiveIdentity
     from cloud_agent_host.shared_session_state import _Group
     from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
 
-logger = get_logger(__name__)
+logger = get_logger("cloud_agent_host.sandbox_deletion_diagnostics")
 
 #: The sentences a discard can be refused with, as the host raises them.
 #: ``tests/unit/test_sandbox_discard_diagnostics.py`` checks each against the

@@ -16,6 +16,21 @@ from tests.support.archive_policy import hooked_supervisor
 from tests.unit.test_sandbox_checkpoints import BASE, NEW, _digest, _Image
 from tests.unit.test_shared_session_supervisor import _Manager, _members, _spec
 
+from cloud_agent_host.archive.sandbox_archive_s3 import (
+    SandboxArchiveDownloadError,
+    SandboxArchiveS3Config,
+    SandboxArchiveS3Uploader,
+    checkpoint_object_key,
+)
+from cloud_agent_host.archive.sandbox_checkpoints import (
+    CheckpointRestore,
+    SandboxCheckpointCapture,
+    SandboxCheckpointError,
+    SandboxCheckpointStore,
+    checkpoint_image_reference,
+    export_checkpoint_archive,
+    prepare_restore_archive,
+)
 from cloud_agent_host.chat_sandbox import (
     CHAT_CHECKPOINT_LABEL,
     CHAT_GENERATION_LABEL,
@@ -28,21 +43,6 @@ from cloud_agent_host.chat_sandbox import (
 )
 from cloud_agent_host.chat_sandbox_network import ChatSandboxNetwork
 from cloud_agent_host.sandbox import ContainerBackend, SandboxError
-from cloud_agent_host.sandbox_archive_s3 import (
-    SandboxArchiveDownloadError,
-    SandboxArchiveS3Config,
-    SandboxArchiveS3Uploader,
-    checkpoint_object_key,
-)
-from cloud_agent_host.sandbox_checkpoints import (
-    CheckpointRestore,
-    SandboxCheckpointCapture,
-    SandboxCheckpointError,
-    SandboxCheckpointStore,
-    checkpoint_image_reference,
-    export_checkpoint_archive,
-    prepare_restore_archive,
-)
 from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 

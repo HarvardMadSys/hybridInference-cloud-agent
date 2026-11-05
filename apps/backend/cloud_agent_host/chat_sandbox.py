@@ -40,6 +40,7 @@ import tty
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent_host import chat_sandbox_markers as markers, chat_sandbox_writers as writers
+from cloud_agent_host.archive.sandbox_checkpoints import checkpoint_image_reference
 from cloud_agent_host.bounded_output import OutputPump, TextTail, protocol_lines, text_chunks
 from cloud_agent_host.chat_sandbox_exec import network_proof, spawn_target
 from cloud_agent_host.chat_sandbox_export import pump_archive_export, raise_archive_export_failure
@@ -134,7 +135,6 @@ from cloud_agent_host.sandbox import (
     SandboxSpec,
     TerminalProcess,
 )
-from cloud_agent_host.sandbox_checkpoints import checkpoint_image_reference
 from cloud_agent_host.stream_input import interactive_input, require_nonempty_rewindable
 from cloud_agent_host.tool_windows import MAX_TOOL_MARK_BYTES, TOOL_MARK_FILE, ToolMarkReader
 from cloud_agent_shared.environment import (

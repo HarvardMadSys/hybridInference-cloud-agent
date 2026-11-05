@@ -17,6 +17,7 @@ from tests.unit.test_repository_environments import _Backend
 from tests.unit.test_sandbox_restore import _inspection
 from tests.unit.test_shared_session_supervisor import _Manager, _members, _spec
 
+from cloud_agent_host.archive.sandbox_checkpoints import CheckpointArchiveInvalid
 from cloud_agent_host.chat_sandbox import (
     CHAT_ENVIRONMENT_SNAPSHOT_LABEL,
     ENVIRONMENT_TEST_LABEL,
@@ -24,7 +25,6 @@ from cloud_agent_host.chat_sandbox import (
 )
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
 from cloud_agent_host.sandbox import ContainerBackend, SandboxError
-from cloud_agent_host.sandbox_checkpoints import CheckpointArchiveInvalid
 from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_shared.environment import (
     BoundEnvironment,
@@ -623,7 +623,7 @@ def test_a_host_without_a_sandbox_manager_has_no_snapshots_to_drop(monkeypatch):
 
 
 def test_snapshot_images_are_named_by_their_ids(tmp_path):
-    from cloud_agent_host.sandbox_checkpoints import (
+    from cloud_agent_host.archive.sandbox_checkpoints import (
         SandboxCheckpointCapture,
         SandboxCheckpointStore,
     )

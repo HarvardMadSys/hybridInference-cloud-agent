@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO, Final, cast
 
-from cloud_agent_host.sandbox_archives import safe_archive_error_type
+from cloud_agent_host.archive.sandbox_archives import safe_archive_error_type
 from cloud_agent_shared.errors import SandboxError
 
 if TYPE_CHECKING:

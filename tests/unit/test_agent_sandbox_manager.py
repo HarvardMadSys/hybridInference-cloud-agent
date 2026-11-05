@@ -3330,7 +3330,7 @@ def test_build_turn_resources_adopts_late_announced_guest_marks_and_logs_them(ca
 
 @pytest.mark.asyncio
 async def test_inventory_rows_carry_each_groups_latest_checkpoint(tmp_path):
-    from cloud_agent_host.sandbox_checkpoints import (
+    from cloud_agent_host.archive.sandbox_checkpoints import (
         SandboxCheckpointReceipt,
         SandboxCheckpointStore,
     )

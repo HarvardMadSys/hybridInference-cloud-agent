@@ -21,13 +21,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud_agent_host.chat_sandbox import SHARED_WORKSPACE_PERMISSIONS_SCRIPT, ChatSandboxSpec
-from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveReceipt
-from cloud_agent_host.sandbox_checkpoints import (
+from cloud_agent_host.archive.sandbox_archive_s3 import SandboxArchiveReceipt
+from cloud_agent_host.archive.sandbox_checkpoints import (
     CheckpointArchiveInvalid,
     SandboxCheckpointCapture,
     SandboxCheckpointStore,
 )
+from cloud_agent_host.chat_sandbox import SHARED_WORKSPACE_PERMISSIONS_SCRIPT, ChatSandboxSpec
 from cloud_agent_shared.environment_snapshots import (
     owner_hash,
     snapshot_image_reference,

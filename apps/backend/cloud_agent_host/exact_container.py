@@ -34,6 +34,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from cloud_agent_host.archive.sandbox_checkpoints import checkpoint_image_reference
 from cloud_agent_host.chat_sandbox_inspect import container_inspection
 from cloud_agent_host.chat_sandbox_models import (
     CHAT_CHECKPOINT_LABEL,
@@ -44,7 +45,6 @@ from cloud_agent_host.chat_sandbox_models import (
 )
 from cloud_agent_host.docker_engine import run_docker
 from cloud_agent_host.sandbox import SandboxError
-from cloud_agent_host.sandbox_checkpoints import checkpoint_image_reference
 from cloud_agent_shared.environment_snapshots import snapshot_image_reference
 
 if TYPE_CHECKING:

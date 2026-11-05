@@ -13,8 +13,8 @@ from typing import Any
 import pytest
 from botocore.exceptions import ClientError
 
-from cloud_agent_host import sandbox_archive_ranges, sandbox_archive_s3
-from cloud_agent_host.sandbox_archive_s3 import (
+from cloud_agent_host.archive import sandbox_archive_ranges, sandbox_archive_s3
+from cloud_agent_host.archive.sandbox_archive_s3 import (
     SandboxArchiveDownloadError,
     SandboxArchiveS3Config,
     SandboxArchiveS3Uploader,

@@ -17,7 +17,7 @@ import logging
 from dataclasses import asdict, replace
 from typing import TYPE_CHECKING, Any, Literal
 
-from cloud_agent_host.archive_failure_diagnostics import (
+from cloud_agent_host.archive.archive_failure_diagnostics import (
     _archive_failure_diagnostic,
     logged_stopped_archive_failure,
 )
