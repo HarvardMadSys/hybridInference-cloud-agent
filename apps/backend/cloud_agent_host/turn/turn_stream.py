@@ -20,10 +20,10 @@ from cloud_agent_shared import operation_profiling
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from cloud_agent_host.attempt_lease import Heartbeater
     from cloud_agent_host.control_plane_client import (
         ControlPlane,
     )
+    from cloud_agent_host.service.attempt_lease import Heartbeater
 
 # How often the control checks run while the agent is silent.
 _POLL_INTERVAL_S = 0.5

@@ -13,10 +13,10 @@ import secrets
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent_host.container.sandbox import ContainerBackend, SandboxBackend
-from cloud_agent_host.host_runtime import HOST_CONCURRENCY_CAPABILITY, default_slots
-from cloud_agent_host.local_settings import _sandbox_resource_setting
 from cloud_agent_host.runtimes import get_runtime, registered_runtimes
 from cloud_agent_host.runtimes.live import driver_for
+from cloud_agent_host.service.host_runtime import HOST_CONCURRENCY_CAPABILITY, default_slots
+from cloud_agent_host.service.local_settings import _sandbox_resource_setting
 from cloud_agent_shared import sandbox_archive_settings
 from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY, ENVIRONMENT_INFERENCE_CAPABILITY
 from cloud_agent_shared.environment_snapshots import ENVIRONMENT_SNAPSHOT_CAPABILITY

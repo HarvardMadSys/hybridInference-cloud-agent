@@ -340,7 +340,9 @@ def test_a_poll_claims_with_the_loops_proof_on_the_workers_client(monkeypatch):
     def second_proof(*_args, **_kwargs):
         raise AssertionError("the poll built a proof of its own")
 
-    monkeypatch.setattr("cloud_agent_host.host_capabilities.claim_attestation", second_proof)
+    monkeypatch.setattr(
+        "cloud_agent_host.service.host_capabilities.claim_attestation", second_proof
+    )
     with httpx.Client(transport=httpx.MockTransport(handler), base_url="http://control") as client:
         claimed = environment_tests.claim_and_execute(
             base_url="http://control",

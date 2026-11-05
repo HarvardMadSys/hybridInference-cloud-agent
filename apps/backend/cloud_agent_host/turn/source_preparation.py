@@ -31,7 +31,7 @@ from cloud_agent_host.container.chat_sandbox import (
     RetainedChatBackend,
 )
 from cloud_agent_host.container.sandbox import SandboxBackend, SandboxSpec
-from cloud_agent_host.local_settings import source_import_max_bytes
+from cloud_agent_host.service.local_settings import source_import_max_bytes
 from cloud_agent_host.turn.source_prefetch import SourcePrefetch
 from cloud_agent_shared.environment_snapshots import (
     MAX_LOCKFILES,

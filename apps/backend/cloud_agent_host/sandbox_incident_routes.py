@@ -5,7 +5,7 @@ journal drain in a running group's container, as root in the ``agent`` group:
 the journals are group-readable, and root needs no capability for that.
 ``install_incident_routes`` adds the one route the runner calls, after a
 heartbeat answer confirmed what its beat carried: the sandbox manager forgets
-those rows (``cloud_agent_host.incident_relay``).
+those rows (``cloud_agent_host.service.incident_relay``).
 """
 
 from __future__ import annotations

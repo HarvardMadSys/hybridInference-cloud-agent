@@ -17,11 +17,11 @@ import httpx
 from cloud_agent_host.claimed_job import ClaimedJob, LeaseLost
 from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
 from cloud_agent_host.container.sandbox import ContainerBackend
-from cloud_agent_host.local_settings import (
+from cloud_agent_host.logging_utils import get_logger
+from cloud_agent_host.service.local_settings import (
     _sandbox_resource_setting,
     local_shared_resident_capacity,
 )
-from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.shared_protocol import FORK_HELPER, PLATFORM_MCP_SERVER_PREFIX
 

@@ -15,7 +15,6 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_host import incident_relay
 from cloud_agent_host.claimed_job import ClaimedJob, ClaimUnreachable, WorkWaitUnsupported
 from cloud_agent_host.container.sandbox import (
     ContainerBackend,
@@ -23,26 +22,40 @@ from cloud_agent_host.container.sandbox import (
     SandboxError,
     build_backend_from_env,
 )
-from cloud_agent_host.enrollment import HostHeartbeat, ensure_enrolled
-from cloud_agent_host.host_capabilities import (
+from cloud_agent_host.host_capacity import (
+    HostCapacityCollector,
+    build_storage_probe,
+    capacity_enabled,
+)
+from cloud_agent_host.logging_utils import get_logger
+from cloud_agent_host.measurement_delivery import DELIVERY_HANDOFF_DRAIN_S
+from cloud_agent_host.runtime_downloads import (
+    ENV_RUNTIME_DOWNLOAD_NETWORK,
+    ENV_RUNTIME_REGISTRY_URL,
+    RuntimeDownloads,
+)
+from cloud_agent_host.runtime_qualification import HostQualification
+from cloud_agent_host.sandbox_manager_client import (
+    SandboxManagerClient,
+    SandboxManagerError,
+    sandbox_manager_from_env,
+)
+from cloud_agent_host.service import incident_relay
+from cloud_agent_host.service.enrollment import HostHeartbeat, ensure_enrolled
+from cloud_agent_host.service.host_capabilities import (
     _advertised_host_capabilities,
     _shared_live_deployment_ready,
     _shared_live_host_capabilities,
     _shared_live_ready_file,
     claim_attestation,
 )
-from cloud_agent_host.host_capacity import (
-    HostCapacityCollector,
-    build_storage_probe,
-    capacity_enabled,
-)
-from cloud_agent_host.host_control import (
+from cloud_agent_host.service.host_control import (
     claim_payload,
     keepalive_client,
     release_turn,
     wait_for_work,
 )
-from cloud_agent_host.host_runtime import (
+from cloud_agent_host.service.host_runtime import (
     LAUNCH_STARTED,
     LAUNCH_UNCERTAIN,
     LaunchResult,
@@ -51,33 +64,20 @@ from cloud_agent_host.host_runtime import (
     read_handover,
     requested_slots,
 )
-from cloud_agent_host.local_settings import (
+from cloud_agent_host.service.local_settings import (
     DEFAULT_AGENT_TIMEOUT_S,
     DEFAULT_LEASE_TTL_S,
     _runner_local_settings,
 )
-from cloud_agent_host.logging_utils import get_logger
-from cloud_agent_host.measurement_delivery import DELIVERY_HANDOFF_DRAIN_S
-from cloud_agent_host.measurement_sender import _enqueue_delivery
-from cloud_agent_host.profiling_policy import ProfilingPolicySync
-from cloud_agent_host.runner_stop import (
+from cloud_agent_host.service.measurement_sender import _enqueue_delivery
+from cloud_agent_host.service.profiling_policy import ProfilingPolicySync
+from cloud_agent_host.service.runner_stop import (
     STOPPING as _STOPPING,
     drain_on_sigterm as _drain_on_sigterm,
     stay_down as _stay_down,
 )
-from cloud_agent_host.runtime_downloads import (
-    ENV_RUNTIME_DOWNLOAD_NETWORK,
-    ENV_RUNTIME_REGISTRY_URL,
-    RuntimeDownloads,
-)
-from cloud_agent_host.runtime_qualification import HostQualification
-from cloud_agent_host.runtime_settings import RuntimeSettings, SandboxArchiveRuntimeSettings
-from cloud_agent_host.sandbox_manager_client import (
-    SandboxManagerClient,
-    SandboxManagerError,
-    sandbox_manager_from_env,
-)
-from cloud_agent_host.turn_launch import TurnSpare, spawn_turn
+from cloud_agent_host.service.runtime_settings import RuntimeSettings, SandboxArchiveRuntimeSettings
+from cloud_agent_host.service.turn_launch import TurnSpare, spawn_turn
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.sandbox_manager_compat import manager_env
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
@@ -539,7 +539,7 @@ def _spawn_turn(
 ) -> LaunchResult:
     """Hand one claimed turn to a child and find out whether it took it.
 
-    The handover is :func:`cloud_agent_host.turn_launch.spawn_turn`'s. This
+    The handover is :func:`cloud_agent_host.service.turn_launch.spawn_turn`'s. This
     is the name the service calls and its tests replace, and it reads the
     answer with this module's ``read_handover``, which they replace too.
     """

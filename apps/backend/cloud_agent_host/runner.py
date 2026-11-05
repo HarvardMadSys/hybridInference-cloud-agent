@@ -24,7 +24,7 @@ unparsable line becomes a raw event rather than disappearing, and a lost lease
 ends the run instead of being retried.
 
 This module is the command line. Without ``--turn`` it runs the host service
-(:mod:`cloud_agent_host.host_service`); with it, one turn's child process
+(:mod:`cloud_agent_host.service.host_service`); with it, one turn's child process
 (:mod:`cloud_agent_host.turn.turn_child`). The trusted Git work on a chat's source
 is :mod:`cloud_agent_host.turn.source_preparation`.
 """
@@ -36,14 +36,14 @@ import os
 import socket
 import sys
 
-from cloud_agent_host.attempt_lease import _UNRENEWABLE_LEASE_S
-from cloud_agent_host.host_service import run_forever
-from cloud_agent_host.local_settings import (
+from cloud_agent_host.logging_utils import configure_process_logging
+from cloud_agent_host.retired_configuration import refuse_retired_host_configuration
+from cloud_agent_host.service.attempt_lease import _UNRENEWABLE_LEASE_S
+from cloud_agent_host.service.host_service import run_forever
+from cloud_agent_host.service.local_settings import (
     DEFAULT_LEASE_TTL_S,
     _local_agent_timeout_s,
 )
-from cloud_agent_host.logging_utils import configure_process_logging
-from cloud_agent_host.retired_configuration import refuse_retired_host_configuration
 from cloud_agent_host.turn.turn_child import _serve_turn
 
 

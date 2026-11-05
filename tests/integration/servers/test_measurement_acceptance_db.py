@@ -67,13 +67,14 @@ from cloud_agent.sandbox_manager.sandbox_manager_client import (
 )
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import SCOPE_FULL, mint_worker_token
-from cloud_agent_host import measurement_sender, operation_call
+from cloud_agent_host import operation_call
 from cloud_agent_host.claimed_job import ClaimedJob
 from cloud_agent_host.control_plane_client import ControlPlane
 from cloud_agent_host.measurement_delivery import (
     DELIVERY_DRAIN_S,
     DELIVERY_HANDOFF_DRAIN_S,
 )
+from cloud_agent_host.service import measurement_sender
 from cloud_agent_host.turn import turn_stream
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.shared_protocol import (

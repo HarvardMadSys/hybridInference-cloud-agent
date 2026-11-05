@@ -52,8 +52,8 @@ def test_http_observations_and_runner_heartbeats_do_not_wait_for_final_archive(m
     from anyio.from_thread import start_blocking_portal
     from fastapi.testclient import TestClient
 
-    from cloud_agent_host import host_service
     from cloud_agent_host.sandbox_manager_client import SandboxManagerClient
+    from cloud_agent_host.service import host_service
 
     manager = _Manager()
     entered, release = threading.Event(), threading.Event()

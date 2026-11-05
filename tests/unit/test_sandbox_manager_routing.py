@@ -214,7 +214,7 @@ class TestAdvertisedSandboxManagerUrl:
 
     def test_it_reports_the_url_it_uses_when_nothing_says_otherwise(self, monkeypatch) -> None:
         """The co-located shape, and the default: one address, no drift."""
-        from cloud_agent_host import host_service
+        from cloud_agent_host.service import host_service
 
         monkeypatch.delenv("AGENT_SANDBOX_MANAGER_ADVERTISE_URL", raising=False)
         monkeypatch.setenv("AGENT_SANDBOX_MANAGER_URL", "http://sandbox-manager:8092")
@@ -223,7 +223,7 @@ class TestAdvertisedSandboxManagerUrl:
 
     def test_an_advertised_url_wins(self, monkeypatch) -> None:
         """The remote shape: dial locally, advertise the tunnel's far end."""
-        from cloud_agent_host import host_service
+        from cloud_agent_host.service import host_service
 
         monkeypatch.setenv("AGENT_SANDBOX_MANAGER_URL", "http://sandbox-manager:8092")
         monkeypatch.setenv("AGENT_SANDBOX_MANAGER_ADVERTISE_URL", "http://172.24.0.1:18092")
@@ -237,7 +237,7 @@ class TestAdvertisedSandboxManagerUrl:
         defined, empty variable rather than an absent one. Treating that as an
         override would report no sandbox manager at all on every co-located deployment.
         """
-        from cloud_agent_host import host_service
+        from cloud_agent_host.service import host_service
 
         monkeypatch.setenv("AGENT_SANDBOX_MANAGER_URL", "http://sandbox-manager:8092")
         monkeypatch.setenv("AGENT_SANDBOX_MANAGER_ADVERTISE_URL", "   ")

@@ -21,10 +21,10 @@ from tests.unit.test_agent_runner import (  # noqa: F401 - the autouse pytest fi
 from cloud_agent import settings
 from cloud_agent.application import runtime_upgrades
 from cloud_agent.schemas.hosts import HostHeartbeatRequest
-from cloud_agent_host import attempt_lease, host_capabilities, local_settings
 from cloud_agent_host.container.sandbox import ContainerBackend
 from cloud_agent_host.runtime_downloads import RuntimeDownloads
-from cloud_agent_host.runtime_settings import RuntimeSettings
+from cloud_agent_host.service import attempt_lease, host_capabilities, local_settings
+from cloud_agent_host.service.runtime_settings import RuntimeSettings
 from cloud_agent_host.turn import turn_child
 from cloud_agent_shared.host_settings import (
     HOST_SETTINGS_BY_KEY,

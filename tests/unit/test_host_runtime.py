@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cloud_agent_host.host_runtime import (
+from cloud_agent_host.service.host_runtime import (
     HANDOVER_ACCEPTED,
     HANDOVER_DECLINED,
     LAUNCH_NOT_STARTED,

@@ -2152,9 +2152,9 @@ def _ensure_running_container(sandbox: StartupSandbox) -> Any:
 
 async def _run_startup_section(session: BenchSession, args: argparse.Namespace) -> dict[str, Any]:
     """Measure the four startup paths, per cohort, on a real container."""
-    from cloud_agent_host import measurement_sender
     from cloud_agent_host.claimed_job import ClaimedJob
     from cloud_agent_host.measurement_delivery import DELIVERY_HANDOFF_DRAIN_S
+    from cloud_agent_host.service import measurement_sender
 
     sandbox = StartupSandbox()
     results: dict[str, dict[str, Any]] = {}

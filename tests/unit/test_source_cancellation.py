@@ -16,7 +16,7 @@ from tests.unit.test_agent_runner_worktree import _assert_ended, _child_started,
 from tests.unit.test_runner_host_settings import _JOB
 from tests.unit.test_runner_source_prefetch import Source, _prefetch_threads, _run_turn
 
-from cloud_agent_host.host_runtime import LAUNCH_STARTED, LaunchResult, TurnPool
+from cloud_agent_host.service.host_runtime import LAUNCH_STARTED, LaunchResult, TurnPool
 from cloud_agent_host.turn import source_preparation
 from cloud_agent_shared.git import source_archive, source_cancellation
 from cloud_agent_shared.git.source_cancellation import SourcePreparationCancelled

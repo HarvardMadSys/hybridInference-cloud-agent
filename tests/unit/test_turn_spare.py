@@ -30,9 +30,10 @@ from tests.unit.test_runner_host_service import (
     service as service,
 )
 
-from cloud_agent_host import host_service, runner, runner_stop, turn_launch
+from cloud_agent_host import runner
 from cloud_agent_host.container.sandbox import ProcessBackend
-from cloud_agent_host.host_runtime import (
+from cloud_agent_host.service import host_service, runner_stop, turn_launch
+from cloud_agent_host.service.host_runtime import (
     LAUNCH_NOT_STARTED,
     LAUNCH_STARTED,
     LAUNCH_UNCERTAIN,

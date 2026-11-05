@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 from cloud_agent_host.atomic_file import atomic_replace_bytes
 from cloud_agent_host.container.sandbox import SandboxError
-from cloud_agent_host.enrollment import credential_path
+from cloud_agent_host.service.enrollment import credential_path
 
 
 class ActionReceipts:

@@ -9,13 +9,8 @@ from unittest.mock import Mock
 import httpx
 import pytest
 
-from cloud_agent_host import (
-    attempt_lease,
-    claimed_job,
-    control_plane_client,
-    local_settings,
-    runner,
-)
+from cloud_agent_host import claimed_job, control_plane_client, runner
+from cloud_agent_host.service import attempt_lease, local_settings
 from cloud_agent_host.turn import turn_stream
 
 

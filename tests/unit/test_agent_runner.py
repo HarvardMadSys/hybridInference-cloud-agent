@@ -17,20 +17,13 @@ from pydantic import ValidationError
 from tests.support.owners import connection_access, residency_connection
 
 from cloud_agent.schemas import WorkerSandboxAbandonRequest
-from cloud_agent_host import (
-    attempt_lease,
-    control_plane_client,
-    host_capabilities,
-    host_service,
-    local_settings,
-    sandbox_manager_client,
-    session_lifecycle,
-)
+from cloud_agent_host import control_plane_client, sandbox_manager_client, session_lifecycle
 from cloud_agent_host.claimed_job import ClaimedJob, LeaseLost
 from cloud_agent_host.container.chat_sandbox import ChatSandboxSpec
 from cloud_agent_host.container.sandbox import ContainerBackend, ProcessBackend, SandboxError
 from cloud_agent_host.runtimes import ClaudeCodeRuntime, get_runtime
 from cloud_agent_host.sandbox_manager_client import SandboxManagerError
+from cloud_agent_host.service import attempt_lease, host_capabilities, host_service, local_settings
 from cloud_agent_host.turn import group_reservation, shared_live_attempt, turn_child, turn_stream
 from cloud_agent_shared import operation_profiling, shared_protocol
 from cloud_agent_shared.environment import BoundEnvironment

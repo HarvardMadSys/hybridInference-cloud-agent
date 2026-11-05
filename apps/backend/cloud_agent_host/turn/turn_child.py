@@ -11,7 +11,6 @@ from __future__ import annotations
 import contextlib
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_host.attempt_lease import HEARTBEAT_INTERVAL_S, Heartbeater
 from cloud_agent_host.claimed_job import (
     ClaimedJob,
     LeaseLost,
@@ -23,26 +22,27 @@ from cloud_agent_host.container.sandbox import (
     build_backend_from_env,
 )
 from cloud_agent_host.control_plane_client import ControlPlane, _log_control_failure
-from cloud_agent_host.host_control import release_turn
-from cloud_agent_host.host_runtime import (
+from cloud_agent_host.logging_utils import get_logger
+from cloud_agent_host.measurement_delivery import DELIVERY_DRAIN_S
+from cloud_agent_host.runtime_qualification import VERDICT_KEY, adopt_verdict
+from cloud_agent_host.runtimes import get_runtime
+from cloud_agent_host.service.attempt_lease import HEARTBEAT_INTERVAL_S, Heartbeater
+from cloud_agent_host.service.host_control import release_turn
+from cloud_agent_host.service.host_runtime import (
     HANDOVER_ACCEPTED,
     HANDOVER_DECLINED,
     decode_turn,
     write_handover,
 )
-from cloud_agent_host.local_settings import (
+from cloud_agent_host.service.local_settings import (
     DEFAULT_AGENT_TIMEOUT_S,
     DEFAULT_LEASE_TTL_S,
     _new_sandbox_storage_error,
 )
-from cloud_agent_host.logging_utils import get_logger
-from cloud_agent_host.measurement_delivery import DELIVERY_DRAIN_S
-from cloud_agent_host.measurement_sender import _enqueue_delivery
-from cloud_agent_host.runner_stop import drain_on_sigterm as _drain_on_sigterm
-from cloud_agent_host.runtime_qualification import VERDICT_KEY, adopt_verdict
-from cloud_agent_host.runtimes import get_runtime
+from cloud_agent_host.service.measurement_sender import _enqueue_delivery
+from cloud_agent_host.service.runner_stop import drain_on_sigterm as _drain_on_sigterm
+from cloud_agent_host.service.turn_launch import handed_worker_id, read_turn_input
 from cloud_agent_host.turn.shared_live_attempt import _run_shared_live_attempt
-from cloud_agent_host.turn_launch import handed_worker_id, read_turn_input
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.host_settings import (
     RUNNER_SETTING_KEYS,

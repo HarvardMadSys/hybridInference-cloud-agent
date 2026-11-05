@@ -754,17 +754,23 @@ check_shared_live_stack() {
     [[ -n "$first_id" ]] || first_id="$id"
     (
       attest_rc=0
-      # A runner image from before the host service split holds the probe in
-      # cloud_agent_host.runner; the fallback keeps `check` working against it.
-      # One from before the host package split keeps the sandbox module at
-      # cloud_agent_host.sandbox, not in cloud_agent_host.container.
+      # A runner image from before the host package split keeps host_capabilities
+      # and sandbox at the package's top level rather than in
+      # cloud_agent_host.service and cloud_agent_host.container, and one from
+      # before the host service split holds the probe in cloud_agent_host.runner;
+      # the fallbacks keep `check` working against both.
       docker exec "$id" python -c '
 try:
-    from cloud_agent_host.host_capabilities import _shared_live_host_capabilities as capabilities
-except ModuleNotFoundError as missing:  # COMPAT(remove-after=2026-12-31): every runner image ships host_capabilities
-    if missing.name != "cloud_agent_host.host_capabilities":
+    from cloud_agent_host.service.host_capabilities import _shared_live_host_capabilities as capabilities
+except ModuleNotFoundError as missing:  # COMPAT(remove-after=2026-12-31): every runner image ships cloud_agent_host.service
+    if missing.name != "cloud_agent_host.service":
         raise
-    from cloud_agent_host.runner import _shared_live_host_capabilities as capabilities
+    try:
+        from cloud_agent_host.host_capabilities import _shared_live_host_capabilities as capabilities
+    except ModuleNotFoundError as older:  # COMPAT(remove-after=2026-12-31): every runner image ships host_capabilities
+        if older.name != "cloud_agent_host.host_capabilities":
+            raise
+        from cloud_agent_host.runner import _shared_live_host_capabilities as capabilities
 try:
     from cloud_agent_host.container.sandbox import build_backend_from_env
 except ModuleNotFoundError as missing:  # COMPAT(remove-after=2026-12-31): every runner image ships cloud_agent_host.container

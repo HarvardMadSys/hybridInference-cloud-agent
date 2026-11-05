@@ -32,7 +32,7 @@ def test_sigterm_sets_the_flag_and_does_not_kill_the_process() -> None:
         """
         import os, signal, sys, time
         sys.path.insert(0, os.environ["HOST_PKG"])
-        from cloud_agent_host import runner_stop
+        from cloud_agent_host.service import runner_stop
 
         runner_stop.drain_on_sigterm()
         os.kill(os.getpid(), signal.SIGTERM)
@@ -73,7 +73,7 @@ def test_sigterm_during_preflight_does_not_kill_the_turn_child() -> None:
         """
         import io, os, signal, sys, time
         sys.path.insert(0, os.environ["HOST_PKG"])
-        from cloud_agent_host import runner_stop
+        from cloud_agent_host.service import runner_stop
         from cloud_agent_host.turn import turn_child
 
         class Backend:
@@ -124,7 +124,7 @@ def test_sigint_is_left_alone() -> None:
     people: SIGTERM from docker, which is already waiting out its grace
     period, and SIGINT from somebody at a keyboard.
     """
-    from cloud_agent_host import runner_stop
+    from cloud_agent_host.service import runner_stop
 
     before = signal.getsignal(signal.SIGINT)
     try:
