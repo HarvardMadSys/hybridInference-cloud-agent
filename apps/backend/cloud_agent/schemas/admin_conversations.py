@@ -7,7 +7,8 @@ from typing import Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
-from cloud_agent.admin_observability import AdminRun, RunFilters, cursor_scope
+from cloud_agent.domain.cursors import cursor_scope
+from cloud_agent.schemas.admin_observability import AdminRun, RunFilters
 
 
 class AdminConversation(BaseModel):

@@ -21,7 +21,7 @@ from tests.integration.storage.test_agent_job_store import (
 from tests.integration.storage.test_schema_upgrade import _db_config
 from tests.support.migrations import apply_migrations, downgrade_to
 
-from cloud_agent.admin_observability import RunFilters
+from cloud_agent.schemas.admin_observability import RunFilters
 from cloud_agent.storage.repositories.admin.runs import PostgresAdminRunQueries
 from cloud_agent.storage.repositories.admin.usage import PostgresAdminUsageQueries
 

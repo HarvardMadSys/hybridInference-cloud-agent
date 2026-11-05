@@ -16,8 +16,8 @@ from tests.support.follow_ups import append_follow_up
 from tests.support.usage import END, START
 from tests.unit.test_sandbox_resource_protocol import sample
 
-from cloud_agent.admin_observability import decode_cursor
-from cloud_agent.admin_sandboxes import (
+from cloud_agent.domain.cursors import decode_cursor
+from cloud_agent.schemas.admin_sandboxes import (
     SANDBOX_CURSOR_SCOPE,
     SANDBOX_TRAJECTORY_MEMBER_LIMIT,
     SandboxCursor,

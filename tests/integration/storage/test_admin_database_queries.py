@@ -7,7 +7,11 @@ import pytest
 from tests.integration.storage.test_agent_job_store import _create_job
 from tests.integration.storage.test_attempt_ledger import db as db, store as store
 
-from cloud_agent.admin_database import DatabaseQuery, DatabaseQueryInvalid, DatabaseQueryTimeout
+from cloud_agent.schemas.admin_database import (
+    DatabaseQuery,
+    DatabaseQueryInvalid,
+    DatabaseQueryTimeout,
+)
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

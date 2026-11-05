@@ -15,15 +15,15 @@ from tests.support.storage import OneFake
 from tests.support.usage import END, START
 
 from cloud_agent.accounts.config import LOCAL_SESSION_COOKIE
-from cloud_agent.admin_observability import (
-    AdminRun,
-    AdminRunList,
-)
 from cloud_agent.api import admin_runs, usage
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_owner_directory, get_storage
 from cloud_agent.app import create_app, create_mcp_app
 from cloud_agent.schemas import ResourceMetricBrief, RunResourceSummary
+from cloud_agent.schemas.admin_observability import (
+    AdminRun,
+    AdminRunList,
+)
 
 ADMIN = {"Authorization": "Bearer admin-observations-test"}
 PREFIX = "/admin/agent/runs"

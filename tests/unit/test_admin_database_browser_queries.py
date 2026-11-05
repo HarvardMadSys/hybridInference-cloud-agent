@@ -9,7 +9,7 @@ from typing import Any, cast
 import asyncpg
 import pytest
 
-from cloud_agent.admin_database import (
+from cloud_agent.schemas.admin_database import (
     DatabaseQuery,
     DatabaseQueryInvalid,
     DatabaseQueryTimeout,

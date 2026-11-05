@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from cloud_agent.admin_sandboxes import AdminSandbox, resource_usage_view
+from cloud_agent.schemas.admin_sandboxes import AdminSandbox, resource_usage_view
 from cloud_agent.storage._sql.rows import load_json
 
 

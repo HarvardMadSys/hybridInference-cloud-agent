@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
-import hashlib
-import json
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal, Protocol, TypeVar
+from typing import Literal, Protocol
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
-from cloud_agent.schemas import (
+from cloud_agent.schemas.resources import (
     RunResourceSummary,  # noqa: TC001 — Pydantic resolves this at runtime.
 )
 from cloud_agent.thread_stats import (
@@ -105,35 +101,6 @@ class RunCursor(BaseModel):
     until: AwareDatetime
     created_at: AwareDatetime
     job_id: str = Field(min_length=1, max_length=256)
-
-
-_Cursor = TypeVar("_Cursor", bound=BaseModel)
-
-
-def cursor_scope(values: Any) -> str:
-    """Bind an opaque cursor to the same query; this is not authentication."""
-    return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
-
-
-def encode_cursor(cursor: BaseModel) -> str:
-    """Encode a small, versioned cursor without exposing arbitrary SQL values."""
-    return base64.urlsafe_b64encode(cursor.model_dump_json().encode()).decode().rstrip("=")
-
-
-def decode_cursor(cursor: str | None, schema: type[_Cursor], scope: str) -> _Cursor | None:
-    """Reject malformed, oversized or filter-mismatched cursors before SQL."""
-    if cursor is None:
-        return None
-    try:
-        if not cursor or len(cursor) > 2048:
-            raise ValueError
-        raw = base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True)
-        parsed = schema.model_validate_json(raw)
-        if getattr(parsed, "scope", None) != scope:
-            raise ValueError
-        return parsed
-    except (ValueError, binascii.Error, ValidationError):
-        raise ValueError("Invalid pagination cursor for these filters.") from None
 
 
 class CreationWindowCursor(Protocol):

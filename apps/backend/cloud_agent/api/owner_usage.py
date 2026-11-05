@@ -13,9 +13,9 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
-from cloud_agent.admin_observability import decode_cursor
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage, require_store
+from cloud_agent.domain.cursors import decode_cursor
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.ports.admin_queries import (
     AdminUsageQueries,

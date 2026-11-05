@@ -7,25 +7,24 @@ from typing import TYPE_CHECKING, Any, Protocol
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from pydantic import AwareDatetime, ValidationError
 
-from cloud_agent.admin_observability import (
-    AdminAttempt,
-    AdminRun,
-    AdminRunDetail,
-    AdminRunList,
-    RunCursor,
-    RunFilters,
-    cursor_scope,
-    decode_cursor,
-    resolve_run_window,
-)
 from cloud_agent.api._job_views import _attempt_duration_ms, _attempt_resources
 from cloud_agent.api.deps import (
     get_storage,
     require_store,
     verify_admin_access,
 )
+from cloud_agent.domain.cursors import cursor_scope, decode_cursor
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import AgentAttemptTelemetry, AttemptResources, TurnResourceSummary
+from cloud_agent.schemas.admin_observability import (
+    AdminAttempt,
+    AdminRun,
+    AdminRunDetail,
+    AdminRunList,
+    RunCursor,
+    RunFilters,
+    resolve_run_window,
+)
 from cloud_agent.thread_stats import summarize_session_statistics
 from cloud_agent.usage.turn_report import summarize_job_usage
 from cloud_agent_shared.turn_resources import summarize_turn_resources

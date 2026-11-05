@@ -11,10 +11,10 @@ import pytest
 from fastapi import FastAPI
 from tests.support.owners import SESSIONS, use_session_secret
 
-from cloud_agent.admin_observability import encode_cursor
 from cloud_agent.api import context
 from cloud_agent.api.deps import get_owner_directory, get_storage
 from cloud_agent.context.context_insights import ContextInsightsCursor, context_cursor_scope
+from cloud_agent.domain.cursors import encode_cursor
 
 NOW = datetime(2026, 10, 15, 12, tzinfo=UTC)
 _SUMMARY = {

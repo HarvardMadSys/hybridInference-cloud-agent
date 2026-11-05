@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cloud_agent.admin_observability import encode_cursor
-from cloud_agent.admin_sandboxes import (
+from cloud_agent.domain.cursors import encode_cursor
+from cloud_agent.schemas.admin_sandboxes import (
     SANDBOX_TRAJECTORY_MEMBER_LIMIT,
     AdminSandbox,
     AdminSandboxCheckpoint,

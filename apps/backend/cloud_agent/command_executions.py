@@ -44,11 +44,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from cloud_agent.admin_observability import decode_cursor, encode_cursor
 from cloud_agent.domain.command_executions import (  # noqa: TC001 — Pydantic resolves annotations at runtime.
     CommandFilter,
     CommandSort,
 )
+from cloud_agent.domain.cursors import decode_cursor, encode_cursor
 
 #: A command at or over this many milliseconds is "slow".
 #:

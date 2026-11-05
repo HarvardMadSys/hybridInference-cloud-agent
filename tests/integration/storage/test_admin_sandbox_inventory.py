@@ -8,13 +8,13 @@ import pytest
 from tests.integration.storage.test_host_pool_store import db as db
 from tests.support.db import assert_pool_idle
 
-from cloud_agent.admin_observability import decode_cursor, encode_cursor
-from cloud_agent.admin_sandbox_inventory import (
+from cloud_agent.domain.cursors import decode_cursor, encode_cursor
+from cloud_agent.schemas.admin_sandbox_inventory import (
     SandboxInventoryCursor,
     decode_inventory_cursor,
     inventory_scope,
 )
-from cloud_agent.admin_sandboxes import SandboxCursor, sandbox_cursor_scope
+from cloud_agent.schemas.admin_sandboxes import SandboxCursor, sandbox_cursor_scope
 from cloud_agent.storage.repositories.admin.sandbox_inventory import (
     PostgresAdminSandboxInventory,
     _capture_pages,
