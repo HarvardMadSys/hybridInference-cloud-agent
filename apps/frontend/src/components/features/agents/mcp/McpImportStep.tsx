@@ -1,7 +1,6 @@
 'use client';
 
 import { useEffect, useId, useRef, useState } from 'react';
-import { Select } from '@/components/ui/Select';
 import {
   previewMcpImport,
   saveMcpImport,
@@ -99,6 +98,8 @@ export function McpImportStep({
   const submission = useRef(false);
   const [text, setText] = useState(initialText);
   const [preview, setPreview] = useState<McpImportPreviewApi | null>(null);
+  // Where each draft runs, as its preview placed it: an address is a service, a
+  // command a program in each chat's sandbox. Saving keeps what the owner saw.
   const [locations, setLocations] = useState<Record<string, McpLocation>>({});
   const [secrets, setSecrets] = useState<Record<string, Record<string, string>>>({});
   const [checking, setChecking] = useState(false);
@@ -248,38 +249,6 @@ export function McpImportStep({
             >
               <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{draft.label}</p>
               <DraftBody draft={draft} />
-              {draft.transport === 'stdio' ? (
-                <div className="mt-3">
-                  <label className="block text-xs font-medium text-gray-600 dark:text-gray-400">
-                    Run this command on
-                    <Select<McpLocation>
-                      aria-label={`Run location for ${draft.label}`}
-                      value={locations[draft.label] ?? draft.location}
-                      disabled={saving}
-                      onValueChange={(next) =>
-                        setLocations((current) => ({ ...current, [draft.label]: next }))
-                      }
-                      className={`mt-1 ${FIELD}`}
-                      options={[
-                        {
-                          value: 'user-connector',
-                          label: 'Your computer (requires a connected MCP connector)',
-                        },
-                        { value: 'managed-worker', label: 'Cloud worker' },
-                        {
-                          value: 'sandbox',
-                          label: 'Each chat’s sandbox (pinned npx or uvx package, no secrets)',
-                        },
-                      ]}
-                    />
-                  </label>
-                  <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                    Commands run where you choose. Files and packages on your computer are not
-                    automatically available in the cloud. In the sandbox, a server sees the task’s
-                    files, its localhost and the sandbox browser, and its tools need no approval.
-                  </p>
-                </div>
-              ) : null}
               {draft.warnings.map((warning) => (
                 <p key={warning} className="mt-2 text-xs text-amber-800 dark:text-amber-300">
                   {warning}

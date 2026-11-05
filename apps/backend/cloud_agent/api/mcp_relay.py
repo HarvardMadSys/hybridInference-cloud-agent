@@ -56,7 +56,7 @@ from cloud_agent.agent_memory import MemoryTask
 from cloud_agent.api.deps import get_http_client, get_mcp_decision_signal, get_storage
 from cloud_agent.credential_cipher import CredentialCipherError
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.mcp import protocol
+from cloud_agent.mcp import protocol, sandbox_tools
 from cloud_agent.mcp.authorization import decide, visible_capabilities
 from cloud_agent.mcp.host import (
     HostError,
@@ -1252,13 +1252,7 @@ async def _host_document(
             # offered to every task; a scope turned off refuses writes itself.
             tools.extend(memory_tool.TOOL_DEFINITIONS)
             tools.sort(key=lambda tool: str(tool["name"]))
-            replies.append(
-                _result_reply(
-                    request_id,
-                    {"tools": tools},
-                    stateless=stateless,
-                )
-            )
+            replies.append(_result_reply(request_id, {"tools": tools}, stateless=stateless))
             continue
         if method == protocol.TOOLS_CALL:
             replies.append(
@@ -1301,6 +1295,9 @@ async def _host_document(
                     request=request,
                 )
             )
+            continue
+        if method == sandbox_tools.METHOD:  # the sandbox's gateway, reporting a program's tools
+            replies.append(await sandbox_tools.reply(payload, identity, store))
             continue
         replies.append(_error_reply(request_id, f"this surface does not implement {method!r}"))
 

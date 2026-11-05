@@ -18,7 +18,7 @@ import {
   previewMcpImport,
   saveMcpImport,
 } from '@/lib/api/mcp';
-import { chooseOption, optionNames } from '@/components/ui/__tests__/select';
+import { chooseOption } from '@/components/ui/__tests__/select';
 
 const template: McpTemplateApi = {
   name: 'github',
@@ -309,14 +309,14 @@ describe('McpAddDialog', () => {
       expect(saveMcpImport).toHaveBeenCalledWith(text, { docs: 'remote' }, {}, undefined, {}),
     );
     expect(added).toHaveBeenCalledWith([{ id: 5, label: 'docs' }]);
-    expect(screen.queryByLabelText('Run location for docs')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Run docs on my computer')).not.toBeInTheDocument();
   });
 
-  it('shows exact command arguments and asks for unresolved credentials before adding', async () => {
+  it('adds a command as a program with its keys, asking for those it lacks', async () => {
     const command = {
       ...preview.drafts[0],
       transport: 'stdio' as const,
-      location: 'user-connector' as const,
+      location: 'sandbox' as const,
       url: null,
       argv: ['npx', '-y', 'package', '/my folder'],
       env_names: ['API_KEY'],
@@ -332,16 +332,15 @@ describe('McpAddDialog', () => {
     const add = await screen.findByRole('button', { name: 'Add 1 server' });
     expect(add).toBeDisabled();
     expect(screen.getByText('npx -y package /my folder')).toBeInTheDocument();
-    expect(optionNames(screen.getByLabelText('Run location for docs'))).not.toContain(
-      'Remote server',
-    );
-    chooseOption(screen.getByLabelText('Run location for docs'), 'Cloud worker');
+    // No place to choose: a command runs with each chat.
+    expect(screen.queryByText('Cloud worker')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Run docs on my computer')).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('docs · Value for API_KEY'), {
       target: { value: 'private-token' },
     });
     fireEvent.click(add);
     await waitFor(() =>
-      expect(saveMcpImport).toHaveBeenCalledWith(text, { docs: 'managed-worker' }, {}, undefined, {
+      expect(saveMcpImport).toHaveBeenCalledWith(text, { docs: 'sandbox' }, {}, undefined, {
         docs: { API_KEY: 'private-token' },
       }),
     );

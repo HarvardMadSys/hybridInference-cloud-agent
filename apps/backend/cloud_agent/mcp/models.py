@@ -284,6 +284,9 @@ class LaunchSpec:
     #: The resolved package and version, once a dependency plan exists.
     pinned_package: str | None = None
     pinned_version: str | None = None
+    #: ``secret://NAME`` values as stored, sealed: ciphertext by name. Opened
+    #: only where a launch is about to run (a sandbox server's claim).
+    sealed_env: Mapping[str, str] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Refuse a launch spec that would be ambiguous or unsafe to run."""

@@ -380,8 +380,8 @@ class TestConfigImport:
         shown = result.drafts[0].summary()["secrets"][0]["value"]
         assert "supersecrettoken" not in shown
 
-    def test_a_stdio_entry_defaults_to_the_users_own_machine(self) -> None:
-        """A pasted command is the user's, not the control plane's."""
+    def test_a_stdio_entry_defaults_to_the_chats_sandbox(self) -> None:
+        """A pasted command is a program, and a program runs where the agent does."""
         result = config_import.parse_import(
             """
             {"mcpServers": {"fs": {
@@ -392,10 +392,13 @@ class TestConfigImport:
         )
         draft = result.drafts[0]
         assert draft.transport is Transport.STDIO
-        assert draft.location == "user-connector"
+        assert draft.location == "sandbox"
+        assert draft.auth_kind == "none"
         assert draft.launch is not None
         assert draft.launch.argv()[0] == "npx"
+        # A path on the user's computer is pointed out: a chat cannot reach it.
         assert draft.paths == ("/home/me/docs",)
+        assert any("a chat cannot reach" in warning for warning in draft.warnings)
         # The value is replaced by a reference; the literal stays in `secrets`
         # so it can be encrypted rather than copied into a config document.
         assert draft.launch.env["API_KEY"] == "secret://API_KEY"

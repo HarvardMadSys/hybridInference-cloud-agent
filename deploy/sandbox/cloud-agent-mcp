@@ -40,7 +40,16 @@ running, or when its admission is withdrawn.
 
 A server's arguments and environment may name ``${CLOUD_AGENT_BROWSER_CDP}``,
 replaced at start with the sandbox browser's CDP URL (``cloud-agent-browser
-start``, which also starts the runner's download courier).
+start``, which also starts the runner's download courier). They may also use
+credentials: an ``env`` value ``secret://NAME`` and a ``${NAME}`` anywhere are
+filled from the values the host gave this slot's runner alone, in a file only
+the runner's user can read (``runner start`` reads them on stdin). Neither the
+admission nor the gateway ever holds one.
+
+The gateway reports the tools each server lists to the admission's
+``report_url`` (the relay), as its ``cloud_agent/sandbox_tools`` method and
+with the bearer token the member's CLI sent, so the owner's settings can show
+them; only when a list changes.
 
 Installs run with npm's ``ignore-scripts`` on. The host has already refused a
 package without an exact version.
@@ -67,6 +76,7 @@ import struct
 import subprocess
 import sys
 import time
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -88,6 +98,10 @@ MAX_SERVERS = 16
 MAX_REQUEST_BYTES = 8 * 1024 * 1024
 MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 MAX_HEAD_BYTES = 16 * 1024
+#: The relay method a tool report is (cloud_agent.mcp.sandbox_tools), and how
+#: much of its reply is read.
+REPORT_METHOD = "cloud_agent/sandbox_tools"
+MAX_REPORT_REPLY = 64 * 1024
 #: A server that has served no call for this long, and runs none, is stopped.
 DEFAULT_IDLE_S = 900.0
 #: How long a server may take to install and answer ``initialize``.
@@ -161,6 +175,9 @@ class Paths:
     def runner_log(self, slot: int) -> str:
         return os.path.join(self.slot_dir(slot), "runner.log")
 
+    def runner_secrets(self, slot: int) -> str:
+        return os.path.join(self.slot_dir(slot), "secrets.json")
+
     def server_log(self, slot: int, alias: str) -> str:
         return os.path.join(self.slot_dir(slot), f"{alias}.log")
 
@@ -233,14 +250,27 @@ class Admission:
     slot: int
     token_sha256: str
     servers: tuple[ServerSpec, ...]
+    #: Where the gateway reports the tools these servers list; may be empty.
+    report_url: str = ""
 
 
 def parse_admission(slot: int, document: Any) -> Admission:
     """Validate what the host sent; anything unexpected refuses the whole admission."""
     if not 0 <= slot < MAX_SLOTS:
         raise GatewayError("slot is out of range")
-    if not isinstance(document, dict) or set(document) != {"token_sha256", "servers"}:
-        raise GatewayError("an admission is {token_sha256, servers}")
+    if (
+        not isinstance(document, dict)
+        or not {"token_sha256", "servers"} <= set(document)
+        or (set(document) - {"token_sha256", "servers", "report_url"})
+    ):
+        raise GatewayError("an admission is {token_sha256, servers, report_url?}")
+    report_url = document.get("report_url", "")
+    if (
+        not isinstance(report_url, str)
+        or len(report_url) > 2048
+        or (report_url and not re.fullmatch(r"https?://[!-~]+", report_url))
+    ):
+        raise GatewayError("report_url must be an http(s) address")
     digest = document["token_sha256"]
     if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise GatewayError("token_sha256 must be 64 lowercase hex digits")
@@ -267,11 +297,13 @@ def parse_admission(slot: int, document: Any) -> Admission:
         servers.append(ServerSpec(alias, command, tuple(args), tuple(sorted(env.items()))))
     if len({server.alias for server in servers}) != len(servers):
         raise GatewayError("aliases must be distinct")
-    return Admission(slot, digest, tuple(servers))
+    return Admission(slot, digest, tuple(servers), report_url)
 
 
 def admission_document(admission: Admission) -> dict[str, Any]:
+    extra = {"report_url": admission.report_url} if admission.report_url else {}
     return {
+        **extra,
         "token_sha256": admission.token_sha256,
         "servers": [
             {
@@ -283,6 +315,33 @@ def admission_document(admission: Admission) -> dict[str, Any]:
             for server in admission.servers
         ],
     }
+
+
+MAX_SECRET_BYTES = 32768
+
+
+def parse_secrets(document: Any) -> dict[str, dict[str, str]]:
+    """Each server's secret values, as the host hands them to a slot's runner."""
+    if not isinstance(document, dict) or set(document) != {"secrets"}:
+        raise GatewayError("secrets are {secrets: {alias: {NAME: value}}}")
+    raw = document["secrets"]
+    if not isinstance(raw, dict) or len(raw) > MAX_SERVERS:
+        raise GatewayError(f"secrets name at most {MAX_SERVERS} servers")
+    parsed: dict[str, dict[str, str]] = {}
+    for alias, values in raw.items():
+        if not isinstance(alias, str) or not _ALIAS.match(alias) or not isinstance(values, dict):
+            raise GatewayError(f"invalid secrets for {alias!r}")
+        for name, value in values.items():
+            if not isinstance(name, str) or not _ENV_NAME.match(name):
+                raise GatewayError(f"{alias}: {name!r} is not a variable name")
+            if (
+                not isinstance(value, str)
+                or "\0" in value
+                or len(value.encode()) > MAX_SECRET_BYTES
+            ):
+                raise GatewayError(f"{alias}: the value of {name} is too long or not text")
+        parsed[alias] = dict(values)
+    return parsed
 
 
 def token_digest(token: str) -> str:
@@ -414,13 +473,29 @@ def browser_endpoint() -> str:
     return result.stdout.strip()
 
 
-def server_argv_env(spec: ServerSpec, home: str) -> tuple[list[str], dict[str, str]]:
-    """The process a spec starts, with placeholders filled in."""
+_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]{0,127})\}")
+SECRET_PREFIX = "secret://"
+
+
+def server_argv_env(
+    spec: ServerSpec, home: str, secrets: dict[str, str] | None = None
+) -> tuple[list[str], dict[str, str]]:
+    """The process a spec starts, with the browser's URL and its secrets filled in.
+
+    ``secret://NAME`` as a whole ``env`` value, and ``${NAME}`` anywhere, take
+    the value the host gave this slot for ``NAME``; one it gave none for is
+    left empty, as a shell would leave it.
+    """
+    secrets = secrets or {}
     values = [spec.command, *spec.args, *(value for _, value in spec.env)]
     cdp = browser_endpoint() if any(BROWSER_PLACEHOLDER in value for value in values) else ""
 
     def fill(value: str) -> str:
-        return value.replace(BROWSER_PLACEHOLDER, cdp) if cdp else value
+        if cdp:
+            value = value.replace(BROWSER_PLACEHOLDER, cdp)
+        if value.startswith(SECRET_PREFIX):
+            return secrets.get(value.removeprefix(SECRET_PREFIX), "")
+        return _REFERENCE.sub(lambda match: secrets.get(match.group(1), ""), value)
 
     env = {
         "PATH": SANDBOX_PATH,
@@ -441,8 +516,11 @@ def server_argv_env(spec: ServerSpec, home: str) -> tuple[list[str], dict[str, s
 class Backend:
     """A running stdio server: newline-delimited JSON-RPC on its stdin/stdout."""
 
-    def __init__(self, spec: ServerSpec, slot: int, paths: Paths) -> None:
+    def __init__(
+        self, spec: ServerSpec, slot: int, paths: Paths, secrets: dict[str, str] | None = None
+    ) -> None:
         self.spec = spec
+        self.secrets = dict(secrets or {})
         self.slot = slot
         self.paths = paths
         self.process: asyncio.subprocess.Process | None = None
@@ -474,7 +552,7 @@ class Backend:
     async def _start(self) -> None:
         self.stop()
         home = os.environ.get("HOME") or os.path.expanduser("~")
-        argv, env = await asyncio.to_thread(server_argv_env, self.spec, home)
+        argv, env = await asyncio.to_thread(server_argv_env, self.spec, home, self.secrets)
         log = os.open(
             self.paths.server_log(self.slot, self.spec.alias),
             os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW,
@@ -664,19 +742,49 @@ class Runner:
         self.routes: dict[str, tuple[tuple[str, str], str]] = {}
         self.warmed: set[tuple[str, str]] = set()
         self.stopping: asyncio.Event | None = None
+        self._secrets: tuple[tuple[int, int, int], dict[str, dict[str, str]]] | None = None
 
     def specs(self) -> tuple[ServerSpec, ...]:
         admission = self.admissions.get(self.slot)
         return admission.servers if admission is not None else ()
 
+    def secrets(self) -> dict[str, dict[str, str]]:
+        """Each server's secret values, from the file only this runner's user reads."""
+        path = self.paths.runner_secrets(self.slot)
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            self._secrets = None
+            return {}
+        key = (info.st_mtime_ns, info.st_ino, info.st_size)
+        if self._secrets is not None and self._secrets[0] == key:
+            return self._secrets[1]
+        values: dict[str, dict[str, str]] = {}
+        if stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077:
+            with contextlib.suppress(OSError, ValueError), open(path, encoding="utf-8") as handle:
+                values = parse_secrets(json.load(handle))
+        self._secrets = (key, values)
+        return values
+
+    def key(self, spec: ServerSpec) -> tuple[str, str]:
+        """A server, by what starts it: its spec and its secret values."""
+        given = json.dumps(self.secrets().get(spec.alias, {}), sort_keys=True)
+        return spec.alias, hashlib.sha256((spec.digest + given).encode()).hexdigest()[:16]
+
     def backend(self, spec: ServerSpec) -> Backend:
-        key = (spec.alias, spec.digest)
+        key = self.key(spec)
         backend = self.backends.get(key)
         if backend is None:
-            backend = self.backends[key] = Backend(spec, self.slot, self.paths)
+            secrets = self.secrets().get(spec.alias, {})
+            backend = self.backends[key] = Backend(spec, self.slot, self.paths, secrets)
         return backend
 
     async def list_tools(self) -> list[dict[str, Any]]:
+        return (await self.list_by_server())[0]
+
+    async def list_by_server(self) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+        """Every tool as presented, and each server's own list, for the owner's settings."""
+
         async def one(spec: ServerSpec) -> list[tuple[str, dict[str, Any], str]]:
             try:
                 tools = await self.backend(spec).list_tools()
@@ -695,16 +803,20 @@ class Runner:
         lists = await asyncio.gather(*(one(spec) for spec in specs))
         routes: dict[str, tuple[tuple[str, str], str]] = {}
         presented: list[dict[str, Any]] = []
+        by_server: dict[str, list[dict[str, Any]]] = {}
         for spec, listed in zip(specs, lists, strict=True):
+            key = self.key(spec)
+            if listed:
+                by_server[spec.alias] = [tool for _, tool, _ in listed]
             for public, tool, own in listed:
-                routes[public] = ((spec.alias, spec.digest), own)
+                routes[public] = (key, own)
                 presented.append({**tool, "name": public})
         self.routes = routes
-        return presented
+        return presented, by_server
 
     async def call_tool(self, presented: str, arguments: Any) -> Any:
         route = self.routes.get(presented)
-        if route is None or route[0] not in {(spec.alias, spec.digest) for spec in self.specs()}:
+        if route is None or route[0] not in {self.key(spec) for spec in self.specs()}:
             # A name this runner has not listed since a change: list again,
             # each server on its own, so a broken one cannot answer for another.
             await self.list_tools()
@@ -712,7 +824,7 @@ class Runner:
         if route is None:
             raise RemoteError(-32602, f"unknown tool: {presented}")
         key, own = route
-        spec = next((spec for spec in self.specs() if (spec.alias, spec.digest) == key), None)
+        spec = next((spec for spec in self.specs() if self.key(spec) == key), None)
         if spec is None:
             raise RemoteError(-32602, f"unknown tool: {presented}")
         return await self.backend(spec).call_tool(own, arguments)
@@ -720,7 +832,7 @@ class Runner:
     def warm(self) -> None:
         """Start each newly admitted server now, so a CLI's first tool list is quick."""
         for spec in self.specs():
-            key = (spec.alias, spec.digest)
+            key = self.key(spec)
             if key not in self.warmed:
                 self.warmed.add(key)
                 asyncio.get_running_loop().create_task(self._warm_one(spec))
@@ -732,8 +844,16 @@ class Runner:
             _log(f"warm-up failed: slot {self.slot} {spec.alias}: {exc}")
 
     def retire(self) -> None:
-        """Stop servers idle past the timeout with no call running, and withdrawn ones."""
-        admitted = {(spec.alias, spec.digest) for spec in self.specs()}
+        """Stop servers idle past the timeout with no call running, and withdrawn ones.
+
+        A server whose secret values changed is a withdrawn one: its successor
+        starts with the new values. With no admission left, the values go too.
+        """
+        specs = self.specs()
+        if not specs:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(self.paths.runner_secrets(self.slot))
+        admitted = {self.key(spec) for spec in specs}
         for key, backend in list(self.backends.items()):
             if key not in admitted:
                 backend.stop()
@@ -746,7 +866,8 @@ class Runner:
         op = request.get("op")
         try:
             if op == "list":
-                return {"tools": await self.list_tools()}
+                tools, by_server = await self.list_by_server()
+                return {"tools": tools, "by_server": by_server}
             if op == "call" and isinstance(request.get("name"), str):
                 return {"result": await self.call_tool(request["name"], request.get("arguments"))}
             return {"error": {"code": -32601, "message": f"unknown runner op: {op}"}}
@@ -897,6 +1018,41 @@ class Gateway:
         self.paths = paths
         self.admissions = Admissions(paths)
         self.stopping: asyncio.Event | None = None
+        #: The digest of the tool lists last reported for each slot's admission.
+        self.reported: dict[tuple[int, str], str] = {}
+        self._reports: set[asyncio.Task[None]] = set()
+
+    # -- reporting tools to the owner's settings ---------------------------
+
+    def report(self, admission: Admission, token: str, by_server: dict[str, Any]) -> None:
+        """Send the servers' tool lists to the relay once they change; never wait for it.
+
+        The relay authenticates the member's own credential, the one this
+        request carried, and stores each list for the connection the alias is
+        bound to, so the owner's settings show the tools. A failed report is
+        tried again at the next listing.
+        """
+        if not admission.report_url or not token or not isinstance(by_server, dict):
+            return
+        body = json.dumps(
+            {"jsonrpc": "2.0", "id": 1, "method": REPORT_METHOD, "params": {"servers": by_server}},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest = hashlib.sha256(body.encode()).hexdigest()
+        key = (admission.slot, admission.token_sha256)
+        if self.reported.get(key) == digest:
+            return
+        self.reported[key] = digest
+
+        async def send() -> None:
+            ok = await asyncio.to_thread(_post_report, admission.report_url, token, body)
+            if not ok and self.reported.get(key) == digest:
+                del self.reported[key]
+
+        task = asyncio.get_running_loop().create_task(send())
+        self._reports.add(task)
+        task.add_done_callback(self._reports.discard)
 
     # -- HTTP -------------------------------------------------------------
 
@@ -926,7 +1082,7 @@ class Gateway:
             return HttpResponse("202 Accepted")  # notifications, responses: nothing to do
         method = message.get("method")
         _log(f"slot {admission.slot}: {method if isinstance(method, str) else '?'}")
-        response = self._json(await self.dispatch(admission, message))
+        response = self._json(await self.dispatch(admission, message, token))
         if method == "initialize":
             response.headers["Mcp-Session-Id"] = secrets.token_urlsafe(16)
         return response
@@ -941,7 +1097,9 @@ class Gateway:
 
     # -- MCP --------------------------------------------------------------
 
-    async def dispatch(self, admission: Admission, message: dict[str, Any]) -> dict[str, Any]:
+    async def dispatch(
+        self, admission: Admission, message: dict[str, Any], token: str = ""
+    ) -> dict[str, Any]:
         request_id, method = message["id"], message.get("method")
         params = message.get("params") if isinstance(message.get("params"), dict) else {}
         try:
@@ -968,6 +1126,7 @@ class Gateway:
                 reply = await ask_runner(
                     self.paths, admission.slot, {"op": "list"}, START_TIMEOUT_S + 30
                 )
+                self.report(admission, token, reply.get("by_server") or {})
                 return _rpc_result(request_id, {"tools": reply.get("tools", [])})
             if method == "tools/call":
                 name = params.get("name")
@@ -1025,6 +1184,27 @@ class Gateway:
             server.close()
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(self.paths.record)
+
+
+def _post_report(url: str, token: str, body: str) -> bool:
+    """POST one tool report to the relay; whether it was accepted."""
+    request = urllib.request.Request(
+        url,
+        data=body.encode(),
+        method="POST",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:  # http(s), checked
+            reply = json.loads(response.read(MAX_REPORT_REPLY) or b"{}")
+    except (OSError, ValueError) as exc:
+        _log(f"tool report to the relay failed: {exc}")
+        return False
+    if not isinstance(reply, dict) or "result" not in reply:
+        error = reply.get("error") if isinstance(reply, dict) else reply
+        _log(f"the relay refused a tool report: {str(error)[:200]}")
+        return False
+    return True
 
 
 def _report(ready_fd: int | None, line: str) -> None:
@@ -1189,13 +1369,22 @@ def service_start(paths: Paths) -> dict[str, Any]:
         os.close(lock)
 
 
-def runner_start(paths: Paths, slot: int, *, idle_s: float) -> dict[str, Any]:
-    """Start a slot's runner unless it runs. Idempotent; as that slot's runner user."""
+def runner_start(paths: Paths, slot: int, *, idle_s: float, secrets: Any = None) -> dict[str, Any]:
+    """Start a slot's runner unless it runs, with its servers' secret values.
+
+    Idempotent; as that slot's runner user. ``secrets`` (as :func:`parse_secrets`
+    reads them) replace the slot's: written 0600 in the runner's own directory,
+    which no other user can read, and picked up by a running runner, which
+    restarts only the servers whose values changed.
+    """
     if os.getuid() != RUNNER_UID_BASE + slot:
         raise GatewayError(f"slot {slot}'s runner runs as uid {RUNNER_UID_BASE + slot}")
     ensure_private_dir(paths.slot_dir(slot), 0o710)
     lock = _locked(paths.runner_lock(slot))
     try:
+        if secrets is not None:
+            given = parse_secrets(secrets)
+            write_file(paths.runner_secrets(slot), json.dumps({"secrets": given}), 0o600)
         record = _running(paths.runner_record(slot), b"_runner")
         if record is None:
             _spawn(["_runner", str(slot), str(idle_s)], paths.runner_log(slot))
@@ -1279,7 +1468,13 @@ def main(argv: list[str]) -> int:
         if command == "runner" and len(rest) == 2 and rest[0] in ("start", "stop"):
             slot = _slot(rest[1])
             if rest[0] == "start":
-                runner_start(paths, slot, idle_s=_idle_s())
+                # Secret values come on stdin, never as arguments.
+                raw = "" if sys.stdin is None or sys.stdin.isatty() else sys.stdin.read(1 << 20)
+                try:
+                    secrets = json.loads(raw) if raw.strip() else None
+                except ValueError as exc:
+                    raise GatewayError("the secrets are not JSON") from exc
+                runner_start(paths, slot, idle_s=_idle_s(), secrets=secrets)
                 print(f"slot {slot} runner running")
             else:
                 print("stopped" if _stop(paths.runner_record(slot), b"_runner") else "not running")
