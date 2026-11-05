@@ -19,10 +19,10 @@ from cloud_agent.storage._sql.environment_runs import env_run_holds_slot
 from cloud_agent.storage._sql.fences import leased_attempt_sql
 from cloud_agent.storage._sql.hosts import LIVE_ATTEMPT_HOST
 from cloud_agent.storage._sql.rows import load_json
-from cloud_agent.storage.repositories.environments import (
+from cloud_agent.storage.repositories.environments import retire_changed_snapshots
+from cloud_agent.storage.repositories.environments.installations import (
     lock_environment_snapshots,
     lock_team_environment_snapshots,
-    retire_changed_snapshots,
 )
 from cloud_agent_shared.environment_snapshots import (
     SNAPSHOT_MAX_AGE_DAYS,
