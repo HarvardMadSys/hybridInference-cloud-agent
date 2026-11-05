@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.storage._sql.accounts import local_access_ended
+from cloud_agent.storage._sql.fences import attempt_lease_is_live, leased_attempt_sql
 from cloud_agent.storage._sql.hosts import LIVE_ATTEMPT_HOST
 from cloud_agent.storage._sql.mcp_residency import mint_residency_sql
 from cloud_agent.storage.deadlocks import retry_deadlock_victim
@@ -92,10 +93,7 @@ class PostgresResidencyRepository:
                 thread_id,
                 attempt_id,
             )
-            if earns is None or not await conn.fetchval(
-                "SELECT lease_expires_at > clock_timestamp() FROM agent_attempts WHERE id = $1",
-                attempt_id,
-            ):
+            if earns is None or not await attempt_lease_is_live(conn, attempt_id):
                 return None
             # Attempt, then membership: the order every admission writer keeps.
             member = await conn.fetchrow(
@@ -137,10 +135,8 @@ class PostgresResidencyRepository:
                   AND ($6::text IS NULL OR m.sandbox_id = $6)
                   AND j.thread_id = m.thread_id
                   AND j.current_attempt_id = a.id
-                  AND a.id = $3 AND a.job_id = j.id
-                  AND a.lease_generation = $5 AND a.host_id = $4
-                  AND a.status = 'running'
-                  AND a.lease_expires_at > clock_timestamp()
+                  AND {leased_attempt_sql("$3", "$5")}
+                  AND a.job_id = j.id AND a.host_id = $4
                   AND {LIVE_ATTEMPT_HOST}
                   AND NOT {local_access_ended("j.user_id")}
                 RETURNING m.thread_id, m.sandbox_id,

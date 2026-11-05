@@ -35,11 +35,11 @@ from cloud_agent.execution_profiles import (
 from cloud_agent.host_pool import CLAIMABLE_STATUSES, HOST_ONLINE
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.sandbox_archive_credentials import stored_archive_policy
-from cloud_agent.storage._sql.attempts import lock_live_attempt
 from cloud_agent.storage._sql.compute_admission import host_compute_admission, lock_compute_topology
 from cloud_agent.storage._sql.environment_runs import env_run_blocks_host, env_runs_holding_slots
 from cloud_agent.storage._sql.event_batches import append_attempt_events
 from cloud_agent.storage._sql.events import insert_event
+from cloud_agent.storage._sql.fences import leased_attempt_sql, lock_live_attempt
 from cloud_agent.storage._sql.goals import arm_finish_wakeup, goal_after_terminal
 from cloud_agent.storage._sql.hosts import (
     DELETED_GROUP_STATES_SQL,
@@ -813,8 +813,7 @@ class PostgresAttemptCommands:
                 f"""
                 UPDATE agent_attempts a
                 SET lease_expires_at = clock_timestamp() + make_interval(secs => $3)
-                WHERE a.id = $1 AND a.lease_generation = $2 AND a.status = 'running'
-                  AND a.lease_expires_at > clock_timestamp()
+                WHERE {leased_attempt_sql("$1", "$2")}
                   AND {LIVE_ATTEMPT_HOST}
                 RETURNING a.job_id
                 """,
@@ -1164,12 +1163,11 @@ class PostgresAttemptCommands:
                 return False
             return bool(
                 await conn.fetchval(
-                    """
+                    f"""
                     UPDATE agent_attempts
                     SET continuity_mode = COALESCE($3, continuity_mode),
                         context_status = COALESCE($4, context_status)
-                    WHERE id = $1 AND lease_generation = $2
-                      AND status = 'running' AND lease_expires_at > clock_timestamp()
+                    WHERE {leased_attempt_sql("$1", "$2", alias="")}
                     RETURNING id
                     """,
                     attempt_id,
@@ -1211,12 +1209,11 @@ class PostgresAttemptCommands:
                 return False
             recorded = bool(
                 await conn.fetchval(
-                    """
+                    f"""
                     WITH live AS (
                         SELECT id, job_id
                         FROM agent_attempts
-                        WHERE id = $1 AND lease_generation = $2
-                          AND status = 'running' AND lease_expires_at > clock_timestamp()
+                        WHERE {leased_attempt_sql("$1", "$2", alias="")}
                     )
                     INSERT INTO agent_attempt_resources (
                         attempt_id, job_id, cpu_usec, mem_peak_bytes, mem_avg_bytes,
@@ -1988,7 +1985,7 @@ class PostgresAttemptCommands:
     ) -> Any:
         """The fenced job UPDATE behind :meth:`transition`; ``None`` when fenced out."""
         return await conn.fetchrow(
-            """
+            f"""
             UPDATE agent_jobs j
             SET state = $4,
                 detail = COALESCE($5, j.detail),
@@ -1999,9 +1996,7 @@ class PostgresAttemptCommands:
               AND j.current_attempt_id = $2
               AND EXISTS (
                     SELECT 1 FROM agent_attempts a
-                    WHERE a.id = $2 AND a.lease_generation = $6
-                      AND a.status = 'running'
-                      AND a.lease_expires_at > clock_timestamp()
+                    WHERE {leased_attempt_sql("$2", "$6")}
               )
             RETURNING j.id, j.thread_id, j.goal_id, j.goal_revision,
                       j.turn_source, j.parent_job_id

@@ -6,6 +6,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.ports.web_search import WebSearchAdmission, WebSearchAdmissionReason
+from cloud_agent.storage._sql.fences import leased_attempt_sql
 from cloud_agent.storage._sql.mcp_residency import lock_mcp_residency
 
 if TYPE_CHECKING:
@@ -66,14 +67,11 @@ class PostgresWebSearchRepository:
             )
 
             attempt = await conn.fetchrow(
-                """
+                f"""
                 SELECT a.job_id
                 FROM agent_attempts a
-                WHERE a.id = $1
+                WHERE {leased_attempt_sql("$1", "$3")}
                   AND a.job_id = $2
-                  AND a.lease_generation = $3
-                  AND a.status = 'running'
-                  AND a.lease_expires_at > clock_timestamp()
                 FOR UPDATE OF a
                 """,
                 attempt_id,
