@@ -26,6 +26,7 @@ from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api._sensitive_routes import SensitiveRoute
 from cloud_agent.api.deps import get_owner_directory, get_storage, require_store
 from cloud_agent.application import teams as flows
+from cloud_agent.application.owner_access import AgentAccessUnavailable
 from cloud_agent.domain.teams import (
     AUDIT_PAGE_LIMIT,
     InvitationUnavailable,
@@ -34,7 +35,6 @@ from cloud_agent.domain.teams import (
     TeamForbidden,
     TeamNotFound,
 )
-from cloud_agent.owner_access import AgentAccessUnavailable
 from cloud_agent.schemas import (
     ClaimInvitationRequest,
     CreateInvitationRequest,

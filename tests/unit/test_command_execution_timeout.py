@@ -11,7 +11,7 @@ import asyncio
 
 import pytest
 
-from cloud_agent.command_executions import CommandReadTimeout
+from cloud_agent.context.command_executions import CommandReadTimeout
 from cloud_agent.storage.repositories import command_execution_queries as queries
 from cloud_agent.storage.repositories.command_execution_queries import (
     PostgresCommandExecutionQueries,

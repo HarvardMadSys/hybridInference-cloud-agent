@@ -38,6 +38,7 @@ from cloud_agent.api.deps import (
     get_storage,
     require_store,
 )
+from cloud_agent.api.workspace_errors import _sandbox_manager_http_error
 from cloud_agent.application import send_now as send_now_delivery
 from cloud_agent.application.follow_ups import (
     prepare_follow_up,
@@ -74,7 +75,6 @@ from cloud_agent.source_control.source_control_runtime import (
 from cloud_agent.workers.job_event_signal import (  # noqa: TC001 — FastAPI resolves it.
     JobEventSignal,
 )
-from cloud_agent.workspace_errors import _sandbox_manager_http_error
 
 if TYPE_CHECKING:
     from cloud_agent.domain.errors import Refused

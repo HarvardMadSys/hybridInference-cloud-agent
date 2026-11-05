@@ -10,7 +10,7 @@ directory answers are asked here, before the store commits:
   handed to an account that could not run anything in it.
 
 Both fail closed: an explicit "no" is a refusal the owner can read, and a
-directory that does not answer is :class:`~cloud_agent.owner_access.AgentAccessUnavailable`,
+directory that does not answer is :class:`~cloud_agent.application.owner_access.AgentAccessUnavailable`,
 which the API reports as temporarily unavailable rather than as a verdict.
 
 Display enrichment lives here too. Members and applicants are shown by the
@@ -27,8 +27,8 @@ import secrets
 from typing import TYPE_CHECKING
 
 from cloud_agent.accounts.directory import OwnerDirectoryError
+from cloud_agent.application.owner_access import owner_may_use_agent
 from cloud_agent.domain.teams import INVITATION_TTL, TeamConflict, TeamForbidden, TeamNotFound
-from cloud_agent.owner_access import owner_may_use_agent
 from cloud_agent.profile.user_avatar import generate_user_avatar
 from cloud_agent.schemas import (
     AdminTeamAuditEvent,

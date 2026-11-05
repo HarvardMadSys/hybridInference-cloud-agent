@@ -41,6 +41,7 @@ from cloud_agent.api.deps import (
     require_store,
 )
 from cloud_agent.api.errors import as_http_exception, typed_error
+from cloud_agent.api.workspace_errors import _sandbox_manager_http_error
 from cloud_agent.application.model_connections import residency_credential
 from cloud_agent.application.pending_messages import settle_queue_when_possible
 from cloud_agent.application.residency import residency_ttl_s
@@ -103,7 +104,6 @@ from cloud_agent.tokens import (
     parse_worker_token,
 )
 from cloud_agent.workers.work_signal import WorkSignal  # noqa: TC001 — FastAPI resolves it.
-from cloud_agent.workspace_errors import _sandbox_manager_http_error
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine

@@ -36,13 +36,7 @@ STORAGE_ENTRY = "cloud_agent.storage.assembly"
 
 #: Callers outside storage that still import a storage module, and why each one
 #: has not moved yet. An entry is a debt to pay down, never a way to add one.
-STORAGE_IMPORT_EXCEPTIONS = {
-    # The heartbeat's settings-import policy, called only by the host-pool
-    # repository, decodes that row's JSONB column with the store's own decoder.
-    # It left the repository as policy; its decoder did not come with it.
-    ("cloud_agent/host_settings_import.py", "cloud_agent.storage._sql.rows"),
-    ("cloud_agent/host_settings_import.py", "cloud_agent.storage._sql.rows.load_json"),
-}
+STORAGE_IMPORT_EXCEPTIONS: set[tuple[str, str]] = set()
 
 #: Where a concrete Postgres implementation may be named. The assembly, because
 #: assembling them is what it is for; the repositories, because they are them.

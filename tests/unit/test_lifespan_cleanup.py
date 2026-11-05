@@ -361,7 +361,7 @@ def _prepare(
             "account_access_task",
         ),
         ("cloud_agent.workers.account_broadcasts.run_account_broadcasts", "account_broadcast_task"),
-        ("cloud_agent.capacity_history.prune_host_capacity_history", "capacity_task"),
+        ("cloud_agent.workers.capacity_history.prune_host_capacity_history", "capacity_task"),
         ("cloud_agent.deployment.operational_health.monitor_queue", "queue_monitor_task"),
         ("cloud_agent.mcp.runtime.maintain_host_sessions", "mcp_maintenance_task"),
     ):
@@ -437,7 +437,10 @@ def _inject(monkeypatch: pytest.MonkeyPatch, stage: str | None) -> None:
             "cloud_agent.bootstrap.lifespan.coordinate_sandbox_deletions",
             _boom(stage),
         ),
-        "capacity": ("cloud_agent.capacity_history.prune_host_capacity_history", _boom(stage)),
+        "capacity": (
+            "cloud_agent.workers.capacity_history.prune_host_capacity_history",
+            _boom(stage),
+        ),
         "agent_memory": ("cloud_agent.bootstrap.lifespan.maintain_agent_memories", _boom(stage)),
         "profiling_deployment": (
             "cloud_agent.profiling.profiling_control_config.profiling_control_deployment",

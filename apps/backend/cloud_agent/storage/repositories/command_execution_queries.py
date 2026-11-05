@@ -16,7 +16,7 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.command_executions import (
+from cloud_agent.context.command_executions import (
     DEFAULT_COMMAND_PAGE,
     MAX_COMMAND_EXECUTIONS,
     CommandReadTimeout,

@@ -14,7 +14,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from cloud_agent.runtime_upgrades import (
+from cloud_agent.application.runtime_upgrades import (
     REGISTRY_CACHE_S,
     STATE_DOWNLOADING,
     STATE_FAILED,

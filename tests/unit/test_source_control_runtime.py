@@ -567,7 +567,7 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
         # This wiring test uses a fake pool; its notification listener must
         # also stay idle instead of resolving the test-only database hostname.
         "cloud_agent.bootstrap.lifespan.listen",
-        "cloud_agent.capacity_history.prune_host_capacity_history",
+        "cloud_agent.workers.capacity_history.prune_host_capacity_history",
         "cloud_agent.deployment.operational_health.monitor_queue",
         "cloud_agent.mcp.runtime.maintain_host_sessions",
         "cloud_agent.mcp.catalog.McpCatalog.run",

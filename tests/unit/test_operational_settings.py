@@ -8,11 +8,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from cloud_agent import capacity_history, settings
+from cloud_agent import settings
 from cloud_agent.api import mcp_connections
 from cloud_agent.deployment import operational_health
 from cloud_agent.source_control import entitlement
 from cloud_agent.storage.repositories import host_pool
+from cloud_agent.workers import capacity_history
 
 
 def test_oauth_callbacks_and_repository_access_use_current_settings(monkeypatch):

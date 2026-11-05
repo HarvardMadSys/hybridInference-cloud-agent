@@ -36,11 +36,11 @@ class ReplayCursor:
 
 
 async def _resume(store: TerminalReplayStore, job: dict[str, Any]) -> None:
+    from cloud_agent.application.terminal_coordination import resume_settled_terminal
     from cloud_agent.sandbox_manager.sandbox_manager_routing import (
         hydrate_shared_sandbox_manager,
         sandbox_manager_for_host,
     )
-    from cloud_agent.terminal_coordination import resume_settled_terminal
 
     job_id = job["id"]
     try:

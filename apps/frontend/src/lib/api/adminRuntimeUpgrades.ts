@@ -5,7 +5,7 @@
 // release or any other from `getRuntimeVersions`. Rolling back is
 // `setAgentRuntimeVersion` in `./admin`, which also replaces the update and
 // keeps the chosen version on every server. See
-// `cloud_agent/runtime_upgrades.py` for how an update completes.
+// `cloud_agent/application/runtime_upgrades.py` for how an update completes.
 
 import { config } from '@/config/env';
 
