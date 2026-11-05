@@ -22,7 +22,7 @@
     },
     {
       "files": ["src/components/features/agents/TaskComposer.test.tsx"],
-      "rules": { "max-lines": ["error", { "max": 2974 }] }
+      "rules": { "max-lines": ["error", { "max": 2973 }] }
     },
     {
       "files": ["src/app/(agents)/admin/settings/page.test.tsx"],

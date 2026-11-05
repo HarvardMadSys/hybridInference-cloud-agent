@@ -844,7 +844,7 @@ class TestHostRendering:
             await self._host().call_tool(session, name="search")
 
     @pytest.mark.asyncio
-    async def test_stdio_without_a_worker_says_which_component_is_missing(self) -> None:
+    async def test_stdio_on_the_relay_says_where_it_runs(self) -> None:
         """Pretending would be worse than refusing."""
         connection = McpConnection(
             connection_id="7",
@@ -852,13 +852,13 @@ class TestHostRendering:
             label="Local files",
             config=ConnectionConfig(
                 transport=Transport.STDIO,
-                location=ExecutionLocation.MANAGED_WORKER,
+                location=ExecutionLocation.SANDBOX,
                 launch=__import__("cloud_agent.mcp.models", fromlist=["LaunchSpec"]).LaunchSpec(
                     command="npx", args=("s@1.0.0",)
                 ),
             ),
         )
-        with pytest.raises(host.ConnectorRequired):
+        with pytest.raises(host.SandboxProgram, match="runs in the chat's sandbox"):
             await self._host().open(
                 connection, secret=None, key=host.SessionKey(connection_id="7", member="j:1")
             )
@@ -903,7 +903,7 @@ class TestAuthProfile:
     def test_a_stdio_connection_needs_a_launch_spec(self) -> None:
         """And a remote one must not pretend to have one."""
         with pytest.raises(ValueError):
-            ConnectionConfig(transport=Transport.STDIO, location=ExecutionLocation.USER_CONNECTOR)
+            ConnectionConfig(transport=Transport.STDIO, location=ExecutionLocation.SANDBOX)
 
     def test_a_remote_connection_may_not_use_the_stdio_transport(self) -> None:
         """The two contradict each other."""

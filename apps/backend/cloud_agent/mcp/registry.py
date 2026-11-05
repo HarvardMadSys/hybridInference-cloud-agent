@@ -214,7 +214,6 @@ def connection_from_row(row: Mapping[str, Any]) -> McpConnection:
         enabled=bool(row.get("enabled", True)),
         error_kind=ConnectionErrorKind(str(row.get("error_kind") or "none")),
         error_detail=_optional(row.get("error_detail")),
-        connector_id=str(row["connector_id"]) if row.get("connector_id") else None,
         config_revision=int(row.get("config_revision") or 1),
         authorization_epoch=int(row.get("authorization_epoch") or 1),
         oauth_generation=int(row.get("oauth_generation") or 0),
@@ -563,7 +562,6 @@ def server_for(
         request_timeout_s=connection.request_timeout_s,
         location=connection.config.location,
         launch=connection.config.launch,
-        connector_id=connection.connector_id,
     )
 
 

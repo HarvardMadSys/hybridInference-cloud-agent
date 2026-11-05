@@ -9,7 +9,7 @@ A user adds an MCP server and the agent can use it. That is the whole concept. W
 - **An address** (`https://…`) is a service on the internet. The platform connects to it, as today.
 - **A command** (`npx pkg@1.2.3`, `uvx pkg==1.2.3`) is a program. It runs inside the chat's sandbox, next to the agent, so it reaches the task's `localhost`, its files and the sandbox browser.
 
-"Sandbox MCP", "remote MCP", "managed worker" and "run location" stay internal words. The UI, the docs for users and the agent's own instructions do not use them.
+"Sandbox MCP", "remote MCP" and "run location" stay internal words. The UI, the docs for users and the agent's own instructions do not use them.
 
 ## Why
 
@@ -32,8 +32,9 @@ Other cloud agents do not ask users this question. As far as their public docume
 - The command form keeps today's guarantees: one exactly pinned package, started by `npx` or `uvx`; no shell and no unpinned `latest`.
 - **A bare package name is pinned for the user.** READMEs write `npx -y @scope/server` or `@scope/server@latest`, and almost nobody adds a version. Adding such a command asks the registry for the current release and stores that exact version (`@scope/server@1.4.0`, `server==1.4.0`), shown before the user confirms. It changes only when the user edits the server.
 - A pasted configuration (Claude, Cursor, VS Code JSON) is classified the same way, entry by entry. A command entry becomes a sandbox program, instead of today's default, "your computer".
-- **Running on the user's own computer** (the MCP connector) leaves the UI. No connector runtime ships (`operations.md` § *Connector configuration*), so the option could only fail. A stored connection of that kind keeps its *On your computer* label.
-- **The managed worker** has no runtime behind it either. It leaves the UI until it exists.
+- **Running on the user's own computer** (the MCP connector) is removed. No connector runtime ever shipped, so the option could only fail.
+- **The managed worker** is removed too: it never had a runtime behind it.
+- A connection stored at either one becomes a program (*Removing the dead locations*, below).
 
 ### Credentials
 
@@ -70,9 +71,18 @@ Today's extras-syntax bug (`uvx --from 'pkg[extra]==1.2.3' …` rejected as unpi
 ## What changes
 
 - **UI.** Remove the run-location picker, "Cloud worker" and "your computer". A command entry runs in the sandbox. Cards say *Online service* or *Program*. Hide approval controls for programs, and list their tools once reported.
-- **API and data.** No new location: `remote` and `sandbox` remain the stored values, chosen from what was added. Import defaults command entries to `sandbox` and pins a bare package name to its current release (`cloud_agent/mcp/package_pins.py`). A program's sealed keys and `${NAME}` references are accepted.
+- **API and data.** No new location: `remote` and `sandbox` are the only stored values, chosen from what was added. Import defaults command entries to `sandbox` and pins a bare package name to its current release (`cloud_agent/mcp/package_pins.py`). A program's sealed keys and `${NAME}` references are accepted.
 - **Host.** Resolve a program's credentials (its sealed keys from the claim, `${NAME}` from the member's environment) and hand them to the slot's runner, as that runner's user, into its private directory; a change restarts only the affected servers. Report a program's tool list back to the control plane once per change.
 - **Docs and agent instructions.** Say "MCP servers"; describe programs as "running next to you in the sandbox".
+
+## Removing the dead locations
+
+A follow-up change removes `managed-worker` and `user-connector` from the code and the schema. On staging on 2026-11-04, no connection, connector or connector link was stored at either one, in the current database or in the archived one.
+
+- **API.** Both values are refused, as is `connector_id`; a connection view no longer carries `connector_id`. The import derives no mounts from a command's paths: it still warns that a chat cannot reach them.
+- **Data.** `0113_mcp_retire_dead_locations` moves every connection stored at either location to `sandbox`, with its launch as stored, and narrows the location check to `remote` and `sandbox`. Its configuration revision and authorization epoch move on, as a location edit moves them, and a failing diagnosis for the old location is cleared. Nothing is deleted.
+- **What the owner sees.** A moved connection is a *Program* card. A chat runs it when its command passes the sandbox's rules; otherwise the claim leaves it out, as it does any program that does not. Its owner can disconnect it and add it again, which pins a bare package name, or edit its command through the API.
+- **Rollout.** The previous release still reads and maintains the connector tables and `agent_mcp_connections.connector_id`, so they stay in the schema, unused, and a later release drops them. Its writes of a removed location are refused while it serves beside the new one. Rolling back needs no downgrade: the previous release reads a moved connection as a program.
 
 ## Not in scope
 
@@ -84,3 +94,4 @@ Today's extras-syntax bug (`uvx --from 'pkg[extra]==1.2.3' …` rejected as unpi
 
 1. A program is addable by a bare package name ("`@playwright/mcp`"); the platform pins the current release when it is added (*Adding a server*, above).
 2. "Run on my computer instead" is removed: it offered a connector that no longer runs.
+3. The two locations with no runtime are removed from the code and the schema, and a connection stored at one becomes a program (*Removing the dead locations*).

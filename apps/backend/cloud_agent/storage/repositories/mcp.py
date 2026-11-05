@@ -7,7 +7,6 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.mcp.errors import McpConnectionCreateConflict
 from cloud_agent.mcp.models import Capability, CapabilityKind
 from cloud_agent.storage._sql.mcp import ensure_mcp_bindings, mcp_binding_row
 from cloud_agent.storage._sql.mcp_maintenance import ALLOW_GROUP_PAGE, pending_allow_groups
@@ -26,7 +25,6 @@ _CREATE_OPTIONAL = (
     "url",
     "launch_spec",
     "template",
-    "connector_id",
     "account_label",
     "request_timeout_s",
     "reuse_pending",
@@ -179,7 +177,7 @@ class PostgresMcpConnectionRepository:
 
     _MCP_CONNECTION_COLUMNS = (
         "id, user_id, label, template, transport, location, url, launch_spec, "
-        "auth_kind, auth_config, connector_id, status, enabled, error_kind, error_detail, "
+        "auth_kind, auth_config, status, enabled, error_kind, error_detail, "
         "access_token_ciphertext, refresh_token_ciphertext, client_secret_ciphertext, "
         "expires_at, scopes, issuer, resource, refresh_rotates, token_endpoint, "
         "revocation_endpoint, registration_endpoint, client_auth_method, "
@@ -253,7 +251,6 @@ class PostgresMcpConnectionRepository:
         auth_kind: str,
         auth_config: dict[str, Any],
         template: str | None = None,
-        connector_id: int | None = None,
         account_label: str | None = None,
         request_timeout_s: float | None = None,
         reuse_pending: bool = False,
@@ -289,7 +286,6 @@ class PostgresMcpConnectionRepository:
                     "auth_kind": auth_kind,
                     "auth_config": auth_config,
                     "template": template,
-                    "connector_id": connector_id,
                     "account_label": account_label,
                     "request_timeout_s": request_timeout_s,
                     "reuse_pending": reuse_pending,
@@ -329,7 +325,6 @@ class PostgresMcpConnectionRepository:
         auth_kind: str,
         auth_config: dict[str, Any],
         template: str | None = None,
-        connector_id: int | None = None,
         account_label: str | None = None,
         request_timeout_s: float | None = None,
         reuse_pending: bool = False,
@@ -338,23 +333,6 @@ class PostgresMcpConnectionRepository:
         sealed_launch_spec: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Insert one connection on ``conn`` and store any credential with it."""
-        if connector_id is not None:
-            if location != "user-connector":
-                raise McpConnectionCreateConflict(
-                    "a connector can only serve a user-connector connection"
-                )
-            owned_connector = await conn.fetchval(
-                """
-                SELECT id FROM agent_mcp_connectors
-                WHERE id = $1 AND user_id = $2 AND status <> 'revoked'
-                FOR SHARE
-                """,
-                connector_id,
-                user_id,
-            )
-            if owned_connector is None:
-                raise McpConnectionCreateConflict("that connector is no longer available")
-
         if (
             reuse_pending
             and location == "remote"
@@ -378,9 +356,8 @@ class PostgresMcpConnectionRepository:
                 FROM agent_mcp_connections
                 WHERE user_id = $1 AND label = $2 AND transport = $3
                   AND location = $4 AND url = $5 AND launch_spec IS NULL
-                  AND connector_id IS NOT DISTINCT FROM $6::bigint
-                  AND account_label IS NOT DISTINCT FROM $7::text
-                  AND request_timeout_s IS NOT DISTINCT FROM $8::double precision
+                  AND account_label IS NOT DISTINCT FROM $6::text
+                  AND request_timeout_s IS NOT DISTINCT FROM $7::double precision
                   AND auth_kind IN ('none', 'oauth')
                   AND access_token_ciphertext IS NULL AND refresh_token_ciphertext IS NULL
                   AND deleted_at IS NULL AND status <> 'disabled'
@@ -391,7 +368,6 @@ class PostgresMcpConnectionRepository:
                 transport,
                 location,
                 url,
-                connector_id,
                 account_label,
                 request_timeout_s,
             )
@@ -411,10 +387,10 @@ class PostgresMcpConnectionRepository:
             f"""
             INSERT INTO agent_mcp_connections
                 (user_id, label, template, transport, location, url, launch_spec,
-                 auth_kind, auth_config, connector_id, account_label, status,
+                 auth_kind, auth_config, account_label, status,
                  request_timeout_s, access_token_ciphertext, credential_version)
-            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb, $10, $11, 'draft',
-                    $12, $13, CASE WHEN $13::text IS NULL THEN 1 ELSE 2 END)
+            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb, $10, 'draft',
+                    $11, $12, CASE WHEN $12::text IS NULL THEN 1 ELSE 2 END)
             RETURNING {self._MCP_CONNECTION_COLUMNS}
             """,
             user_id,
@@ -426,21 +402,10 @@ class PostgresMcpConnectionRepository:
             json.dumps(stored_launch_spec) if stored_launch_spec is not None else None,
             auth_kind,
             json.dumps(stored_auth_config),
-            connector_id,
             account_label,
             request_timeout_s,
             access_token_ciphertext,
         )
-        inserted_id = int(row["id"])
-        if connector_id is not None:
-            await conn.execute(
-                """
-                INSERT INTO agent_mcp_connector_connections (connector_id, connection_id)
-                VALUES ($1, $2)
-                """,
-                connector_id,
-                inserted_id,
-            )
         return self._mcp_connection(row)
 
     async def update_mcp_connection(
@@ -507,10 +472,6 @@ class PostgresMcpConnectionRepository:
                         ELSE auth_config END,
                     account_label = COALESCE($13, account_label),
                     request_timeout_s = COALESCE($17, request_timeout_s),
-                    connector_id = CASE
-                        WHEN COALESCE($5, location) = 'user-connector' THEN connector_id
-                        ELSE NULL
-                    END,
                     status = CASE WHEN $14::boolean THEN 'draft' ELSE status END,
                     error_kind = CASE WHEN $14::boolean THEN 'none' ELSE error_kind END,
                     error_detail = CASE WHEN $14::boolean THEN NULL ELSE error_detail END,
@@ -573,16 +534,6 @@ class PostgresMcpConnectionRepository:
                     "DELETE FROM agent_mcp_oauth_flows WHERE connection_id = $1 AND consumed_at IS NULL",
                     connection_id,
                 )
-            if row is not None:
-                # Keep the reverse authorization exactly aligned with the
-                # connection's one current route, including location edits
-                # that remove that route.
-                await conn.execute(
-                    "DELETE FROM agent_mcp_connector_connections "
-                    "WHERE connection_id = $1 AND connector_id IS DISTINCT FROM $2::bigint",
-                    connection_id,
-                    row["connector_id"],
-                )
         return self._mcp_connection(row) if row is not None else None
 
     async def disconnect_mcp_connection(self, *, connection_id: int, user_id: str) -> bool:
@@ -605,7 +556,6 @@ class PostgresMcpConnectionRepository:
                     refresh_token_ciphertext = NULL,
                     client_secret_ciphertext = NULL,
                     expires_at = NULL,
-                    connector_id = NULL,
                     authorization_epoch = authorization_epoch + 1,
                     credential_version = credential_version + 1,
                     oauth_generation = oauth_generation + 1,
@@ -619,10 +569,6 @@ class PostgresMcpConnectionRepository:
             if row is not None:
                 await conn.execute(
                     "DELETE FROM agent_mcp_oauth_flows WHERE connection_id = $1 AND consumed_at IS NULL",
-                    connection_id,
-                )
-                await conn.execute(
-                    "DELETE FROM agent_mcp_connector_connections WHERE connection_id = $1",
                     connection_id,
                 )
         return row is not None
@@ -1948,18 +1894,6 @@ class PostgresMcpConnectionRepository:
                 connection_id,
                 member,
                 keep_handle,
-            )
-        return [dict(row) for row in rows]
-
-    async def list_mcp_connectors(self, *, user_id: str) -> list[dict[str, Any]]:
-        """Every connector this user registered."""
-        async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT id, user_id, name, status, mounts, created_at, last_seen_at, revoked_at
-                FROM agent_mcp_connectors WHERE user_id = $1 ORDER BY id
-                """,
-                user_id,
             )
         return [dict(row) for row in rows]
 

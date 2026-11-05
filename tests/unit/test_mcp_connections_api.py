@@ -34,10 +34,7 @@ from cloud_agent.accounts.config import LOCAL_SESSION_COOKIE
 from cloud_agent.api import mcp_connections
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage
-from cloud_agent.mcp.errors import (
-    McpConnectionCreateConflict,
-    McpCredentialWriteRejected,
-)
+from cloud_agent.mcp.errors import McpCredentialWriteRejected
 from cloud_agent.mcp.models import CapabilityKind, ToolPolicy
 from cloud_agent.mcp.registry import mcp_cipher
 
@@ -46,22 +43,6 @@ if TYPE_CHECKING:
 
 _OWNER = "user-owner"
 _OTHER = "user-other"
-
-
-def _connector(store: Any, connector_id: int = 1, *, user_id: str = _OWNER) -> dict[str, Any]:
-    """One connector row, as an earlier registration left it."""
-    row = {
-        "id": connector_id,
-        "user_id": user_id,
-        "name": "Laptop",
-        "status": "pending",
-        "mounts": [],
-        "created_at": None,
-        "last_seen_at": None,
-        "revoked_at": None,
-    }
-    store.connectors[connector_id] = row
-    return row
 
 
 _ENCRYPTION_KEY = "mcp-api-test-encryption-key"
@@ -86,8 +67,6 @@ class FakeStore(AllCapabilities):
         self.threads: dict[str, dict[str, Any]] = {}
         self.jobs: dict[str, dict[str, Any]] = {}
         self.created: list[dict[str, Any]] = []
-        self.connectors: dict[int, dict[str, Any]] = {}
-        self.connector_connections: dict[int, set[int]] = {}
         #: One pending OAuth flow, keyed by the state hash the callback presents.
         self.oauth_flow: dict[str, Any] | None = None
         self.oauth_state_hash: str | None = None
@@ -117,19 +96,6 @@ class FakeStore(AllCapabilities):
         return self._row(connection_id)
 
     async def create_mcp_connection(self, **kwargs: Any) -> dict[str, Any]:
-        connector_id = kwargs.get("connector_id")
-        if connector_id is not None and kwargs["location"] != "user-connector":
-            raise McpConnectionCreateConflict(
-                "a connector can only serve a user-connector connection"
-            )
-        if connector_id is not None:
-            connector = self.connectors.get(connector_id)
-            if (
-                connector is None
-                or connector["user_id"] != kwargs["user_id"]
-                or connector["status"] == "revoked"
-            ):
-                raise McpConnectionCreateConflict("that connector is no longer available")
         connection_id = self._next
         self._next += 1
         row = {
@@ -143,7 +109,6 @@ class FakeStore(AllCapabilities):
             "launch_spec": kwargs.get("launch_spec"),
             "auth_kind": kwargs["auth_kind"],
             "auth_config": kwargs.get("auth_config") or {},
-            "connector_id": kwargs.get("connector_id"),
             "request_timeout_s": kwargs.get("request_timeout_s"),
             "status": "draft",
             "error_kind": "none",
@@ -171,8 +136,6 @@ class FakeStore(AllCapabilities):
         }
         self.connections[connection_id] = row
         self.created.append(dict(row))
-        if connector_id is not None:
-            self.connector_connections.setdefault(connector_id, set()).add(connection_id)
         try:
             if self.reject_credential_writes and kwargs.get("access_token_ciphertext") is not None:
                 raise RuntimeError("injected credential write rejection")
@@ -196,8 +159,6 @@ class FakeStore(AllCapabilities):
         except McpCredentialWriteRejected:
             self.connections.pop(connection_id, None)
             self.created.pop()
-            if connector_id is not None:
-                self.connector_connections.get(connector_id, set()).discard(connection_id)
             raise
         return self._row(connection_id)
 
@@ -207,14 +168,12 @@ class FakeStore(AllCapabilities):
         """Insert every draft, rolling back the whole batch when one fails."""
         before_connections = deepcopy(self.connections)
         before_created = deepcopy(self.created)
-        before_connector_connections = deepcopy(self.connector_connections)
         before_next = self._next
         try:
             return [await self.create_mcp_connection(**dict(draft)) for draft in connections]
         except Exception:
             self.connections = before_connections
             self.created = before_created
-            self.connector_connections = before_connector_connections
             self._next = before_next
             raise
 
@@ -247,11 +206,6 @@ class FakeStore(AllCapabilities):
                 kwargs["connection_id"]
             ):
                 self.oauth_flow = None
-        if row["location"] != "user-connector":
-            row["connector_id"] = None
-        for connector_id, connection_ids in self.connector_connections.items():
-            if connector_id != row["connector_id"]:
-                connection_ids.discard(kwargs["connection_id"])
         return self._row(kwargs["connection_id"])
 
     async def disconnect_mcp_connection(self, *, connection_id: int, user_id: str) -> bool:
@@ -262,9 +216,6 @@ class FakeStore(AllCapabilities):
         row["status"] = "disabled"
         row["access_token_ciphertext"] = None
         row["authorization_epoch"] += 1
-        row["connector_id"] = None
-        for connection_ids in self.connector_connections.values():
-            connection_ids.discard(connection_id)
         return True
 
     async def set_mcp_connection_status(self, **kwargs: Any) -> bool:
@@ -356,13 +307,6 @@ class FakeStore(AllCapabilities):
 
     async def get_mcp_capabilities(self, *, connection_id: int) -> dict[str, Any] | None:
         return self.capabilities.get(connection_id)
-
-    # -- Connectors --
-
-    async def list_mcp_connectors(self, *, user_id: str) -> list[dict[str, Any]]:
-        return [
-            dict(row) for _, row in sorted(self.connectors.items()) if row["user_id"] == user_id
-        ]
 
     async def save_mcp_capabilities(self, **kwargs: Any) -> int:
         row = self.connections[kwargs["connection_id"]]
@@ -526,7 +470,6 @@ def _seed(store: FakeStore, **overrides: Any) -> int:
         "launch_spec": None,
         "auth_kind": "static",
         "auth_config": {"header_name": "Authorization", "scheme": "Bearer"},
-        "connector_id": None,
         "status": "active",
         "error_kind": "none",
         "error_detail": None,
@@ -730,7 +673,7 @@ class TestConnectionManagement:
                 json={
                     "label": "Local",
                     "transport": "stdio",
-                    "location": "user-connector",
+                    "location": "sandbox",
                     "auth_kind": "none",
                     "launch": {
                         "command": "npx",
@@ -743,80 +686,36 @@ class TestConnectionManagement:
         assert response.status_code == 409
         assert store.connections == {}
 
-    def test_connector_revoked_after_preflight_returns_conflict_without_a_row(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """The repository fence closes the create route's connector TOCTOU."""
+    @pytest.mark.parametrize("location", ["managed-worker", "user-connector"])
+    def test_a_location_with_no_runtime_is_refused(self, location: str) -> None:
+        """Neither a cloud worker nor the owner's computer runs anything."""
         store = FakeStore()
-        original_create = store.create_mcp_connection
         with _client(store) as client:
-            connector = _connector(store)
-
-            async def revoke_then_create(**kwargs: Any) -> dict[str, Any]:
-                store.connectors[connector["id"]]["status"] = "revoked"
-                return await original_create(**kwargs)
-
-            monkeypatch.setattr(store, "create_mcp_connection", revoke_then_create)
             response = client.post(
                 "/v1/agent/mcp/connections",
                 json={
                     "label": "Local",
                     "transport": "stdio",
-                    "location": "user-connector",
-                    "launch": {
-                        "command": "npx",
-                        "args": ["-y", "@scope/server@1.0.0"],
-                    },
-                    "connector_id": connector["id"],
-                },
-            )
-
-        assert response.status_code == 409
-        assert store.connections == {}
-        assert store.created == []
-
-    def test_direct_connector_create_records_both_sides_of_the_route(self) -> None:
-        """Creation publishes the route and connector authority as one decision."""
-        store = FakeStore()
-        with _client(store) as client:
-            connector = _connector(store)
-            created = client.post(
-                "/v1/agent/mcp/connections",
-                json={
-                    "label": "Local",
-                    "transport": "stdio",
-                    "location": "user-connector",
-                    "launch": {
-                        "command": "npx",
-                        "args": ["-y", "@scope/server@1.0.0"],
-                    },
-                    "connector_id": connector["id"],
-                },
-            )
-
-        assert created.status_code == 201
-        connection_id = created.json()["id"]
-        assert store.connections[connection_id]["connector_id"] == connector["id"]
-        assert store.connector_connections[connector["id"]] == {connection_id}
-
-    def test_direct_connector_create_rejects_a_non_connector_location(self) -> None:
-        """A remote target cannot carry authority for a user-run connector."""
-        store = FakeStore()
-        with _client(store) as client:
-            connector = _connector(store)
-            response = client.post(
-                "/v1/agent/mcp/connections",
-                json={
-                    "label": "Remote",
-                    "url": "https://mcp.example.com/mcp",
-                    "connector_id": connector["id"],
+                    "location": location,
+                    "launch": {"command": "npx", "args": ["-y", "@scope/server@1.0.0"]},
                 },
             )
 
         assert response.status_code == 400
-        assert "only valid" in response.json()["detail"]["error"]["message"]
+        assert "use one of: remote, sandbox" in response.json()["detail"]["error"]["message"]
         assert store.connections == {}
-        assert store.connector_connections == {}
+
+    def test_a_connection_cannot_name_a_connector(self) -> None:
+        """No connector runs, so a create naming one is not a create at all."""
+        store = FakeStore()
+        with _client(store) as client:
+            response = client.post(
+                "/v1/agent/mcp/connections",
+                json={"label": "Remote", "url": "https://mcp.example.com/mcp", "connector_id": 1},
+            )
+
+        assert response.status_code == 422
+        assert store.connections == {}
 
     def test_templates_are_offered_but_decide_nothing(self) -> None:
         """A template prefills a form; it is not an eligibility list."""
@@ -941,21 +840,21 @@ class TestConnectionManagement:
                 json={
                     "label": "Local",
                     "transport": "stdio",
-                    "location": "user-connector",
+                    "location": "sandbox",
                     "auth_kind": "none",
                 },
             )
         assert response.status_code == 400
 
-    def test_a_managed_stdio_connection_must_pin_its_package(self) -> None:
-        """Installing ``latest`` in a worker that holds a credential is the bug."""
+    def test_a_stdio_connection_must_pin_its_package(self) -> None:
+        """Installing ``latest`` in a sandbox that holds a credential is the bug."""
         with _client(FakeStore()) as client:
             response = client.post(
                 "/v1/agent/mcp/connections",
                 json={
                     "label": "Local",
                     "transport": "stdio",
-                    "location": "managed-worker",
+                    "location": "sandbox",
                     "launch": {"command": "npx", "args": ["-y", "@scope/server"]},
                 },
             )
@@ -1034,21 +933,21 @@ class TestConnectionManagement:
         assert response.status_code == 409
 
     @pytest.mark.parametrize(
-        "location,launch,reason",
+        "launch,reason",
         [
-            ("managed-worker", {"command": "npx", "args": ["-y", "@scope/server"]}, "pin"),
-            ("user-connector", {"command": "sh", "args": ["-c", "server"]}, "shell"),
-            ("user-connector", {"args": ["server"]}, "command"),
+            ({"command": "npx", "args": ["-y", "@scope/server"]}, "pin"),
+            ({"command": "sh", "args": ["-c", "server"]}, "shell"),
+            ({"args": ["server"]}, "command"),
         ],
     )
-    def test_an_edited_launch_is_checked_like_a_new_one(self, location, launch, reason) -> None:
+    def test_an_edited_launch_is_checked_like_a_new_one(self, launch, reason) -> None:
         """A PATCH is not a way around the launch policy creation enforces."""
         store = FakeStore()
         stored = {"command": "uvx", "args": ["server==1.0"], "env": {}, "cwd": None, "mounts": []}
         connection_id = _seed(
             store,
             transport="stdio",
-            location=location,
+            location="sandbox",
             url=None,
             auth_kind="none",
             launch_spec=dict(stored),
@@ -1069,7 +968,7 @@ class TestConnectionManagement:
         connection_id = _seed(
             store,
             transport="stdio",
-            location="user-connector",
+            location="sandbox",
             url=None,
             auth_kind="none",
             launch_spec={"command": "uvx", "args": ["server==1.0"], "env": {}, "mounts": []},
@@ -2112,14 +2011,14 @@ class TestImport:
         ("entry", "locations", "refusal"),
         [
             ({"url": "http://wiki.example.com/mcp"}, {}, "http is not allowed"),
-            ({"url": "https://wiki.example.com/mcp"}, {"wiki": "managed-worker"}, "stdio"),
+            ({"url": "https://wiki.example.com/mcp"}, {"wiki": "sandbox"}, "stdio"),
             ({"command": "npx", "args": ["-y", "@scope/wiki@1.0.0"]}, {"wiki": "remote"}, "stdio"),
             ({"command": "npx", "args": ["-y", "@scope/wiki"]}, {}, "pin"),
             ({"command": "bash", "args": ["-c", "npx -y @scope/wiki@1.0.0"]}, {}, "shell"),
             (
-                {"command": "npx", "args": ["-y", "@scope/wiki@1.0.0", "~/notes"]},
-                {"wiki": "managed-worker"},
-                "absolute path",
+                {"command": "npx", "args": ["-y", "@scope/wiki@1.0.0"]},
+                {"wiki": "user-connector"},
+                "use one of: remote, sandbox",
             ),
         ],
     )
@@ -2129,9 +2028,9 @@ class TestImport:
         """Saving checks each draft the way adding one by hand does.
 
         The import used to store whatever the paste and the chosen locations
-        said -- a cleartext address, an address saved as a worker process, an
-        unpinned package, a shell, a home-relative mount -- which are rows the
-        connection form refuses and a future runner would trust.
+        said -- a cleartext address, an address saved as a process, an unpinned
+        package, a shell, a location nothing runs -- which are rows the
+        connection form refuses and a runner would trust.
         """
         store = FakeStore()
         paste = {"mcpServers": {"public": {"url": "https://public.example.com/mcp"}, "wiki": entry}}
@@ -2146,7 +2045,7 @@ class TestImport:
         assert store.created == []
 
     def test_a_saved_draft_is_stored_in_the_form_create_stores(self) -> None:
-        """The address normalised, and a worker's mounts the ones its plan accepts."""
+        """The address normalised, and a program's paths left as arguments, never mounts."""
         store = FakeStore()
         paste = {
             "mcpServers": {
@@ -2160,17 +2059,15 @@ class TestImport:
                 json={
                     "text": json.dumps(paste),
                     "save": True,
-                    "locations": {"files": "managed-worker"},
+                    "locations": {"files": "sandbox"},
                 },
             )
         assert response.status_code == 200, response.text
         stored = {row["label"]: row for row in store.connections.values()}
         assert stored["wiki"]["url"] == "https://wiki.example.com/mcp"
-        assert stored["files"]["location"] == "managed-worker"
+        assert stored["files"]["location"] == "sandbox"
         assert stored["files"]["launch_spec"]["args"] == ["-y", "@scope/files@1.2.3", "/srv/data"]
-        assert stored["files"]["launch_spec"]["mounts"] == [
-            {"source": "/srv/data", "target": "/workspace/mcp/0", "read_only": True}
-        ]
+        assert stored["files"]["launch_spec"]["mounts"] == []
 
 
 class TestBindings:
@@ -2720,66 +2617,6 @@ class TestInvocationDecisions:
         view = response.json()
         assert view["capability_kind"] == "prompt"
         assert view["capability_description"] == "A prompt of the same name."
-
-
-class TestConnectors:
-    """What a connection may say about a connector registered earlier."""
-
-    def test_disconnect_removes_the_connector_route_and_authority(self) -> None:
-        """A tombstone cannot remain in a connector's authorized set."""
-        store = FakeStore()
-        with _client(store) as client:
-            connector = _connector(store)
-            created = client.post(
-                "/v1/agent/mcp/connections",
-                json={
-                    "label": "Local",
-                    "transport": "stdio",
-                    "location": "user-connector",
-                    "launch": {
-                        "command": "npx",
-                        "args": ["-y", "@scope/server@1.0.0"],
-                    },
-                    "connector_id": connector["id"],
-                },
-            )
-            connection_id = created.json()["id"]
-            removed = client.delete(f"/v1/agent/mcp/connections/{connection_id}")
-
-        assert removed.status_code == 204
-        assert store.connections[connection_id]["connector_id"] is None
-        assert store.connector_connections[connector["id"]] == set()
-
-    def test_a_new_connection_cannot_name_another_users_connector(self) -> None:
-        """Creation reads the connector under the caller's ownership."""
-        store = FakeStore()
-        store.connectors[9] = {
-            "id": 9,
-            "user_id": _OTHER,
-            "name": "Theirs",
-            "status": "pending",
-            "mounts": [],
-            "created_at": None,
-            "last_seen_at": None,
-            "revoked_at": None,
-        }
-        launch = {"command": "uvx", "args": ["server==1.0"]}
-        body = {
-            "label": "Local",
-            "transport": "stdio",
-            "location": "user-connector",
-            "launch": launch,
-        }
-        own = _connector(store)
-        with _client(store) as client:
-            refused = client.post("/v1/agent/mcp/connections", json={**body, "connector_id": 9})
-            assert refused.status_code == 404
-            assert store.connections == {}
-            created = client.post(
-                "/v1/agent/mcp/connections", json={**body, "connector_id": own["id"]}
-            )
-        assert created.status_code == 201, created.text
-        assert created.json()["connector_id"] == own["id"]
 
 
 class TestMcpAvailableOnDeployment:

@@ -192,8 +192,8 @@ class RemoteTransportConfig:
     session_id: str | None = None
     request_timeout: float | None = None
     connect_timeout: float | None = None
-    #: Overrides the scheme check for a private connector bridge. Set only by
-    #: the caller that already knows the location.
+    #: Overrides the scheme check for a deployment that allows plain HTTP. Set
+    #: only by the caller that holds that policy.
     allow_plain_http: bool = False
 
 

@@ -9,7 +9,7 @@ this page. The deployment order itself, and how to roll back, are in
 ## Before starting this release
 
 Before starting this release, run `alembic upgrade head` through
-`0112_thread_pull_requests`. The supported deployment scripts run migrations
+`0113_mcp_retire_dead_locations`. The supported deployment scripts run migrations
 before replacing the API; every migration listed here is additive and safe
 under the running previous release unless it says otherwise. The few
 transitions that need stopped writers are listed in
@@ -43,6 +43,33 @@ The publisher's tables (`agent_sandbox_snapshots`, `agent_snapshot_jobs`,
 schema, unused: this release neither reads nor writes them, and a migration in
 the next release drops them. This release is an ordinary rolling deploy, and
 rolling back to the previous release needs no downgrade and loses nothing.
+
+## MCP servers run in two places
+
+An MCP connection is an online service (`remote`) or a program in the chat's
+sandbox (`sandbox`). The two locations nothing ever ran, `managed-worker` and
+`user-connector`, are gone: the API refuses them, as it refuses `connector_id`,
+and connection views no longer carry `connector_id`.
+`0113_mcp_retire_dead_locations` moves any connection still stored at either
+one to `sandbox`, with its command kept as stored. Such a connection now shows
+as a program. It runs when its command passes the sandbox's rules (`npx` or
+`uvx` and one exactly pinned package, no mounts or working directory), and is
+left out of chats otherwise; its owner can disconnect it and add it again, or
+edit its command through the API. Count such rows before upgrading if you want
+to tell their owners:
+
+```sql
+SELECT location, count(*) FROM agent_mcp_connections
+WHERE location IN ('managed-worker', 'user-connector') GROUP BY location;
+```
+
+The connector tables (`agent_mcp_connectors`, `agent_mcp_connector_connections`)
+and `agent_mcp_connections.connector_id` stay in the schema, unused: this
+release neither reads nor writes them, and a migration in a later release drops
+them. While the previous release still serves during the rollout, a request
+that asks it to store a connection at a removed location fails rather than
+storing one that would never run. Rolling back to the previous release needs no
+downgrade: it reads the moved rows as programs.
 
 ## Shorter `.env` files
 
@@ -224,6 +251,7 @@ Newest first.
 
 | Migration | What it changes |
 |---|---|
+| `0113_mcp_retire_dead_locations` | Moves every MCP connection stored at `managed-worker` or `user-connector` to `sandbox`, with its launch, credentials and connector link unchanged; moves its `config_revision` and `authorization_epoch` on by one, as a location edit does; and clears a failing diagnosis (an `error` status becomes `draft`). It then narrows `agent_mcp_connections_location_check` to `remote` and `sandbox`, under the table lock it took first, so no removed value lands in between. No row is deleted. The previous release runs beside it, except that its writes of a removed location are refused. A downgrade restores the four-location constraint; moved rows stay `sandbox` ([MCP servers run in two places](#mcp-servers-run-in-two-places)). |
 | `0112_thread_pull_requests` | Adds `agent_thread_pull_requests`: the pull requests a conversation's agent opened through the GitHub relay, one row per conversation and pull request. Nothing reads it before this release, so the previous release runs unchanged beside it. A downgrade drops the table. |
 | `0111_mcp_sandbox_location` | Lets an MCP connection run inside the task sandbox: the `agent_mcp_connections.location` check constraint admits `sandbox` beside `remote`, `managed-worker` and `user-connector`, under the stable name `agent_mcp_connections_location_check`. No row changes. A downgrade restores the three-location constraint, and refuses while any sandbox connection exists rather than deleting it. |
 | `0110_host_late_settings` | Adds two columns to `agent_runner_hosts`: the host settings registered after a host's first import that it has already offered (so each is imported once, and an administrator's reset is never undone), and what the host reports it uses for configuration delivered on the heartbeat, such as the agent package registry. Existing rows get an empty list and no report. A downgrade drops both columns. |

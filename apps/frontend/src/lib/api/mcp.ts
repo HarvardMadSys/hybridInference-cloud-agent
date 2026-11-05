@@ -23,9 +23,12 @@ const API_BASE = config.apiBase;
 /** How the platform speaks to one server. */
 export type McpTransport = 'streamable-http' | 'http-sse' | 'stdio';
 
-/** Where a stdio server actually runs. */
-/** `sandbox`: inside each chat's own sandbox, next to the agent (pinned packages, no secrets). */
-export type McpLocation = 'remote' | 'managed-worker' | 'user-connector' | 'sandbox';
+/**
+ * Where a server runs, decided by what was added: `remote` for an address,
+ * `sandbox` for a command, which runs inside each chat's own sandbox, next to
+ * the agent (one pinned package).
+ */
+export type McpLocation = 'remote' | 'sandbox';
 
 /** How a connection authenticates to its server. */
 export type McpAuthKind = 'none' | 'static' | 'oauth';
@@ -117,7 +120,6 @@ export interface McpConnectionApi {
   error_kind: McpConnectionErrorKind;
   error_detail: string | null;
   account_label: string | null;
-  connector_id: number | null;
   has_credential: boolean;
   secret_hint: string | null;
   expires_at: string | null;

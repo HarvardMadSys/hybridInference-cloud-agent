@@ -521,7 +521,6 @@ class FakeStorage(EmptySkillLibrary, EmptyAttachments, NoAccounts, AllCapabiliti
             "launch_spec": None,
             "auth_kind": auth_kind,
             "auth_config": {"header_name": "Authorization", "scheme": "Bearer"},
-            "connector_id": None,
             "status": status,
             "error_kind": error_kind,
             "error_detail": error_detail,
