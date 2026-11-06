@@ -20,9 +20,9 @@ REPO = Path(__file__).resolve().parents[2]
 LIMIT = 1500
 TEST_LIMIT = 2000
 
-#: Line counts of the modules over the limit when it arrived.
-BASELINE = {
-}
+#: Line counts of the modules over the limit when it arrived. Empty since
+#: the last ones were split: no production module may exceed LIMIT again.
+BASELINE: dict[str, int] = {}
 
 #: Exact line counts of test modules over their calibrated limit after #894's
 #: first behavior-focused splits. Unlike the older production baseline, these
