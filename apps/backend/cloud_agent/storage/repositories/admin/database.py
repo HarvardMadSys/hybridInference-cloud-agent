@@ -35,16 +35,20 @@ from cloud_agent.schemas.admin_database import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+# Primary keys come from the catalog: joining information_schema's constraint
+# views to its column views plans badly, about a second for twelve tables even
+# on an idle server and past the five-second bound on a loaded one. MATERIALIZED
+# keeps the planner from folding the small key set back into that join.
 _SCHEMA_SQL = """
-    WITH keys AS (
-        SELECT k.table_name, k.column_name, k.ordinal_position
-        FROM information_schema.table_constraints t
-        JOIN information_schema.key_column_usage k
-          ON k.constraint_catalog = t.constraint_catalog
-         AND k.constraint_schema = t.constraint_schema
-         AND k.constraint_name = t.constraint_name
-         AND k.table_name = t.table_name
-        WHERE t.table_schema = 'public' AND t.constraint_type = 'PRIMARY KEY'
+    WITH keys AS MATERIALIZED (
+        SELECT r.relname::text AS table_name, a.attname::text AS column_name,
+               k.position::int AS ordinal_position
+        FROM pg_constraint p
+        JOIN pg_class r ON r.oid = p.conrelid
+        CROSS JOIN LATERAL unnest(p.conkey) WITH ORDINALITY AS k(attnum, position)
+        JOIN pg_attribute a ON a.attrelid = p.conrelid AND a.attnum = k.attnum
+        WHERE p.contype = 'p' AND r.relnamespace = 'public'::regnamespace
+          AND r.relname = ANY($1::text[])
     )
     SELECT c.table_name, c.column_name, c.data_type, c.is_nullable,
            k.ordinal_position AS key_position
