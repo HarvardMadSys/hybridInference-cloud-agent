@@ -171,9 +171,9 @@ def test_preserved_initial_archive_keeps_its_snapshot_barrier_across_a_restart(
     try:
         capture_thread.start()
         assert collided.wait(timeout=_WAIT_S), outcomes
-        assert group.initial_archive_preservation_pending
-        assert group.snapshotting
-        assert group.stopping
+        assert group.life.initial_preservation
+        assert group.life.exclusive is not None
+        assert group.life.stop is not None
 
         # Step 3: the competing stop finishes, clearing both fields.
         manager.stop_release.set()
@@ -181,9 +181,9 @@ def test_preserved_initial_archive_keeps_its_snapshot_barrier_across_a_restart(
         assert not stop_thread.is_alive()
         assert not isinstance(outcomes["stop"], BaseException), outcomes["stop"]
         assert manager.items[_spec().container_name].running is False
-        assert group.initial_archive_preservation_pending is False
-        assert group.snapshotting is False
-        assert group.stop_archive_pending is False
+        assert group.life.initial_preservation is False
+        assert group.life.exclusive is None
+        assert group.life.final_archive_pending is False
 
         # Step 4: the capture is about to re-inspect; a workspace read restarts
         # the group first.
@@ -200,7 +200,7 @@ def test_preserved_initial_archive_keeps_its_snapshot_barrier_across_a_restart(
     assert isinstance(outcomes["capture"], SessionBusy), outcomes["capture"]
 
     # Step 5, the invariant.
-    if group.initial_archive_preservation_pending and not group.snapshotting:
+    if group.life.initial_preservation and group.life.exclusive is None:
         raise InvariantBroken(
             "initial_archive_preservation_pending is set on a running group whose "
             "snapshot barrier is gone: writers are admitted while preservation "
@@ -241,11 +241,11 @@ def test_a_group_found_running_is_never_labelled_at_or_below_its_sealed_checkpoi
     supervisor.register_manifest(_spec(), _members())
     group = supervisor.state.members["athr_source"]
     assert manager.items[_spec().container_name].running
-    assert group.sealed_seq == 5
-    assert group.start_seq is None
+    assert group.life.run.sealed_seq == 5
+    assert group.life.run.start_seq is None
 
     token, _ = supervisor.operation_opened("athr_source", start_seq=3)
-    running_label = group.start_seq
+    running_label = group.life.run.start_seq
     supervisor.operation_closed("athr_source", token)
     assert supervisor.stop_if_idle("athr_source", generation=1)
     # Today the stop's checkpoint names 3. The control plane's counter is at
@@ -253,10 +253,10 @@ def test_a_group_found_running_is_never_labelled_at_or_below_its_sealed_checkpoi
     # so this receipt covers nothing: the violation is fail-closed.
     assert labels in ([3], [None])
 
-    if running_label is not None and running_label <= group.sealed_seq:
+    if running_label is not None and running_label <= group.life.run.sealed_seq:
         raise InvariantBroken(
             f"a running group was labelled {running_label}, at or below the "
-            f"sealed checkpoint fence {group.sealed_seq}"
+            f"sealed checkpoint fence {group.life.run.sealed_seq}"
         )
 
 
