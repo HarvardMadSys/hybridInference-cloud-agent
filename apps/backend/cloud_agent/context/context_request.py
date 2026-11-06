@@ -14,6 +14,10 @@ each labelled for what it is:
   before it. Claude Code's size breakdown and pi's context are answered only
   over the conversation's own channel (and Claude's with token-counting calls
   to the model provider), so neither is asked.
+- **Measured prefix**: what the member's request meter measured the request's
+  attempt sending ahead of the conversation -- the system prompt and each tool
+  schema -- as its own agent sent it (``context_profile.main_prefix``), from
+  sizes only; the platform stores neither text.
 - **Reconstructed**: the conversation content the platform stored, in the
   order it was stored, selected for this request: the turns up to it, after
   the last compaction the CLI reported before it, from the attempt that
@@ -35,6 +39,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from cloud_agent.context.context_profile import main_prefix
 from cloud_agent.context.context_view import ContextPoint  # noqa: TC001 — Pydantic resolves it.
 from cloud_agent_shared.text_tokens import ESTIMATE_BASIS, estimate_from_counts
 
@@ -164,6 +169,40 @@ class SnapshotRelation(BaseModel):
     compacted_since: bool = False
 
 
+class PrefixTool(BaseModel):
+    """One tool schema a request sent, by its name."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str
+    chars: int = Field(ge=0)
+    tokens: int = Field(ge=0)
+
+
+class MeasuredPrefix(BaseModel):
+    """What the request's attempt sent ahead of the conversation, as its meter measured it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["member_request_meter"] = "member_request_meter"
+    token_basis: str = ESTIMATE_BASIS
+    event_id: int | None = None
+    protocol: str | None = None
+    #: ``passthrough`` on a direct plan, ``translated`` behind the translator.
+    mode: str | None = None
+    system_chars: int = Field(ge=0)
+    system_tokens: int = Field(ge=0)
+    system_parts: int = Field(ge=0)
+    tool_count: int = Field(ge=0)
+    tool_chars: int = Field(ge=0)
+    tool_tokens: int = Field(ge=0)
+    #: The largest tool schemas, by name; empty when the record was not read.
+    tools: list[PrefixTool]
+    tools_omitted: int = Field(ge=0)
+    #: Other prefixes the attempt's requests sent: delegated agents', a title's.
+    other_prefixes: int = Field(ge=0)
+
+
 class RequestComposition(BaseModel):
     """Everything known about what one model request carried."""
 
@@ -183,6 +222,9 @@ class RequestComposition(BaseModel):
     #: or the read was dropped because it was slow, large or late), or the
     #: account's own status.
     native_status: str
+    #: What the member's request meter measured; None when nothing did (a turn
+    #: from before the meter, or a CLI on its vendor's own host).
+    prefix: MeasuredPrefix | None = None
     reconstructed: ReconstructedComposition
 
 
@@ -395,6 +437,10 @@ class LocatedRequest:
     #: The request's attempt was followed by another of the same turn.
     retried: bool = False
     job_state: str | None = None
+    #: The attempt's measured prefix (``context_profile.main_prefix``) and how
+    #: many others its requests sent.
+    prefix: Mapping[str, Any] | None = None
+    other_prefixes: int = 0
 
 
 def _attempt_ranks(
@@ -518,6 +564,10 @@ def locate_request(
         compacted_since=compacted_since,
         retried=retried,
         job_state=job.get("state"),
+        prefix=main_prefix(profile),
+        other_prefixes=max(
+            0, len(profile.get("prefixes") or []) + int(profile.get("prefixes_omitted") or 0) - 1
+        ),
     )
 
 
@@ -602,8 +652,13 @@ def assemble_request(
     superseded: Mapping[str, int],
     snapshot: Mapping[str, Any] | None,
     events_capped: bool,
+    prefix_record: Mapping[str, Any] | None = None,
 ) -> RequestComposition:
-    """Put the reads together into the request's composition."""
+    """Put the reads together into the request's composition.
+
+    ``prefix_record`` is the stored meter record of the attempt's measured
+    prefix, for its tools' names; the sizes are the profile's.
+    """
     carried = located.carried_attempts
     ranked = []
     for row in events:
@@ -652,10 +707,50 @@ def assemble_request(
             else None
         ),
         native_status=native_status,
+        prefix=measured_prefix(located, prefix_record),
         reconstructed=reconstructed(
             walk,
             boundary=located.boundary,
             copied_turns=located.copied_turns,
             events_capped=events_capped,
         ),
+    )
+
+
+def measured_prefix(
+    located: LocatedRequest, record: Mapping[str, Any] | None
+) -> MeasuredPrefix | None:
+    """The request's measured prefix, with its tools named when the record was read."""
+    prefix = located.prefix
+    if prefix is None:
+        return None
+    tools: list[PrefixTool] = []
+    entries = (record or {}).get("entries")
+    for entry in entries if isinstance(entries, list) else []:
+        if not (isinstance(entry, list) and len(entry) == 4 and isinstance(entry[0], str)):
+            continue
+        chars, ascii_chars, cjk = (
+            int(value) if isinstance(value, int) else 0 for value in entry[1:]
+        )
+        tools.append(
+            PrefixTool(
+                label=entry[0][:200],
+                chars=max(0, chars),
+                tokens=estimate_from_counts(ascii_chars, cjk, chars - ascii_chars - cjk),
+            )
+        )
+    tools = tools[:MAX_REQUEST_ENTRIES]
+    return MeasuredPrefix(
+        event_id=prefix.get("event_id"),
+        protocol=prefix.get("protocol"),
+        mode=prefix.get("mode"),
+        system_chars=int(prefix.get("system_chars") or 0),
+        system_tokens=int(prefix.get("system_tokens") or 0),
+        system_parts=int(prefix.get("system_parts") or 0),
+        tool_count=int(prefix.get("tool_count") or 0),
+        tool_chars=int(prefix.get("tool_chars") or 0),
+        tool_tokens=int(prefix.get("tool_tokens") or 0),
+        tools=tools,
+        tools_omitted=max(0, int(prefix.get("tool_count") or 0) - len(tools)),
+        other_prefixes=located.other_prefixes,
     )

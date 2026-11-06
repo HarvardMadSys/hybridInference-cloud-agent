@@ -38,11 +38,9 @@ import asyncpg
 import pytest
 import pytest_asyncio
 from tests.support.db import reset_agent_tables
-from tests.support.mcp_connectors import connector_connections, insert_connector
 from tests.support.migrations import apply_migrations, downgrade_to
 
 from cloud_agent.mcp import refresh
-from cloud_agent.mcp.errors import McpConnectionCreateConflict
 from cloud_agent.mcp.registry import mcp_cipher, oauth_cipher
 from cloud_agent.storage.assembly import Storage
 
@@ -299,126 +297,6 @@ async def test_bulk_create_rolls_back_when_a_later_credential_insert_is_rejected
     retried = await store.mcp.create_mcp_connections(connections=connections)
     assert [row["label"] for row in retried] == ["Public", "Private"]
     assert retried[1]["access_token_ciphertext"] == "reject-this-credential"
-
-
-@pytest.mark.parametrize("invalid_connector", ["other-owner", "revoked"])
-async def test_bulk_create_rolls_back_when_a_later_connector_is_unavailable(
-    store: Storage, pool, invalid_connector: str
-) -> None:
-    """Connector ownership and revocation are checked inside the batch transaction."""
-    connector = await insert_connector(
-        pool,
-        user_id=_OTHER if invalid_connector == "other-owner" else _OWNER,
-        name="Laptop",
-        revoked=invalid_connector == "revoked",
-    )
-    common = {
-        "user_id": _OWNER,
-        "transport": "streamable-http",
-        "location": "remote",
-        "launch_spec": None,
-        "auth_kind": "none",
-        "auth_config": {},
-        "template": None,
-        "reuse_pending": False,
-    }
-    with pytest.raises(McpConnectionCreateConflict, match="connector is no longer available"):
-        await store.mcp.create_mcp_connections(
-            connections=[
-                {
-                    **common,
-                    "label": "First",
-                    "url": "https://first.example.com/mcp",
-                },
-                {
-                    **common,
-                    "label": "Second",
-                    "transport": "stdio",
-                    "location": "user-connector",
-                    "url": None,
-                    "launch_spec": {"command": "mcp-server", "args": [], "env": {}, "mounts": []},
-                    "connector_id": int(connector["id"]),
-                },
-            ]
-        )
-
-    assert await store.mcp.list_mcp_connections(user_id=_OWNER) == []
-
-
-async def test_direct_connector_create_rolls_back_if_authorization_insert_fails(
-    store: Storage, pool
-) -> None:
-    """The route, encrypted config row, and reverse authority commit together."""
-    connector = await insert_connector(pool, user_id=_OWNER, name="Laptop")
-    async with pool.acquire() as conn:
-        await conn.execute(
-            """
-            CREATE FUNCTION agent_test_reject_mcp_connector_mapping() RETURNS trigger
-            LANGUAGE plpgsql AS $$
-            BEGIN
-                RAISE EXCEPTION 'injected connector mapping rejection';
-            END
-            $$
-            """
-        )
-        await conn.execute(
-            """
-            CREATE TRIGGER trg_agent_test_reject_mcp_connector_mapping
-            BEFORE INSERT ON agent_mcp_connector_connections
-            FOR EACH ROW EXECUTE FUNCTION agent_test_reject_mcp_connector_mapping()
-            """
-        )
-    values = {
-        "user_id": _OWNER,
-        "label": "Local",
-        "transport": "stdio",
-        "location": "user-connector",
-        "url": None,
-        "launch_spec": {"command": "mcp-server", "args": [], "env": {}, "mounts": []},
-        "auth_kind": "none",
-        "auth_config": {},
-        "connector_id": int(connector["id"]),
-    }
-    try:
-        with pytest.raises(asyncpg.PostgresError, match="injected connector mapping rejection"):
-            await store.mcp.create_mcp_connection(**values)
-    finally:
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "DROP TRIGGER IF EXISTS trg_agent_test_reject_mcp_connector_mapping "
-                "ON agent_mcp_connector_connections"
-            )
-            await conn.execute("DROP FUNCTION IF EXISTS agent_test_reject_mcp_connector_mapping()")
-
-    assert await store.mcp.list_mcp_connections(user_id=_OWNER) == []
-    assert await connector_connections(pool, int(connector["id"])) == []
-
-    created = await store.mcp.create_mcp_connection(**values)
-    assert created["connector_id"] == connector["id"]
-    assert await connector_connections(pool, int(connector["id"])) == [created["id"]]
-
-
-async def test_direct_connector_create_rejects_a_non_connector_location(
-    store: Storage,
-    pool,
-) -> None:
-    """Repository callers cannot bypass the API's location validation."""
-    connector = await insert_connector(pool, user_id=_OWNER, name="Laptop")
-    with pytest.raises(McpConnectionCreateConflict, match="can only serve"):
-        await store.mcp.create_mcp_connection(
-            user_id=_OWNER,
-            label="Remote",
-            transport="streamable-http",
-            location="remote",
-            url=_URL,
-            launch_spec=None,
-            auth_kind="none",
-            auth_config={},
-            connector_id=int(connector["id"]),
-        )
-
-    assert await store.mcp.list_mcp_connections(user_id=_OWNER) == []
-    assert await connector_connections(pool, int(connector["id"])) == []
 
 
 @pytest.mark.parametrize(
@@ -897,72 +775,6 @@ async def test_finishing_a_call_is_fenced_by_its_dispatch_generation(
     stored = await store.mcp.get_mcp_invocation(invocation_id=invocation["id"])
     assert stored is not None
     assert stored["status"] == "outcome_unknown"
-
-
-async def test_location_edit_away_from_user_connector_unbinds_atomically(
-    store: Storage,
-    pool,
-) -> None:
-    """Changing the run location removes the singular connector authority."""
-    connector = await insert_connector(pool, user_id=_OWNER, name="Laptop")
-    connection = await store.mcp.create_mcp_connection(
-        user_id=_OWNER,
-        label="Local files",
-        transport="stdio",
-        location="user-connector",
-        url=None,
-        launch_spec={"command": "mcp-server", "args": [], "env": {}, "mounts": []},
-        auth_kind="none",
-        auth_config={},
-        connector_id=int(connector["id"]),
-    )
-
-    moved = await store.mcp.update_mcp_connection(
-        connection_id=int(connection["id"]),
-        user_id=_OWNER,
-        expected_config_revision=int(connection["config_revision"]),
-        transport="streamable-http",
-        location="remote",
-        url=_URL,
-    )
-
-    assert moved is not None
-    assert moved["location"] == "remote"
-    assert moved["connector_id"] is None
-    assert moved["config_revision"] == connection["config_revision"] + 1
-    assert moved["authorization_epoch"] == connection["authorization_epoch"] + 1
-    assert await connector_connections(pool, int(connector["id"])) == []
-
-
-async def test_disconnect_removes_connector_route_and_mapping(
-    store: Storage,
-    pool,
-) -> None:
-    """A soft-deleted connection is no longer authorized on the connector."""
-    connector = await insert_connector(pool, user_id=_OWNER, name="Laptop")
-    connection = await store.mcp.create_mcp_connection(
-        user_id=_OWNER,
-        label="Local files",
-        transport="stdio",
-        location="user-connector",
-        url=None,
-        launch_spec={"command": "mcp-server", "args": [], "env": {}, "mounts": []},
-        auth_kind="none",
-        auth_config={},
-        connector_id=int(connector["id"]),
-    )
-
-    assert await store.mcp.disconnect_mcp_connection(
-        connection_id=int(connection["id"]), user_id=_OWNER
-    )
-
-    tombstone = await store.mcp.get_mcp_connection(
-        connection_id=int(connection["id"]), user_id=_OWNER
-    )
-    assert tombstone is not None
-    assert tombstone["deleted_at"] is not None
-    assert tombstone["connector_id"] is None
-    assert await connector_connections(pool, int(connector["id"])) == []
 
 
 async def test_a_connection_and_its_credential_commit_together(store: Storage) -> None:

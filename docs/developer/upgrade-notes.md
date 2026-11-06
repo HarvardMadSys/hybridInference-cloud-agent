@@ -9,7 +9,7 @@ this page. The deployment order itself, and how to roll back, are in
 ## Before starting this release
 
 Before starting this release, run `alembic upgrade head` through
-`0113_sandbox_incidents`. The supported deployment scripts run migrations
+`0115_mcp_retire_dead_locations`. The supported deployment scripts run migrations
 before replacing the API; every migration listed here is additive and safe
 under the running previous release unless it says otherwise. The few
 transitions that need stopped writers are listed in
@@ -18,6 +18,19 @@ transitions that need stopped writers are listed in
 After migrating, start the main control-plane listener with its existing
 complete environment: it imports newly registered settings once, as described
 in [Admin Settings](operations.md#admin-settings).
+
+## The audit log names who acted on whom
+
+**Admin → Audit log** now names the administrator and the account of each
+action, files account decisions under **Accounts**, and shows only people by
+default: administrators' sessions and break-glass access (`ADMIN_TOKEN`,
+first-run setup, the bootstrap command). Automation, the control plane's own
+workers and policy, and accounts changing themselves are one switch away. A
+request whose work runs later, such as a sandbox deletion or a new server,
+shows its final result. Erasing an account no longer deletes the audit rows
+about it, and an audit row that cannot be written no longer fails the action
+it records; the page reports such misses instead
+([reading the trail](operations.md#reading-a-tasks-recorded-events)).
 
 ## Agents open their own pull requests
 
@@ -43,6 +56,33 @@ The publisher's tables (`agent_sandbox_snapshots`, `agent_snapshot_jobs`,
 schema, unused: this release neither reads nor writes them, and a migration in
 the next release drops them. This release is an ordinary rolling deploy, and
 rolling back to the previous release needs no downgrade and loses nothing.
+
+## MCP servers run in two places
+
+An MCP connection is an online service (`remote`) or a program in the chat's
+sandbox (`sandbox`). The two locations nothing ever ran, `managed-worker` and
+`user-connector`, are gone: the API refuses them, as it refuses `connector_id`,
+and connection views no longer carry `connector_id`.
+`0115_mcp_retire_dead_locations` moves any connection still stored at either
+one to `sandbox`, with its command kept as stored. Such a connection now shows
+as a program. It runs when its command passes the sandbox's rules (`npx` or
+`uvx` and one exactly pinned package, no mounts or working directory), and is
+left out of chats otherwise; its owner can disconnect it and add it again, or
+edit its command through the API. Count such rows before upgrading if you want
+to tell their owners:
+
+```sql
+SELECT location, count(*) FROM agent_mcp_connections
+WHERE location IN ('managed-worker', 'user-connector') GROUP BY location;
+```
+
+The connector tables (`agent_mcp_connectors`, `agent_mcp_connector_connections`)
+and `agent_mcp_connections.connector_id` stay in the schema, unused: this
+release neither reads nor writes them, and a migration in a later release drops
+them. While the previous release still serves during the rollout, a request
+that asks it to store a connection at a removed location fails rather than
+storing one that would never run. Rolling back to the previous release needs no
+downgrade: it reads the moved rows as programs.
 
 ## Shorter `.env` files
 
@@ -224,6 +264,8 @@ Newest first.
 
 | Migration | What it changes |
 |---|---|
+| `0115_mcp_retire_dead_locations` | Moves every MCP connection stored at `managed-worker` or `user-connector` to `sandbox`, with its launch, credentials and connector link unchanged; moves its `config_revision` and `authorization_epoch` on by one, as a location edit does; and clears a failing diagnosis (an `error` status becomes `draft`). It then narrows `agent_mcp_connections_location_check` to `remote` and `sandbox`, under the table lock it took first, so no removed value lands in between. No row is deleted. The previous release runs beside it, except that its writes of a removed location are refused. A downgrade restores the four-location constraint; moved rows stay `sandbox` ([MCP servers run in two places](#mcp-servers-run-in-two-places)). |
+| `0114_admin_audit_attribution` | Gives `agent_admin_audit_log` its attribution: `actor_type`, generated from `actor_id`, and `actor_label`, `target_type`, `target_id`, `target_label`, `subject_label`, `outcome`, `reason` and `correlation_id`, backfilled from the rows' own actions and details and the current account names; and two tables, `agent_admin_audit_outcomes` (a requested sandbox deletion's final result) and `agent_admin_audit_write_failures`. It deletes the Servers page's polling reads and connection checks, and turns the sandbox deletion worker's per-step rows into one result per request, deleting those rows; a worker row that names no request is kept. Adding the generated column rewrites the table under a brief lock. The previous release keeps writing and reading the original columns unchanged, and its rows are classified by the generated column. A downgrade drops the columns and the two tables; deleted rows are not restored, and the deletion steps remain in `agent_sandbox_events`. |
 | `0113_sandbox_incidents` | Makes sandbox incidents idempotent and tracks what each chat's agent was told: a unique index on `agent_sandbox_events (sandbox_id, details->>'incident_id')` for `incident.*` rows, and two tables, `agent_thread_incident_cursors` and `agent_attempt_incident_marks`. A trigger on `agent_thread_sandbox_memberships` starts a chat's cursor when it joins or moves sandbox, and every existing membership gets one. The previous release never reads them and no existing row has an `incident.*` type, so it runs unchanged beside it; its membership inserts only start cursors. A downgrade drops the triggers, the tables and the index; incident rows stay. |
 | `0112_thread_pull_requests` | Adds `agent_thread_pull_requests`: the pull requests a conversation's agent opened through the GitHub relay, one row per conversation and pull request. Nothing reads it before this release, so the previous release runs unchanged beside it. A downgrade drops the table. |
 | `0111_mcp_sandbox_location` | Lets an MCP connection run inside the task sandbox: the `agent_mcp_connections.location` check constraint admits `sandbox` beside `remote`, `managed-worker` and `user-connector`, under the stable name `agent_mcp_connections_location_check`. No row changes. A downgrade restores the three-location constraint, and refuses while any sandbox connection exists rather than deleting it. |

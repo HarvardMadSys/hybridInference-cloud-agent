@@ -21,7 +21,7 @@ class McpRepositoryBase:
 
     _MCP_CONNECTION_COLUMNS = (
         "id, user_id, label, template, transport, location, url, launch_spec, "
-        "auth_kind, auth_config, connector_id, status, enabled, error_kind, error_detail, "
+        "auth_kind, auth_config, status, enabled, error_kind, error_detail, "
         "access_token_ciphertext, refresh_token_ciphertext, client_secret_ciphertext, "
         "expires_at, scopes, issuer, resource, refresh_rotates, token_endpoint, "
         "revocation_endpoint, registration_endpoint, client_auth_method, "

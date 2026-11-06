@@ -174,7 +174,6 @@ function mcpConnection(overrides: Record<string, unknown> = {}) {
     error_kind: 'none',
     error_detail: null,
     account_label: null,
-    connector_id: null,
     has_credential: true,
     secret_hint: null,
     expires_at: null,

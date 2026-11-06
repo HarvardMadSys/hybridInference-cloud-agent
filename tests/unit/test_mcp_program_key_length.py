@@ -172,16 +172,16 @@ def test_a_pasted_short_key_is_refused_in_the_preview_and_at_the_save() -> None:
     assert not store.connections
 
 
-def test_a_paste_the_owner_runs_elsewhere_is_not_judged_as_a_program() -> None:
-    """The owner's chosen location wins over the one the paste implies, as at the save."""
+def test_a_paste_placed_at_a_removed_location_is_refused_at_the_preview() -> None:
+    """A program runs only in the sandbox; no other place is left to judge it for."""
     store = FakeStore()
     body = {"text": _paste({"API_KEY": "abc"}), "locations": {"search": "user-connector"}}
     with _client(store) as client:
         preview = client.post("/v1/agent/mcp/connections/import", json=body)
 
-    assert preview.status_code == 200, preview.text
-    assert preview.json()["rejected"] == []
-    assert [draft["label"] for draft in preview.json()["drafts"]] == ["search"]
+    assert preview.status_code == 400
+    assert "use one of: remote, sandbox" in preview.json()["detail"]["error"]["message"]
+    assert not store.connections
 
 
 def test_a_pasted_eight_character_key_is_previewed_and_saved() -> None:
@@ -251,5 +251,5 @@ def test_only_a_sandbox_programs_key_is_judged() -> None:
     assert sandbox_servers.short_key_refusal(ExecutionLocation.SANDBOX, {"API_KEY": "abc"}) == (
         _REFUSAL
     )
-    assert sandbox_servers.short_key_refusal(ExecutionLocation.USER_CONNECTOR, {"K": "a"}) is None
+    assert sandbox_servers.short_key_refusal(ExecutionLocation.REMOTE, {"K": "a"}) is None
     assert sandbox_servers.short_key_refusal(ExecutionLocation.SANDBOX, {"K": ""}) is None

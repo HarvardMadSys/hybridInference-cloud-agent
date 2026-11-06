@@ -1,9 +1,9 @@
-"""Connector rows for database tests, as an earlier registration left them.
+"""Connector rows for migration tests, as an earlier registration left them.
 
-The routes that registered, bound and revoked connectors are retired. A
-connection can still name a connector registered before then, and deleting or
-re-locating that connection still clears its route, so the tests that cover
-those paths seed the rows directly.
+No connector ever ran, and nothing in the application reads or writes these
+tables any more. The migrations that repaired and then retired connector
+routes still have to be tested over the rows a release before them wrote, so
+those tests seed them directly.
 """
 
 from __future__ import annotations
@@ -31,14 +31,3 @@ async def insert_connector(
             "revoked" if revoked else "pending",
         )
     return dict(row)
-
-
-async def connector_connections(pool: asyncpg.Pool, connector_id: int) -> list[int]:
-    """The connection ids one connector is authorized to serve."""
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT connection_id FROM agent_mcp_connector_connections WHERE connector_id = $1 "
-            "ORDER BY connection_id",
-            connector_id,
-        )
-    return [int(row["connection_id"]) for row in rows]

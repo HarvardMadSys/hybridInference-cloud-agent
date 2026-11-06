@@ -11,9 +11,11 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from tests.support.member_loopback import HELPER_IN_PLACE
 from tests.support.owners import launch_connection
 
 from cloud_agent_host.container.chat_sandbox import MEMBER_UID_BASE, ChatSandboxSpec
+from cloud_agent_host.member_setup.compat_helper import LAUNCHER
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
 
 _PLACEHOLDER = "agh.payload.signature"
@@ -31,6 +33,7 @@ def _context(runtime_id="claude-code", **changes):
         ensure_kilo_mcp_runtime=lambda *_args: None,
         spawn=lambda spec, argv, **kwargs: calls.append({"argv": argv, **kwargs}),
         install_tool_hooks=lambda spec, update, **kwargs: calls.append({"hooks": update}),
+        exact=HELPER_IN_PLACE,
     )
     spec = ChatSandboxSpec(
         thread_id="athr_owner",
@@ -171,7 +174,9 @@ def test_claude_is_told_how_github_works_here_and_names_the_co_author():
     context.spawn_live(["claude", "-p"], context.base_env)
     context.install_tool_hooks({"hooks": {}})
 
-    argv = calls[0]["argv"]
+    # A direct plan's CLI starts behind its request meter; the CLI's own argv follows.
+    assert calls[0]["argv"][: len(LAUNCHER)] == list(LAUNCHER)
+    argv = calls[0]["argv"][len(LAUNCHER) :]
     assert argv[:2] == ["claude", "-p"]
     assert argv[-2] == "--append-system-prompt"
     assert "`gh api repos/owner/repo/pulls" in argv[-1]
@@ -188,5 +193,5 @@ def test_claude_is_told_how_github_works_here_and_names_the_co_author():
     plain, plain_calls, _ = _context(github_credential="", git_coauthor="")
     plain.spawn_live(["claude", "-p"], plain.base_env)
     plain.install_tool_hooks({"hooks": {}})
-    assert plain_calls[0]["argv"] == ["claude", "-p"]
+    assert plain_calls[0]["argv"] == [*LAUNCHER, "claude", "-p"]
     assert plain_calls[1]["hooks"] == {"hooks": {}}

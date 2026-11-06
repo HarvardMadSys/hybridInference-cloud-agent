@@ -25,21 +25,18 @@ from typing import TYPE_CHECKING, Any
 from cloud_agent.crypto.credential_cipher import CredentialCipherError
 from cloud_agent.domain.errors import Refused, Unavailable
 from cloud_agent.mcp import config_import, launch, sandbox_servers as sandbox
-from cloud_agent.mcp.launch import LaunchPlanError, ManagedLaunchPolicy, build_launch_plan
+from cloud_agent.mcp.launch import LaunchPlanError, build_launch_plan
 from cloud_agent.mcp.models import (
     AuthKind,
     ExecutionLocation,
     HeaderAuth,
     LaunchSpec,
-    Mount,
     Transport,
 )
 from cloud_agent.mcp.net_policy import EndpointRejected, policy_from_environment, validate_endpoint
 from cloud_agent.mcp.registry import mcp_cipher
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-
     from cloud_agent.ports import McpConnectionRepository
 
 
@@ -110,12 +107,11 @@ def validate_target(
     location: ExecutionLocation,
     url: str | None,
     launch: Mapping[str, Any] | None,
-    mounts: Sequence[Mount] = (),
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Check a connection's target and return its storable form.
 
-    ``mounts`` are the ones the platform derived and the owner was shown; a
-    submitted launch document's own ``mounts`` are never read.
+    A submitted launch document's own ``mounts`` are never read: the sandbox
+    takes none.
     """
     if location is ExecutionLocation.REMOTE:
         if transport is Transport.STDIO:
@@ -140,11 +136,8 @@ def validate_target(
             args=tuple(str(arg) for arg in launch.get("args") or ()),
             env={str(k): str(v) for k, v in (launch.get("env") or {}).items()},
             cwd=str(launch["cwd"]) if launch.get("cwd") else None,
-            mounts=tuple(mounts),
         )
-        plan = build_launch_plan(
-            spec, connection_id="draft", location=location, policy=ManagedLaunchPolicy()
-        )
+        build_launch_plan(spec, connection_id="draft", location=location)
     except LaunchPlanError as exc:
         raise _invalid(str(exc)) from exc
     rendered: dict[str, Any] = {
@@ -152,10 +145,7 @@ def validate_target(
         "args": list(spec.args),
         "env": dict(spec.env),
         "cwd": spec.cwd,
-        "mounts": [
-            {"source": mount.source, "target": mount.target, "read_only": mount.read_only}
-            for mount in plan.mounts
-        ],
+        "mounts": [],
     }
     return None, rendered
 
@@ -329,17 +319,13 @@ def prepare_import_draft(
             "cwd": draft.launch.cwd,
         }
     # The checks create applies, and only the form they render is stored: the
-    # run location must fit the transport, an address must pass the egress
-    # policy and a command must build a launch plan. The local paths a command
-    # names become a managed worker's mounts under that plan's mount rules.
+    # location must fit the transport, an address must pass the egress policy
+    # and a command must pass the sandbox's launch plan.
     url, launch_spec = validate_target(
         transport=draft.transport,
         location=parsed_location,
         url=draft.url,
         launch=launch_spec,
-        mounts=config_import.mounts_for(draft.paths)
-        if parsed_location is ExecutionLocation.MANAGED_WORKER
-        else (),
     )
     auth_config: dict[str, Any] = {}
     if draft.auth_kind is AuthKind.STATIC and draft.secrets:
@@ -421,23 +407,6 @@ def header_of(row: Mapping[str, Any]) -> str:
     return str(settings.get("header_name") or "Authorization")
 
 
-async def require_connector(
-    store: McpConnectionRepository, *, connector_id: int, user_id: str
-) -> dict[str, Any]:
-    """Fetch one of this user's connectors, or refuse."""
-    row = next(
-        (
-            item
-            for item in await store.list_mcp_connectors(user_id=user_id)
-            if int(item["id"]) == connector_id
-        ),
-        None,
-    )
-    if row is None:
-        raise Refused("not_found", "not_found", "no such connector")
-    return row
-
-
 __all__ = [
     "build_auth",
     "edited_launch_spec",
@@ -448,7 +417,6 @@ __all__ = [
     "parse_location",
     "parse_transport",
     "prepare_import_draft",
-    "require_connector",
     "sealed_launch_spec",
     "static_credential",
     "store_static_secret",

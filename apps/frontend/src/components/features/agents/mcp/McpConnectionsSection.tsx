@@ -34,14 +34,9 @@ export function capabilitySummary(counts: CapabilityCounts): string {
   return parts.join(' · ') || 'No tools discovered';
 }
 
-const CONNECTION_KINDS: Record<string, string> = {
-  remote: 'Online service',
-  'user-connector': 'On your computer',
-};
-
 /** What kind of server this is, in the owner's words: never where it is placed. */
 export function connectionKind(location: string): string {
-  return CONNECTION_KINDS[location] ?? 'Program';
+  return location === 'remote' ? 'Online service' : 'Program';
 }
 
 /** The one line under a server's name on its card. */

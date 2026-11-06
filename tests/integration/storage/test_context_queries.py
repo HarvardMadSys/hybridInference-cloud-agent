@@ -33,6 +33,7 @@ from cloud_agent.domain.thread_stats import ATTEMPT_ROLLUP_VERSION
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.usage.admin_usage import MAX_USAGE_RUNS
 from cloud_agent.usage.usage_batches import owner_usage
+from cloud_agent_shared.request_prefix import measure
 from cloud_agent_shared.text_tokens import estimate_text_tokens
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -584,6 +585,33 @@ async def test_request_composition_reads_carried_content_and_the_cli_account(db,
         )
         is None
     )
+
+
+async def test_request_composition_names_the_tools_its_meter_measured(db, store):
+    [job] = await _thread(db, store, "athr_prefix")
+    body = {
+        "system": "You are a coding agent.",
+        "tools": [{"name": "Bash", "input_schema": {}}, {"name": "mcp__session__x", "d": "y" * 99}],
+    }
+    record = measure("anthropic_messages", body, mode="passthrough")
+    assert record is not None
+    await _events(
+        db,
+        job,
+        [
+            ("lifecycle", {"phase": "request_prefix", "prefix": record}),
+            _claude("msg_1", 1000),
+        ],
+    )
+    composition = await store.context_queries.request_composition(
+        job_id=job, user_id=OWNER, event_id=await _event_id(db, job, 2)
+    )
+    assert composition is not None and composition.prefix is not None
+    prefix = composition.prefix
+    assert prefix.system_chars == len("You are a coding agent.") and prefix.tool_count == 2
+    # The stored record names the tools, the largest first.
+    assert [tool.label for tool in prefix.tools] == ["mcp__session__x", "Bash"]
+    assert prefix.mode == "passthrough" and prefix.event_id == await _event_id(db, job, 1)
 
 
 async def test_event_content_is_windowed_and_owner_scoped(db, store):

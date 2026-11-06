@@ -258,27 +258,20 @@ async def resolve_binding(
     ):
         raise refused(503, "server_error", f"The {alias!r} MCP connection is not usable.")
     if str(connection_row.get("transport")) == "stdio":
-        # A local process needs a worker or a connector to run it, and neither
-        # is this listener. Refused here rather than forwarded to an address
-        # that does not exist, so the agent is told what is missing instead of
-        # reporting a server that cannot be reached.
+        # A program runs in the task's sandbox, behind the sandbox's own MCP
+        # gateway, and this listener has nothing to run it with. Refused here
+        # rather than forwarded to an address that does not exist, so the agent
+        # is told where the server is instead of reporting one that cannot be
+        # reached.
         logger.warning(
             "agent_mcp_stdio_not_runnable",
             extra={"event": "agent_mcp_stdio_not_runnable", "job_id": job_id, "alias": alias},
         )
-        # Named precisely, because the two cases need different actions from the
-        # owner: one is a deployment that has no connector runtime, the other is
-        # a connection they have not routed anywhere yet.
         raise refused(
             503,
             "server_error",
-            (
-                f"The {alias!r} MCP connection runs through a connector, and this "
-                "deployment does not serve connectors yet."
-                if connection_row.get("connector_id")
-                else f"The {alias!r} MCP connection runs a local process, and no connector "
-                "is configured for it."
-            ),
+            f"The {alias!r} MCP connection is a program that runs in the chat's sandbox, "
+            "not through this relay.",
         )
 
     try:

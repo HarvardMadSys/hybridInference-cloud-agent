@@ -24,12 +24,13 @@ class AuditRepository(Protocol):
         target_user_id: str | None = None,
         details: dict[str, Any] | None = None,
         success: bool = True,
-    ) -> int:
+        reason: str | None = None,
+    ) -> int | None:
         """Append one row to this service's admin audit trail.
 
-        The gateway's ``admin_audit_log`` stayed with the gateway. This one is
-        ours, and it is append-only by convention rather than by constraint —
-        there is no code here that updates or deletes a row.
+        Append-only: nothing in this service updates or deletes a row, an
+        erased account's included. A row that cannot be written is logged and
+        counted rather than raised, so recording never fails the action.
 
         Args:
             action: Dotted action name, e.g. ``agent.runner_host.drain``.
@@ -38,8 +39,9 @@ class AuditRepository(Protocol):
             target_user_id: The user acted upon, where there is one.
             details: Structured context. Never a credential.
             success: Whether the action succeeded.
+            reason: Why, in the administrator's words, when they gave one.
 
         Returns:
-            The new row's id.
+            The new row's id, or ``None`` when it could not be written.
         """
         ...

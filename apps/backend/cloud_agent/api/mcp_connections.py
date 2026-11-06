@@ -69,7 +69,7 @@ from cloud_agent.crypto.credential_cipher import CredentialCipherError
 from cloud_agent.domain.errors import Refused, Unavailable
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import config_import, sandbox_servers as sandbox
-from cloud_agent.mcp.errors import McpConnectionCreateConflict, McpCredentialWriteRejected
+from cloud_agent.mcp.errors import McpCredentialWriteRejected
 from cloud_agent.mcp.host import HostError, McpHost, SessionKey
 from cloud_agent.mcp.models import (
     AuthKind,
@@ -207,7 +207,6 @@ class ConnectionView(BaseModel):
     error_kind: str = ConnectionErrorKind.NONE.value
     error_detail: str | None = None
     account_label: str | None = None
-    connector_id: int | None = None
     has_credential: bool = False
     secret_hint: str | None = None
     expires_at: datetime | None = None
@@ -245,7 +244,6 @@ class CreateConnectionRequest(BaseModel):
     launch: dict[str, Any] | None = None
     auth_kind: str = AuthKind.NONE.value
     template: str | None = None
-    connector_id: int | None = None
     #: Seconds one call to this server may take. Omitted means the relay's
     #: default, which is what every connection had before this was a choice.
     request_timeout_s: float | None = Field(default=None, ge=5, le=900)
@@ -266,8 +264,8 @@ class ImportRequest(BaseModel):
     text: str = Field(min_length=1)
     format_hint: str | None = None
     save: bool = False
-    #: Per-draft overrides, keyed by the draft's label: the run location the
-    #: user chose after seeing what the configuration implied.
+    #: Per-draft locations, keyed by the draft's label, as its preview placed
+    #: it. Only one location fits a draft's shape; any other is refused.
     locations: dict[str, str] = Field(default_factory=dict)
     env_secrets: dict[str, str] = Field(default_factory=dict)
     #: Missing values belong to a server, even when several use the same key.
@@ -382,7 +380,6 @@ async def _view(store: _McpConnectionsStorage, row: Mapping[str, Any]) -> Connec
         error_kind=connection.error_kind.value,
         error_detail=connection.error_detail,
         account_label=row.get("account_label"),
-        connector_id=int(row["connector_id"]) if row.get("connector_id") else None,
         # The credential the server is sent. A stored OAuth client secret is
         # not one: until a sign-in completes there is nothing to send.
         has_credential=bool(row.get("access_token_ciphertext")),
@@ -467,19 +464,6 @@ async def create_connection(
         # column means "which preset this came from", and a value that names
         # nothing makes the provenance unreadable.
         raise _bad_request(f"unknown template: {template!r}")
-    if body.connector_id is not None:
-        # A connection may name only its owner's connector: another user's
-        # answers 404, as a missing one does, and nothing is stored.
-        await _require_connector(job_store, connector_id=body.connector_id, user_id=user["user_id"])
-
-    if body.connector_id is not None:
-        if location is not ExecutionLocation.USER_CONNECTOR:
-            raise _bad_request("connector_id is only valid when location is 'user-connector'")
-        connector = await _require_connector(
-            job_store, connector_id=body.connector_id, user_id=user["user_id"]
-        )
-        if str(connector.get("status")) == "revoked":
-            raise _conflict("that connector has been revoked")
 
     # Encrypt before the insert. A missing key used to commit the row and then
     # return 503, and the next attempt inserted another credential-less row.
@@ -507,7 +491,6 @@ async def create_connection(
             auth_kind=auth_kind.value,
             auth_config=auth_config,
             template=template,
-            connector_id=body.connector_id,
             account_label=body.account_label,
             request_timeout_s=body.request_timeout_s,
             reuse_pending=not body.secret and not body.env_secrets,
@@ -515,8 +498,6 @@ async def create_connection(
             auth_config_patch=auth_config_patch,
             sealed_launch_spec=sealed_launch_spec,
         )
-    except McpConnectionCreateConflict as exc:
-        raise _conflict(str(exc)) from exc
     except McpCredentialWriteRejected as exc:
         raise _conflict("the credential could not be stored with this connection") from exc
     logger.info(
@@ -803,8 +784,8 @@ async def _diagnose(
     if loaded_row is None:
         raise _not_found("no such MCP connection")
     if loaded_row.get("location") == ExecutionLocation.SANDBOX.value:
-        # Nothing here can reach it, and an unreachable verdict would stop it.
-        return TestResult(ok=True, message=sandbox.TEST_MESSAGE)
+        ok, message = await sandbox.checked_in_place(job_store.mcp, loaded_row, record=record)
+        return TestResult(ok=ok, error_kind="none" if ok else "launch_failed", message=message)
     row = loaded_row
 
     async def record_status(
@@ -917,14 +898,6 @@ def _build_auth(
     """Validate an authentication choice and render its non-secret settings."""
     with _answered():
         return inputs.build_auth(auth_kind, header_name, header_scheme)
-
-
-async def _require_connector(
-    store: _McpConnectionsStorage, *, connector_id: int, user_id: str
-) -> dict[str, Any]:
-    """Fetch one of this user's connectors, or refuse."""
-    with _answered():
-        return await inputs.require_connector(store.mcp, connector_id=connector_id, user_id=user_id)
 
 
 async def _store_static_secret(

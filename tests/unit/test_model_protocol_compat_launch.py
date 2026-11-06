@@ -22,6 +22,7 @@ from types import SimpleNamespace
 import pytest
 
 from cloud_agent_host.claimed_job import ClaimedJob, claim_secret_values
+from cloud_agent_host.container.exact_container import ProvenContainers
 from cloud_agent_host.member_setup.compat_helper import (
     HELPER_PATH,
     LAUNCHER,
@@ -270,19 +271,25 @@ def test_the_helper_archive_is_deterministic_and_runs_on_the_image_interpreter(t
     assert "cloud_agent_host/protocol_translator.py" in names
     assert "cloud_agent_shared/protocol_compat/LICENSE.hybridinference" in names
     assert "cloud_agent_shared/protocol_compat/NOTICE.md" in names
-    # Of the host package only the translator, which imports nothing of it.
+    # Of the host package only the translator and the passthrough.
     assert [n for n in names if n.startswith("cloud_agent_host/")] == [
         "cloud_agent_host/__init__.py",
+        "cloud_agent_host/model_passthrough.py",
         "cloud_agent_host/protocol_translator.py",
     ]
+    assert "cloud_agent_shared/request_prefix.py" in names
+    archived = {
+        name.removesuffix(".py").removesuffix("/__init__").replace("/", ".")
+        for name in names
+        if name.endswith(".py")
+    }
     archive_zip = zipfile.ZipFile(io.BytesIO(archive))
     for name in names:
         if name.endswith(".py") and name != "__main__.py":
             for module in _imported(archive_zip.read(name), name):
                 top = module.split(".")[0]
-                assert top in sys.stdlib_module_names or module.startswith(
-                    "cloud_agent_shared.protocol_compat"
-                ), (name, module)
+                # The standard library, or a module the archive itself holds.
+                assert top in sys.stdlib_module_names or module in archived, (name, module)
     assert HELPER_PATH == "/usr/local/libexec/model-protocol-translator.pyz"
     path = tmp_path / "helper.pyz"
     path.write_bytes(archive)
@@ -305,13 +312,15 @@ def _imported(source: bytes, name: str) -> list[str]:
 
 
 class _Manager:
-    """Just the calls ``install_trusted_file`` makes."""
+    """Just the calls ``install_once`` and ``install_trusted_file`` make."""
 
     def __init__(self, probe_ok: bool) -> None:
         self.probe_ok = probe_ok
         self.copied: list[bytes] = []
         self.commands: list[list[str]] = []
         self.backend = SimpleNamespace(docker_binary="docker")
+        self._proven = ProvenContainers()
+        self.proven = SimpleNamespace(container_id="container-1")
 
     @property
     def exact(self):
@@ -320,6 +329,15 @@ class _Manager:
 
     def require(self, spec):
         return SimpleNamespace(container_id="container-1")
+
+    def proven_container(self, spec):
+        return self.proven
+
+    def holds_helper(self, proven, key):
+        return self._proven.holds_helper(proven, key)
+
+    def note_helper(self, proven, key):
+        self._proven.note_helper(proven, key)
 
     def exec_capture(self, spec, argv, **kwargs):
         self.commands.append(argv)
@@ -344,3 +362,15 @@ def test_a_retained_container_gets_this_hosts_helper_only_when_it_differs():
     probe, activate = stale.commands
     assert HELPER_PATH in probe and "0:0:444" not in probe
     assert activate[-2] == HELPER_PATH and activate[-1] == "444"
+
+
+def test_the_helper_is_looked_for_once_per_container():
+    """A direct plan starts behind it too, so a container's later launches skip the probe."""
+    spec = SimpleNamespace(container_name="sandbox-1")
+    manager = _Manager(probe_ok=True)
+    install_compat_helper(manager, spec)
+    install_compat_helper(manager, spec)
+    assert len(manager.commands) == 1
+    manager.proven = SimpleNamespace(container_id="container-2")
+    install_compat_helper(manager, spec)
+    assert len(manager.commands) == 2
