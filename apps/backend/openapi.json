@@ -17098,7 +17098,7 @@
         "type": "object"
       },
       "McpBindingInput": {
-        "description": "One connection's use by a session, as the caller asks for it.\n\nThe policy map is name to ``deny`` / ``confirm`` / ``allow``. A name that\nis absent is denied: a session means what it says, and a capability the\nserver adds later is not covered by what its owner chose earlier.",
+        "description": "One connection's use by a session, as the caller asks for it.\n\nThe policy map is name to ``deny`` / ``confirm`` / ``allow``. A name that\nis absent is denied: a session means what it says, and a capability the\nserver adds later is not covered by what its owner chose earlier.\n\n``use_defaults`` turns the server on before its tools are known: every\ntool it lists asks first, as a server the owner connected later does. A\nprogram in the chat's sandbox needs it, because it lists its tools only\nonce a chat has started it.",
         "properties": {
           "alias": {
             "anyOf": [
@@ -17142,6 +17142,11 @@
             },
             "title": "Tools",
             "type": "object"
+          },
+          "use_defaults": {
+            "default": false,
+            "title": "Use Defaults",
+            "type": "boolean"
           }
         },
         "required": [

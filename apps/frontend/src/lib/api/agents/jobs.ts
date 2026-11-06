@@ -114,7 +114,8 @@ export interface AgentJobApi {
  *
  * A capability the map does not name is denied, and the control plane derives
  * `enabled` from whether anything is left non-denied — so an empty map binds
- * the server switched off rather than fully open.
+ * the server switched off rather than fully open, unless `use_defaults` asks
+ * for every tool to ask first.
  */
 export interface McpBindingInputApi {
   connection_id: number;
@@ -123,6 +124,8 @@ export interface McpBindingInputApi {
   tools?: Record<string, 'deny' | 'confirm' | 'allow'>;
   resources?: Record<string, 'deny' | 'confirm' | 'allow'>;
   prompts?: Record<string, 'deny' | 'confirm' | 'allow'>;
+  /** On before its tools are known: every tool it lists asks first. */
+  use_defaults?: boolean;
 }
 
 export interface AgentPluginInputApi {
