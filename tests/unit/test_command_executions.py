@@ -607,3 +607,12 @@ def test_cumulative_duration_is_absent_when_nothing_was_measured():
     assert page.summary.cumulative_ms == 0
     # The count says nothing was measured; the client renders it as unknown.
     assert page.summary.durations_missing == 1
+
+
+def test_parse_program_public_surface_is_the_extracted_implementation():
+    """The pure resolver moved; command_executions re-exports it by identity."""
+    from cloud_agent.context import command_executions, command_program
+
+    assert command_executions.parse_program is command_program.parse_program
+    assert command_executions.MAX_PROGRAM_CHARS == command_program.MAX_PROGRAM_CHARS
+    assert command_executions.ParseBasis is command_program.ParseBasis
