@@ -95,27 +95,52 @@ def test_a_program_takes_keys_as_environment_values_not_a_sign_in() -> None:
     assert not store.connections
 
 
-def test_testing_a_sandbox_connection_explains_instead_of_failing_it() -> None:
-    """The control plane cannot reach it; an unreachable verdict would stop it."""
-    store = FakeStore()
-    connection_id = _seed(
+def _program(store: FakeStore, launch: dict[str, Any] | None = None, **overrides: Any) -> int:
+    return _seed(
         store,
         transport="stdio",
         location="sandbox",
         url=None,
-        launch_spec=dict(_PLAYWRIGHT["launch"]),
+        launch_spec=dict(launch or _PLAYWRIGHT["launch"]),
         auth_kind="none",
         auth_config={},
         access_token_ciphertext=None,
         status="draft",
+        **overrides,
     )
+
+
+def test_testing_a_program_makes_it_ready_to_turn_on_in_a_chat() -> None:
+    """A saved program was left ``draft`` for good, and a chat refused a draft.
+
+    The control plane cannot reach it, so the test is what a claim checks: its
+    launch against the sandbox policy. Passing makes it ``active``; it never
+    reports the server unreachable.
+    """
+    store = FakeStore()
+    connection_id = _program(store)
     with _client(store) as client:
         response = client.post(f"/v1/agent/mcp/connections/{connection_id}/test")
 
     assert response.status_code == 200, response.text
     assert response.json()["ok"] is True
     assert response.json()["message"] == sandbox_servers.TEST_MESSAGE
-    assert store.connections[connection_id]["status"] == "draft"
+    assert store.connections[connection_id]["status"] == "active"
+    assert store.connections[connection_id]["error_kind"] == "none"
+
+
+def test_a_program_that_no_longer_passes_the_policy_fails_its_test() -> None:
+    store = FakeStore()
+    stale = {"command": "npx", "args": ["-y", "@playwright/mcp@latest"]}
+    connection_id = _program(store, launch=stale)
+    with _client(store) as client:
+        response = client.post(f"/v1/agent/mcp/connections/{connection_id}/test")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["ok"] is False
+    assert response.json()["message"] == sandbox_servers.REFUSED_MESSAGE
+    assert store.connections[connection_id]["status"] == "error"
+    assert store.connections[connection_id]["error_kind"] == "launch_failed"
 
 
 def test_the_browser_presets_are_offered_and_accepted_as_templates() -> None:

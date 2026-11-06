@@ -909,8 +909,8 @@ async def _diagnose(
     if loaded_row is None:
         raise _not_found("no such MCP connection")
     if loaded_row.get("location") == ExecutionLocation.SANDBOX.value:
-        # Nothing here can reach it, and an unreachable verdict would stop it.
-        return TestResult(ok=True, message=sandbox.TEST_MESSAGE)
+        ok, message = await sandbox.checked_in_place(job_store.mcp, loaded_row, record=record)
+        return TestResult(ok=ok, error_kind="none" if ok else "launch_failed", message=message)
     row = loaded_row
 
     async def record_status(
