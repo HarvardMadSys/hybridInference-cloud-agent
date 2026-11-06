@@ -174,7 +174,7 @@ def test_the_migration_backfills_exactly_what_the_registry_declares() -> None:
         if action.name not in _DECLARED_AFTER_0114
     }
     assert set(_frozen_table()) == declared
-    assert _DECLARED_AFTER_0114 <= ACTIONS.keys()
+    assert ACTIONS.keys() >= _DECLARED_AFTER_0114
 
 
 def _page_list() -> list[dict[str, str]]:
