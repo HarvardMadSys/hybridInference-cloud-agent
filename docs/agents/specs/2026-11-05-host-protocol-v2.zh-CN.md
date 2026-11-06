@@ -148,6 +148,16 @@
 2. 第二个 PR 加 B 层。
 3. §4–§9 的每个协议 PR，两层都要在那个 PR 上跑绿，并把结果写进 PR 描述。`check_rolling_upgrade.py` 仍然要通过。
 
+**A 层的现状（2026-11-05）。** 已实现，尚未在 dev 上连续跑满一周：
+
+- 脚本 `scripts/check_mixed_protocol.py`，两个进程驱动 `tests/support/mixed_protocol_control.py`（某一版的控制面）和 `tests/support/mixed_protocol_host.py`（某一版的 host 端代码），共用的模型检查在 `tests/support/mixed_protocol_wire.py`。上一版用 `git archive` 取出，在自己的目录里 `uv sync --frozen --no-dev` 建 venv。
+- 四组配对并行跑：本版 host 对上一版控制面、上一版 host 对本版控制面，以及两版各自同版本配对作为基准。每组一个随机数据库，用该组控制面自己的 Alembic 迁移。控制面是真实的 `create_app()`（含后台任务），出站 HTTP 指向一个关闭的代理端口。
+- 覆盖 §3.4 的 1–7 步：注册和心跳（`retained_sandboxes` 由那一版自己的心跳行构建函数从假 Sandbox Manager 读出）；新对话 claim 和两次后续 claim；reserve、running、residency、process、admit；事件和 attempt 心跳，第二轮中途取消并在心跳里看到 `cancel_requested`；settle 和 finish，第三轮 abandon 和 finish；心跳下发空闲停止、host 停掉后下一次心跳报告已停止；驱逐 residency 后心跳返回 `residencies_lost`。
+- 断言：每次调用的状态码；接收方用自己那一版的模型解析——控制面按路由的请求模型、host 按路由的响应模型、假 Sandbox Manager 按 host 那一版的 `manager_api` 请求模型——出现被拒收或被静默丢弃的非空字段就失败；数据库状态在第一轮之后、驱逐之后、空闲停止之后和结束时，都要和同版本基准一致。已知的丢弃只有一项白名单：控制面在终端挂起和恢复里发的 `lease_generation`，由 `sandbox_manager_client.py` 的 `COMPAT(remove-after=2026-11-30)` 管着。
+- CI：`ci.yml` 的 test-db 任务在滚动升级检查之后、只在 shard 1 上跑，由 `changes` 任务的 `protocol` 输出控制（路径见 §3.2，另加 `api/worker_events.py`、`service/host_control.py`、`service/host_service.py`、`cloud_agent_host/sandbox_manager_client.py` 和检查自己的文件）。本地对 `agent-9a2b9e1` 跑一次约 10 秒。
+- 人为不兼容已验证会失败：把 settle 的 `native_session_id` 改名，两个混合方向都报"控制面的请求模型丢弃该字段"和数据库差异，基准两组通过；把心跳响应的 `retained_sandboxes_stop` 改名，两个混合方向都报 host 的响应模型丢弃该字段、没收到停止，以及空闲停止之后的数据库差异。
+- 未做：§3.2 第三条的 Sandbox Manager 线上协议对照只覆盖了这个流程里控制面真实发出的调用（`/health`、`/shared-sandboxes/{thread_id}/register`、终端 suspend/resume），没有单独对照 §2.1 的 35 个方法，也没有起上一版的 `manager_api` app。§3.4 第 8 步（控制面直接调 Sandbox Manager 的状态、SSH 同步）不在内。
+
 ## 4. 10.1 协议版本
 
 ### 4.1 线上改动
@@ -508,7 +518,7 @@ send-now；终端挂起和恢复；环境运行；删除和 archive；任何交�
 
 | 顺序 | 项 | 改协议吗 | 依赖 |
 |---|---|---|---|
-| 1 | §3 A 层 | 否 | — |
+| 1 | §3 A 层（已实现，见 §3.5） | 否 | — |
 | 2 | §6.2 residency 值进入脱敏器 | 否 | — |
 | 3 | §3 B 层 | 否 | 1 |
 | 4 | §4 协议版本（v2） | 是 | 1、3 |

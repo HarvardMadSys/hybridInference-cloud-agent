@@ -185,8 +185,9 @@ both server-only and runtime-site-config build guards.
 
 Each run saves logs in a fresh gitignored `.local-ci/<tier>.XXXXXX` directory.
 Set `CI_LOG_DIR` to choose an output directory. This local gate excludes external
-regressions, rolling upgrades, Gitleaks, Docker release-image builds, and Kata
-qualification; those remain part of the wider hosted CI gate.
+regressions, rolling upgrades, mixed-version protocol checks, Gitleaks, Docker
+release-image builds, and Kata qualification; those remain part of the wider
+hosted CI gate.
 
 Every pull request, from a fork or from a branch of this repository, runs on
 disposable GitHub-hosted VMs: ARM64 artifacts use `ubuntu-24.04-arm`, and
