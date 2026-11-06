@@ -80,7 +80,33 @@ _OLD_HOLDS: Final[dict[Blocker, Callable[[Any, bool], bool]]] = {
     Blocker.NOT_QUIESCENT: lambda group, allow: (
         not _old_is_quiescent(group, allow_lifecycle_check=allow)
     ),
+    # Read by the initial archive's hand-written drain wait before it was a row.
+    Blocker.OPEN_MUTATIONS: lambda group, _: bool(group.operation_tokens or group.terminal_tokens),
 }
+
+
+def _old_initial_archive_wait(group: Any) -> str | None:
+    """The initial archive's first wait, as ``capture_initial_archive`` wrote it."""
+    return (
+        "shared workspace start is in progress"
+        if group.starting
+        else "shared sandbox lifecycle check is in progress"
+        if group.lifecycle_check is not None
+        else None
+    )
+
+
+def _old_initial_archive_drain(group: Any) -> str | None:
+    """The wait under its raised barrier, as ``capture_initial_archive`` wrote it."""
+    return (
+        "shared workspace start is in progress"
+        if group.starting
+        else "shared sandbox lifecycle check is in progress"
+        if group.lifecycle_check is not None
+        else "shared workspace still has active mutations"
+        if group.operation_tokens or group.terminal_tokens
+        else None
+    )
 
 
 def _old_refusal(group: Any, operation: Operation, allow: bool) -> tuple[type, str] | None:
@@ -240,3 +266,19 @@ def test_the_old_table_never_read_an_unreadable_marker_on_its_own(allow: bool) -
     old = _old_flags(group)
     old.orphan_marker_unreadable = True
     assert _old_refusal(old, Operation.DELETION, allow) is None
+
+
+def test_the_initial_archive_waits_name_what_the_hand_written_waits_named() -> None:
+    for group in every_state():
+        for tokens in ({}, {"t": "athr_source"}):
+            group.operation_tokens = dict(tokens)
+            for terminals in ({}, {"t": "athr_source"}):
+                group.terminal_tokens = dict(terminals)
+                old = _old_flags(group)
+                lifecycle = group.lifecycle
+                assert lifecycle.busy_reason(
+                    Operation.INITIAL_ARCHIVE_WAIT
+                ) == _old_initial_archive_wait(old)
+                assert lifecycle.busy_reason(
+                    Operation.INITIAL_ARCHIVE_DRAIN
+                ) == _old_initial_archive_drain(old)

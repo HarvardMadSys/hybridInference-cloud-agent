@@ -86,12 +86,12 @@ def test_initial_archive_waits_out_a_start_that_begins_under_its_barrier(monkeyp
     )
     try:
         deadline = time.monotonic() + 1
-        while not group.snapshotting and time.monotonic() < deadline:
+        while group.life.exclusive is None and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert group.snapshotting
+        assert group.life.exclusive is not None
         release.set()
         assert manager.start_entered.wait(timeout=1)
-        assert group.starting
+        assert group.life.start is not None
         supervisor.operation_closed("athr_peer", running)
         capturing.join(timeout=0.6)
         assert capturing.is_alive(), f"the archive did not wait for the start: {outcome}"
@@ -105,7 +105,7 @@ def test_initial_archive_waits_out_a_start_that_begins_under_its_barrier(monkeyp
     assert not capturing.is_alive()
     assert "error" not in outcome
     assert captured.is_set()
-    assert group.snapshotting is False
+    assert group.life.exclusive is None
 
 
 def test_initial_archive_reports_busy_once_a_request_outlasts_its_wait() -> None:
@@ -130,7 +130,7 @@ def test_initial_archive_reports_busy_once_a_request_outlasts_its_wait() -> None
 
     group = supervisor.state.members["athr_source"]
     assert captured == []
-    assert group.snapshotting is False
+    assert group.life.exclusive is None
     # The barrier is gone: the request finishes, and the next attempt captures.
     supervisor.operation_closed("athr_peer", token)
     supervisor.capture_initial_archive(

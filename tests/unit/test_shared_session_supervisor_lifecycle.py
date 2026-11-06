@@ -206,9 +206,7 @@ def test_background_final_archive_failure_preserves_fence_and_retries():
         supervisor.list(background_recovery=True)
         with supervisor.state.condition:
             group = supervisor.state.members[spec.thread_id]
-            assert supervisor.state.condition.wait_for(
-                lambda: group.lifecycle_check is None, timeout=2
-            )
+            assert supervisor.state.condition.wait_for(lambda: group.life.check is None, timeout=2)
         assert attempts == ["archive"]
         assert supervisor.status(spec.thread_id).lifecycle_pending is True
         assert manager.items[spec.container_name].networks == ("agent-net",)
@@ -216,9 +214,7 @@ def test_background_final_archive_failure_preserves_fence_and_retries():
             supervisor.operation_opened(spec.thread_id)
         supervisor.list(background_recovery=True)
         with supervisor.state.condition:
-            assert supervisor.state.condition.wait_for(
-                lambda: group.lifecycle_check is None, timeout=2
-            )
+            assert supervisor.state.condition.wait_for(lambda: group.life.check is None, timeout=2)
         assert attempts == ["archive", "archive"]
         assert supervisor.status(spec.thread_id).lifecycle_pending is False
         assert manager.items[spec.container_name].networks == ()
@@ -388,7 +384,7 @@ def test_lifecycle_check_rejects_superseded_observations(monkeypatch, caplog, op
             call()
     assert manager.stop_count == 0
     assert group.inspection.running is True
-    assert group.archive_request_id is None
+    assert group.life.archive_request_id is None
 
 
 @pytest.mark.parametrize("operation", ["idle_stop", "begin_archive"])
@@ -416,9 +412,9 @@ def test_failed_lifecycle_proof_releases_only_its_temporary_reservation(monkeypa
                     generation=spec.generation,
                     container_id=group.inspection.container_id,
                 )
-    assert group.lifecycle_check is None
-    assert group.archive_request_id is None
-    assert not group.stopping
+    assert group.life.check is None
+    assert group.life.archive_request_id is None
+    assert group.life.stop is None
     token, descriptor = supervisor.operation_opened(spec.thread_id)
     assert descriptor.running
     supervisor.operation_closed(spec.thread_id, token)
@@ -590,9 +586,9 @@ def test_deletion_proves_both_container_identities_absent_before_forgetting_grou
         )
     assert supervisor.state.groups[spec.sandbox_id] is group
     assert supervisor.state.members[spec.thread_id] is group
-    assert group.archive_request_id == "delete-1"
-    assert group.stopping
-    assert group.lifecycle_check is None
+    assert group.life.archive_request_id == "delete-1"
+    assert group.life.stop is not None
+    assert group.life.check is None
 
 
 def test_refused_busy_deletion_does_not_invalidate_active_lifecycle(monkeypatch):
@@ -602,7 +598,7 @@ def test_refused_busy_deletion_does_not_invalidate_active_lifecycle(monkeypatch)
     supervisor.register_manifest(spec, _members())
     token, _descriptor = supervisor.operation_opened(spec.thread_id)
     group = supervisor.state.members[spec.thread_id]
-    generation = group.lifecycle_generation
+    generation = group.life.generation
 
     def inspect(*_args):
         pytest.fail("a refused busy deletion must not perform Docker I/O")
@@ -612,9 +608,9 @@ def test_refused_busy_deletion_does_not_invalidate_active_lifecycle(monkeypatch)
         supervisor.commit_archive(
             spec, request_id="delete-1", container_id=group.inspection.container_id
         )
-    assert group.lifecycle_generation == generation
-    assert group.lifecycle_check is None
-    assert group.archive_request_id is None
+    assert group.life.generation == generation
+    assert group.life.check is None
+    assert group.life.archive_request_id is None
     supervisor.operation_closed(spec.thread_id, token)
 
 
@@ -817,8 +813,8 @@ def test_failed_idle_stop_keeps_its_automatic_retry_deadline(monkeypatch):
     monkeypatch.setattr(manager, "stop", fail_stop)
     with pytest.raises(SandboxError, match="temporarily unavailable"):
         supervisor.stop_if_idle(spec.thread_id, generation=spec.generation)
-    assert group.lifecycle_check is None
-    assert group.stopping is False
+    assert group.life.check is None
+    assert group.life.stop is None
     assert group.idle_deadline == now["value"] + supervisor.idle_timeout_s
     monkeypatch.setattr(manager, "stop", stop)
     now["value"] += supervisor.idle_timeout_s + 1

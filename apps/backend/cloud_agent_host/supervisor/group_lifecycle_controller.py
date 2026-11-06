@@ -32,6 +32,7 @@ from cloud_agent_host.container.chat_sandbox import (
 from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.network.guarded_workloads import (
     GuardedWorkload,
+    KnownGuardedGroup,
     exact_stop_unguarded,
     host_rule_failure,
     merge_guarded_inventories,
@@ -130,17 +131,17 @@ class GroupLifecycleController:
                 if group.members
                 and (
                     (include_running and group.inspection.running)
-                    or group.stop_archive_pending
-                    or group.orphan_finalization_pending
-                    or group.start_archive_completion_pending
+                    or group.life.final_archive_pending
+                    or group.life.orphan is not None
+                    or group.life.start_completion_pending
                 )
             ]
         failures: builtins.list[Exception] = []
         for thread_id, generation, group in candidates:
             hold: Hold | None = None
             with self._state.lock:
-                retry_pending = group.stop_archive_pending
-                blocked = group.stop_archive_blocked
+                retry_pending = group.life.final_archive_pending
+                blocked = group.life.final_archive_blocked
                 if retry_pending:
                     if (refused := group.lifecycle.refusal(Operation.TAKE_STOP)) is not None:
                         failures.append(refused)
@@ -151,7 +152,7 @@ class GroupLifecycleController:
                     if blocked:
                         self.stop_blocked_group(group)
                         with self._state.lock:
-                            still_blocked = group.stop_archive_blocked
+                            still_blocked = group.life.final_archive_blocked
                         if still_blocked:
                             failures.append(
                                 SandboxError(
@@ -184,9 +185,9 @@ class GroupLifecycleController:
         with self._state.lock:
             return sum(
                 group.inspection.running
-                or group.stop_archive_pending
-                or group.orphan_finalization_pending
-                or group.start_archive_completion_pending
+                or group.life.final_archive_pending
+                or group.life.orphan is not None
+                or group.life.start_completion_pending
                 for group in self._state.groups.values()
             )
 
@@ -194,10 +195,10 @@ class GroupLifecycleController:
         """Whether shutdown must preserve or finish an older archive lifecycle."""
         with self._state.lock:
             return any(
-                group.stop_archive_pending
-                or group.stop_archive_blocked
-                or group.orphan_finalization_pending
-                or group.start_archive_completion_pending
+                group.life.final_archive_pending
+                or group.life.final_archive_blocked
+                or group.life.orphan is not None
+                or group.life.start_completion_pending
                 for group in self._state.groups.values()
             )
 
@@ -237,7 +238,9 @@ class GroupLifecycleController:
                 group.life.settle_archive_locked()
                 return inspection
             group.life.owe_final_locked(members)
-            start_seq = None if group.run_unfenced else group.start_seq  # this run's own
+            start_seq = (
+                None if group.life.run.unfenced else group.life.run.start_seq
+            )  # this run's own
         with logged_stopped_archive_failure("final_archive", group.spec, inspection.container_id):
             self._archive.stopped(group.spec, inspection, members, start_seq=start_seq)
         # The owned bridge is the durable marker that a stopped container has
@@ -258,8 +261,8 @@ class GroupLifecycleController:
     def retry_stopped_archive(self, group: _Group, *, persist: bool = True) -> None:
         """Finish a prepared stop, optionally deferring archive persistence."""
         with self._state.lock:
-            members = group.stop_archive_members
-            pending = group.stop_archive_pending
+            members = group.life.final_archive_members
+            pending = group.life.final_archive_pending
         if not pending or members is None:
             return
         inspection = self._state.require_current_inspection(group)
@@ -276,7 +279,7 @@ class GroupLifecycleController:
                         group.life.owe_final_locked(members, blocked=True)
                     self.stop_blocked_group(group, inspection)
                     with self._state.lock:
-                        if not group.stop_archive_blocked:
+                        if not group.life.final_archive_blocked:
                             return
                 raise
             inspection = self._manager.stop(
@@ -349,7 +352,7 @@ class GroupLifecycleController:
         if not marker_persisted and self._archives_finals:
             return current
         with self._state.lock:
-            members = group.stop_archive_members or self._state.archive_members_locked(group)
+            members = group.life.final_archive_members or self._state.archive_members_locked(group)
         # The skipped marker makes the final hook a no-op, so this only
         # releases the bridge and clears the fences.
         return self.persist_stopped_archive(group, current, members)
@@ -457,7 +460,7 @@ class GroupLifecycleController:
         needs an ordinary start.
         """
         with self._state.lock:
-            completion_pending = group.start_archive_completion_pending
+            completion_pending = group.life.start_completion_pending
         if completion_pending:
             current = self._state.require_current_inspection(group)
             if current.running:
@@ -516,7 +519,7 @@ class GroupLifecycleController:
     ) -> None:
         """Clear the start archive fence of a proven start and accept its inspection."""
         with self._state.lock:
-            completion_pending = group.start_archive_completion_pending
+            completion_pending = group.life.start_completion_pending
         if start_fence_prepared or completion_pending:
             self._archive.started(group.spec, inspection)
         with self._state.lock:
@@ -528,9 +531,9 @@ class GroupLifecycleController:
         """The start fence of the run a stop of this group ends, if known."""
         with self._state.lock:
             group = self._state.groups.get(sandbox_id)
-            if group is None or group.run_unfenced:
+            if group is None or group.life.run.unfenced:
                 return None
-            return group.start_seq
+            return group.life.run.start_seq
 
     def stop_if_idle(
         self,
@@ -556,7 +559,7 @@ class GroupLifecycleController:
         """
         with self._state.lock:
             group, requested = self._state.member(thread_id)
-            if group.container_lost:
+            if group.life.container_lost:
                 raise RetainedChatLost("shared sandbox container identity was lost")
             if group.spec.generation != generation:
                 raise SessionLeaseLost("shared sandbox generation is stale")
@@ -613,8 +616,8 @@ class GroupLifecycleController:
             read_marker = (
                 not current.running
                 and self._archives_finals
-                and not group.stop_archive_blocked
-                and not group.stop_archive_pending
+                and not group.life.final_archive_blocked
+                and not group.life.final_archive_pending
             )
         marker_payload = None
         marker_prepared = False
@@ -634,26 +637,26 @@ class GroupLifecycleController:
         with self._state.lock:
             self._state.require_lifecycle_check_locked(check)
             owned_bridge = self._manager.network.network_for(group.spec)
-            blocked = group.stop_archive_blocked
+            blocked = group.life.final_archive_blocked
             retry_pending = (
-                group.stop_archive_pending
-                or group.orphan_finalization_pending
-                or group.start_archive_completion_pending
+                group.life.final_archive_pending
+                or group.life.orphan is not None
+                or group.life.start_completion_pending
             )
-            quarantine_unreadable = current.running and group.orphan_marker_unreadable
+            quarantine_unreadable = current.running and group.life.orphan_marker_unreadable
             if (
                 not current.running
                 and self._archives_finals
                 and not blocked
-                and not group.stop_archive_pending
+                and not group.life.final_archive_pending
             ):
                 group.life.marker_read_locked()
                 if marker_payload is not None:
                     retry_pending = True
                 elif (
                     current.status is ChatSandboxStatus.CREATED
-                    and not group.stop_archive_pending
-                    and not group.start_archive_completion_pending
+                    and not group.life.final_archive_pending
+                    and not group.life.start_completion_pending
                 ):
                     # Docker create attaches the owned bridge before the first
                     # start fence exists. A canceled pre-start activation has no
@@ -677,11 +680,11 @@ class GroupLifecycleController:
                         self._state.archive_members_locked(group), blocked=True
                     )
                     retry_pending = True
-            if retry_pending and not group.stop_archive_pending and not quarantine_unreadable:
+            if retry_pending and not group.life.final_archive_pending and not quarantine_unreadable:
                 group.life.owe_final_locked(
                     self._state.archive_members_locked(group) if self._archives_finals else None
                 )
-                retry_pending = group.stop_archive_pending
+                retry_pending = group.life.final_archive_pending
             if quarantine_unreadable or blocked:
                 stop = group.life.begin_stop_locked(StopHolder.STOP, check=check)
                 group.idle_deadline = None
@@ -755,7 +758,7 @@ class GroupLifecycleController:
                     group.life.end_stop_locked(stop)
                     group.lifecycle.record_combination(site="end_stop")
             with self._state.lock:
-                if group.stop_archive_blocked:
+                if group.life.final_archive_blocked:
                     raise SandboxError("shared sandbox final archive skip could not be persisted")
                 return self._state.descriptor(group, requested)
 
@@ -804,7 +807,7 @@ class GroupLifecycleController:
                     )
                 inspection = self.stop_blocked_group(group, current)
                 with self._state.lock:
-                    skip_persisted = not group.stop_archive_blocked
+                    skip_persisted = not group.life.final_archive_blocked
                 if not skip_persisted:
                     raise SandboxError(
                         "native flush failure archive skip could not be persisted"
@@ -832,7 +835,7 @@ class GroupLifecycleController:
                         group.life.owe_final_locked(archive_members, blocked=True)
                     inspection = self.stop_blocked_group(group, current)
                     with self._state.lock:
-                        skip_persisted = not group.stop_archive_blocked
+                        skip_persisted = not group.life.final_archive_blocked
                     if not skip_persisted:
                         raise
                 if inspection is None:
@@ -869,7 +872,7 @@ class GroupLifecycleController:
                     # gone; a daemon that cannot answer proves nothing. Keep the
                     # last accepted observation for the next sweep or
                     # reconciliation to inspect again.
-                    if not group.container_lost:
+                    if not group.life.container_lost:
                         for member in group.members.values():
                             member.resident_state = (
                                 "restarting" if member.native_session_id else "stopped"
@@ -916,10 +919,10 @@ class GroupLifecycleController:
             group, _ = self._state.member(thread_id)
             if group.spec.generation != generation:
                 raise SessionLeaseLost("sandbox archive generation is stale")
-            if group.archive_request_id not in (None, request_id):
+            if group.life.archive_request_id not in (None, request_id):
                 raise SessionBusy("another sandbox archive is in progress")
             group.lifecycle.admit(
-                Operation.ARCHIVE if group.archive_request_id is None else Operation.DELETION
+                Operation.ARCHIVE if group.life.archive_request_id is None else Operation.DELETION
             )
             check = self._state.begin_lifecycle_check_locked(group)
         try:
@@ -948,10 +951,10 @@ class GroupLifecycleController:
                 return
             if group.spec != spec or group.inspection.container_id != container_id:
                 raise SessionLeaseLost("sandbox archive identity changed")
-            if group.archive_request_id not in (None, request_id):
+            if group.life.archive_request_id not in (None, request_id):
                 raise SessionLeaseLost("sandbox archive request is stale")
             group.lifecycle.admit(Operation.LIFECYCLE_CHECK)
-            if group.archive_request_id == request_id:
+            if group.life.archive_request_id == request_id:
                 group.life.release_archive_locked(request_id)
                 self._state.arm_idle_if_quiescent(group)
 
@@ -970,7 +973,7 @@ class GroupLifecycleController:
                 if current is not None and group is not None:
                     group.lifecycle.admit(
                         Operation.IDLE_DELETION
-                        if group.archive_request_id is None
+                        if group.life.archive_request_id is None
                         else Operation.DELETION,
                         allow_lifecycle_check=True,
                     )
@@ -987,7 +990,7 @@ class GroupLifecycleController:
                     self._state.require_lifecycle_check_locked(check)
                     if (
                         group is not None
-                        and group.archive_request_id != request_id
+                        and group.life.archive_request_id != request_id
                         and current is not None
                     ):
                         raise SessionLeaseLost("sandbox archive request is stale")
@@ -1023,9 +1026,9 @@ class GroupLifecycleController:
         if group is not None:
             if group.spec != spec or group.inspection.container_id != container_id:
                 raise SessionLeaseLost("sandbox archive identity changed")
-            if group.archive_request_id not in (None, request_id):
+            if group.life.archive_request_id not in (None, request_id):
                 raise SessionLeaseLost("sandbox archive request is stale")
-            if group.archive_request_id is None and not group.container_lost:
+            if group.life.archive_request_id is None and not group.life.container_lost:
                 # Refusing a busy deletion must not invalidate an active
                 # native fork merely by advancing the lifecycle clock.
                 group.lifecycle.admit(Operation.IDLE_DELETION)
@@ -1075,7 +1078,7 @@ class GroupLifecycleController:
     def recover_start_archive_completion(self, group: _Group) -> None:
         """Retry an idempotent post-start marker completion before admission."""
         with self._state.lock:
-            pending = group.start_archive_completion_pending
+            pending = group.life.start_completion_pending
         if pending:
             self.start_group(group)
 
@@ -1087,6 +1090,17 @@ class GroupLifecycleController:
             release_networks=workload.environment_run or not self._archives_finals,
         )
 
+    def _known_groups_locked(self) -> builtins.list[KnownGuardedGroup]:
+        """Every group's exact identity, and whether it is starting or stopping."""
+        return [
+            KnownGuardedGroup(
+                group.spec,
+                group.inspection,
+                transitioning=group.life.start is not None or group.life.stop is not None,
+            )
+            for group in self._state.groups.values()
+        ]
+
     def guard_network(self) -> builtins.list[SharedSessionDescriptor]:
         """Fail-stop every running workload when the host cannot prove its rules.
 
@@ -1096,7 +1110,7 @@ class GroupLifecycleController:
         """
         inventory = running_guarded_workloads(self._manager)
         with self._state.lock:
-            workloads = workloads_with_known(inventory, self._state.groups.values())
+            workloads = workloads_with_known(inventory, self._known_groups_locked())
         if not workloads and inventory.complete and not inventory.unresolved_container_ids:
             self._idle_host_rules.renew()
             return []
@@ -1108,7 +1122,7 @@ class GroupLifecycleController:
             running_guarded_workloads(self._manager),
         )
         with self._state.lock:
-            workloads = workloads_with_known(inventory, self._state.groups.values())
+            workloads = workloads_with_known(inventory, self._known_groups_locked())
         retry_unresolved_stops(self._manager, inventory)
         logger.error(
             "shared_chat_network_unguarded",
@@ -1131,8 +1145,8 @@ class GroupLifecycleController:
                     or group is None
                     or group.spec != workload.spec
                     or group.inspection.container_id != workload.inspection.container_id
-                    or group.stopping
-                    or group.starting
+                    or group.life.stop is not None
+                    or group.life.start is not None
                     or not group.members
                 ):
                     direct.append(workload)

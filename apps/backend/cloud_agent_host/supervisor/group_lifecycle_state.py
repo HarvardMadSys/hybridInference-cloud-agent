@@ -193,8 +193,13 @@ class GroupLifecycleState:
         """Whether the orphan's final archive marker could not be read."""
         return self.orphan is not None and self.orphan.marker_unreadable
 
+    @property
+    def final_archive_members(self) -> tuple[SharedMemberManifest, ...] | None:
+        """The membership an owed final archive is for, if one is owed."""
+        return None if self.final_archive is None else self.final_archive.members
+
     def flags(self) -> dict[str, bool]:
-        """The state under the names in :data:`FLAG_NAMES`."""
+        """The state under the names in :data:`FLAG_NAMES`, in that order."""
         return {
             "container_lost": self.container_lost,
             "snapshotting": self.exclusive is not None,

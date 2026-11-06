@@ -212,7 +212,7 @@ class MemberSessions:
             # a stopped workspace only to be rejected after ``docker start``.
             if activation_generation < member.activation_generation:
                 raise SessionLeaseLost("member activation generation is stale")
-            lifecycle_generation = group.lifecycle_generation
+            lifecycle_generation = group.life.generation
         # Docker answers outside the metadata lock. The start below and the
         # admission after it check again everything this observation stood for.
         current = self._manager.inspect(group.spec.container_name)
@@ -240,7 +240,7 @@ class MemberSessions:
             if (
                 current_group is not group
                 or current_member is not member
-                or group.lifecycle_generation != lifecycle_generation
+                or group.life.generation != lifecycle_generation
             ):
                 raise SessionLeaseLost("shared sandbox lifecycle changed during activation")
             group.lifecycle.admit(Operation.MUTATION)
@@ -378,7 +378,7 @@ class MemberSessions:
             if transport is None or not transport.alive:
                 member.resident_state = "restarting"
                 raise SandboxError("member resident transport is not live")
-            lifecycle_generation = group.lifecycle_generation
+            lifecycle_generation = group.life.generation
             group.idle_deadline = None
         if not member.turn_lock.acquire(blocking=False):
             raise SessionBusy(f"chat {thread_id!r} already has a running turn")
@@ -403,8 +403,8 @@ class MemberSessions:
                 if (
                     current_group is not group
                     or current_member is not member
-                    or group.stopping
-                    or group.lifecycle_generation != lifecycle_generation
+                    or group.life.stop is not None
+                    or group.life.generation != lifecycle_generation
                     or member.lease_token != token
                     or member.transport is not transport
                 ):
@@ -429,8 +429,8 @@ class MemberSessions:
             admitted = (
                 current_group is group
                 and current_member is member
-                and not group.stopping
-                and group.lifecycle_generation == lifecycle_generation
+                and group.life.stop is None
+                and group.life.generation == lifecycle_generation
                 and member.lease_token == token
                 and member.transport is transport
             )
@@ -739,7 +739,7 @@ class MemberSessions:
         member = group.members.get(thread_id) if group is not None else None
         if (
             group is None
-            or group.stopping
+            or group.life.stop is not None
             or member is None
             or not member.lease_token
             or member.lease_owner != owner
@@ -1190,7 +1190,7 @@ class MemberSessions:
                 ):
                     raise SandboxError("activation requested a different native session")
                 launch = replace(launch, native_session_id=member.native_session_id)
-            lifecycle_generation = group.lifecycle_generation
+            lifecycle_generation = group.life.generation
             current = member.transport
             same_residency = (
                 current is not None
@@ -1233,8 +1233,8 @@ class MemberSessions:
             launch_invalid = (
                 rechecked_group is not group
                 or rechecked_member is not member
-                or group.stopping
-                or group.lifecycle_generation != lifecycle_generation
+                or group.life.stop is not None
+                or group.life.generation != lifecycle_generation
                 or (lease_token is not None and member.lease_token != lease_token)
             )
             if not launch_invalid:

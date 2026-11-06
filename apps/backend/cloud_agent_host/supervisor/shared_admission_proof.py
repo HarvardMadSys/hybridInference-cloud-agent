@@ -55,9 +55,9 @@ def admit_running(
     records it for the group's lifecycle generation either way.
     """
     with lifecycle.state.lock:
-        generation = group.lifecycle_generation
+        generation = group.life.generation
         recorded = group.network_proof
-        reuse = reuse and not group.start_failed
+        reuse = reuse and not group.life.last_start_failed
     if reuse and recorded is not None and recorded[0] == generation:
         standing = _standing_proof(lifecycle, group, generation)
         if standing is not None:
@@ -82,7 +82,7 @@ def _standing_proof(
     if proved_from is None:
         return None
     with lifecycle.state.lock:
-        if group.lifecycle_generation != generation or group.start_failed:
+        if group.life.generation != generation or group.life.last_start_failed:
             return None
         # The group's identity fence: a different container is lost, as on a start.
         lifecycle.state.accept_inspection_locked(group, current)

@@ -81,7 +81,7 @@ class GroupEnvironmentPreparation:
         with self._state.lock:
             group, member = self._state.member(thread_id)
             observed = group.inspection
-            lifecycle_generation = group.lifecycle_generation
+            lifecycle_generation = group.life.generation
         backend = RetainedChatBackend(self._manager, group.spec)
         current = self._manager.inspect(group.spec.container_name)
         receipt = preparer.status(backend, environment.binding_id)
@@ -154,12 +154,12 @@ class GroupEnvironmentPreparation:
 
         The caller holds the lock.
         """
-        if group.inspection == observed and group.lifecycle_generation == lifecycle_generation:
+        if group.inspection == observed and group.life.generation == lifecycle_generation:
             if current is None:
                 self._state.mark_container_lost_locked(group)
                 raise RetainedChatLost("shared sandbox container is missing")
             self._state.accept_inspection_locked(group, current)
-        elif group.container_lost:
+        elif group.life.container_lost:
             raise RetainedChatLost("shared sandbox container identity was lost")
 
     def _reserve_preparation_locked(
@@ -187,7 +187,7 @@ class GroupEnvironmentPreparation:
         group.environment_cancel = cancelled
         group.environment_owner = activation_owner
         hold = group.life.begin_exclusive_locked(ExclusiveHolder.ENVIRONMENT)
-        generation = group.lifecycle_generation
+        generation = group.life.generation
         expected = group.inspection.container_id
         slots = [m.resident_slot_id for m in group.members.values()]
         return hold, cancelled, generation, expected, slots
@@ -207,7 +207,7 @@ class GroupEnvironmentPreparation:
         def monitor() -> None:
             while not monitor_stop.wait(0.5):
                 with self._state.lock:
-                    if group.lifecycle_generation != generation or (
+                    if group.life.generation != generation or (
                         activation_owner is not None and member.lease_token != activation_owner
                     ):
                         cancelled.set()

@@ -228,6 +228,36 @@ _CASES: list[tuple[Operation, dict[str, Any], bool, type[Exception] | None, str 
     (Operation.ACTIVATION_WAIT, {"starting": True, "stopping": True}, False, SessionBusy, START),
     (Operation.ACTIVATION_WAIT, {"stopping": True}, False, SessionBusy, STOP),
     (Operation.ACTIVATION_WAIT, {"stop_archive_pending": True}, False, None, None),
+    (
+        Operation.INITIAL_ARCHIVE_WAIT,
+        {"starting": True, "lifecycle_check": HELD_CHECK},
+        False,
+        SessionBusy,
+        START,
+    ),
+    (Operation.INITIAL_ARCHIVE_WAIT, {"lifecycle_check": HELD_CHECK}, False, SessionBusy, CHECK),
+    (
+        Operation.INITIAL_ARCHIVE_WAIT,
+        {"operation_tokens": {"t": "athr_source"}, "snapshotting": True},
+        False,
+        None,
+        None,
+    ),
+    (
+        Operation.INITIAL_ARCHIVE_DRAIN,
+        {"lifecycle_check": HELD_CHECK, "terminal_tokens": {"t": "athr_source"}},
+        False,
+        SessionBusy,
+        CHECK,
+    ),
+    (
+        Operation.INITIAL_ARCHIVE_DRAIN,
+        {"operation_tokens": {"t": "athr_source"}},
+        False,
+        SessionBusy,
+        "shared workspace still has active mutations",
+    ),
+    (Operation.INITIAL_ARCHIVE_DRAIN, {"members": _leased(), "stopping": True}, False, None, None),
     # RUN and JOIN_RUN.
     (
         Operation.RUN,

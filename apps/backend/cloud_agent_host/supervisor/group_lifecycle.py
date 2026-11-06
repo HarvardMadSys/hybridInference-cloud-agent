@@ -1,14 +1,16 @@
 """Whether a shared sandbox group admits an operation now, decided from one table.
 
-A group (``shared_session_state._Group``) keeps its lifecycle in separate
-fields: the operations in progress (``starting``, ``stopping``,
-``snapshotting``), records of what happened (``start_failed``,
-``container_lost``), barriers that wait for unfinished work (the ``*_pending``
-and ``*_blocked`` fields), and the holders using the group (its operation and
-terminal tokens, its members' leases and turns, a lifecycle check).
+A group (``shared_session_state._Group``) keeps its lifecycle in one
+:class:`~cloud_agent_host.supervisor.group_lifecycle_state.GroupLifecycleState`:
+the operations in progress (a start, a stop, the exclusive workspace, a
+lifecycle check), records of what happened (the last start failed, the
+container was lost), and barriers that wait for unfinished work (a final
+archive or an orphan finalization owed, a preserved initial archive, a start
+completion). The holders using the group -- its operation and terminal tokens,
+its members' leases and turns -- stay on the group.
 
-:class:`GroupLifecycle` is a view over those same fields and keeps no state of
-its own. :data:`ADMISSION` lists, for each :class:`Operation`, the checks that
+:class:`GroupLifecycle` is a view over that state and the group's holders and
+keeps no state of its own. :data:`ADMISSION` lists, for each :class:`Operation`, the checks that
 refuse it in the order they are made. The first check that holds decides the
 exception and its message, so the order is part of each row: two callers that
 check the same state in a different order are two rows.
@@ -48,6 +50,11 @@ class Operation(Enum):
     START_WAIT = "start_wait"
     #: Why an activation still waits for a transition to finish.
     ACTIVATION_WAIT = "activation_wait"
+    #: Why the pre-prompt archive still waits before it raises its barrier.
+    INITIAL_ARCHIVE_WAIT = "initial_archive_wait"
+    #: Why the pre-prompt archive, its barrier raised, still waits for the
+    #: requests admitted before it.
+    INITIAL_ARCHIVE_DRAIN = "initial_archive_drain"
     #: Run the group for a request, once nothing transitions it.
     RUN = "run"
     #: Count an admitted request in the run the group is in.
@@ -88,6 +95,8 @@ class Blocker(Enum):
     NOT_RUNNING = "not_running"
     #: An operation or holder keeps the group from being quiescent.
     NOT_QUIESCENT = "not_quiescent"
+    #: A workspace operation or terminal is open on the group.
+    OPEN_MUTATIONS = "open_mutations"
 
 
 @dataclass(frozen=True)
@@ -175,6 +184,15 @@ ADMISSION: Final[dict[Operation, tuple[Refusal, ...]]] = {
         _busy(Blocker.STARTING, message=_START_IN_PROGRESS),
         _busy(Blocker.STOPPING, message=_STOP_IN_PROGRESS),
     ),
+    Operation.INITIAL_ARCHIVE_WAIT: (
+        _busy(Blocker.STARTING, message=_START_IN_PROGRESS),
+        _busy(Blocker.LIFECYCLE_CHECK, message=_CHECK_IN_PROGRESS),
+    ),
+    Operation.INITIAL_ARCHIVE_DRAIN: (
+        _busy(Blocker.STARTING, message=_START_IN_PROGRESS),
+        _busy(Blocker.LIFECYCLE_CHECK, message=_CHECK_IN_PROGRESS),
+        _busy(Blocker.OPEN_MUTATIONS, message="shared workspace still has active mutations"),
+    ),
     Operation.RUN: (
         _busy(Blocker.STOP_ARCHIVE_PENDING, message=_ARCHIVE_RETRY_PENDING),
         _busy(Blocker.ORPHAN_FINALIZATION, message=_ORPHAN_PENDING),
@@ -227,12 +245,15 @@ _HOLDS: Final[dict[Blocker, _Holds]] = {
     Blocker.ARCHIVE_REQUEST: lambda life, _: life.group.life.archive_request_id is not None,
     Blocker.NOT_RUNNING: lambda life, _: not life.group.inspection.running,
     Blocker.NOT_QUIESCENT: lambda life, allow: not life.is_quiescent(allow_lifecycle_check=allow),
+    Blocker.OPEN_MUTATIONS: lambda life, _: bool(
+        life.group.operation_tokens or life.group.terminal_tokens
+    ),
 }
 
 
 @dataclass(frozen=True)
 class GroupLifecycle:
-    """The admission decisions over one group's lifecycle fields, which it reads in place.
+    """The admission decisions over one group's lifecycle state, which it reads in place.
 
     ``allow_lifecycle_check`` lets a caller that holds the group's lifecycle
     check through the checks that the check would otherwise refuse.

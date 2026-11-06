@@ -685,7 +685,7 @@ class SharedChatSessionSupervisor:
         state = self.state
         with state.lock:
             group = state.groups.get(sandbox_id)
-            if group is None or group.stopping or not group.inspection.running:
+            if group is None or group.life.stop is not None or not group.inspection.running:
                 return None
             return group.spec, group.inspection.container_id
 

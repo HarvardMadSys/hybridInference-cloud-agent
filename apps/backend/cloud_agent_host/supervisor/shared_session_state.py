@@ -237,82 +237,6 @@ class _Group:
         """The admission decisions over this group's lifecycle state."""
         return GroupLifecycle(self)
 
-    # Read-only views of the lifecycle under its old field names, while the
-    # readers move to ``life``.
-
-    @property
-    def starting(self) -> bool:
-        return self.life.start is not None
-
-    @property
-    def stopping(self) -> bool:
-        return self.life.stop is not None
-
-    @property
-    def snapshotting(self) -> bool:
-        return self.life.exclusive is not None
-
-    @property
-    def lifecycle_check(self) -> _LifecycleCheck | None:
-        return self.life.check
-
-    @property
-    def start_failed(self) -> bool:
-        return self.life.last_start_failed
-
-    @property
-    def container_lost(self) -> bool:
-        return self.life.container_lost
-
-    @property
-    def initial_archive_preservation_pending(self) -> bool:
-        return self.life.initial_preservation
-
-    @property
-    def archive_request_id(self) -> str | None:
-        return self.life.archive_request_id
-
-    @property
-    def stop_archive_pending(self) -> bool:
-        return self.life.final_archive_pending
-
-    @property
-    def stop_archive_blocked(self) -> bool:
-        return self.life.final_archive_blocked
-
-    @property
-    def stop_archive_members(self) -> tuple[SharedMemberManifest, ...] | None:
-        owed = self.life.final_archive
-        return None if owed is None else owed.members
-
-    @property
-    def orphan_finalization_pending(self) -> bool:
-        return self.life.orphan is not None
-
-    @property
-    def orphan_marker_unreadable(self) -> bool:
-        return self.life.orphan_marker_unreadable
-
-    @property
-    def start_archive_completion_pending(self) -> bool:
-        return self.life.start_completion_pending
-
-    @property
-    def lifecycle_generation(self) -> int:
-        return self.life.generation
-
-    @property
-    def start_seq(self) -> int | None:
-        return self.life.run.start_seq
-
-    @property
-    def run_unfenced(self) -> bool:
-        return self.life.run.unfenced
-
-    @property
-    def sealed_seq(self) -> int | None:
-        return self.life.run.sealed_seq
-
 
 @dataclass(frozen=True, eq=False)
 class _LifecycleCheck:
@@ -412,7 +336,7 @@ class SharedSessionState:
         if inspection.container_id != group.inspection.container_id:
             self.mark_container_lost_locked(group)
             raise RetainedChatLost("shared sandbox container identity changed")
-        if group.container_lost:
+        if group.life.container_lost:
             raise RetainedChatLost("shared sandbox container identity was lost")
         group.inspection = inspection
         if not inspection.running:
@@ -440,8 +364,8 @@ class SharedSessionState:
             self.groups.get(check.spec.sandbox_id) is not group
             or group.spec != check.spec
             or group.inspection.container_id != check.container_id
-            or group.lifecycle_generation != check.generation
-            or group.lifecycle_check is not check
+            or group.life.generation != check.generation
+            or group.life.check is not check
             or len(group.members) != len(check.members)
             or any(
                 group.members.get(thread_id) is not member
@@ -488,9 +412,9 @@ class SharedSessionState:
             lambda: group.lifecycle.busy_reason(Operation.START_WAIT),
             deadline=time.monotonic() + 30.0,
         )
-        if group.container_lost:
+        if group.life.container_lost:
             raise RetainedChatLost("shared sandbox container identity was lost")
-        if group.start_failed and not retry_failed:
+        if group.life.last_start_failed and not retry_failed:
             raise SandboxError("shared workspace start verification failed")
 
     @staticmethod
@@ -525,11 +449,11 @@ class SharedSessionState:
         if (
             group.lifecycle.is_quiescent(allow_lifecycle_check=allow_lifecycle_check)
             and group.inspection.running
-            and not group.container_lost
-            and not group.stop_archive_pending
-            and not group.stop_archive_blocked
-            and not group.orphan_finalization_pending
-            and not group.start_archive_completion_pending
+            and not group.life.container_lost
+            and not group.life.final_archive_pending
+            and not group.life.final_archive_blocked
+            and group.life.orphan is None
+            and not group.life.start_completion_pending
         ):
             idle_from = self.clock() if last_activity is None else last_activity
             group.idle_deadline = idle_from + self.idle_timeout_s
@@ -577,10 +501,10 @@ class SharedSessionState:
             running=group.inspection.running,
             group_busy=not group.lifecycle.is_quiescent(),
             lifecycle_pending=(
-                group.lifecycle_check is not None
-                or group.stopping
-                or group.stop_archive_pending
-                or group.orphan_finalization_pending
+                group.life.check is not None
+                or group.life.stop is not None
+                or group.life.final_archive_pending
+                or group.life.orphan is not None
             ),
             busy=member.lease_token is not None or member.current_turn is not None,
             terminal_count=sum(
@@ -589,7 +513,7 @@ class SharedSessionState:
             operation_count=sum(
                 1 for owner in group.operation_tokens.values() if owner == member.thread_id
             ),
-            snapshotting=group.snapshotting,
+            snapshotting=group.life.exclusive is not None,
             activation_generation=member.activation_generation,
             process_generation=member.process_generation,
             residency_generation=member.residency_generation,

@@ -413,7 +413,7 @@ def test_guard_exact_stops_a_stopping_group_then_its_archive_finishes() -> None:
     stopping = threading.Thread(target=stop_group)
     stopping.start()
     assert prepare_entered.wait(timeout=2)
-    assert supervisor.state.members["athr_source"].stopping is True
+    assert supervisor.state.members["athr_source"].life.stop is not None
 
     manager.host_rule_failures = 2
     try:

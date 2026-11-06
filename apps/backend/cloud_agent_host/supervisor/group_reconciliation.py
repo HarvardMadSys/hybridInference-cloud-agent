@@ -82,8 +82,7 @@ class GroupReconciler:
         """Discover containers, fencing each group's slow recovery independently."""
         with self._state.lock:
             before = {
-                key: (group, group.lifecycle_generation)
-                for key, group in self._state.groups.items()
+                key: (group, group.life.generation) for key, group in self._state.groups.items()
             }
         found: builtins.list[SharedSessionDescriptor] = []
         specs: builtins.list[ChatSandboxSpec] = []
@@ -99,11 +98,11 @@ class GroupReconciler:
                     (
                         previous is None
                         or previous[0] is not group
-                        or previous[1] != group.lifecycle_generation
+                        or previous[1] != group.life.generation
                     )
-                    or group.lifecycle_check is not None
-                    or group.starting
-                    or group.stopping
+                    or group.life.check is not None
+                    or group.life.start is not None
+                    or group.life.stop is not None
                 ):
                     found.extend(self._state.descriptors(group))
                     continue
@@ -144,22 +143,22 @@ class GroupReconciler:
                         continue
                 read_marker = (
                     discovered
-                    or group.orphan_marker_unreadable
+                    or group.life.orphan_marker_unreadable
                     or (
                         not inspection.running
                         and inspection.status is not ChatSandboxStatus.CREATED
                         and self._manager.network.network_for(spec) in inspection.networks
                         and group.lifecycle.is_quiescent()
-                        and not group.stop_archive_blocked
-                        and not group.orphan_finalization_pending
-                        and not group.stop_archive_pending
+                        and not group.life.final_archive_blocked
+                        and group.life.orphan is None
+                        and not group.life.final_archive_pending
                     )
                 )
                 if not (
                     read_marker
-                    or group.stop_archive_blocked
-                    or group.orphan_finalization_pending
-                    or group.stop_archive_pending
+                    or group.life.final_archive_blocked
+                    or group.life.orphan is not None
+                    or group.life.final_archive_pending
                 ):
                     found.extend(self._state.descriptors(group))
                     continue
@@ -276,7 +275,7 @@ class GroupReconciler:
                 if group.spec != spec:
                     raise SandboxError("shared sandbox immutable labels changed")
                 self._state.accept_inspection_locked(group, inspection)
-                if group.orphan_marker_unreadable:
+                if group.life.orphan_marker_unreadable:
                     try:
                         marker_payload = self._lifecycle.marker_result(marker_payload, marker_error)
                     except BaseException:
@@ -321,16 +320,16 @@ class GroupReconciler:
                             members = self._state.archive_members_locked(group)
                         else:
                             group.life.settle_orphan_locked()
-                elif group.stop_archive_blocked:
+                elif group.life.final_archive_blocked:
                     if inspection.running:
                         stop = group.life.begin_stop_locked(StopHolder.FINALIZE, check=check)
                     blocked = True
-                elif group.orphan_finalization_pending:
+                elif group.life.orphan is not None:
                     group.lifecycle.admit(Operation.ORPHAN_FINALIZATION)
                     stop = group.life.begin_stop_locked(StopHolder.FINALIZE, check=check)
                     finalize = True
                     members = self._state.archive_members_locked(group)
-                elif group.stop_archive_pending:
+                elif group.life.final_archive_pending:
                     group.lifecycle.admit(Operation.TAKE_STOP)
                     stop = group.life.begin_stop_locked(StopHolder.FINALIZE, check=check)
                     retry = True
@@ -519,19 +518,19 @@ class GroupReconciler:
         with self._state.lock:
             group, member = self._state.member(thread_id)
             observed = group.inspection
-            lifecycle_generation = group.lifecycle_generation
+            lifecycle_generation = group.life.generation
         current = self._manager.inspect(group.spec.container_name)
         with self._state.lock:
             current_group, current_member = self._state.member(thread_id)
             if current_group is not group or current_member is not member:
                 raise SessionLeaseLost("shared sandbox membership changed during observation")
-            if group.inspection == observed and group.lifecycle_generation == lifecycle_generation:
+            if group.inspection == observed and group.life.generation == lifecycle_generation:
                 if current is None:
                     member.context_status = "lost"
                     member.resident_state = "lost"
                     raise RetainedChatLost("shared sandbox container is missing")
                 self._state.accept_inspection_locked(group, current)
-            elif group.container_lost:
+            elif group.life.container_lost:
                 raise RetainedChatLost("shared sandbox container identity was lost")
             stale_transport = self._detach_dead_transport(member)
             descriptor = self._state.descriptor(group, member)
@@ -565,7 +564,7 @@ class GroupReconciler:
         with self._state.lock:
             group, member = self._state.member(thread_id)
             spec = group.spec
-            lifecycle_generation = group.lifecycle_generation
+            lifecycle_generation = group.life.generation
             inspection = group.inspection
             container_id = inspection.container_id
 
@@ -579,7 +578,7 @@ class GroupReconciler:
                 or self._state.members.get(thread_id) is not group
                 or group.members.get(thread_id) is not member
                 or group.spec != spec
-                or group.lifecycle_generation != lifecycle_generation
+                or group.life.generation != lifecycle_generation
                 or group.inspection != inspection
             ):
                 raise SessionLeaseLost("shared sandbox lifecycle changed during observation")

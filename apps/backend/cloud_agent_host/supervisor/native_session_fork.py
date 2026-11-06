@@ -174,7 +174,7 @@ class ForkService:
             group.lifecycle.admit(Operation.MUTATION)
             # The Fork's activity token keeps the group from stopping.
             self._state.join_run_locked(group, start_seq)
-            fork_lifecycle_generation = group.lifecycle_generation
+            fork_lifecycle_generation = group.life.generation
             current_group, current_source = self._state.member(source_thread_id)
             if current_group is not group or current_source is not source:
                 raise SessionLeaseLost("source membership changed before fork")
@@ -308,7 +308,7 @@ class ForkService:
             raise
 
         with self._state.lock:
-            if group.stopping or group.lifecycle_generation != fork_lifecycle_generation:
+            if group.life.stop is not None or group.life.generation != fork_lifecycle_generation:
                 child.transport.close()
                 raise SessionLeaseLost("shared sandbox lifecycle changed during native fork")
             if target_thread_id in self._state.members:

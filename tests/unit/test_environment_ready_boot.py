@@ -247,7 +247,7 @@ def test_a_lifecycle_change_during_the_reads_takes_the_full_path():
         if not reads:
             with supervisor.state.lock:
                 group.life.generation += 1
-        reads.append(group.lifecycle_generation)
+        reads.append(group.life.generation)
         return _ready()
 
     supervisor.prepare_environment(

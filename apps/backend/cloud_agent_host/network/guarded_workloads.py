@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 from cloud_agent_host.container.chat_sandbox_models import (
     CHAT_CPU_LIMIT_LABEL,
@@ -84,20 +84,14 @@ class GuardedInventory:
     complete: bool = True
 
 
-class KnownGuardedGroup(Protocol):
+@dataclass(frozen=True)
+class KnownGuardedGroup:
     """Supervisor state needed to conservatively retain an exact identity."""
 
-    @property
-    def spec(self) -> ChatSandboxSpec: ...
-
-    @property
-    def inspection(self) -> ChatSandboxInspection: ...
-
-    @property
-    def starting(self) -> bool: ...
-
-    @property
-    def stopping(self) -> bool: ...
+    spec: ChatSandboxSpec
+    inspection: ChatSandboxInspection
+    #: A start or a stop is in progress, so Docker may run it whatever it last said.
+    transitioning: bool
 
 
 def sandbox_spec_from_inspection(inspection: ChatSandboxInspection) -> ChatSandboxSpec:
@@ -175,7 +169,7 @@ def workloads_with_known(
     seen = {workload.inspection.container_id for workload in workloads}
     for group in groups:
         inspection = group.inspection
-        if not (inspection.running or group.starting or group.stopping):
+        if not (inspection.running or group.transitioning):
             continue
         if inspection.container_id in seen:
             continue

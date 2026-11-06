@@ -90,7 +90,7 @@ class InitialArchiveCapture:
             expected_container_id
         ):
             raise RetainedChatLost("shared sandbox container identity changed")
-        if group.container_lost:
+        if group.life.container_lost:
             raise RetainedChatLost("shared sandbox container identity was lost")
         if member.current_turn is not None or member.transport is not None:
             raise SessionBusy("initial archive must precede resident process creation")
@@ -130,13 +130,7 @@ class InitialArchiveCapture:
             # fence, and the chat page reads the workspace while a new chat
             # prepares. Wait for that check as a prompt does, not fail on it.
             self._state.wait_while_locked(
-                lambda: (
-                    "shared workspace start is in progress"
-                    if group.starting
-                    else "shared sandbox lifecycle check is in progress"
-                    if group.lifecycle_check is not None
-                    else None
-                ),
+                lambda: group.lifecycle.busy_reason(Operation.INITIAL_ARCHIVE_WAIT),
                 deadline=deadline,
             )
             group, member = self._state.leased_member(thread_id, token)
@@ -156,15 +150,7 @@ class InitialArchiveCapture:
                 # bridge revalidation under it (``_start_group`` does not read
                 # the barrier), so its start fence is waited out here too.
                 self._state.wait_while_locked(
-                    lambda: (
-                        "shared workspace start is in progress"
-                        if group.starting
-                        else "shared sandbox lifecycle check is in progress"
-                        if group.lifecycle_check is not None
-                        else "shared workspace still has active mutations"
-                        if group.operation_tokens or group.terminal_tokens
-                        else None
-                    ),
+                    lambda: group.lifecycle.busy_reason(Operation.INITIAL_ARCHIVE_DRAIN),
                     deadline=deadline,
                 )
                 # The wait released the lock; the lease and group may have moved.
@@ -183,7 +169,7 @@ class InitialArchiveCapture:
                 self._state.arm_idle_if_quiescent(group)
                 raise
             observed = group.inspection
-            lifecycle_generation = group.lifecycle_generation
+            lifecycle_generation = group.life.generation
             authoritative_spec = group.spec
             authoritative_members = self._state.archive_members_locked(group)
             expected_container_id = group.inspection.container_id
@@ -261,7 +247,7 @@ class InitialArchiveCapture:
                     # notifies this condition; retain the frozen-writer barrier
                     # until the owning transition has a stable result to inspect.
                     with self._state.condition:
-                        while group.stopping:
+                        while group.life.stop is not None:
                             self._state.condition.wait(timeout=0.5)
                     try:
                         current = self._state.require_current_inspection(group)
@@ -306,8 +292,8 @@ class InitialArchiveCapture:
             lease_is_current = (
                 current_group is group
                 and current_member is member
-                and not group.stopping
-                and group.lifecycle_generation == lifecycle_generation
+                and group.life.stop is None
+                and group.life.generation == lifecycle_generation
                 and member.lease_token == token
             )
             # A concurrent exact stop can land after the inspection above but
