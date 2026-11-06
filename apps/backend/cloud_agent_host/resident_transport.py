@@ -54,6 +54,7 @@ from cloud_agent_host.member_setup.member_preparation import (
 from cloud_agent_host.runtimes import RuntimeMCPConfig, connection_base_url
 from cloud_agent_host.runtimes.claude import member as claude_member
 from cloud_agent_host.runtimes.codex import member as codex_member
+from cloud_agent_host.runtimes.codex.fork_state import CODEX_REBASE_ROLLOUT_PATHS
 from cloud_agent_host.runtimes.http_bridge import member as http_member
 from cloud_agent_host.runtimes.live import get_driver, member_launch
 from cloud_agent_shared.plugins import validate_sandbox_plugins
@@ -485,17 +486,21 @@ class ResidentTransportFactory:
             'exec tar --create --file=- --files-from=/dev/null "$@"'
         )
         unpack = (
-            'set -eu; target="$1"; runtime="$2"; trusted="$3"; '
+            'set -eu; target="$1"; source="$2"; runtime="$3"; trusted="$4"; '
             + NEW_PRIVATE_MEMBER_HOME_PROLOGUE
             + 'find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; '
             'tar --extract --file=- --directory="$target" --no-same-owner '
             "--no-same-permissions; "
             'mkdir -p -- "$target/tmp" "$target/.tmp"; '
+            'if [ "$runtime" = codex ]; then '
+            'python3 -I - "$target" "$source" <<\'PY\'\n' + CODEX_REBASE_ROLLOUT_PATHS + "\nPY\n"
+            "fi; "
             'case "$runtime" in '
             '  opencode|kilo) rm -rf -- "$target/$runtime/state/$runtime/locks";; '
             "esac; "
             ': > "$target/.freeinference-member-state-v1"'
         )
+
         # The source's open already secured the collections; this also covers
         # a fork recovered by a broker that has not opened the source yet.
         self._manager.ensure_private_member_collections(spec)
@@ -509,6 +514,7 @@ class ResidentTransportFactory:
                 unpack,
                 "sh",
                 target_dir,
+                source_dir,
                 runtime_id,
                 str(self._manager.backend.uid),
             ],
