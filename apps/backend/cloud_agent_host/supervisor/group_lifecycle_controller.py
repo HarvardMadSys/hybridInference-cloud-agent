@@ -377,30 +377,28 @@ class GroupLifecycleController:
         ``start`` proved the network here; a retried archive completion did not.
 
         A request in the run it was admitted to (``_SAME_RUN``) begins no new
-        run, so when ``activation_owner`` names its lease, a stopped container
-        is started only while a member still holds that lease: one a stop
-        cleared would restart the group under the label that stop's checkpoint
-        names. Refused, the start raises :class:`SessionLeaseLost`.
+        run, so when ``activation_owner`` names its lease, the group is started
+        only while a member still holds that lease: one a stop cleared would
+        restart the group under the label that stop's checkpoint names.
+        Refused, the start raises :class:`SessionLeaseLost` before Docker or
+        the group's bridge is touched, and records no failed start.
         """
         with self._state.lock:
             self._state.wait_for_start_locked(group, retry_failed=True)
-            hold, members, expected_container_id = self._admit_start_locked(group)
+            hold, members, expected_container_id = self._admit_start_locked(
+                group, activation_owner=activation_owner if start_seq is _SAME_RUN else None
+            )
         start_fence_prepared = False
         start_completed = False
         refused = False
 
         def prepare_stopped_start(current: ChatSandboxInspection) -> None:
-            nonlocal start_fence_prepared, refused
+            nonlocal start_fence_prepared
             # Docker has just proved this exact container stopped, and starts
             # it next: this is where a new run begins.
-            with self._state.lock:
-                if start_seq is not _SAME_RUN:
+            if start_seq is not _SAME_RUN:
+                with self._state.lock:
                     group.life.begin_run_locked(start_seq)
-                elif activation_owner is not None and all(
-                    member.lease_token != activation_owner for member in group.members.values()
-                ):
-                    refused = True
-                    raise SessionLeaseLost("Environment preparation lease was lost")
             if not self._archive.prepare_start(group.spec, current):
                 return
             with self._state.lock:
@@ -454,14 +452,26 @@ class GroupLifecycleController:
                 group.lifecycle.record_combination(site="end_start")
 
     def _admit_start_locked(
-        self, group: _Group
+        self, group: _Group, *, activation_owner: str | None
     ) -> tuple[Hold, tuple[SharedMemberManifest, ...], str]:
         """Admit a start and mark the group starting.
 
         The caller holds the lock. Returns the start's hold, the final-archive
         membership and the container the start is for.
+
+        ``activation_owner`` must still be a member's lease. Checked here, in
+        the same hold of the lock that marks the group starting, and before
+        ``ChatSandboxManager.start`` attaches the group's bridge, the check
+        holds until Docker starts the container: a stop is what both clears
+        the leases and seals the run's label, and no stop begins while a start
+        is in progress (``STOP`` and ``SHUTDOWN_TAKE_STOP`` refuse
+        ``STARTING``). A lease the runner gives up otherwise seals nothing.
         """
         group.lifecycle.admit(Operation.START)
+        if activation_owner is not None and all(
+            member.lease_token != activation_owner for member in group.members.values()
+        ):
+            raise SessionLeaseLost("Environment preparation lease was lost")
         hold = group.life.begin_start_locked()
         members = self._state.archive_members_locked(group)
         return hold, members, group.inspection.container_id

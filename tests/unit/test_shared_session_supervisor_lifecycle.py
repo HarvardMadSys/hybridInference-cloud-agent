@@ -1820,14 +1820,30 @@ def test_shutdown_leaves_a_start_in_progress_its_own_final_archive():
         assert not group.life.final_archive_pending
 
 
+class _BridgeRecordingManager(_Manager):
+    """Its start attaches the group bridge first, as ``ChatSandboxManager.start`` does."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.bridge_connects: list[str] = []
+
+    def start(self, spec, **kwargs):
+        current = self.items[spec.container_name]
+        if not current.running:
+            self.bridge_connects.append(spec.container_name)
+        return super().start(spec, **kwargs)
+
+
 def test_a_turns_start_whose_lease_a_stop_cleared_starts_nothing():
-    """The lease is rechecked right before Docker starts a stopped container.
+    """The lease is checked as the start is admitted, before Docker or the bridge.
 
     A request in the run it was admitted to begins no run, so a stale
     activation's start would carry the label of the stop that cleared it.
-    It is refused, and it is not recorded as a failed start.
+    It is refused, it is not recorded as a failed start, and it leaves no
+    bridge attached to the stopped container: an attached bridge is the
+    durable sign of an unfinished final archive.
     """
-    manager = _Manager()
+    manager = _BridgeRecordingManager()
     spec = _spec()
     manager.items[spec.container_name] = manager._inspection(spec, running=False)
     supervisor = SharedChatSessionSupervisor(manager)
@@ -1837,7 +1853,25 @@ def test_a_turns_start_whose_lease_a_stop_cleared_starts_nothing():
     with pytest.raises(SessionLeaseLost, match="Environment preparation lease was lost"):
         supervisor._lifecycle.start_group(group, activation_owner="lease-a-stop-cleared")
 
+    assert manager.bridge_connects == []
+    assert manager.starts == []
     assert manager.items[spec.container_name].running is False
     with supervisor.state.lock:
         assert group.life.start is None
         assert group.life.last_start_failed is False
+
+
+def test_a_turns_start_under_its_lease_starts_the_stopped_group():
+    manager = _BridgeRecordingManager()
+    spec = _spec()
+    manager.items[spec.container_name] = manager._inspection(spec, running=False)
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(spec, _members())
+    group = supervisor.state.groups[spec.sandbox_id]
+    with supervisor.state.lock:
+        group.members["athr_source"].lease_token = "lease"
+
+    supervisor._lifecycle.start_group(group, activation_owner="lease")
+
+    assert manager.bridge_connects == [spec.container_name]
+    assert manager.items[spec.container_name].running is True
