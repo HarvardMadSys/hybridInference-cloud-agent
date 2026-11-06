@@ -138,6 +138,7 @@ from cloud_agent.schemas.archive_settings import (
 from cloud_agent.schemas.audit import (
     AdminAuditLogEntry,
     AdminAuditLogResponse,
+    AuditWriteFailures,
 )
 from cloud_agent.schemas.capacity_protocol import (
     AgentHostCapacity,
@@ -540,6 +541,7 @@ __all__ = [
     "AgentWorkspaceResponse",
     "AgentWorkspaceWriteRequest",
     "AttemptResources",
+    "AuditWriteFailures",
     "AuthConfigResponse",
     "AuthOptionsResponse",
     "AutomaticDeploymentSetup",

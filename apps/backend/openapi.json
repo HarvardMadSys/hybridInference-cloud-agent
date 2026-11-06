@@ -740,12 +740,30 @@
         "type": "object"
       },
       "AdminAuditLogEntry": {
-        "description": "One recorded admin action, as the Audit log page shows it.",
+        "description": "One recorded action, as the Audit log page shows it.",
         "properties": {
           "action": {
             "description": "Dotted action name, e.g. ``agent.runner_host.drain``.",
             "title": "Action",
             "type": "string"
+          },
+          "actor_account_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The acting account, for ``admin`` and ``user`` actors.",
+            "title": "Actor Account Id"
+          },
+          "actor_deleted": {
+            "default": false,
+            "description": "The acting account has since been deleted.",
+            "title": "Actor Deleted",
+            "type": "boolean"
           },
           "actor_id": {
             "anyOf": [
@@ -756,10 +774,36 @@
                 "type": "null"
               }
             ],
-            "description": "The administrator who acted; null on rows older than the column.",
+            "description": "Who acted, as recorded: ``admin:<account id>``, ``admin-token`` ...",
             "title": "Actor Id"
           },
+          "actor_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The acting account's name when the row was written.",
+            "title": "Actor Label"
+          },
+          "actor_type": {
+            "description": "``admin`` (an administrator's session), ``break_glass`` (access belonging to no account: ADMIN_TOKEN, first-run setup, the bootstrap command), ``service``, ``system``, ``user`` (an account acting on itself) or ``anonymous``.",
+            "enum": [
+              "admin",
+              "break_glass",
+              "service",
+              "system",
+              "user",
+              "anonymous"
+            ],
+            "title": "Actor Type",
+            "type": "string"
+          },
           "admin_ip": {
+            "description": "The caller's address, best effort.",
             "title": "Admin Ip",
             "type": "string"
           },
@@ -767,11 +811,13 @@
             "anyOf": [
               {
                 "enum": [
+                  "accounts",
                   "settings",
                   "servers",
+                  "sandboxes",
                   "measurements",
-                  "content",
-                  "database"
+                  "sensitive_access",
+                  "access_control"
                 ],
                 "type": "string"
               },
@@ -803,9 +849,119 @@
             "title": "Id",
             "type": "integer"
           },
+          "kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "change",
+                  "access",
+                  "self_service"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "``change`` altered the platform or someone else's account or data, ``access`` opened someone's data to the actor, ``self_service`` is an account changing itself; null for an action this release does not know.",
+            "title": "Kind"
+          },
+          "outcome": {
+            "description": "What the request did. ``requested`` was accepted and runs later; ``refused`` and ``replayed`` changed nothing.",
+            "enum": [
+              "applied",
+              "requested",
+              "refused",
+              "failed",
+              "replayed"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why, in the administrator's words.",
+            "title": "Reason"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "enum": [
+                  "applied",
+                  "failed",
+                  "cancelled"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A ``requested`` row's final result; null while it still runs.",
+            "title": "Result"
+          },
+          "result_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result At"
+          },
+          "subject_deleted": {
+            "default": false,
+            "description": "The affected user has since been deleted.",
+            "title": "Subject Deleted",
+            "type": "boolean"
+          },
+          "subject_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The affected user's name when the row was written.",
+            "title": "Subject Label"
+          },
           "success": {
             "title": "Success",
             "type": "boolean"
+          },
+          "target_id": {
+            "description": "Its id: an account id, a host name, a sandbox id ...",
+            "title": "Target Id",
+            "type": "string"
+          },
+          "target_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Its name when the row was written.",
+            "title": "Target Label"
+          },
+          "target_type": {
+            "description": "What was acted on: ``account``, ``host``, ``sandbox`` ...",
+            "title": "Target Type",
+            "type": "string"
           },
           "target_user_id": {
             "anyOf": [
@@ -816,15 +972,19 @@
                 "type": "null"
               }
             ],
-            "description": "The user acted upon, such as the owner of content an admin read.",
+            "description": "The user affected: the account acted on, or the owner of what was.",
             "title": "Target User Id"
           }
         },
         "required": [
           "id",
           "action",
+          "actor_type",
           "admin_ip",
+          "target_type",
+          "target_id",
           "success",
+          "outcome",
           "created_at"
         ],
         "title": "AdminAuditLogEntry",
@@ -851,6 +1011,9 @@
             ],
             "description": "Pass as ``before`` for the next, older page; null when there is none.",
             "title": "Next Before"
+          },
+          "write_failures": {
+            "$ref": "#/components/schemas/AuditWriteFailures"
           }
         },
         "required": [
@@ -8930,6 +9093,33 @@
           }
         },
         "title": "AttemptResources",
+        "type": "object"
+      },
+      "AuditWriteFailures": {
+        "description": "Audit writes that failed recently. Recording never fails the action itself.",
+        "properties": {
+          "count": {
+            "description": "Failed writes in the last seven days.",
+            "title": "Count",
+            "type": "integer"
+          },
+          "latest_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest At"
+          }
+        },
+        "required": [
+          "count"
+        ],
+        "title": "AuditWriteFailures",
         "type": "object"
       },
       "AuthConfigResponse": {
@@ -27379,7 +27569,7 @@
   "paths": {
     "/admin/agent/audit-log": {
       "get": {
-        "description": "Return recorded admin actions, newest first, a page at a time.",
+        "description": "Return recorded actions, newest first, a page at a time.",
         "operationId": "list_admin_audit_log_admin_agent_audit_log_get",
         "parameters": [
           {
@@ -27390,11 +27580,13 @@
               "anyOf": [
                 {
                   "enum": [
+                    "accounts",
                     "settings",
                     "servers",
+                    "sandboxes",
                     "measurements",
-                    "content",
-                    "database"
+                    "sensitive_access",
+                    "access_control"
                   ],
                   "type": "string"
                 },
@@ -27403,6 +27595,75 @@
                 }
               ],
               "title": "Category"
+            }
+          },
+          {
+            "description": "``people``: administrators' sessions and break-glass access. ``all`` adds services, the control plane's own policy and accounts changing themselves.",
+            "in": "query",
+            "name": "actors",
+            "required": false,
+            "schema": {
+              "default": "people",
+              "description": "``people``: administrators' sessions and break-glass access. ``all`` adds services, the control plane's own policy and accounts changing themselves.",
+              "enum": [
+                "people",
+                "all"
+              ],
+              "title": "Actors",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Only rows about this account or what it owns.",
+            "in": "query",
+            "name": "user",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only rows about this account or what it owns.",
+              "title": "User"
+            }
+          },
+          {
+            "in": "query",
+            "name": "target_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Target Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "target_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 512,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Target Id"
             }
           },
           {
@@ -28247,7 +28508,7 @@
     },
     "/admin/agent/compute-connections/{connection_id}/validate": {
       "post": {
-        "description": "Validate a configured connection without allocating resources.",
+        "description": "Validate a configured connection without allocating resources.\n\nA check changes nothing an administrator would look for later, so it is\nnot audited, as the reads above are not.",
         "operationId": "validate_connection_admin_agent_compute_connections__connection_id__validate_post",
         "parameters": [
           {

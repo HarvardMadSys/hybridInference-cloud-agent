@@ -407,7 +407,10 @@ async def test_inventory_controls_reject_stale_review(db, store, archived, fence
 
 @pytest.mark.parametrize("archived", [False, True])
 @pytest.mark.parametrize("allow_stale_host", [False, True])
-async def test_inventory_audit_failure_rolls_back_visibility(db, store, archived, allow_stale_host):
+async def test_inventory_visibility_changes_even_when_its_audit_fails(
+    db, store, archived, allow_stale_host
+):
+    """Recording never fails the action: visibility changes and the miss is counted."""
     await seed(db, store, "asbx_audit", state="running" if allow_stale_host else "stopped")
     if not archived:
         assert (
@@ -421,12 +424,18 @@ async def test_inventory_audit_failure_rolls_back_visibility(db, store, archived
             f"CHECK (action <> '{action}')"
         )
     try:
-        with pytest.raises(asyncpg.CheckViolationError):
+        assert (
             await archive_request(
                 store, "asbx_audit", archived=archived, allow_stale_host=allow_stale_host
             )
+            == "accepted"
+        )
         detail = await store.admin_sandboxes.detail("asbx_audit")
-        assert detail is not None and (detail.sandbox.archived_at is None) == archived
+        assert detail is not None and (detail.sandbox.archived_at is not None) == archived
+        async with db.acquire() as conn:
+            assert (
+                await conn.fetchval("SELECT action FROM agent_admin_audit_write_failures") == action
+            )
     finally:
         async with db.acquire() as conn:
             await conn.execute(
@@ -702,7 +711,8 @@ async def test_stop_rejects_stale_review(db, store, fence):
     assert await stop_request(db, store, "asbx_stale", **fence) == "stale"
 
 
-async def test_stop_audit_failure_rolls_back_intent(db, store):
+async def test_a_stop_is_requested_even_when_its_audit_fails(db, store):
+    """Recording never fails the action: the stop is requested and the miss is counted."""
     await seed(db, store, "asbx_audit")
     async with db.acquire() as conn:
         await conn.execute(
@@ -710,11 +720,15 @@ async def test_stop_audit_failure_rolls_back_intent(db, store):
             "CHECK (action <> 'agent.sandbox.stop')"
         )
     try:
-        with pytest.raises(asyncpg.CheckViolationError):
-            await stop_request(db, store, "asbx_audit")
+        assert await stop_request(db, store, "asbx_audit") == "accepted"
         detail = await store.admin_sandboxes.detail("asbx_audit")
-        assert detail is not None and detail.sandbox.state == "running"
-        assert detail.sandbox.stop_requested_at is None
+        assert detail is not None and detail.sandbox.state == "stopping"
+        assert detail.sandbox.stop_requested_at is not None
+        async with db.acquire() as conn:
+            assert (
+                await conn.fetchval("SELECT action FROM agent_admin_audit_write_failures")
+                == "agent.sandbox.stop"
+            )
     finally:
         async with db.acquire() as conn:
             await conn.execute("ALTER TABLE agent_admin_audit_log DROP CONSTRAINT reject_stop_test")

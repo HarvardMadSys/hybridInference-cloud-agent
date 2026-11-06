@@ -12,9 +12,15 @@ the rows it is handed. Three things only Postgres can settle:
   the actions that worked is not a trail.
 - **The actor and the target are different columns.** An audit row that blurs
   who acted with whom they acted on cannot answer the question it exists for.
-- **The Audit log reads it back newest first, filtered in SQL.** Action names
-  hold ``_``, which ``LIKE`` reads as a wildcard, and paging by ``id`` must
+- **The Audit log reads it back newest first, filtered in SQL**, by action,
+  by kind of actor, by affected user and by target, and paging by ``id`` must
   neither repeat nor skip a row.
+- **The kind of actor is derived by the database**, so a row a previous
+  release writes is classified like one this release writes.
+- **Recording never fails the action**: a row that cannot be written is
+  counted instead, and the caller's transaction carries on.
+- **A ``requested`` row reads with its final result**, reported by a worker
+  or read from the compute operation it names.
 """
 
 from __future__ import annotations
@@ -64,7 +70,12 @@ async def pool():
 
     async def _clear() -> None:
         async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM agent_admin_audit_outcomes")
+            await conn.execute("DELETE FROM agent_admin_audit_write_failures")
             await conn.execute("DELETE FROM agent_admin_audit_log")
+            await conn.execute(
+                "DELETE FROM agent_compute_operations WHERE starts_with(id, 'op-audit-')"
+            )
 
     await _clear()
     try:
@@ -215,39 +226,241 @@ async def test_pages_follow_one_another_without_repeating_a_row(
     assert seen == sorted(ids, reverse=True)
 
 
-async def test_prefixes_and_exact_names_filter_and_underscore_is_literal(
+async def test_exact_actions_filter_the_read(
     store: PostgresAuditRepository, log: PostgresAuditLogRepository
 ) -> None:
-    """A prefix keeps its family, an exact name only itself, ``_`` matches ``_``."""
+    """A filter is the exact list of actions it shows; ``_`` is not a wildcard."""
     await _record(store, action="agent.runner_host.drain")
     await _record(store, action="agent.runner_host.set_settings")
     await _record(store, action="agent.compute.server.add")
-    await _record(store, action="agent.profiling.start")
-    # Would match ``agent.runner_host.%`` if ``_`` were the wildcard it is in LIKE.
     await _record(store, action="agent.runnerXhost.drain")
 
-    assert await _actions(log, actions=("agent.runner_host.",)) == [
-        "agent.runner_host.set_settings",
+    assert await _actions(log, actions=("agent.runner_host.drain", "agent.compute.server.add")) == [
+        "agent.compute.server.add",
         "agent.runner_host.drain",
     ]
-    assert await _actions(
-        log,
-        actions=("agent.runner_host.", "agent.compute."),
-        excluded_actions=("agent.runner_host.set_settings",),
-    ) == ["agent.compute.server.add", "agent.runner_host.drain"]
-    assert await _actions(log, actions=("agent.runner_host.set_settings",)) == [
-        "agent.runner_host.set_settings"
-    ]
 
 
-async def test_excluded_actions_stay_out_of_an_unfiltered_read(
+@pytest.mark.parametrize(
+    ("actor_id", "actor_type"),
+    [
+        ("admin:01KQ", "admin"),
+        ("self:01M6", "user"),
+        ("anonymous", "anonymous"),
+        ("password-reset", "anonymous"),
+        ("admin-token", "break_glass"),
+        ("deployment-bootstrap", "break_glass"),
+        ("first-run-setup", "break_glass"),
+        ("operator:realtmxi", "break_glass"),
+        ("admin:staging-cleanup", "service"),
+        ("codex-ops-stale-cleanup", "service"),
+        ("service:deploy-pipeline", "service"),
+        ("sandbox-deletion-worker", "system"),
+        ("signup-policy", "system"),
+        ("admin-emails", "system"),
+    ],
+)
+async def test_the_database_names_the_kind_of_actor(
+    store: PostgresAuditRepository, pool, actor_id: str, actor_type: str
+) -> None:
+    row_id = await _record(store, actor_id=actor_id)
+    async with pool.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT actor_type FROM agent_admin_audit_log WHERE id = $1", row_id
+            )
+            == actor_type
+        )
+
+
+async def test_a_row_the_previous_release_writes_is_classified_too(pool) -> None:
+    """Its insert names only the original columns."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO agent_admin_audit_log (action, actor_id, admin_ip, details, success) "
+            "VALUES ('agent.runner_host.drain', 'admin-token', 'x', NULL, TRUE)"
+        )
+        assert await conn.fetchval("SELECT actor_type FROM agent_admin_audit_log") == "break_glass"
+
+
+async def test_people_users_and_targets_narrow_the_read(
     store: PostgresAuditRepository, log: PostgresAuditLogRepository
 ) -> None:
-    """Polling reads written by older releases never reach the page."""
-    await _record(store, action="agent.compute.servers.list")
-    await _record(store, action="agent.runner_host.drain")
-    await _record(store, action="agent.compute.servers.list")
+    await _record(
+        store, action="agent.runner_host.drain", actor_id="admin-token", target_user_id=None
+    )
+    await _record(
+        store,
+        action="agent.sandbox.delete.requested",
+        actor_id="admin:u-1",
+        target_user_id="owner-1",
+        details={"sandbox_id": "asbx_1", "request_id": "req-1"},
+    )
+    await _record(
+        store, action="agent.local_account.signup", actor_id="anonymous", target_user_id="new-1"
+    )
+    await _record(
+        store, action="agent.local_account.approve", actor_id="admin:u-1", target_user_id="new-1"
+    )
 
-    assert await _actions(log, excluded_actions=("agent.compute.servers.list",)) == [
-        "agent.runner_host.drain"
+    assert await _actions(log, actor_types=("admin", "break_glass")) == [
+        "agent.local_account.approve",
+        "agent.sandbox.delete.requested",
+        "agent.runner_host.drain",
     ]
+    assert await _actions(log, subject_user_id="new-1") == [
+        "agent.local_account.approve",
+        "agent.local_account.signup",
+    ]
+    assert await _actions(log, target=("sandbox", "asbx_1")) == ["agent.sandbox.delete.requested"]
+    assert await _actions(log, target=("host", "runner-a")) == ["agent.runner_host.drain"]
+
+
+async def test_a_row_stores_what_it_acted_on_and_its_outcome(
+    store: PostgresAuditRepository, log: PostgresAuditLogRepository
+) -> None:
+    await _record(
+        store,
+        action="agent.sandbox.delete.requested",
+        target_user_id="owner-1",
+        details={"sandbox_id": "asbx_1", "request_id": "req-1"},
+    )
+    await _record(
+        store, action="agent.profiling.start", details={"outcome": "refused"}, success=False
+    )
+    await _record(
+        store, action="agent.local_account.reject", target_user_id="new-1", reason="not a member"
+    )
+
+    reject, start, delete = await log.list_admin_actions(limit=10)
+
+    assert (delete["target_type"], delete["target_id"]) == ("sandbox", "asbx_1")
+    assert (delete["outcome"], delete["correlation_id"]) == ("requested", "req-1")
+    assert delete["result"] is None
+    assert (start["target_type"], start["outcome"]) == ("measurement", "refused")
+    assert (reject["target_type"], reject["target_id"], reject["reason"]) == (
+        "account",
+        "new-1",
+        "not a member",
+    )
+
+
+async def test_a_name_survives_the_account_that_had_it(
+    store: PostgresAuditRepository, log: PostgresAuditLogRepository, pool
+) -> None:
+    """An erased account's last recorded name labels the rows written after it."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO agent_admin_audit_log "
+            "(action, actor_id, admin_ip, target_user_id, success, subject_label) "
+            "VALUES ('agent.local_account.delete', 'admin:u-1', 'x', 'gone-1', TRUE, 'alice')"
+        )
+    await _record(store, action="agent.local_account.erase", target_user_id="gone-1", details={})
+
+    erase = (await log.list_admin_actions(limit=1))[0]
+    assert (erase["subject_label"], erase["target_label"]) == ("alice", "alice")
+
+
+async def test_a_write_that_fails_is_counted_and_the_transaction_carries_on(pool) -> None:
+    from cloud_agent.storage._sql.admin_audit import insert_audit_row
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "ALTER TABLE agent_admin_audit_log ADD CONSTRAINT reject_audit_test "
+            "CHECK (action <> 'agent.runner_host.forget')"
+        )
+        try:
+            async with conn.transaction():
+                assert (
+                    await insert_audit_row(
+                        conn,
+                        action="agent.runner_host.forget",
+                        actor_id="admin:u-1",
+                        admin_ip="x",
+                        details={"host": "h"},
+                    )
+                    is None
+                )
+                # The caller's transaction is intact and commits its own work.
+                assert await conn.fetchval("SELECT 1") == 1
+        finally:
+            await conn.execute(
+                "ALTER TABLE agent_admin_audit_log DROP CONSTRAINT reject_audit_test"
+            )
+        failure = await conn.fetchrow(
+            "SELECT action, actor_id, error FROM agent_admin_audit_write_failures"
+        )
+    assert tuple(failure) == ("agent.runner_host.forget", "admin:u-1", "CheckViolationError")
+
+
+async def test_recent_write_failures_are_counted(log: PostgresAuditLogRepository, pool) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO agent_admin_audit_write_failures (action, error, created_at) VALUES "
+            "('a', 'E', NOW() - INTERVAL '8 days'), ('b', 'E', NOW() - INTERVAL '1 day'), ('c', 'E', NOW())"
+        )
+    count, latest = await log.write_failures_since(datetime.now(UTC) - timedelta(days=7))
+    assert count == 2 and latest is not None
+
+
+async def test_a_requested_row_reads_with_its_reported_result(
+    store: PostgresAuditRepository, log: PostgresAuditLogRepository, pool
+) -> None:
+    from cloud_agent.storage._sql.admin_audit import report_final_outcome
+
+    requested = ("agent.sandbox.delete.requested",)
+    await _record(
+        store,
+        action="agent.sandbox.delete.requested",
+        details={"sandbox_id": "asbx_1", "request_id": "req-1"},
+    )
+    async with pool.acquire() as conn:
+        await report_final_outcome(
+            conn,
+            requested_actions=requested,
+            correlation_id="req-1",
+            outcome="failed",
+            reported_by="w",
+        )
+        assert (await log.list_admin_actions(limit=1))[0]["result"] == "failed"
+        # Reported again: the newer word wins.
+        await report_final_outcome(
+            conn,
+            requested_actions=requested,
+            correlation_id="req-1",
+            outcome="applied",
+            reported_by="w",
+        )
+        # A request nobody recorded is left alone.
+        await report_final_outcome(
+            conn,
+            requested_actions=requested,
+            correlation_id="req-x",
+            outcome="applied",
+            reported_by="w",
+        )
+        assert await conn.fetchval("SELECT count(*) FROM agent_admin_audit_outcomes") == 1
+    row = (await log.list_admin_actions(limit=1))[0]
+    assert row["result"] == "applied" and row["result_at"] is not None
+
+
+async def test_a_compute_request_reads_with_its_operations_state(
+    store: PostgresAuditRepository, log: PostgresAuditLogRepository, pool
+) -> None:
+    """The operation's own state is the result; nothing copies it."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO agent_compute_operations (id, request_id, fingerprint, kind, state, completed_at) "
+            "VALUES ('op-audit-1', 'r1', 'f', 'add', 'succeeded', NOW()), "
+            "('op-audit-2', 'r2', 'f', 'add', 'running', NULL)"
+        )
+    await _record(store, action="agent.compute.server.add", details={"operation_id": "op-audit-1"})
+    await _record(store, action="agent.compute.server.add", details={"operation_id": "op-audit-2"})
+
+    running, done = await log.list_admin_actions(limit=10)
+
+    assert (done["outcome"], done["result"]) == ("requested", "applied")
+    assert done["result_at"] is not None
+    assert (running["result"], running["result_at"]) == (None, None)
