@@ -36,6 +36,17 @@ def _steps() -> list[dict[str, object]]:
         "apps/backend/cloud_agent_host/service/host_control.py",
         "apps/backend/cloud_agent_host/service/host_service.py",
         "apps/backend/cloud_agent_host/manager_api/models.py",
+        # Wire models and payload builders beyond the clients.
+        "apps/backend/cloud_agent/schemas/_host_reports.py",
+        "apps/backend/cloud_agent/schemas/capacity_protocol.py",
+        "apps/backend/cloud_agent/attachments/models.py",
+        "apps/backend/cloud_agent/application/turn_claim.py",
+        "apps/backend/cloud_agent_host/host_capacity.py",
+        "apps/backend/cloud_agent_host/observe/sandbox_inventory.py",
+        "apps/backend/cloud_agent_host/turn/shared_live_attempt.py",
+        # Pydantic and the rest decide what parses.
+        "pyproject.toml",
+        "uv.lock",
         "scripts/check_mixed_protocol.py",
         "tests/support/mixed_protocol_host.py",
         "tests/support/mixed_protocol_control.py",
@@ -52,10 +63,9 @@ def test_protocol_changes_select_the_check(path: str) -> None:
 @pytest.mark.parametrize(
     "path",
     [
-        "apps/backend/cloud_agent/api/jobs.py",
-        "apps/backend/cloud_agent/schemas/jobs.py",
-        "apps/backend/cloud_agent_host/runtimes/codex.py",
         "apps/frontend/src/app/page.tsx",
+        "tests/unit/test_chat_sandbox.py",
+        "deploy/sandbox/cloud-agent-browser",
         "docs/developer/development.md",
     ],
 )

@@ -168,13 +168,14 @@ jobs:
             docs=false
           fi
 
-          # Protocol: what a host and a control plane of adjacent releases send
-          # each other or read from each other, the control plane's calls to
-          # the sandbox manager, and the check that runs the two releases
-          # against each other (host protocol v2 design §3.2).
-          if matches '^apps/backend/cloud_agent/(schemas/(workers|hosts)\.py$|api/(worker|worker_events|hosts)\.py$|sandbox_manager/)' \
-             || matches '^apps/backend/cloud_agent_shared/' \
-             || matches '^apps/backend/cloud_agent_host/((control_plane_client|claimed_job|sandbox_manager_client)\.py$|service/(enrollment|host_control|host_service)\.py$|manager_api/)' \
+          # Protocol: any backend package, its locked dependencies, and the check
+          # that runs two releases against each other (host protocol v2 design
+          # §3.2). The wire is built from models imported across schemas/,
+          # attachments/, the claim use case and host modules well beyond the
+          # clients, and pydantic itself decides what parses; a list of files
+          # misses some, and the check costs seconds.
+          if matches '^apps/backend/cloud_agent(_host|_shared)?/' \
+             || matches '^(pyproject\.toml|uv\.lock)$' \
              || matches '^(scripts/check_mixed_protocol\.py|tests/support/mixed_protocol_.*\.py)$'; then
             protocol=true
           else

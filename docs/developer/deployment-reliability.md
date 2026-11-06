@@ -195,10 +195,10 @@ evidence.
 
 Hosts deploy before the control plane, and a managed compute host follows a
 new control plane later, so for a while each side talks to the other's
-previous release. When a change touches the host protocol (the worker and
-host routes and schemas, `cloud_agent_shared`, the host's control-plane
-client, enrollment and claim code, or either side of the sandbox manager
-wire), the same Postgres job runs
+previous release. When a change touches any backend package or the locked
+dependencies (the wire is built from models and payload code spread well
+beyond the clients, and pydantic decides what parses), the same Postgres job
+runs
 [`scripts/check_mixed_protocol.py`](../../scripts/check_mixed_protocol.py)
 against the same previous release. It archives that release and gives it an
 environment from its own lock file, then runs four pairings, each on a
