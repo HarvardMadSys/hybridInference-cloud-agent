@@ -261,13 +261,13 @@ def _private_host(host: str) -> bool:
 # The code that uses these two refuses anything else, so the editor asks it
 # rather than keeping a second copy of the rule.
 def _github_install_url(value: str) -> bool:
-    from cloud_agent.source_control import github_install_url_is_usable
+    from cloud_agent.source_control.source_control import github_install_url_is_usable
 
     return not value or github_install_url_is_usable(value)
 
 
 def _gitlab_redirect_uri(value: str) -> bool:
-    from cloud_agent.source_control import gitlab_redirect_uri_is_usable
+    from cloud_agent.source_control.source_control import gitlab_redirect_uri_is_usable
 
     return not value or gitlab_redirect_uri_is_usable(value)
 

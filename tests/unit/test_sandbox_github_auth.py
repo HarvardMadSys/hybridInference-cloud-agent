@@ -14,8 +14,8 @@ import pytest
 from tests.support.member_loopback import HELPER_IN_PLACE
 from tests.support.owners import launch_connection
 
-from cloud_agent_host.chat_sandbox import MEMBER_UID_BASE, ChatSandboxSpec
-from cloud_agent_host.compat_helper import LAUNCHER
+from cloud_agent_host.container.chat_sandbox import MEMBER_UID_BASE, ChatSandboxSpec
+from cloud_agent_host.member_setup.compat_helper import LAUNCHER
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
 
 _PLACEHOLDER = "agh.payload.signature"
@@ -33,7 +33,7 @@ def _context(runtime_id="claude-code", **changes):
         ensure_kilo_mcp_runtime=lambda *_args: None,
         spawn=lambda spec, argv, **kwargs: calls.append({"argv": argv, **kwargs}),
         install_tool_hooks=lambda spec, update, **kwargs: calls.append({"hooks": update}),
-        _proven=HELPER_IN_PLACE,
+        exact=HELPER_IN_PLACE,
     )
     spec = ChatSandboxSpec(
         thread_id="athr_owner",

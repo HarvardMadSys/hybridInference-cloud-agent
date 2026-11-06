@@ -35,6 +35,7 @@ from cloud_agent.api._owner_auth import (
 from cloud_agent.api._stream_slots import STREAM_SLOTS
 from cloud_agent.api._thread_history import message_response, thread_response
 from cloud_agent.api.deps import get_job_event_signal, get_storage, require_store
+from cloud_agent.api.errors import typed_error
 from cloud_agent.domain.execution import TERMINAL_STATES
 from cloud_agent.domain.thread_history import THREAD_DETAIL_CHARS, THREAD_PAGE_MAX, THREAD_PAGE_SIZE
 from cloud_agent.logging_utils import get_logger
@@ -53,6 +54,7 @@ from cloud_agent.workers.job_event_signal import (  # noqa: TC001 — FastAPI re
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from cloud_agent.domain.execution import JobStreamState
     from cloud_agent.ports import ConversationQueries, ExecutionQueries
 
 
@@ -142,10 +144,7 @@ async def get_agent_thread(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if thread is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"type": "not_found", "message": f"No thread for {job_id}"}},
-        )
+        raise typed_error(404, "not_found", f"No thread for {job_id}")
     return thread_response(thread)
 
 
@@ -190,10 +189,7 @@ async def get_agent_thread_stats(
     # answers the 404 itself; see get_agent_thread.
     result = await job_store.execution_queries.thread_stats(job_id=job_id, user_id=user["user_id"])
     if result is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"type": "not_found", "message": f"No thread for {job_id}"}},
-        )
+        raise typed_error(404, "not_found", f"No thread for {job_id}")
     return AgentThreadStatsResponse(thread_id=result["thread_id"], **asdict(result["stats"]))
 
 
@@ -252,8 +248,50 @@ async def list_agent_job_events(
     )
 
 
+async def _finished_job_frames(
+    job_store: _ThreadsStorage, job_id: str, cursor: int, stream_state: JobStreamState
+) -> AsyncIterator[str]:
+    """Drain a finished job's remaining events, then announce its end.
+
+    Drain to exhaustion before announcing the end. A single extra page is not
+    enough: a client attaching to a finished job with more than two pages of
+    backlog would see job_finished, close, and lose the rest.
+    """
+    while True:
+        tail = await job_store.execution_queries.list_events_after(
+            job_id=job_id, after_id=cursor, limit=_EVENT_PAGE_SIZE
+        )
+        if not tail:
+            break
+        for event in tail:
+            cursor = event["id"]
+            yield _sse_frame(event)
+    final = json.dumps(
+        {
+            "state": stream_state.state,
+            "published_pr_url": stream_state.published_pr_url,
+            "last_event_id": cursor,
+        },
+        separators=(",", ":"),
+    )
+    yield f"event: job_finished\ndata: {final}\n\n"
+
+
+async def _await_next_read(
+    signal: JobEventSignal | None, woken: asyncio.Event | None, remaining: float
+) -> None:
+    """Wait for the job's notification, or the poll clock, never past ``remaining``."""
+    if signal is None or woken is None:
+        await asyncio.sleep(min(_POLL_INTERVAL_S, remaining))
+    else:
+        await signal.wait(
+            woken,
+            min(_IDLE_READ_S if signal.listening else _POLL_INTERVAL_S, remaining),
+        )
+
+
 @router.get("/jobs/{job_id}/stream")
-async def stream_agent_job_events(  # noqa: C901 complexity baseline, #771
+async def stream_agent_job_events(
     job_id: str,
     request: Request,
     last_event_id: str | None = Header(None, alias="Last-Event-ID"),
@@ -282,7 +320,7 @@ async def stream_agent_job_events(  # noqa: C901 complexity baseline, #771
         with contextlib.suppress(ValueError):
             cursor = int(last_event_id)
 
-    async def event_source() -> AsyncIterator[Any]:  # noqa: PLR0912 complexity baseline, #771
+    async def event_source() -> AsyncIterator[Any]:
         nonlocal cursor
         clock = asyncio.get_running_loop().time
         last_frame = clock()
@@ -330,39 +368,14 @@ async def stream_agent_job_events(  # noqa: C901 complexity baseline, #771
                         last_frame = clock()
 
                     if stream_state.state in TERMINAL_STATES:
-                        # Drain to exhaustion before announcing the end. A
-                        # single extra page is not enough: a client attaching
-                        # to a finished job with more than two pages of backlog
-                        # would see job_finished, close, and lose the rest.
-                        while True:
-                            tail = await job_store.execution_queries.list_events_after(
-                                job_id=job_id, after_id=cursor, limit=_EVENT_PAGE_SIZE
-                            )
-                            if not tail:
-                                break
-                            for event in tail:
-                                cursor = event["id"]
-                                yield _sse_frame(event)
-                        final = json.dumps(
-                            {
-                                "state": stream_state.state,
-                                "published_pr_url": stream_state.published_pr_url,
-                                "last_event_id": cursor,
-                            },
-                            separators=(",", ":"),
-                        )
-                        yield f"event: job_finished\ndata: {final}\n\n"
+                        async for frame in _finished_job_frames(
+                            job_store, job_id, cursor, stream_state
+                        ):
+                            yield frame
                         return
 
                     # No wait runs past the cap, so the stream ends on time.
-                    remaining = closes_at - clock()
-                    if signal is None or woken is None:
-                        await asyncio.sleep(min(_POLL_INTERVAL_S, remaining))
-                    else:
-                        await signal.wait(
-                            woken,
-                            min(_IDLE_READ_S if signal.listening else _POLL_INTERVAL_S, remaining),
-                        )
+                    await _await_next_read(signal, woken, closes_at - clock())
         except asyncio.CancelledError:
             # Client disconnect: the subscription ends with its block, the
             # event log is durable and the client can resume by cursor.

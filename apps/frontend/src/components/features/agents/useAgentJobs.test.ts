@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { AgentJobApi, AgentJobEventApi } from '@/lib/api/agents';
-import { toDisplayJob } from './adapt';
+import { toDisplayJob } from './adapt/jobAdapter';
 
 import { applyAgentLifecycleEvent } from './useAgentJobs';
 

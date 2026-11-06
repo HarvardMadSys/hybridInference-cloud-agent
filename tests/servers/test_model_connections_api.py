@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from tests.servers.test_agent_jobs_api import (  # noqa: F401 -- autouse fixtures
     _OWNER,
@@ -29,6 +29,7 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 -- autouse fixture
 )
 from tests.servers.test_worker_claim import _app as _claim_app, _ClaimStore
 from tests.support.owners import on_connection
+from tests.support.refusals import raises_http
 
 from cloud_agent.api import model_connections as api
 from cloud_agent.api._owner_auth import require_agent_owner
@@ -1233,7 +1234,7 @@ async def test_a_follow_up_inherits_its_source_and_rechecks_it():
     assert (inherited.model, inherited.model_connection_id) == (None, None)
 
     row["enabled"] = False
-    with pytest.raises(HTTPException) as refused:
+    with raises_http() as refused:
         await _follow_up(connections, _parent())
     assert refused.value.status_code == 400
     assert refused.value.detail["error"]["reason"] == "disabled"
@@ -1253,10 +1254,10 @@ async def test_a_follow_up_switching_source_is_checked_against_the_new_one():
     assert (switched.model, switched.model_connection_id) == ("o4-mini", row["id"])
     assert switched.reasoning_effort is None
 
-    with pytest.raises(HTTPException) as refused:
+    with raises_http() as refused:
         await _follow_up(connections, _parent(), reasoning_effort="high")
     assert refused.value.detail["error"]["reason"] == "effort_unsupported"
-    with pytest.raises(HTTPException) as foreign:
+    with raises_http() as foreign:
         await _follow_up(
             connections, _parent(), model="gpt-4.1", model_connection_id="mconn_" + "f" * 32
         )
@@ -1275,7 +1276,7 @@ async def test_a_claude_follow_up_inherits_its_messages_source_and_rechecks_the_
     # The owner later replaces Messages with Responses: nothing serves Claude Code now.
     # A later verification found only Responses: Claude Code has no path now.
     row["model_checks"]["claude-sonnet-4-5"] = {**_supported("responses"), "revision": 1}
-    with pytest.raises(HTTPException) as refused:
+    with raises_http() as refused:
         await _follow_up(connections, parent)
     assert refused.value.detail["error"]["reason"] == "protocol_unsupported"
 
@@ -1539,7 +1540,7 @@ async def test_a_residency_whose_connection_changed_is_released_and_ends_the_tur
         return False
 
     connections.bind_residency = changed_meanwhile  # type: ignore[method-assign]
-    with pytest.raises(HTTPException) as refused:
+    with raises_http() as refused:
         await residency_credential(store, job=_JOB, row=dict(_ROW), host="h", fence=_FENCE)
     assert refused.value.status_code == 403
     assert refused.value.detail["error"]["reason"] == "changed"
@@ -1567,12 +1568,12 @@ async def test_config_offers_the_owners_connections_and_their_last_use_without_t
         id="mconn_" + "d" * 32, name="Off", enabled=False
     )
 
-    from cloud_agent.model_preference import ModelPreferenceView
+    from cloud_agent.schemas.model_preferences import ModelPreferenceView
 
     async def last_on_connection(user_id: str) -> ModelPreferenceView:
         return ModelPreferenceView(last_model="gpt-4.1", last_model_connection_id=row["id"])
 
-    store.get_model_preference = last_on_connection  # type: ignore[method-assign]
+    store.model_preferences.get_model_preference.side_effect = last_on_connection
 
     class _DownDirectory(_FakeOwners):
         async def model_catalog_with_reasoning_efforts(self, user_id: str):
@@ -1614,12 +1615,12 @@ async def test_with_the_gate_off_a_task_on_a_connection_is_refused_not_moved(mon
 
 
 def _remembering(store: _TurnStorage, connection_id: str):
-    from cloud_agent.model_preference import ModelPreferenceView
+    from cloud_agent.schemas.model_preferences import ModelPreferenceView
 
     async def preference(user_id: str) -> ModelPreferenceView:
         return ModelPreferenceView(last_model="glm-5.1", last_model_connection_id=connection_id)
 
-    store.get_model_preference = preference  # type: ignore[method-assign]
+    store.model_preferences.get_model_preference.side_effect = preference
 
 
 @pytest.mark.parametrize(

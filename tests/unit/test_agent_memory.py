@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from cloud_agent.agent_memory import (
+from cloud_agent.memory.agent_memory import (
     TASK_CONTEXT_LIMIT,
     describe,
     fit_task_memories,

@@ -9,9 +9,9 @@ from cloud_agent.application.compute_autoscale import CloudLabAutoscaler
 from cloud_agent.application.compute_reconcile import ComputeReconciler
 from cloud_agent.application.compute_resources import ComputeCommands
 from cloud_agent.application.compute_setup import AutomaticComputeSetup
-from cloud_agent.compute_config import ComputeConfiguration, ComputeSecretResolver
-from cloud_agent.compute_registry import build_registry
-from cloud_agent.compute_secrets import ComputeSecretStore
+from cloud_agent.providers.compute.compute_config import ComputeConfiguration, ComputeSecretResolver
+from cloud_agent.providers.compute.compute_registry import build_registry
+from cloud_agent.providers.compute.compute_secrets import ComputeSecretStore
 from cloud_agent.providers.compute.host_bootstrap import SshHostBootstrap
 from cloud_agent.providers.compute.setup_tunnels import SshTunnelSetup
 from cloud_agent.providers.compute.ssh import OpenSshTransport

@@ -44,7 +44,7 @@ RUN sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR%/}|g" /etc/apt/sources.list.
 # this same image as a short-lived helper in the host's network namespace — with
 # NET_ADMIN and nothing else for nft, to install and read back the host's
 # sandbox rules, and with no capability at all for ip, to read the host's routes
-# (cloud_agent_host/network_guard.py). The runner itself holds no NET_ADMIN.
+# (cloud_agent_host/network/network_guard.py). The runner itself holds no NET_ADMIN.
 
 # That helper runs Python with a read-only root filesystem, where it cannot
 # cache bytecode, and this base image ships the standard library without any:

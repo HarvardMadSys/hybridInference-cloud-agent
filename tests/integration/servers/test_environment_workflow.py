@@ -21,10 +21,12 @@ async def test_environment_create_test_bind_rotate_reuse_and_archive_via_http(ap
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "http-environment-key")
     api.app.include_router(environments.router)
     monkeypatch.setattr(
-        "cloud_agent.environment_source.resolve_test_commit", AsyncMock(return_value="a" * 40)
+        "cloud_agent.environments.environment_source.resolve_test_commit",
+        AsyncMock(return_value="a" * 40),
     )
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_job", AsyncMock(return_value=None)
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.sandbox_manager_for_job",
+        AsyncMock(return_value=None),
     )
     http = api.client
     response = await http.patch(

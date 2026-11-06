@@ -21,6 +21,7 @@ from tests.support.owners import (
     FakeConnections,
     use_session_secret,
 )
+from tests.support.refusals import raises_http
 
 from cloud_agent.accounts import config
 from cloud_agent.accounts.directory import (
@@ -156,7 +157,7 @@ async def test_connections_are_on_unless_switched_off(monkeypatch):
 
 async def test_a_job_without_a_connection_is_a_verdict_not_an_outage():
     body = AgentJobCreate(repo=None, task_prompt="fix it", model="any-model")
-    with pytest.raises(HTTPException) as refused:
+    with raises_http() as refused:
         await _admit_model(body, _OWNER, connections=FakeConnections())
     assert refused.value.status_code == 409
     assert refused.value.detail["error"]["type"] == "model_connection_required"
@@ -213,7 +214,7 @@ async def test_host_profiles_refuse_the_retired_relay():
 
 
 async def test_the_namespace_check_names_the_cutover():
-    from cloud_agent import identity_namespace
+    from cloud_agent.deployment import identity_namespace
 
     assert config.CUTOVER_RUNBOOK in identity_namespace.GATEWAY_BOUND
     assert config.CUTOVER_RUNBOOK in identity_namespace.UNBOUND_OWNER_DATA
@@ -221,7 +222,7 @@ async def test_the_namespace_check_names_the_cutover():
 
 
 async def test_the_namespace_check_on_an_empty_database_changes_nothing():
-    from cloud_agent.identity_namespace import check_namespace
+    from cloud_agent.deployment.identity_namespace import check_namespace
 
     class _Empty:
         async def fetchval(self, query, *args):

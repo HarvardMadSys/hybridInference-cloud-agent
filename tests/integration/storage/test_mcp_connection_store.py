@@ -3120,10 +3120,10 @@ async def test_remembered_pages_continue_past_a_locked_prefix(store, pool, monke
     from unittest.mock import AsyncMock
 
     from cloud_agent.storage._sql import mcp_maintenance
-    from cloud_agent.storage.repositories import mcp
+    from cloud_agent.storage.repositories.mcp import invocations
 
     monkeypatch.setattr(mcp_maintenance, "ALLOW_GROUP_PAGE", 1)
-    monkeypatch.setattr(mcp, "ALLOW_GROUP_PAGE", 1)
+    monkeypatch.setattr(invocations, "ALLOW_GROUP_PAGE", 1)
     monkeypatch.setattr(store.mcp, "_flush_remembered_approvals", AsyncMock())
     threads = []
     for _ in range(3):

@@ -13,8 +13,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud_agent_host.chat_sandbox import MEMBER_UID_BASE, ChatSandboxManager, ChatSandboxSpec
-from cloud_agent_host.sandbox import ContainerBackend
+from cloud_agent_host.container.chat_sandbox import (
+    MEMBER_UID_BASE,
+    ChatSandboxManager,
+    ChatSandboxSpec,
+)
+from cloud_agent_host.container.sandbox import ContainerBackend
 
 pytestmark = pytest.mark.external
 

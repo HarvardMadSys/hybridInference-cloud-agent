@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from cloud_agent_host import bounded_output, chat_sandbox, sandbox
+from cloud_agent_host import bounded_output
 from cloud_agent_host.bounded_output import (
     OUTPUT_CHUNK_BYTES,
     OUTPUT_QUEUE_ITEMS,
@@ -22,9 +22,19 @@ from cloud_agent_host.bounded_output import (
     protocol_lines,
     text_chunks,
 )
-from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec, RetainedChatBackend
-from cloud_agent_host.sandbox import ContainerBackend, ProcessBackend, SandboxError, SandboxSpec
-from cloud_agent_host.sandbox_manager import _run_sandbox
+from cloud_agent_host.container import chat_sandbox, sandbox
+from cloud_agent_host.container.chat_sandbox import (
+    ChatSandboxManager,
+    ChatSandboxSpec,
+    RetainedChatBackend,
+)
+from cloud_agent_host.container.sandbox import (
+    ContainerBackend,
+    ProcessBackend,
+    SandboxError,
+    SandboxSpec,
+)
+from cloud_agent_host.manager_api.workspace_commands import _run_sandbox
 
 
 @pytest.mark.parametrize("failure", ["timeout", "output"])
@@ -36,7 +46,7 @@ def test_bounded_command_cleanup_preserves_a_running_sibling(monkeypatch, tmp_pa
     )
     manager = ChatSandboxManager(ContainerBackend(image="test", uid=os.getuid(), gid=os.getgid()))
     monkeypatch.setattr(
-        manager, "_require", lambda _spec: SimpleNamespace(running=True, container_id="test")
+        manager.exact, "require", lambda _spec: SimpleNamespace(running=True, container_id="test")
     )
     monkeypatch.setattr(manager, "require_network", lambda *_args, **_kw: None)
     monkeypatch.setattr(manager, "build_exec_command", lambda _spec, argv, **_kw: argv)
@@ -91,7 +101,7 @@ def _local_receipt_manager(monkeypatch, tmp_path):
     )
     manager = ChatSandboxManager(ContainerBackend(image="test", uid=os.getuid(), gid=os.getgid()))
     monkeypatch.setattr(
-        manager, "_require", lambda _spec: SimpleNamespace(running=True, container_id="test")
+        manager.exact, "require", lambda _spec: SimpleNamespace(running=True, container_id="test")
     )
     monkeypatch.setattr(manager, "build_exec_command", lambda _spec, argv, **_kw: argv)
     monkeypatch.setattr(

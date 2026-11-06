@@ -28,7 +28,7 @@ import {
 } from './AgentNotifications';
 import { AgentReadProvider } from './AgentReadProvider';
 import { NOTIFICATION_PERMISSION_EVENT } from './notificationPreferences';
-import { QUESTION_POLL_MS, useNativeQuestions } from './useNativeQuestions';
+import { QUESTION_POLL_MS, useNativeQuestions } from './conversation/useNativeQuestions';
 
 vi.mock('@/lib/api/agents', () => ({
   getAgentJob: vi.fn(),

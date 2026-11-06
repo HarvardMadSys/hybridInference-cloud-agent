@@ -30,11 +30,12 @@ from tests.unit.test_shared_session_supervisor import (
     _TransportFactory,
 )
 
-from cloud_agent_host import resident_probe, runner as runner_mod
+from cloud_agent_host import resident_probe
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransport
-from cloud_agent_host.sandbox import SandboxError
-from cloud_agent_host.session_supervisor_client import SessionSupervisorError
-from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+from cloud_agent_host.sandbox_manager_client import SandboxManagerError
+from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
+from cloud_agent_host.turn import shared_live_attempt
 from cloud_agent_shared import operation_profiling
 
 
@@ -128,7 +129,7 @@ def test_a_refused_probe_records_why_the_live_process_was_not_reused(
 
         def refuse_first(*args, **kwargs):
             if supervisor.ensure_shared_resident.call_count == 1:
-                raise SessionSupervisorError(503, message)
+                raise SandboxManagerError(503, message)
             return answer(*args, **kwargs)
 
         supervisor.ensure_shared_resident.side_effect = refuse_first
@@ -137,7 +138,7 @@ def test_a_refused_probe_records_why_the_live_process_was_not_reused(
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
             return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
-        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+        monkeypatch.setattr(shared_live_attempt, "_stream_shared_agent_turn", stream)
 
     result, _control, supervisor, _finish = _run_shared_boundary_case(
         monkeypatch,
@@ -176,7 +177,7 @@ def test_an_accepted_probe_is_recorded_as_accepted(monkeypatch, tmp_path):
             operation_profiling.finish(kwargs.get("measurement"), outcome="dispatched")
             return 0, "", [], {"kind": "result", "status": "completed", "exit_code": 0}, None
 
-        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream)
+        monkeypatch.setattr(shared_live_attempt, "_stream_shared_agent_turn", stream)
 
     result, *_ = _run_shared_boundary_case(
         monkeypatch,

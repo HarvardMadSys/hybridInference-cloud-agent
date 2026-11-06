@@ -1,7 +1,6 @@
 // The Context dashboard (Token Stats, Timing Stats, window card, trend,
 // browser). Two kinds of number are always named apart: "≈ recorded" for
-// estimates from stored text, plain numbers for what a provider or the
-// Gateway reported.
+// estimates from stored text, plain numbers for what a provider reported.
 
 export const contextDashboardEn = {
   'dashboard.selected': 'Request details',
@@ -50,36 +49,20 @@ export const contextDashboardEn = {
 
   'dashboard.timing.title': 'Timing Stats',
   'dashboard.timing.active': 'active',
-  'dashboard.timing.ttft': 'TTFT',
-  'dashboard.timing.ttftTip': 'Model request to its first token, as the Gateway measured it.',
   'dashboard.timing.reasoning': 'Thinking',
   'dashboard.timing.text': 'Answers',
   'dashboard.timing.toolarg': 'Tool args',
-  'dashboard.timing.gen': 'Generation (not split)',
-  'dashboard.timing.genTip':
-    'After the first token, as the Gateway measured it; not split by block where the stream did not time blocks.',
   'dashboard.timing.tools': 'Tool runs',
   'dashboard.timing.toolsTip':
     'From a call to its result as the platform received them, outside model requests; parallel calls count once.',
   'dashboard.timing.unsplit': 'Model + harness',
   'dashboard.timing.unsplitTip':
-    'An execution the Gateway rows do not cover: its time outside tool runs, not split into model and harness.',
-  'dashboard.timing.other': 'Not attributed',
-  'dashboard.timing.otherTip':
-    'Neither a model request nor a tool run: the harness, waits and event lag. Nothing measured it.',
-  'dashboard.timing.noGateway': 'The Gateway’s request timing was not read for these executions.',
+    'Time outside tool runs: model requests and the harness together, as no request log splits them.',
   'dashboard.timing.noBlocks': 'Only Claude Code streams block times, from this release on.',
-  'dashboard.timing.tps': '{tps} tok/s',
-  'dashboard.timing.tpsTip': 'Output tokens per second of Gateway-measured generation.',
   'dashboard.timing.strip': 'Execution time in order',
   'dashboard.timing.stripBounded': 'The longest stretches are drawn; short ones are left out.',
-  'dashboard.timing.counts':
-    '{executions} executions · {requests} timed model requests · {tools} tool calls.',
+  'dashboard.timing.counts': '{executions} executions · {tools} tool calls.',
   'dashboard.timing.unpaired': '{count} calls had no result and no time.',
-  'dashboard.timing.gateway.partial': 'Model time is split for {split} of {total} executions.',
-  'dashboard.timing.gateway.unavailable': 'The Gateway’s request timing could not be read.',
-  'dashboard.timing.gateway.not_recorded':
-    'No Gateway request timing is recorded for these executions.',
   'dashboard.timing.empty': 'No timed events yet.',
 
   'dashboard.window.title': 'Context window',
@@ -115,8 +98,7 @@ export const contextDashboardEn = {
   'dashboard.trend.extras': 'Overlay',
   'dashboard.trend.noOverlay': 'Tokens',
   'dashboard.trend.duration': 'Duration',
-  'dashboard.trend.durationTip':
-    'Gateway latency where a request joins one by its id (solid), otherwise the step time between events (dashed).',
+  'dashboard.trend.durationTip': 'The step time between events (dashed).',
   'dashboard.trend.adaptive': 'Adaptive',
   'dashboard.trend.adaptiveTip': 'Fit the scale to the requests shown.',
   'dashboard.trend.overview': 'Overview',
@@ -127,7 +109,6 @@ export const contextDashboardEn = {
   'dashboard.trend.tipTurn': 'Turn {turn} · {requests} requests',
   'dashboard.trend.observed': 'observed',
   'dashboard.trend.noCategories': 'No recorded categories for this request.',
-  'dashboard.trend.latency': 'Gateway latency {ms}',
   'dashboard.trend.stepTime': 'Step time {ms} (events)',
   'dashboard.trend.noDuration': 'No duration recorded.',
   'dashboard.trend.observedLegend': 'Observed input (reported)',
@@ -209,35 +190,20 @@ export const contextDashboardZhCN: Record<keyof typeof contextDashboardEn, strin
 
   'dashboard.timing.title': '耗时统计',
   'dashboard.timing.active': '活跃',
-  'dashboard.timing.ttft': '首 token',
-  'dashboard.timing.ttftTip': '模型请求到第一个 token 的时间，以 Gateway 的测量为准。',
   'dashboard.timing.reasoning': '思考',
   'dashboard.timing.text': '回答',
   'dashboard.timing.toolarg': '工具参数',
-  'dashboard.timing.gen': '生成（未细分）',
-  'dashboard.timing.genTip':
-    '第一个 token 之后的时间，以 Gateway 的测量为准；流里没有分块计时的部分不再细分。',
   'dashboard.timing.tools': '工具运行',
   'dashboard.timing.toolsTip':
     '从工具调用到结果，以平台收到的时间为准，扣除与模型请求重叠的部分；并行调用只算一次。',
   'dashboard.timing.unsplit': '模型与运行框架',
   'dashboard.timing.unsplitTip':
-    'Gateway 记录没有覆盖到的执行：工具运行以外的时间，无法再分成模型和运行框架。',
-  'dashboard.timing.other': '未归属',
-  'dashboard.timing.otherTip':
-    '既不在模型请求里也不在工具运行里：运行框架、等待和事件延迟。没有测量来源。',
-  'dashboard.timing.noGateway': '这些执行没有读到 Gateway 的请求计时。',
+    '工具运行以外的时间：模型请求和运行框架合在一起，没有请求日志能再把它们分开。',
   'dashboard.timing.noBlocks': '只有 Claude Code 的流带分块计时，从这个版本起才有。',
-  'dashboard.timing.tps': '{tps} token/秒',
-  'dashboard.timing.tpsTip': '按 Gateway 测得的生成时间计算的每秒输出 token。',
   'dashboard.timing.strip': '按顺序排列的执行时间',
   'dashboard.timing.stripBounded': '只画出最长的若干段，较短的已省略。',
-  'dashboard.timing.counts':
-    '{executions} 次执行 · {requests} 次有计时的模型请求 · {tools} 次工具调用。',
+  'dashboard.timing.counts': '{executions} 次执行 · {tools} 次工具调用。',
   'dashboard.timing.unpaired': '{count} 次调用没有结果，也就没有时长。',
-  'dashboard.timing.gateway.partial': '{total} 次执行中有 {split} 次细分了模型时间。',
-  'dashboard.timing.gateway.unavailable': '无法读取 Gateway 的请求计时。',
-  'dashboard.timing.gateway.not_recorded': '这些执行没有记录 Gateway 的请求计时。',
   'dashboard.timing.empty': '还没有带时间的事件。',
 
   'dashboard.window.title': '上下文窗口',
@@ -273,8 +239,7 @@ export const contextDashboardZhCN: Record<keyof typeof contextDashboardEn, strin
   'dashboard.trend.extras': '叠加',
   'dashboard.trend.noOverlay': 'Token',
   'dashboard.trend.duration': '时长',
-  'dashboard.trend.durationTip':
-    '能按 id 对上 Gateway 记录的请求画 Gateway 延迟（实线），否则画事件之间的步骤时间（虚线）。',
+  'dashboard.trend.durationTip': '事件之间的步骤时间（虚线）。',
   'dashboard.trend.adaptive': '自适应',
   'dashboard.trend.adaptiveTip': '让刻度适应当前显示的请求。',
   'dashboard.trend.overview': '总览',
@@ -284,7 +249,6 @@ export const contextDashboardZhCN: Record<keyof typeof contextDashboardEn, strin
   'dashboard.trend.tipTurn': '第 {turn} 轮 · {requests} 次请求',
   'dashboard.trend.observed': '观测',
   'dashboard.trend.noCategories': '这次请求没有记录的类别。',
-  'dashboard.trend.latency': 'Gateway 延迟 {ms}',
   'dashboard.trend.stepTime': '步骤时间 {ms}（事件）',
   'dashboard.trend.noDuration': '没有记录时长。',
   'dashboard.trend.observedLegend': '观测输入（报告）',

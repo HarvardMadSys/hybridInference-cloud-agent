@@ -8,9 +8,13 @@ from tests.integration.storage.test_agent_job_store import _create_job
 from tests.integration.storage.test_attempt_ledger import _seed_attempt, db as db, store as store
 from tests.support.usage import END, START
 
-from cloud_agent.admin_conversations import ConversationCursor, ConversationTurnsCursor
-from cloud_agent.admin_observability import RunFilters, cursor_scope, decode_cursor
-from cloud_agent.storage.admin_conversation_queries import turns_scope
+from cloud_agent.domain.cursors import cursor_scope, decode_cursor
+from cloud_agent.schemas.admin_conversations import (
+    ConversationCursor,
+    ConversationTurnsCursor,
+    turns_scope,
+)
+from cloud_agent.schemas.admin_observability import RunFilters
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

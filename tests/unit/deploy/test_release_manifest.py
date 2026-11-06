@@ -29,7 +29,7 @@ import jsonschema
 import pytest
 from deploy.release import release_manifest as rm
 
-from cloud_agent_host import sandbox as host_sandbox
+from cloud_agent_host.container import sandbox as host_sandbox
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCHEMA = json.loads((REPO_ROOT / "deploy/release/manifest.schema.json").read_text())
@@ -303,7 +303,7 @@ def test_an_unlabelled_sandbox_cannot_be_released() -> None:
 def test_the_label_names_are_the_ones_the_host_reads() -> None:
     """Two modules read these labels; a rename in one must not pass silently.
 
-    `cloud_agent_host.sandbox` reads them at claim time to stamp an attempt, and
+    `cloud_agent_host.container.sandbox` reads them at claim time to stamp an attempt, and
     this generator reads them to describe a release. The names are duplicated
     rather than imported — a publication job has no business loading the host
     package — so the agreement is asserted here.

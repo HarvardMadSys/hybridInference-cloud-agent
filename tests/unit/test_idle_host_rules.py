@@ -10,12 +10,12 @@ from typing import Any
 import pytest
 from tests.unit.test_chat_group_network import _NAMESPACE, _config, _spec
 
-from cloud_agent_host.chat_sandbox import ChatSandboxManager
-from cloud_agent_host.chat_sandbox_models import CHAT_NAMESPACE_LABEL, CHAT_PROBE_LABEL
+from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
+from cloud_agent_host.container.chat_sandbox_models import CHAT_NAMESPACE_LABEL, CHAT_PROBE_LABEL
+from cloud_agent_host.container.sandbox import ContainerBackend
 from cloud_agent_host.environment_tests import environment_run_spec
-from cloud_agent_host.idle_host_rules import IdleHostRules, running_deployment_container_ids
-from cloud_agent_host.network_guard import GUARD_RENEW_S
-from cloud_agent_host.sandbox import ContainerBackend
+from cloud_agent_host.network.idle_host_rules import IdleHostRules, running_deployment_container_ids
+from cloud_agent_host.network.network_guard import GUARD_RENEW_S
 from cloud_agent_shared.errors import SandboxError
 
 
@@ -68,7 +68,7 @@ def _host(monkeypatch, *, network: bool = True) -> tuple[ChatSandboxManager, _Do
     backend._network_guard = guard  # type: ignore[assignment]
     manager = ChatSandboxManager(backend)
     docker = _Docker()
-    monkeypatch.setattr(manager, "_run", docker.run)
+    monkeypatch.setattr(manager.exact, "run", docker.run)
     return manager, docker, guard
 
 

@@ -7,7 +7,7 @@ import pytest
 from tests.support.member_loopback import HELPER_IN_PLACE
 from tests.support.owners import launch_connection
 
-from cloud_agent_host.chat_sandbox import ChatSandboxSpec
+from cloud_agent_host.container.chat_sandbox import ChatSandboxSpec
 from cloud_agent_host.drivers import InputOutcome
 from cloud_agent_host.resident_transport import (
     ResidentLaunch,
@@ -71,7 +71,7 @@ def test_retained_http_launch_refreshes_the_trusted_bridge_without_mcp(
         ensure_kilo_mcp_runtime=lambda spec, version: events.append(("kilo", spec, version)),
         ensure_codex_mcp_policy=lambda spec, base_url: events.append(("policy", spec, base_url)),
         spawn=spawn,
-        _proven=HELPER_IN_PLACE,
+        exact=HELPER_IN_PLACE,
     )
     spec = ChatSandboxSpec(
         thread_id="athr_retained",

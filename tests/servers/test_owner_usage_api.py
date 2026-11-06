@@ -12,10 +12,11 @@ import pytest
 from fastapi import FastAPI
 from tests.support.owners import SESSIONS, use_session_secret
 
-from cloud_agent.admin_observability import encode_cursor
 from cloud_agent.api import owner_usage
 from cloud_agent.api.deps import get_owner_directory, get_storage
-from cloud_agent.owner_usage import (
+from cloud_agent.domain.cursors import encode_cursor
+from cloud_agent.ports.admin_queries import UsageQueryTooLarge, UsageQueryUnavailable
+from cloud_agent.usage.owner_usage import (
     CONTAINER_CURSOR_SCOPE,
     OwnerContainerCursor,
     OwnerContainerList,
@@ -23,7 +24,6 @@ from cloud_agent.owner_usage import (
     OwnerResourceHistory,
     OwnerResourceTotals,
 )
-from cloud_agent.storage.admin_usage_queries import UsageQueryTooLarge, UsageQueryUnavailable
 
 NOW = datetime(2026, 10, 15, 12, tzinfo=UTC)
 ZERO = OwnerResourceTotals(

@@ -5,7 +5,7 @@
 // bytes have already travelled. The browser check is a courtesy; the server's
 // is the boundary.
 //
-// The rules match `_repository_content_endpoint` in `cloud_agent/github_app.py`
+// The rules match `_repository_content_endpoint` in `cloud_agent/source_control/github_app.py`
 // — a path arriving from a directory upload is no more trusted than one
 // arriving from a repository.
 

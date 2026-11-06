@@ -11,8 +11,8 @@ from tests.external.test_retained_command_limits import (
     retained_command_container as retained_command_container,
 )
 
+from cloud_agent_host.container.sandbox import SandboxSpec
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
-from cloud_agent_host.sandbox import SandboxSpec
 from cloud_agent_shared.environment import BoundEnvironment, EnvironmentVariable
 
 pytestmark = [pytest.mark.external, pytest.mark.timeout(120)]
@@ -160,7 +160,7 @@ def test_real_snapshot_freezes_and_thaws_environment_services_and_actions(
         cols=80,
     )
     time.sleep(0.3)
-    container_id = backend.manager._require(backend.spec).container_id
+    container_id = backend.manager.exact.require(backend.spec).container_id
     manifest = backend.manager.freeze_shared_writers(
         backend.spec, slot_ids=[], token=uuid.uuid4().hex, expected_container_id=container_id
     )
@@ -201,7 +201,7 @@ def test_real_manual_action_keeps_one_execution_after_terminal_eviction_and_rest
     retained_command_container, tmp_path
 ):
     from cloud_agent_host.action_receipts import ActionReceipts
-    from cloud_agent_host.sandbox_manager import _TerminalManager
+    from cloud_agent_host.manager_api.terminal_manager import _TerminalManager
     from cloud_agent_shared.environment import EnvironmentAction
 
     backend = retained_command_container
@@ -260,7 +260,7 @@ def test_real_manual_action_keeps_one_execution_after_terminal_eviction_and_rest
 def test_fast_script_failures_are_never_success_in_real_container(
     retained_command_container, tmp_path
 ):
-    from cloud_agent_host.sandbox import SandboxError
+    from cloud_agent_host.container.sandbox import SandboxError
     from cloud_agent_host.setup import run_setup
 
     backend = retained_command_container

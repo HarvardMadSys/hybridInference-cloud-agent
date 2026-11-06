@@ -17,7 +17,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from tests.unit.test_agent_sandbox_manager import _app, _SharedSupervisor
 
-from cloud_agent_host.chat_sandbox import ArchiveExportTooLarge
+from cloud_agent_host.container.chat_sandbox import ArchiveExportTooLarge
 
 _HEADERS = {"X-Agent-Workspace-Token": "sandbox-manager-secret"}
 

@@ -21,9 +21,9 @@ from fastapi import FastAPI
 from cloud_agent.accounts.config import RETIRED_GATEWAY_VARIABLES
 from cloud_agent.app import lifespan
 from cloud_agent.bootstrap import lifespan as lifespan_module
-from cloud_agent.measurement_writer import MeasurementWriter, reset_writer
+from cloud_agent.measurement.measurement_writer import MeasurementWriter, reset_writer
 from cloud_agent.settings import reset_settings
-from cloud_agent.source_control_runtime import SourceControlRuntime
+from cloud_agent.source_control.source_control_runtime import SourceControlRuntime
 
 _EXPECTED_SHUTDOWN_TASKS = (
     "settings_task",
@@ -284,7 +284,7 @@ def _prepare(
             events.append("reset_writer")
         real_reset_writer(writer)
 
-    monkeypatch.setattr("cloud_agent.measurement_writer.reset_writer", spy_reset_writer)
+    monkeypatch.setattr("cloud_agent.measurement.measurement_writer.reset_writer", spy_reset_writer)
 
     real_shutdown = MeasurementWriter.shutdown
 
@@ -313,7 +313,8 @@ def _prepare(
 
     monkeypatch.setattr("cloud_agent.mcp.runtime.close_host", close_host)
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.close_sandbox_manager_clients", close_sandbox_managers
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.close_sandbox_manager_clients",
+        close_sandbox_managers,
     )
 
     real_aclose = SourceControlRuntime.aclose
@@ -360,8 +361,8 @@ def _prepare(
             "account_access_task",
         ),
         ("cloud_agent.workers.account_broadcasts.run_account_broadcasts", "account_broadcast_task"),
-        ("cloud_agent.capacity_history.prune_host_capacity_history", "capacity_task"),
-        ("cloud_agent.operational_health.monitor_queue", "queue_monitor_task"),
+        ("cloud_agent.workers.capacity_history.prune_host_capacity_history", "capacity_task"),
+        ("cloud_agent.deployment.operational_health.monitor_queue", "queue_monitor_task"),
         ("cloud_agent.mcp.runtime.maintain_host_sessions", "mcp_maintenance_task"),
     ):
         monkeypatch.setattr(target, _idle(events, label))
@@ -401,7 +402,7 @@ def _inject(monkeypatch: pytest.MonkeyPatch, stage: str | None) -> None:
         ),
         "synchronize_settings": ("cloud_agent.settings.synchronize_settings", _boom(stage)),
         "source_control": (
-            "cloud_agent.source_control_runtime.SourceControlRuntime.from_env",
+            "cloud_agent.source_control.source_control_runtime.SourceControlRuntime.from_env",
             _boom(stage),
         ),
         "compute_runtime": ("cloud_agent.bootstrap.compute.build_compute_runtime", _boom(stage)),
@@ -436,10 +437,13 @@ def _inject(monkeypatch: pytest.MonkeyPatch, stage: str | None) -> None:
             "cloud_agent.bootstrap.lifespan.coordinate_sandbox_deletions",
             _boom(stage),
         ),
-        "capacity": ("cloud_agent.capacity_history.prune_host_capacity_history", _boom(stage)),
+        "capacity": (
+            "cloud_agent.workers.capacity_history.prune_host_capacity_history",
+            _boom(stage),
+        ),
         "agent_memory": ("cloud_agent.bootstrap.lifespan.maintain_agent_memories", _boom(stage)),
         "profiling_deployment": (
-            "cloud_agent.profiling_control_config.profiling_control_deployment",
+            "cloud_agent.profiling.profiling_control_config.profiling_control_deployment",
             _boom(stage),
         ),
         "profiling_service": (
@@ -454,14 +458,17 @@ def _inject(monkeypatch: pytest.MonkeyPatch, stage: str | None) -> None:
             "cloud_agent.workers.profiling_control.ProfilingPolicyWorker",
             lambda **_kwargs: _RaisingWorker(stage),
         ),
-        "queue_monitor": ("cloud_agent.operational_health.monitor_queue", _boom(stage)),
+        "queue_monitor": ("cloud_agent.deployment.operational_health.monitor_queue", _boom(stage)),
         "work_signal": ("cloud_agent.bootstrap.lifespan.WorkSignal", _boom(stage)),
         "job_event_signal": ("cloud_agent.bootstrap.lifespan.JobEventSignal", _boom(stage)),
         "owner_change_signal": ("cloud_agent.bootstrap.lifespan.OwnerChangeSignal", _boom(stage)),
         "listen": ("cloud_agent.bootstrap.lifespan.listen", _boom(stage)),
         "mcp_maintenance": ("cloud_agent.mcp.runtime.maintain_host_sessions", _boom(stage)),
         "mcp_decision_signal": ("cloud_agent.bootstrap.lifespan.McpDecisionSignal", _boom(stage)),
-        "measurement_writer": ("cloud_agent.measurement_writer.MeasurementWriter", _boom(stage)),
+        "measurement_writer": (
+            "cloud_agent.measurement.measurement_writer.MeasurementWriter",
+            _boom(stage),
+        ),
     }
     target, replacement = injections[stage]
     monkeypatch.setattr(target, replacement)

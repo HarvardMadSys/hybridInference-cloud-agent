@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.execution_profiles import shared_sandbox_claim_attested
+from cloud_agent.domain.execution_profiles import shared_sandbox_claim_attested
 from cloud_agent.storage._sql import environment_runs
 from cloud_agent.storage._sql.compute_admission import (
     host_compute_admission,

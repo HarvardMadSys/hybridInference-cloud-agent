@@ -8,7 +8,7 @@ import { usePathname, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { ProtectedRoute } from '@/components/features/auth/ProtectedRoute';
 import { SessionSwitchWatcher } from '@/components/features/auth/SessionSwitchWatcher';
-import { AgentsSidebar } from '@/components/features/agents/AgentsSidebar';
+import { AgentsSidebar } from '@/components/features/agents/sidebar/AgentsSidebar';
 import { useAgentChangeStream } from '@/components/features/agents/agentPush';
 import { AgentNotifications } from '@/components/features/agents/AgentNotifications';
 import { FirstRunProvider } from '@/components/features/agents/firstRun';
@@ -19,7 +19,7 @@ import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
 import { DeploymentFooter } from '@/components/DeploymentFooter';
 import { McpApprovalsProvider } from '@/components/features/agents/mcp/McpApprovalsProvider';
 import { McpApprovalsLink } from '@/components/features/agents/mcp/McpApprovalsView';
-import { AccountMenu } from '@/components/features/agents/AccountMenu';
+import { AccountMenu } from '@/components/features/agents/sidebar/AccountMenu';
 import {
   useApplePlatform,
   useKeyboardShortcuts,

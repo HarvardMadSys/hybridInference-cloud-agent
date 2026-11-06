@@ -25,14 +25,14 @@ from tests.integration.storage.test_agent_job_store import _create_job
 from tests.integration.storage.test_attempt_ledger import db as db
 from tests.support.owners import SESSIONS, use_session_secret
 
-from cloud_agent.admin_usage import MAX_USAGE_RUNS
 from cloud_agent.api import context as context_api, owner_usage as owner_usage_api
 from cloud_agent.api.deps import get_owner_directory, get_storage
-from cloud_agent.context_insights import ContextInsightsCursor, context_cursor_scope
-from cloud_agent.context_profile import CONTEXT_PROFILE_VERSION
+from cloud_agent.context.context_insights import ContextInsightsCursor, context_cursor_scope
+from cloud_agent.context.context_profile import CONTEXT_PROFILE_VERSION
+from cloud_agent.domain.thread_stats import ATTEMPT_ROLLUP_VERSION
 from cloud_agent.storage.assembly import Storage
-from cloud_agent.thread_stats import ATTEMPT_ROLLUP_VERSION
-from cloud_agent.usage_batches import owner_usage
+from cloud_agent.usage.admin_usage import MAX_USAGE_RUNS
+from cloud_agent.usage.usage_batches import owner_usage
 from cloud_agent_shared.request_prefix import measure
 from cloud_agent_shared.text_tokens import estimate_text_tokens
 
@@ -401,7 +401,7 @@ async def test_all_sums_every_run_beyond_one_selections_bound(db, store, monkeyp
     # This is about the sums across selections, not their speed: locally the
     # read takes about 0.6 s of each statement's 5 s, and a busy CI database
     # ran one past it.
-    monkeypatch.setattr("cloud_agent.storage.admin_usage_queries.STATEMENT_TIMEOUT_MS", 60_000)
+    monkeypatch.setattr("cloud_agent.storage.repositories.admin.usage.STATEMENT_TIMEOUT_MS", 60_000)
     runs = MAX_USAGE_RUNS + 250
     expected = await _bulk_history(
         db, store, user_id=OWNER, runs=runs, span_days=400, reported=True

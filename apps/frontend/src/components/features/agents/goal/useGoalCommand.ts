@@ -3,13 +3,13 @@
 import { useCallback, useEffect, useId, useMemo, useState } from 'react';
 import type { Dispatch, KeyboardEvent, SetStateAction } from 'react';
 import { useT } from '@/components/providers';
-import { isComposerSubmit } from '../composerKeys';
+import { isComposerSubmit } from '../composer/composerKeys';
 import {
   composerCommandMatches,
   parseContextCommand,
   parseGoalCommand,
   type ComposerCommand,
-} from '../composerCommands';
+} from '../composer/composerCommands';
 
 /** The text a chosen Goal row leaves in the box, ready for the objective. */
 export const GOAL_COMMAND_PREFIX = '/goal ';

@@ -177,7 +177,7 @@ def _build_source_control(app: FastAPI) -> None:
     failed to load is loaded again (issue #47) — so what is attached is the
     runtime, never a client captured at startup.
     """
-    from cloud_agent.source_control_runtime import SourceControlRuntime
+    from cloud_agent.source_control.source_control_runtime import SourceControlRuntime
 
     app.state.source_control = SourceControlRuntime.from_env()
 
@@ -246,7 +246,29 @@ def _surface_cleanup_errors(primary: BaseException | None, errors: list[BaseExce
     raise errors[0]
 
 
-async def _shutdown_lifespan(  # noqa: PLR0912 complexity baseline, #771
+async def _shutdown_writer(writer: Any, reset_writer: Any, errors: list[BaseException]) -> None:
+    """Flush the measurement writer, log its summary, and uninstall it."""
+    # The writer reports its own drops. A failure here is not a reason to
+    # skip the pool, and it never was: shutdown used to suppress it.
+    try:
+        counts = await writer.shutdown()
+        if any(counts.as_dict().get(name) for name in counts.as_dict() if name != "reasons"):
+            logger.info(
+                "operation_measurement_writer_summary",
+                extra={
+                    "event": "operation_measurement_writer_summary",
+                    **counts.as_dict(),
+                },
+            )
+    except Exception:
+        # Measurement collection is best-effort and was already non-fatal.
+        logger.warning("Measurement writer shutdown failed", exc_info=True)
+    except BaseException as exc:
+        errors.append(exc)
+    await _invoke(lambda: reset_writer(None), errors)
+
+
+async def _shutdown_lifespan(
     app: FastAPI,
     *,
     pool: Any,
@@ -279,24 +301,7 @@ async def _shutdown_lifespan(  # noqa: PLR0912 complexity baseline, #771
         # _surface_cleanup_errors re-raises it after shutdown is complete.
         errors.append(exc)
     if writer_installed and writer is not None:
-        # The writer reports its own drops. A failure here is not a reason to
-        # skip the pool, and it never was: shutdown used to suppress it.
-        try:
-            counts = await writer.shutdown()
-            if any(counts.as_dict().get(name) for name in counts.as_dict() if name != "reasons"):
-                logger.info(
-                    "operation_measurement_writer_summary",
-                    extra={
-                        "event": "operation_measurement_writer_summary",
-                        **counts.as_dict(),
-                    },
-                )
-        except Exception:
-            # Measurement collection is best-effort and was already non-fatal.
-            logger.warning("Measurement writer shutdown failed", exc_info=True)
-        except BaseException as exc:
-            errors.append(exc)
-        await _invoke(lambda: reset_writer(None), errors)
+        await _shutdown_writer(writer, reset_writer, errors)
     tasks = [
         task
         for name in _SHUTDOWN_TASK_ATTRS
@@ -364,19 +369,19 @@ async def lifespan(  # noqa: PLR0915 complexity baseline, #771
 
     from cloud_agent.accounts.config import refuse_retired_configuration
     from cloud_agent.application.profiling_control import ProfilingControlService
-    from cloud_agent.capacity_history import prune_host_capacity_history
+    from cloud_agent.deployment.operational_health import monitor_queue
     from cloud_agent.mcp.catalog import McpCatalog
     from cloud_agent.mcp.runtime import close_host, maintain_host_sessions
-    from cloud_agent.measurement_writer import MeasurementWriter, reset_writer
-    from cloud_agent.operational_health import monitor_queue
-    from cloud_agent.profiling_control_config import profiling_control_deployment
-    from cloud_agent.sandbox_manager_routing import close_sandbox_manager_clients
+    from cloud_agent.measurement.measurement_writer import MeasurementWriter, reset_writer
+    from cloud_agent.profiling.profiling_control_config import profiling_control_deployment
+    from cloud_agent.sandbox_manager.sandbox_manager_routing import close_sandbox_manager_clients
     from cloud_agent.settings import (
         initialize_settings,
         reset_settings,
         synchronize_settings,
     )
     from cloud_agent.storage.assembly import Storage
+    from cloud_agent.workers.capacity_history import prune_host_capacity_history
     from cloud_agent.workers.profiling_control import ProfilingPolicyWorker
 
     # Before the database is touched at all: a deployment still configured for

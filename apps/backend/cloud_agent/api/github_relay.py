@@ -17,7 +17,7 @@ nothing to revoke.
 
 **The owner's token is used only for the conversation's own repository.**
 GitHub cannot narrow a user token to one repository, so
-:mod:`cloud_agent.github_relay_policy` does: a request about any other
+:mod:`cloud_agent.source_control.github_relay_policy` does: a request about any other
 repository, or any other page, goes to GitHub with no credential at all, and
 the repository's administration, secrets, tags and branch deletion are refused.
 
@@ -45,7 +45,8 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 from cloud_agent.api.deps import get_agent_app_credentials, get_http_client, get_storage
-from cloud_agent.github_relay_policy import (
+from cloud_agent.logging_utils import get_logger
+from cloud_agent.source_control.github_relay_policy import (
     API_HOST,
     MAX_PUSH_COMMAND_BYTES,
     RELAY_HOSTS,
@@ -58,20 +59,19 @@ from cloud_agent.github_relay_policy import (
     decide,
     split_push_commands,
 )
-from cloud_agent.github_user_token import (
+from cloud_agent.source_control.github_user_token import (
     UserTokenUnavailable,
     forget_revoked_token,
     user_access_token,
 )
-from cloud_agent.logging_utils import get_logger
 from cloud_agent.tokens import InvalidAgentToken, parse_residency_github_token
 from cloud_agent_shared.shared_protocol import is_residency_github_credential
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from cloud_agent.github_user_token import LiveUserToken
     from cloud_agent.ports import GitHubRelayRepository, SourceControlRepository
+    from cloud_agent.source_control.github_user_token import LiveUserToken
 
 logger = get_logger("cloud_agent.github_relay")
 

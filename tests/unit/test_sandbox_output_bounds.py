@@ -16,20 +16,21 @@ import tracemalloc
 
 import pytest
 
-from cloud_agent_host import chat_sandbox as chat_sandbox_mod, runner as runner_mod
 from cloud_agent_host.bounded_output import OUTPUT_CHUNK_BYTES, STDERR_TAIL_BYTES
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container import chat_sandbox as chat_sandbox_mod
+from cloud_agent_host.container.chat_sandbox import (
     ChatSandboxInspection,
     ChatSandboxManager,
     ChatSandboxSpec,
     ChatSandboxStatus,
 )
-from cloud_agent_host.sandbox import (
+from cloud_agent_host.container.sandbox import (
     ContainerBackend,
     ProcessBackend,
     SandboxSpec,
 )
 from cloud_agent_host.setup import run_setup
+from cloud_agent_host.turn import source_preparation
 
 #: Larger than every bound involved, the retained stderr tail included.
 _FLOOD_CHARS = 16 * 1024 * 1024
@@ -97,8 +98,8 @@ def test_the_patch_reader_cap_holds_before_anything_is_buffered(tmp_path):
     )
 
     def read():
-        with pytest.raises(runner_mod.WorktreeError, match="exceeded 65536 bytes"):
-            runner_mod._read_bounded(process, deadline_s=60, max_bytes=65536)
+        with pytest.raises(source_preparation.WorktreeError, match="exceeded 65536 bytes"):
+            source_preparation._read_bounded(process, deadline_s=60, max_bytes=65536)
 
     _result, peak = _peak_while(read)
     process.wait()
@@ -124,7 +125,7 @@ def test_the_retained_exec_reads_both_streams_in_bounded_pieces(monkeypatch, tmp
         mounts=(),
         networks=("agent-net",),
     )
-    monkeypatch.setattr(manager, "_require", lambda _spec: running)
+    monkeypatch.setattr(manager.exact, "require", lambda _spec: running)
     real_popen = subprocess.Popen
 
     def flood(_argv, **kwargs):

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from cloud_agent.storage._sql.fences import hot_residency_sql
+
 
 def mint_residency_sql(lease_seconds: str) -> str:
     """SET-clause fragment for a membership: mint its next residency generation.
@@ -23,16 +25,19 @@ def mint_residency_sql(lease_seconds: str) -> str:
 
 
 def residency_fence_sql(generation: str) -> str:
-    """Fence aliases ``a`` and ``j`` using a trusted SQL generation expression."""
+    """Fence aliases ``a`` and ``j`` using a trusted SQL generation expression.
+
+    The residency half of the relay fence (:func:`~cloud_agent.storage._sql.fences.hot_residency_sql`),
+    re-read for an attempt already named, so it stays the same residency the
+    caller was resolved from.
+    """
     return f"""({generation}::bigint IS NULL OR EXISTS (
         SELECT 1 FROM agent_thread_sandbox_memberships m
         JOIN agent_sandboxes g ON g.id = m.sandbox_id
         JOIN agent_threads t ON t.id = m.thread_id
-        WHERE m.thread_id = j.thread_id AND t.deleted_at IS NULL
-          AND m.residency_generation = {generation}
-          AND m.residency_status = 'hot'
-          AND m.residency_lease_expires_at > clock_timestamp()
-          AND m.active_attempt_id = a.id AND a.host_id = g.host
+        WHERE m.thread_id = j.thread_id
+          AND m.active_attempt_id = a.id
+          AND {hot_residency_sql(generation)}
     ))"""
 
 

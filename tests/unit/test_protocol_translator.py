@@ -26,7 +26,7 @@ import pytest
 from tests.support.compat_cli import write_wrapper
 
 from cloud_agent_host import protocol_translator as compat_server
-from cloud_agent_host.compat_helper import helper_archive
+from cloud_agent_host.member_setup.compat_helper import helper_archive
 from cloud_agent_host.protocol_translator import Binding, LaunchError, _Server
 from cloud_agent_shared.protocol_compat import ORIGIN_PLACEHOLDER, TOKEN_PLACEHOLDER
 from cloud_agent_shared.request_prefix import read_record

@@ -25,11 +25,11 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.chat_sandbox_models import BROWSER_SERVICE_UID
-from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.container.chat_sandbox_models import BROWSER_SERVICE_UID
+from cloud_agent_host.container.sandbox import SandboxError
 
 if TYPE_CHECKING:
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
 
 logger = logging.getLogger(__name__)
 

@@ -25,8 +25,8 @@ import pytest
 import pytest_asyncio
 from tests.support.migrations import apply_migrations
 
-import cloud_agent.source_control as source_control
-from cloud_agent.source_control import (
+import cloud_agent.source_control.source_control as source_control
+from cloud_agent.source_control.source_control import (
     GitLabOAuthClient,
     GitLabOAuthConfig,
     SourceControlCipher,

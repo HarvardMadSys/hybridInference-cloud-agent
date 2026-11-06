@@ -84,7 +84,6 @@ function job(threadId = 'thread-first', overrides: Partial<AgentJob> = {}): Agen
     runtime: 'claude-code',
     model: 'qwen-test',
     modelConnectionId: TEST_CONNECTION,
-    timeoutLabel: '',
     sandbox: 'container',
     attempts: [{ no: 1, status: 'live' }],
     currentAttemptNo: 1,

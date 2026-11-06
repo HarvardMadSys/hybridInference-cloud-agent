@@ -16,7 +16,7 @@ import pytest_asyncio
 from tests.integration.storage.test_agent_job_store import _create_job
 from tests.integration.storage.test_attempt_ledger import db as db
 
-from cloud_agent.command_executions import SLOW_COMMAND_MS
+from cloud_agent.context.command_executions import SLOW_COMMAND_MS
 from cloud_agent.storage.assembly import Storage
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]

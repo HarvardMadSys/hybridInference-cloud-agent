@@ -7,7 +7,8 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from cloud_agent.agent_memory import (
+from cloud_agent.logging_utils import get_logger
+from cloud_agent.memory.agent_memory import (
     ACTIVE_LIMIT,
     ARCHIVE_RETENTION_DAYS,
     AgentMemoryConflict,
@@ -21,7 +22,7 @@ from cloud_agent.agent_memory import (
     memory_key,
     normalize_memory,
 )
-from cloud_agent.logging_utils import get_logger
+from cloud_agent.storage._sql.fences import leased_attempt_sql
 from cloud_agent.storage._sql.hosts import LIVE_ATTEMPT_HOST
 from cloud_agent.storage._sql.mcp_residency import lock_mcp_residency
 
@@ -30,7 +31,7 @@ if TYPE_CHECKING:
 
     import asyncpg
 
-    from cloud_agent.agent_memory import MemoryTask
+    from cloud_agent.domain.agent_memory import MemoryTask
 
 _COLUMNS = (
     "id, repo, content, description, status, origin, source_job_ids, version, "
@@ -155,10 +156,7 @@ async def _live_task_repo(conn: Any, task: MemoryTask) -> str | None:
         FROM agent_attempts a
         JOIN agent_jobs j ON j.id = a.job_id
         JOIN agent_threads t ON t.id = j.thread_id AND t.user_id = j.user_id
-        WHERE a.id = $3
-          AND a.lease_generation = $4
-          AND a.status = 'running'
-          AND a.lease_expires_at > clock_timestamp()
+        WHERE {leased_attempt_sql("$3", "$4")}
           AND j.id = $2
           AND j.user_id = $1
           AND j.current_attempt_id = a.id

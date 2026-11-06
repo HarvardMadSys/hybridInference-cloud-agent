@@ -64,7 +64,7 @@ def test_missing_migrated_secrets_allow_setup_without_using_a_public_default(
 ) -> None:
     """Setup can start with empty imports; credential use still fails closed."""
     from cloud_agent import settings, tokens
-    from cloud_agent.source_control import SourceControlCipher, SourceControlError
+    from cloud_agent.source_control.source_control import SourceControlCipher, SourceControlError
 
     assert control_plane_env[variable] == "${" + variable + ":-}"
     monkeypatch.delenv(variable, raising=False)
@@ -269,9 +269,9 @@ def _run_control_deploy(
         '    [ "${CONTROL_RUNNING}" = "1" ] && printf "%s\\n" existing-control ; exit 0 ;;\n'
         "  *' ps --status running -q mcp-relay')\n"
         '    [ "${MCP_RUNNING}" = "1" ] && printf "%s\\n" existing-mcp ; exit 0 ;;\n'
-        "  *' run --rm --no-deps control-plane python -m cloud_agent.identity_namespace --check')\n"
+        "  *' run --rm --no-deps control-plane python -m cloud_agent.deployment.identity_namespace --check')\n"
         '    exit "${IDENTITY_EXIT}" ;;\n'
-        "  *' run --rm --no-deps control-plane python -m cloud_agent.deploy_readiness '*)\n"
+        "  *' run --rm --no-deps control-plane python -m cloud_agent.deployment.deploy_readiness '*)\n"
         '    exit "${READINESS_EXIT}" ;;\n'
         "esac\n"
         "exit 0\n"
@@ -334,9 +334,9 @@ def test_a_failed_identity_check_does_not_start_or_replace_listeners(tmp_path: P
     )
     assert result.returncode == 18
     # Refused read-only, before anything could change the database it refused.
-    assert "cloud_agent.identity_namespace --check" in docker_calls
+    assert "cloud_agent.deployment.identity_namespace --check" in docker_calls
     assert " run --rm --no-deps migrate" not in docker_calls
-    assert "cloud_agent.deploy_readiness" not in docker_calls
+    assert "cloud_agent.deployment.deploy_readiness" not in docker_calls
     assert " up -d --no-deps " not in docker_calls
     assert " up -d --remove-orphans" not in docker_calls
     assert " stop " not in docker_calls
@@ -365,9 +365,9 @@ def test_a_failed_readiness_probe_never_replaces_the_running_stack(
     assert (
         docker_calls.index(" build")
         < docker_calls.index(" up -d --wait --wait-timeout 1 postgres")
-        < docker_calls.index("cloud_agent.identity_namespace --check")
+        < docker_calls.index("cloud_agent.deployment.identity_namespace --check")
         < docker_calls.index(" run --rm --no-deps migrate")
-        < docker_calls.index("cloud_agent.deploy_readiness")
+        < docker_calls.index("cloud_agent.deployment.deploy_readiness")
     )
     assert " up -d --remove-orphans" not in docker_calls
 
@@ -400,7 +400,7 @@ def test_a_successful_readiness_probe_allows_the_shared_only_service(tmp_path: P
     result, docker_calls = _run_control_deploy(tmp_path, readiness_exit=0)
 
     assert result.returncode == 0, result.stderr
-    assert "cloud_agent.deploy_readiness" in docker_calls
+    assert "cloud_agent.deployment.deploy_readiness" in docker_calls
     assert re.search(r"--expected-deployment-sha [0-9a-f]{40}(?:\s|$)", docker_calls)
     assert " up -d --remove-orphans" in docker_calls
 
@@ -472,7 +472,7 @@ def test_a_cold_start_bootstraps_both_services_needed_for_host_readiness(
 
     assert result.returncode == 0, result.stderr
     bootstrap = docker_calls.index(" up -d --no-deps control-plane mcp-relay")
-    readiness = docker_calls.index("cloud_agent.deploy_readiness")
+    readiness = docker_calls.index("cloud_agent.deployment.deploy_readiness")
     full_up = docker_calls.index(" up -d --remove-orphans")
     assert bootstrap < readiness < full_up
     assert "parallel host readiness" in result.stdout
@@ -503,7 +503,7 @@ def test_post_gate_health_failure_does_not_stop_bootstrap_services(tmp_path: Pat
     )
 
     assert result.returncode != 0
-    assert "cloud_agent.deploy_readiness" in docker_calls
+    assert "cloud_agent.deployment.deploy_readiness" in docker_calls
     assert " up -d --remove-orphans" in docker_calls
     assert " stop control-plane" not in docker_calls
     assert " stop mcp-relay" not in docker_calls
@@ -539,7 +539,7 @@ def test_a_missing_mcp_relay_is_bootstrapped_without_replacing_the_live_api(
     assert " up -d --no-deps mcp-relay" in docker_calls
     assert " up -d --no-deps control-plane" not in docker_calls
     assert docker_calls.index(" up -d --no-deps mcp-relay") < docker_calls.index(
-        "cloud_agent.deploy_readiness"
+        "cloud_agent.deployment.deploy_readiness"
     )
 
 
@@ -584,7 +584,7 @@ def test_removed_default_off_switch_is_inert(
     )
 
     assert result.returncode == 0, result.stderr
-    assert "cloud_agent.deploy_readiness" in docker_calls
+    assert "cloud_agent.deployment.deploy_readiness" in docker_calls
     assert " up -d --remove-orphans" in docker_calls
 
 
@@ -599,7 +599,7 @@ def test_manual_staging_deploy_reads_its_persistent_environment(tmp_path: Path) 
 
     assert result.returncode == 0, result.stderr
     assert "shared-live scheduling gate" not in result.stdout
-    assert "cloud_agent.deploy_readiness" in docker_calls
+    assert "cloud_agent.deployment.deploy_readiness" in docker_calls
     assert " up -d --remove-orphans" in docker_calls
 
 

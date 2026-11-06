@@ -3,13 +3,13 @@
 import { useT } from '@/components/providers';
 import Link from 'next/link';
 import type { RefObject } from 'react';
-import { ActivityIcon } from '../ActivityWindow';
-import { ThreadActions } from '../ThreadActions';
+import { ActivityIcon } from '../conversation/ActivityWindow';
+import { ThreadActions } from '../conversation/ThreadActions';
 import { isTemporaryWorkspace } from '@/lib/temporaryWorkspace';
 import {
   TranscriptPresentationControl,
   type TranscriptPresentation,
-} from '../transcriptPresentation';
+} from '../conversation/transcriptPresentation';
 import type { AgentJob } from '../types';
 import type { JobDetailPanels } from './useJobDetailPanels';
 import { shortcutAriaLabel, shortcutLabel } from '@/lib/keyboardShortcuts';

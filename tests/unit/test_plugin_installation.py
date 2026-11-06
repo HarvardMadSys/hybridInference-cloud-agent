@@ -17,18 +17,23 @@ from tests.support.owners import launch_connection
 
 from cloud_agent_host import resident_transport
 from cloud_agent_host.bounded_output import text_chunks
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.claimed_job import ClaimedJob
+from cloud_agent_host.container.chat_sandbox import (
     CHAT_WORKDIR,
     ChatSandboxManager,
     ChatSandboxSpec,
     claude_member_config_dir,
 )
 from cloud_agent_host.drivers import DriverError
-from cloud_agent_host.plugins import install_claude_plugins, run_plugin_command
+from cloud_agent_host.member_setup.plugins import run_plugin_command
+from cloud_agent_host.resident_launch_config import SharedResidentLaunchConfig
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
-from cloud_agent_host.runner import ClaimedJob
-from cloud_agent_host.sandbox_manager import SharedResidentLaunchConfig
-from cloud_agent_host.session_supervisor_client import SessionSupervisorClient
+from cloud_agent_host.runtimes.claude import member as claude_member
+from cloud_agent_host.runtimes.claude.plugins import install_claude_plugins
+from cloud_agent_host.runtimes.codex import member as codex_member
+from cloud_agent_host.runtimes.http_bridge import member as http_member
+from cloud_agent_host.runtimes.pi import member as pi_member
+from cloud_agent_host.sandbox_manager_client import SandboxManagerClient
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -269,9 +274,7 @@ def test_installation_precedes_the_first_private_claude_launch(monkeypatch, fail
     manager.backend.base_env.return_value = {"HOME": "/home/agent", "PATH": "/usr/bin"}
     manager.reap_member_processes.side_effect = lambda *_args, **_kwargs: events.append("reap")
     factory = ResidentTransportFactory(manager)
-    monkeypatch.setattr(
-        factory, "_prepare_claude_member_state", lambda *_a: events.append("prepare")
-    )
+    monkeypatch.setattr(claude_member, "prepare_member_state", lambda *_a: events.append("prepare"))
 
     def install(_manager, _spec, plugins, *, env, config_dir, slot_id):
         events.append("install")
@@ -288,7 +291,7 @@ def test_installation_precedes_the_first_private_claude_launch(monkeypatch, fail
         events.append("launch")
         return SimpleNamespace(ensure_started=lambda **_kw: None, process_alive=lambda: True)
 
-    monkeypatch.setattr(resident_transport, "install_claude_plugins", install)
+    monkeypatch.setattr(claude_member, "install_claude_plugins", install)
     monkeypatch.setattr(
         resident_transport, "get_driver", lambda _r: SimpleNamespace(launch_live=launch_live)
     )
@@ -333,8 +336,9 @@ def test_other_runtime_installers_receive_private_env_before_launch(monkeypatch,
             assert context.base_env["AGENT_PLUGIN_PATHS"] == '["/private/plugin"]'
         return SimpleNamespace(ensure_started=lambda **_kw: None, process_alive=lambda: True)
 
-    monkeypatch.setattr(resident_transport, "install_codex_plugins", install)
-    monkeypatch.setattr(resident_transport, "install_other_runtime_plugins", install)
+    monkeypatch.setattr(codex_member, "install_codex_plugins", install)
+    monkeypatch.setattr(pi_member, "install_other_runtime_plugins", install)
+    monkeypatch.setattr(http_member, "install_other_runtime_plugins", install)
     monkeypatch.setattr(
         resident_transport,
         "get_driver",
@@ -376,7 +380,7 @@ def test_plugin_selections_survive_the_client_and_sandbox_manager_launch_protoco
         seen.append(request)
         return httpx.Response(200, json={"resident_state": "live"})
 
-    client = SessionSupervisorClient("http://sandbox_manager", "sandbox-manager-secret")
+    client = SandboxManagerClient("http://sandbox_manager", "sandbox-manager-secret")
     client._client.close()
     client._client = httpx.Client(transport=httpx.MockTransport(handler))
     try:

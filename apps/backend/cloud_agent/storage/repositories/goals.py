@@ -21,7 +21,6 @@ from cloud_agent.goals.models import (
     MAX_REASON_CHARS,
     GoalConflict,
 )
-from cloud_agent.settings import number_setting
 from cloud_agent.storage._sql.goals import (
     CANCEL_QUEUED_GOAL_ROUNDS_SQL,
     EDITED_WHILE_PAUSED_DETAIL,
@@ -36,8 +35,8 @@ from cloud_agent.storage._sql.rows import thread_goal
 if TYPE_CHECKING:
     import asyncpg
 
-    from cloud_agent.goals.decision import GoalAction
-    from cloud_agent.goals.models import GoalInput, GoalPauseReason
+    from cloud_agent.domain.goals import GoalAction, GoalPauseReason
+    from cloud_agent.schemas.goals import GoalInput
 
 #: The goal's own columns, read back after every write so the caller always
 #: sees what the row now says rather than what it asked for.
@@ -519,7 +518,9 @@ class PostgresGoalRepository:
 
     # -- the finished turn's report ----------------------------------------
     # -- recovery -----------------------------------------------------------
-    async def sweep_goal_scheduling(self) -> dict[str, list[str]]:
+    async def sweep_goal_scheduling(
+        self, *, arm_after_seconds: float, stalled_after_seconds: float
+    ) -> dict[str, list[str]]:
         """Recover goals whose scheduling obligation was lost, and pause the rest.
 
         Three shapes are looked for, in this order:
@@ -528,8 +529,13 @@ class PostgresGoalRepository:
           waiting on anything, or whose conversation has gone idle with no
           wakeup at all. The decision is made again.
         * ``stalled`` — an ``active`` goal with nothing queued, running or
-          pending for longer than the ``goals.stalled_after_seconds`` setting.
-          No path can explain it, so it is paused and said so.
+          pending for longer than ``stalled_after_seconds``. No path can
+          explain it, so it is paused and said so.
+
+        ``arm_after_seconds`` is how recent an idle goal's last write must be
+        for it to be re-armed rather than left to the stall check. The caller
+        reads both from the ``goals.arm_after_seconds`` and
+        ``goals.stalled_after_seconds`` settings.
 
         Returns the thread ids by shape, for the caller's log line.
         """
@@ -569,7 +575,7 @@ class PostgresGoalRepository:
                 ORDER BY t.goal_updated_at
                 LIMIT 200
                 """,
-                number_setting("goals.arm_after_seconds"),
+                arm_after_seconds,
             )
             # The ids of wakeups this pass made due again. Populated before the
             # arming loop below, which appends the goals it newly armed.
@@ -642,7 +648,7 @@ class PostgresGoalRepository:
                 LIMIT 200
                 FOR UPDATE OF t SKIP LOCKED
                 """,
-                number_setting("goals.stalled_after_seconds"),
+                stalled_after_seconds,
             )
             stalled_ids = [str(row["id"]) for row in stalled]
             if stalled_ids:

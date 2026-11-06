@@ -26,12 +26,12 @@ import pytest_asyncio
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations, downgrade_to
 
-from cloud_agent.capacity_protocol import (
+from cloud_agent.domain.host_pool import HOST_ONLINE, hash_secret
+from cloud_agent.schemas.capacity_protocol import (
     CapacityHistoryPointWrite,
     HostCapacityReport,
     bucket_for,
 )
-from cloud_agent.host_pool import HOST_ONLINE, hash_secret
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories import host_pool as host_pool_repository
 from cloud_agent.storage.repositories.host_capacity import (

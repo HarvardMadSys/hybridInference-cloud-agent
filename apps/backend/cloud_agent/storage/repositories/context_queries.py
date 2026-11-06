@@ -15,21 +15,21 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.context_dna import MAX_DNA_REQUESTS, DnaBands, bands_for, prepare_rows
-from cloud_agent.context_insights import InsightsFilters
-from cloud_agent.context_profile import (
+from cloud_agent.context.context_dna import MAX_DNA_REQUESTS, DnaBands, bands_for, prepare_rows
+from cloud_agent.context.context_insights import InsightsFilters
+from cloud_agent.context.context_profile import (
     CONTENT_CATEGORIES,
     CONTEXT_PROFILE_VERSION,
     TOTAL_FIELDS,
     ContextProfileAccumulator,
 )
-from cloud_agent.context_request import (
+from cloud_agent.context.context_request import (
     LocatedRequest,
     RequestComposition,
     assemble_request,
     locate_request,
 )
-from cloud_agent.context_view import assemble_thread_context
+from cloud_agent.context.context_view import assemble_thread_context
 from cloud_agent.storage._sql.context import (
     ASCII_CLASS,
     CJK_CLASS,
@@ -41,7 +41,7 @@ from cloud_agent.storage._sql.rows import load_json
 if TYPE_CHECKING:
     import asyncpg
 
-    from cloud_agent.context_insights import ContextInsightsCursor, ContextSort
+    from cloud_agent.context.context_insights import ContextInsightsCursor, ContextSort
 
 
 #: Events one page of a profile refresh reads.

@@ -20,16 +20,24 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud_agent_host.chat_sandbox import ChatSandboxManager
-from cloud_agent_host.chat_sandbox_inspect import containers_by_ref, inspect_each, inspect_many
-from cloud_agent_host.docker_engine import (
+from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
+from cloud_agent_host.container.chat_sandbox_inspect import (
+    containers_by_ref,
+    inspect_each,
+    inspect_many,
+)
+from cloud_agent_host.container.docker_engine import (
     API_VERSION,
     DEFAULT_SOCKET,
     DockerEngine,
     engine_from_env,
     run_docker,
 )
-from cloud_agent_host.sandbox import ContainerBackend, SandboxError, build_backend_from_env
+from cloud_agent_host.container.sandbox import (
+    ContainerBackend,
+    SandboxError,
+    build_backend_from_env,
+)
 
 
 class _Daemon(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):

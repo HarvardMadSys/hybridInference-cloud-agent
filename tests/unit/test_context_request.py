@@ -9,9 +9,9 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from cloud_agent.context_profile import ContextProfileAccumulator
-from cloud_agent.context_request import assemble_request, locate_request
-from cloud_agent.context_view import assemble_thread_context
+from cloud_agent.context.context_profile import ContextProfileAccumulator
+from cloud_agent.context.context_request import assemble_request, locate_request
+from cloud_agent.context.context_view import assemble_thread_context
 from cloud_agent_shared.text_tokens import estimate_text_tokens, split_counts
 
 T0 = datetime(2026, 10, 1, tzinfo=UTC)

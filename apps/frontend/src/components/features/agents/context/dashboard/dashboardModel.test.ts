@@ -125,39 +125,33 @@ describe('trend model', () => {
     point(2, { turn_no: 2, prompt_tokens: 200, categories: null, after_compaction: true }),
     point(3, { turn_no: 2, prompt_tokens: 250, categories: [5, 60], usage_id: 'r3' }),
   ];
-  const latency = new Map([
-    ['r0', 1200],
-    ['r3', 900],
-  ]);
-
-  it('takes latency only by response id, and step time otherwise', () => {
-    const columns = trendColumns(points, 'step', latency);
-    expect(columns.map((c) => c.latencyMs)).toEqual([1200, null, null, 900]);
+  it('takes step time from the events', () => {
+    const columns = trendColumns(points, 'step');
     expect(columns.map((c) => c.stepMs)).toEqual([null, 500, null, null]);
   });
 
   it('stands a turn for its last request, summing time only when all of it is known', () => {
-    const turns = trendColumns(points, 'turn', latency);
+    const turns = trendColumns(points, 'turn');
     expect(turns.map((c) => [c.index, c.observed, c.requests])).toEqual([
       [1, 300, 2],
       [3, 250, 2],
     ]);
     expect(turns[1].afterCompaction).toBe(true);
-    expect(turns[0].latencyMs).toBeNull();
     expect(turns[0].cats).toEqual([30, 40]);
   });
 
   it('changes are unknown where either side is', () => {
-    const delta = deltaColumns(trendColumns(points, 'step', latency));
+    const delta = deltaColumns(trendColumns(points, 'step'));
     expect(delta.map((c) => c.observed)).toEqual([0, 200, -100, 50]);
     expect(delta.map((c) => c.cats)).toEqual([null, [20, 20], null, null]);
   });
 
   it('scales to the visible window when adaptive', () => {
-    const columns = trendColumns(points, 'step', latency);
+    const columns = trendColumns(points, 'step');
     expect(maxima(columns).total).toBe(300);
     expect(maxima(columns, 2, 3).total).toBe(250);
-    expect(maxima(columns).durationMs).toBe(1200);
+    // The duration overlay is the events' step time now; latency is gone.
+    expect(maxima(columns).durationMs).toBe(500);
     const delta = maxima(deltaColumns(columns));
     expect(delta.up).toBe(200);
     expect(delta.down).toBe(100);
@@ -174,7 +168,6 @@ describe('trend model', () => {
     const steps = trendColumns(
       Array.from({ length: 130 }, (_, i) => point(i, { turn_no: 1 + Math.floor(i / 10) })),
       'step',
-      new Map(),
     );
     const saves = savedRangeOf(steps, 10, 129, 'step')!;
     expect(saves).toMatchObject({ fromIndex: 10, toIndex: 129, fromTurn: 2, toTurn: 13 });
@@ -183,10 +176,10 @@ describe('trend model', () => {
     const grewPoints = Array.from({ length: 135 }, (_, i) =>
       point(i, { turn_no: 1 + Math.floor(i / 10) }),
     );
-    const grown = trendColumns(grewPoints, 'step', new Map());
+    const grown = trendColumns(grewPoints, 'step');
     expect(restoreBrowsingWindow(saves, grown, 'step')).toEqual({ from: 10, to: 129 });
     // A different granularity restores the turns the range covered.
-    const turns = trendColumns(grewPoints, 'turn', new Map());
+    const turns = trendColumns(grewPoints, 'turn');
     expect(restoreBrowsingWindow(saves, turns, 'turn')).toEqual({ from: 1, to: 12 });
   });
 
@@ -194,7 +187,6 @@ describe('trend model', () => {
     const steps = trendColumns(
       Array.from({ length: 200 }, (_, i) => point(i, { turn_no: 1 + i })),
       'step',
-      new Map(),
     );
     expect(restoreBrowsingWindow(null, steps, 'step')).toEqual(initialWindow(200));
     expect(restoreBrowsingWindow(savedRangeOf(steps, 0, 3, 'step'), [], 'step')).toEqual({
@@ -216,8 +208,8 @@ describe('trend model', () => {
       { index: 2, turn_no: 2 },
       { index: 3, turn_no: 2 },
     ] as ContextPointApi[];
-    const steps = trendColumns(points, 'step', new Map());
-    const turns = trendColumns(points, 'turn', new Map());
+    const steps = trendColumns(points, 'step');
+    const turns = trendColumns(points, 'turn');
     // Step: the exact request. Turn: the column of the turn containing it,
     // whose own index is that turn's last request.
     expect(columnOf(steps, points, 1)).toBe(1);
@@ -262,7 +254,7 @@ describe('trend model', () => {
   });
 
   it('breaks an area where a request has no recorded categories', () => {
-    const columns = trendColumns(points, 'step', latency);
+    const columns = trendColumns(points, 'step');
     const runs = stackedRuns(
       columns,
       ['user', 'tool_results'],
@@ -300,18 +292,18 @@ describe('trend model', () => {
 
 describe('timing strip', () => {
   const segments: ThreadTimingApi['segments'] = [
-    { kind: 'ttft', start_ms: 0, end_ms: 100 },
-    { kind: 'gen', start_ms: 100, end_ms: 400 },
+    { kind: 'reasoning', start_ms: 0, end_ms: 100 },
+    { kind: 'text', start_ms: 100, end_ms: 400 },
     { kind: 'tools', start_ms: 5000, end_ms: 5600 },
-    { kind: 'other', start_ms: 7000, end_ms: 7000 },
+    { kind: 'unsplit', start_ms: 7000, end_ms: 7000 },
   ];
 
   it('lays segments end to end without the gaps between them', () => {
     const { bands, total } = stripBands(segments);
     expect(total).toBe(1000);
     expect(bands.map((b) => [b.kind, b.leftPct, b.widthPct])).toEqual([
-      ['ttft', 0, 10],
-      ['gen', 10, 30],
+      ['reasoning', 0, 10],
+      ['text', 10, 30],
       ['tools', 40, 60],
     ]);
     expect(bandAt(bands, 0)).toBe(0);
@@ -321,7 +313,7 @@ describe('timing strip', () => {
 
   it('dims all but the focused kind in the gradient', () => {
     const { bands } = stripBands(segments);
-    const gradient = stripGradient(bands, 'gen');
+    const gradient = stripGradient(bands, 'text');
     expect(gradient).toContain('transparent 0.0000% 10.0000%');
     expect(gradient).toContain('% 40.0000%');
     expect(gradient.match(/transparent/g)).toHaveLength(2);
@@ -333,62 +325,39 @@ describe('timingRows', () => {
     return {
       active_ms: 1000,
       totals: {
-        ttft: 0,
         reasoning: 0,
         text: 0,
         toolarg: 0,
-        gen: 0,
         tools: 400,
         unsplit: 500,
-        other: 100,
       },
       executions: 1,
-      executions_split: 0,
-      model_requests: 2,
       tool_calls: 1,
       tool_calls_unpaired: 0,
       blocks: {},
-      output_tps: null,
-      gateway: 'unavailable',
-      gateway_reason: null,
       segments: [],
       segments_merged: false,
-      requests: [],
       ...overrides,
     };
   }
 
   it('lists unmeasured splits as not recorded, never as 0', () => {
     const rows = timingRows(timing(), t);
-    const ttft = rows.find((row) => row.key === 'ttft')!;
-    expect(ttft.count).toBe('not recorded');
-    expect(ttft.pct).toBeNull();
     expect(rows.find((row) => row.key === 'reasoning')?.count).toBe('not recorded');
-    expect(rows.find((row) => row.key === 'gen')).toBeUndefined();
     expect(rows.find((row) => row.key === 'tools')?.pct).toBe('40%');
-    expect(rows.find((row) => row.key === 'other')?.label).toBe('Not attributed');
   });
 
-  it('shows measured splits with their shares', () => {
+  it('shows a measured split with its share', () => {
     const rows = timingRows(
       timing({
-        executions_split: 1,
         blocks: { reasoning: 1 },
-        totals: {
-          ttft: 100,
-          reasoning: 200,
-          text: 0,
-          toolarg: 0,
-          gen: 100,
-          tools: 400,
-          unsplit: 0,
-          other: 200,
-        },
+        totals: { reasoning: 200, text: 0, toolarg: 0, tools: 400, unsplit: 400 },
       }),
       t,
     );
-    expect(rows.map((row) => row.key)).toEqual(['ttft', 'reasoning', 'gen', 'tools', 'other']);
-    expect(rows[0].pct).toBe('10%');
+    expect(rows.map((row) => row.key)).toEqual(['reasoning', 'tools', 'unsplit']);
+    expect(rows[0].pct).toBe('20%');
+    expect(rows[0].count).not.toBe('not recorded');
   });
 });
 

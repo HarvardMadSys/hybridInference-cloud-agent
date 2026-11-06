@@ -9,8 +9,8 @@ from __future__ import annotations
 import hashlib
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent.domain.thread_stats import SUMMARY_PAYLOAD_KEYS
 from cloud_agent.storage._sql.rows import load_json
-from cloud_agent.thread_stats import SUMMARY_PAYLOAD_KEYS
 
 if TYPE_CHECKING:
     import asyncpg

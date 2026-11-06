@@ -30,10 +30,8 @@ from tests.integration.storage.test_host_pool_store import db as db, hosts as ho
 from cloud_agent.application.compute_reconcile import ComputeReconciler
 from cloud_agent.application.compute_release import NEVER_CREATED
 from cloud_agent.application.compute_resources import ComputeCommands
-from cloud_agent.compute_config import ComputeConfiguration
-from cloud_agent.compute_registry import ComputeProviderRegistration, ComputeProviderRegistry
-from cloud_agent.compute_secrets import ComputeSecretStore
-from cloud_agent.host_pool import hash_secret
+from cloud_agent.domain.host_pool import hash_secret
+from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.ports.external.compute_provider import (
     NodeObservation,
     ProviderReceipt,
@@ -42,7 +40,13 @@ from cloud_agent.ports.external.compute_provider import (
     SshConnection,
 )
 from cloud_agent.providers.compute.cloudlab import CloudLabProvider
-from cloud_agent.schemas_compute import RenewalPolicy, RotateComputeRequest, UpdateComputePolicy
+from cloud_agent.providers.compute.compute_config import ComputeConfiguration
+from cloud_agent.providers.compute.compute_registry import (
+    ComputeProviderRegistration,
+    ComputeProviderRegistry,
+)
+from cloud_agent.providers.compute.compute_secrets import ComputeSecretStore
+from cloud_agent.schemas.compute import RenewalPolicy, RotateComputeRequest, UpdateComputePolicy
 from cloud_agent.workers.compute_resources import ComputeResourceWorker
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -739,7 +743,7 @@ async def test_a_move_restarted_after_giving_up_a_candidate_releases_it_once(
         discard = await abandon(**kwargs)
         if discard is not None and not lost:
             lost.append(discard["id"])
-            raise ValueError("operation_lease_lost")
+            raise StorageConflict(ConflictCode.OPERATION_LEASE_LOST)
         return discard
 
     monkeypatch.setattr(r.repo, "abandon_candidate", abandon_then_lose_the_lease)

@@ -9,10 +9,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from cloud_agent import entitlement
 from cloud_agent.app import install_repository_access_errors
-from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed
-from cloud_agent.github_app import AppConfig, GitHubAppCredentials
+from cloud_agent.source_control import entitlement
+from cloud_agent.source_control.entitlement import RepoAccessUnavailable, RepoNotAllowed
+from cloud_agent.source_control.github_app import AppConfig, GitHubAppCredentials
 
 # Listing a user's repositories speaks as the user, so no App key is used.
 _APP = AppConfig(app_id="1", private_key="unused", api_base="https://api.test")

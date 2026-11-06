@@ -5,10 +5,10 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from cloud_agent.context_dashboard import session_tokens
-from cloud_agent.context_profile import ContextProfileAccumulator, main_prefix
-from cloud_agent.context_request import assemble_request, locate_request
-from cloud_agent.context_view import assemble_thread_context
+from cloud_agent.context.context_dashboard import session_tokens
+from cloud_agent.context.context_profile import ContextProfileAccumulator, main_prefix
+from cloud_agent.context.context_request import assemble_request, locate_request
+from cloud_agent.context.context_view import assemble_thread_context
 from cloud_agent_shared.request_prefix import measure
 
 T0 = datetime(2026, 11, 5, 9, tzinfo=UTC)

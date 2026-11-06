@@ -13,23 +13,18 @@ import hashlib
 import json
 import secrets
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     CHAT_STATE_DIR,
     CHAT_WORKDIR,
-    CLAUDE_SHARED_PROJECTS_DIR,
-    LEGACY_MEMBER_HOME_COLLECTIONS,
     MEMBER_TMPFS_ROOT,
     MEMBER_UID_BASE,
-    PRIVATE_MEMBER_HOME_COLLECTIONS,
     ChatSandboxManager,
     ChatSandboxSpec,
-    claude_member_config_dir,
-    member_inference_env_path,
 )
-from cloud_agent_host.codex_plugins import install_codex_plugins
-from cloud_agent_host.compat_helper import compat_token_env, install_compat_helper
+from cloud_agent_host.container.sandbox import SANDBOX_PATH, SandboxProcess, runtime_bin_dir
 from cloud_agent_host.drivers import (
     DialectRuntime,
     DriverError,
@@ -39,38 +34,36 @@ from cloud_agent_host.drivers import (
     LaunchContext,
     TurnInput,
     TurnResult,
-    get_driver,
 )
-from cloud_agent_host.github_relay_env import github_relay_env
-from cloud_agent_host.kilo_mcp import KILO_MCP_VERSION
-from cloud_agent_host.member_preparation import MemberPreparation, MemberStep, run_member_steps
-from cloud_agent_host.other_plugins import install_other_runtime_plugins
-from cloud_agent_host.platform_instructions import (
-    claude_attribution,
-    platform_instructions,
-    with_platform_instructions,
+from cloud_agent_host.launch.environment import EnvironmentFacet
+from cloud_agent_host.launch.facet import PrepareContext
+from cloud_agent_host.launch.facets import PREPARE_ORDER, facet_differences, launch_facets
+from cloud_agent_host.launch.github_relay import GitHubRelayFacet
+from cloud_agent_host.launch.inference import InferenceFacet
+from cloud_agent_host.member_setup.member_homes import (
+    NEW_PRIVATE_MEMBER_HOME_PROLOGUE,
+    PRIVATE_MEMBER_STATE_ROOTS,
+    UNTRUSTED_COLLECTION_EXIT,
+    member_state_dir,
 )
-from cloud_agent_host.plugins import install_claude_plugins
+from cloud_agent_host.member_setup.member_preparation import (
+    MemberPreparation,
+    MemberStep,
+    run_member_steps,
+)
 from cloud_agent_host.request_prefixes import TurnPrefixes
-from cloud_agent_host.runtimes import (
-    RuntimeMCPConfig,
-    connection_base_url,
-    meter_launch,
-    meters_direct_plan,
-)
-from cloud_agent_host.sandbox import SANDBOX_PATH, SandboxProcess, runtime_bin_dir
-from cloud_agent_host.sandbox_browser import ensure_browser_service
-from cloud_agent_host.sandbox_mcp import admit_sandbox_mcp
-from cloud_agent_shared.environment import inference_handoff
+from cloud_agent_host.runtimes import RuntimeMCPConfig, connection_base_url, meter_launch
+from cloud_agent_host.runtimes.claude import member as claude_member
+from cloud_agent_host.runtimes.codex import member as codex_member
+from cloud_agent_host.runtimes.codex.fork_state import CODEX_REBASE_ROLLOUT_PATHS
+from cloud_agent_host.runtimes.http_bridge import member as http_member
+from cloud_agent_host.runtimes.live import get_driver, member_launch
 from cloud_agent_shared.plugins import validate_sandbox_plugins
-from cloud_agent_shared.shared_protocol import (
-    is_residency_github_credential,
-    is_residency_mcp_credential,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from cloud_agent_host.launch.facet import LaunchFacet
     from cloud_agent_shared.environment import BoundEnvironment
     from cloud_agent_shared.sandbox_mcp import SandboxMcpServer
 
@@ -81,98 +74,11 @@ _RuntimeT_co = TypeVar("_RuntimeT_co", bound=DialectRuntime, covariant=True)
 #: The session contract itself is stated invariantly: a session hands back the
 #: turn type of exactly the runtime it was opened for.
 _SessionRuntimeT = TypeVar("_SessionRuntimeT", bound=DialectRuntime)
-
-
-# Provider homes contain files on which the owning CLI performs owner-only
-# chmod, SQLite, or project-lock operations. Shared workspace membership uses
-# distinct UIDs and distinct live processes, so fork siblings cannot safely
-# point those CLIs at one common provider home. The workspace remains shared;
-# the state captured at the native fork boundary is copied into the child's
-# private home before the two processes resume independently.
-PRIVATE_MEMBER_STATE_ROOTS = dict(
-    zip(("codex", "opencode", "kilo"), PRIVATE_MEMBER_HOME_COLLECTIONS, strict=True)
-)
-_LEGACY_MEMBER_STATE_ROOTS = dict(
-    zip(("codex", "opencode", "kilo"), LEGACY_MEMBER_HOME_COLLECTIONS, strict=True)
-)
-
-#: Exit status of a member script that found its collection untrusted. The
-#: caller secures the collections as the sandbox user and asks once more.
-_UNTRUSTED_COLLECTION_EXIT = 75
-
-# Each home is private to its member UID, not only distinct: its config and
-# plugins run at every process start as that member, with that member's grant
-# and MCP token. Mode 0700 keeps a sibling out of the home; the collection
-# around it keeps a sibling from renaming the home away and putting its own
-# tree at the same path between this check and the CLI's start. Every path
-# component is therefore checked first: /agent-state and the collection must be
-# sticky and owned by the sandbox user (``$trusted``), so no member UID can
-# rename an entry it does not own (see
-# ChatSandboxManager.ensure_private_member_collections). A home that is a
-# symlink or belongs to another UID was put there by someone else and is
-# refused rather than adopted. A sibling can still squat on an unused name,
-# which only refuses that start. Shell prologue; expects ``$target`` and
-# ``$trusted``.
-_PRIVATE_MEMBER_HOME_CHECK = (
-    "collection=${target%/*}; root=${collection%/*}; "
-    'if test -z "$(find "$root" -maxdepth 0 -type d -uid "$trusted" -perm -1000)" '
-    '|| test -z "$(find "$collection" -maxdepth 0 -type d -uid "$trusted" '
-    '-perm -3770 ! -perm /0007)"; then '
-    'echo "member provider collection is not trusted" >&2; '
-    f"exit {_UNTRUSTED_COLLECTION_EXIT}; fi; "
-    "umask 0077; "
-)
-# An earlier release kept the home in a member-created, group-writable
-# collection, where a sibling could rename or replace it at any time. The
-# member moves whatever is at that path into the trusted collection once, and
-# only then judges it, where no sibling can swap it any more; a moved home is
-# also narrowed to the member alone. Expects ``$legacy`` as well.
-_PRIVATE_MEMBER_HOME_MIGRATE = (
-    "migrated=; "
-    'if test ! -e "$target" && test ! -L "$target" '
-    '&& { test -e "$legacy" || test -L "$legacy"; }; then '
-    'mv -T -- "$legacy" "$target"; migrated=1; fi; '
-)
-_PRIVATE_MEMBER_HOME_CLAIM = (
-    'mkdir -p -- "$target"; '
-    'if test -L "$target" || test ! -d "$target" '
-    '|| test "$(stat -c %u -- "$target")" != "$(id -u)"; then '
-    'echo "member provider home is not owned by this member" >&2; exit 1; fi; '
-    'chmod u=rwx,go=,g-s -- "$target"; '
-)
-# Judged on every start, not only after a move: whether a home is adopted must
-# never depend on an earlier start having managed to set a bad one aside. Every
-# legitimate writer of a provider home runs as its member -- the CLI, plugin
-# installation, lock cleanup, and the fork copy's unpack -- so an entry owned
-# by any other UID was put there by someone else (through an earlier release's
-# group-writable home). Such a home is refused, and first renamed to an
-# unpredictable name so the next start can begin clean: a sibling can create
-# entries in the sticky collection, and a guessable name it had taken would
-# make the rename fail. If the rename still fails, the start is refused all the
-# same. A walk that cannot be completed is refused too. The walk stops at the
-# first foreign entry; a clean home costs one lstat per entry.
-_PRIVATE_MEMBER_HOME_VERIFY = (
-    'foreign=$(find "$target" -xdev ! -uid "$(id -u)" -print -quit); '
-    'if test -n "$foreign"; then '
-    "attempt=0; "
-    'until aside=$(mktemp -u -- "$target.refused-XXXXXXXXXXXXXXXX") '
-    '&& mv -T -- "$target" "$aside" 2>/dev/null; do '
-    'attempt=$((attempt + 1)); test "$attempt" -lt 3 || break; done; '
-    'echo "member provider home holds another UID files" >&2; exit 1; fi; '
-)
-_PRIVATE_MEMBER_HOME_NARROW_MIGRATED = (
-    'if test -n "$migrated"; then '
-    'find "$target" -xdev -mindepth 1 ! -type l -exec chmod go=,g-s -- {} +; fi; '
-)
-_PRIVATE_MEMBER_HOME_PROLOGUE = (
-    _PRIVATE_MEMBER_HOME_CHECK
-    + _PRIVATE_MEMBER_HOME_MIGRATE
-    + _PRIVATE_MEMBER_HOME_CLAIM
-    + _PRIVATE_MEMBER_HOME_VERIFY
-    + _PRIVATE_MEMBER_HOME_NARROW_MIGRATED
-)
-#: For a home that has no earlier location: a fork child's.
-_NEW_PRIVATE_MEMBER_HOME_PROLOGUE = _PRIVATE_MEMBER_HOME_CHECK + _PRIVATE_MEMBER_HOME_CLAIM
+_FacetT = TypeVar("_FacetT", bound="LaunchFacet")
+#: The launch's own process-fixed identity, compared before its facets and
+#: after them, in the order a refused reuse reports them.
+_IDENTITY_FIELDS = ("thread_id", "runtime_id", "runtime_version", "model", "reasoning_effort")
+_SLOT_FIELDS = ("slot_id",)
 
 # Host-owned exactly-once receipts must not live inside a provider home. Some
 # CLIs enumerate their whole state root, and the deliberately unreadable
@@ -184,7 +90,13 @@ PLATFORM_STATE_DIR = "/home/agent/.freeinference-platform"
 
 @dataclass(frozen=True)
 class ResidentLaunch:
-    """Everything needed to open one member process, excluding its prompt."""
+    """Everything needed to open one member process, excluding its prompt.
+
+    The flat record the runner sends the sandbox manager (``asdict``) and
+    amends with ``replace``. Each platform capability reads its fields as one
+    facet (:mod:`cloud_agent_host.launch`), which states what the capability
+    fixes at process start, prepares, and adds to the CLI's environment.
+    """
 
     thread_id: str
     runtime_id: str
@@ -252,17 +164,14 @@ class ResidentLaunch:
             tuple(validate_sandbox_plugins(self.runtime_id, self.plugins)),
         )
 
+    @cached_property
+    def facets(self) -> tuple[LaunchFacet, ...]:
+        """Every capability this launch carries, one facet each, in comparison order."""
+        return launch_facets(self)
 
-def _metered(launch: ResidentLaunch) -> bool:
-    """Whether a member's CLI runs behind its request meter on a direct plan.
-
-    A translated plan's helper measures every request already; a direct one is
-    metered unless its CLI treats the provider's host as its vendor's own
-    (``meters_direct_plan``).
-    """
-    return not launch.inference_client_protocol and meters_direct_plan(
-        launch.runtime_id, launch.inference_base_url
-    )
+    def facet(self, kind: type[_FacetT]) -> _FacetT:
+        """This launch's facet of ``kind``."""
+        return next(facet for facet in self.facets if isinstance(facet, kind))
 
 
 class ResidentTurn(Generic[_RuntimeT_co]):
@@ -418,54 +327,17 @@ class ResidentTransport(Generic[_RuntimeT_co]):
         live process could not take another turn.
         """
         held = self.launch
-        held_mcp = held.mcp_credential
-        same_mcp = (
-            held.mcp_server_ids == launch.mcp_server_ids
-            and held.sandbox_mcp_servers == launch.sandbox_mcp_servers
-        ) and (
-            not launch.mcp_server_ids
-            or (
-                held.mcp_base_url == launch.mcp_base_url
-                and (
-                    held_mcp == launch.mcp_credential
-                    or (not launch.mcp_credential and is_residency_mcp_credential(held_mcp))
-                )
-            )
+
+        def differing(names: tuple[str, ...]) -> tuple[str, ...]:
+            return tuple(name for name in names if getattr(held, name) != getattr(launch, name))
+
+        # Each capability names what it fixes at process start
+        # (cloud_agent_host.launch); the slot is compared last.
+        return (
+            *differing(_IDENTITY_FIELDS),
+            *facet_differences(held.facets, launch.facets),
+            *differing(_SLOT_FIELDS),
         )
-        # A probe names no credential or identity: those arrive with the
-        # residency, and a live process keeps its own.
-        same_github = (
-            held.github_credential == launch.github_credential
-            and (held.git_author_name, held.git_author_email, held.git_coauthor)
-            == (launch.git_author_name, launch.git_author_email, launch.git_coauthor)
-        ) or (
-            not launch.github_credential
-            and (
-                not held.github_credential or is_residency_github_credential(held.github_credential)
-            )
-        )
-        checks = (
-            ("thread_id", held.thread_id == launch.thread_id),
-            ("runtime_id", held.runtime_id == launch.runtime_id),
-            ("runtime_version", held.runtime_version == launch.runtime_version),
-            ("model", held.model == launch.model),
-            ("reasoning_effort", held.reasoning_effort == launch.reasoning_effort),
-            ("plugins", held.plugins == launch.plugins),
-            ("inference_source", held.inference_source == launch.inference_source),
-            ("inference_base_url", held.inference_base_url == launch.inference_base_url),
-            ("inference_protocol", held.inference_protocol == launch.inference_protocol),
-            (
-                "inference_client_protocol",
-                held.inference_client_protocol == launch.inference_client_protocol,
-            ),
-            ("inference_local_token", held.inference_local_token == launch.inference_local_token),
-            ("mcp", same_mcp),
-            ("github", same_github),
-            ("github_repo", held.github_repo == launch.github_repo),
-            ("environment", held.environment == launch.environment),
-            ("slot_id", held.slot_id == launch.slot_id),
-        )
-        return tuple(name for name, same in checks if not same)
 
     def start_turn(
         self,
@@ -506,7 +378,7 @@ class ResidentTransportFactory:
             raise DriverError("resident slot is outside this sandbox's immutable capacity")
         runtime_id = launch.runtime_id
         driver = get_driver(runtime_id)
-        state_dir = self._member_state_dir(launch)
+        state_dir = member_state_dir(launch)
         preparation, member_processes_reaped = self._member_preparation(spec, launch, state_dir)
         context = self._launch_context(
             spec,
@@ -519,33 +391,9 @@ class ResidentTransportFactory:
         if launch.plugins:
             # Every installer finds its slot reaped and its home prepared.
             preparation.run()
-        if runtime_id == "claude-code" and launch.plugins:
-            install_claude_plugins(
-                self._manager,
-                spec,
-                launch.plugins,
-                config_dir=claude_member_config_dir(launch.slot_id, launch.thread_id),
-                env=context.base_env,
-                slot_id=launch.slot_id,
-            )
-        elif runtime_id == "codex" and launch.plugins:
-            install_codex_plugins(
-                self._manager,
-                spec,
-                launch.plugins,
-                state_dir=state_dir,
-                env=context.base_env,
-                slot_id=launch.slot_id,
-            )
-        elif runtime_id in {"pi", "opencode", "kilo"} and launch.plugins:
             context.base_env.update(
-                install_other_runtime_plugins(
-                    self._manager,
-                    spec,
-                    runtime_id=runtime_id,
-                    plugins=launch.plugins,
-                    env=context.base_env,
-                    slot_id=launch.slot_id,
+                member_launch(runtime_id).install_plugins(
+                    self._manager, spec, launch, state_dir=state_dir, env=context.base_env
                 )
             )
         if launch.native_session_id:
@@ -567,7 +415,7 @@ class ResidentTransportFactory:
     ) -> tuple[MemberPreparation, bool]:
         """Queue what the member's own UID does before its CLI starts, in that order.
 
-        The queue runs in one exec (:mod:`cloud_agent_host.member_preparation`):
+        The queue runs in one exec (:mod:`cloud_agent_host.member_setup.member_preparation`):
         before the first plugin installer, or otherwise at the spawn, with
         Claude's hook merge. Returns it, and whether it holds the slot's reap.
         """
@@ -575,7 +423,8 @@ class ResidentTransportFactory:
         preparation = MemberPreparation(
             self._manager, spec, user_uid=uid, user_gid=self._manager.backend.gid
         )
-        reaped = launch.runtime_id == "claude-code" or bool(launch.plugins)
+        steps = member_launch(launch.runtime_id)
+        reaped = steps.reaps_before_preparation or bool(launch.plugins)
         if reaped:
             # A failed Fork can release a reserved slot. Reap that slot before
             # preparing its next member's launch state, so an old same-UID
@@ -587,25 +436,10 @@ class ResidentTransportFactory:
                 user_gid=self._manager.backend.gid,
                 batch=preparation,
             )
-        if launch.runtime_id == "claude-code":
-            self._prepare_claude_member_state(spec, launch, preparation)
-        elif launch.runtime_id in PRIVATE_MEMBER_STATE_ROOTS:
+        steps.prepare_member(self._manager, spec, launch, preparation)
+        if launch.runtime_id in PRIVATE_MEMBER_STATE_ROOTS:
             self._prepare_member_state(spec, launch, state_dir, preparation)
         return preparation, reaped
-
-    @staticmethod
-    def _member_state_dir(launch: ResidentLaunch) -> str:
-        root = PRIVATE_MEMBER_STATE_ROOTS.get(launch.runtime_id)
-        if root is None:
-            return CHAT_STATE_DIR
-        member_key = hashlib.sha256(launch.thread_id.encode("utf-8")).hexdigest()
-        return f"{root}/{member_key}"
-
-    @staticmethod
-    def _legacy_member_state_dir(launch: ResidentLaunch) -> str:
-        """Where an earlier release kept this member's provider home."""
-        member_key = hashlib.sha256(launch.thread_id.encode("utf-8")).hexdigest()
-        return f"{_LEGACY_MEMBER_STATE_ROOTS[launch.runtime_id]}/{member_key}"
 
     def _prepare_member_state(
         self,
@@ -620,11 +454,7 @@ class ResidentTransportFactory:
         """
         runtime_id = launch.runtime_id
         step = MemberStep(
-            (
-                self._codex_member_state_argv(launch, state_dir)
-                if runtime_id == "codex"
-                else self._http_member_state_argv(launch, state_dir)
-            ),
+            member_launch(runtime_id).member_state_argv(self._manager, launch, state_dir),
             timeout_s=120,
             failure=lambda stderr: DriverError(
                 f"{runtime_id} member state could not be prepared: "
@@ -632,7 +462,7 @@ class ResidentTransportFactory:
             ),
             # A group created by an earlier release, or a collection name a
             # member squatted on before the sandbox user secured it.
-            retry_status=_UNTRUSTED_COLLECTION_EXIT,
+            retry_status=UNTRUSTED_COLLECTION_EXIT,
             before_retry=lambda: self._manager.ensure_private_member_collections(spec),
         )
         run_member_steps(
@@ -644,124 +474,6 @@ class ResidentTransportFactory:
             batch=batch,
         )
 
-    def _prepare_claude_member_state(
-        self,
-        spec: ChatSandboxSpec,
-        launch: ResidentLaunch,
-        batch: MemberPreparation | None = None,
-    ) -> None:
-        """Share Claude native history while keeping launch input slot-private.
-
-        Old retained containers already have projects under the shared Claude
-        root. Link only that credential-free native history; never import its
-        settings, environment overrides, credentials, or process registry.
-        Member homes are image-created beneath root-owned /home, outside every
-        shared-state permission-normalization traversal. Queued on ``batch``
-        when one is given, and run now otherwise.
-        """
-        script = (
-            "import os, pathlib, stat, sys\n"
-            "config = pathlib.Path(sys.argv[1])\n"
-            "shared = pathlib.Path(sys.argv[2])\n"
-            "uid = os.getuid()\n"
-            "for path in (config.parent.parent,):\n"
-            "    info = path.lstat()\n"
-            "    if not stat.S_ISDIR(info.st_mode) or info.st_uid != uid:\n"
-            "        raise RuntimeError('Claude member home is not private')\n"
-            "    path.chmod(0o700)\n"
-            "os.umask(0o077)\n"
-            "for path in (config.parent, config):\n"
-            "    path.mkdir(exist_ok=True)\n"
-            "    info = path.lstat()\n"
-            "    if not stat.S_ISDIR(info.st_mode) or info.st_uid != uid:\n"
-            "        raise RuntimeError('Claude config is not member-owned')\n"
-            "    path.chmod(0o700)\n"
-            "for path in (shared.parent, shared):\n"
-            "    path.mkdir(mode=0o2770, exist_ok=True)\n"
-            "    if not stat.S_ISDIR(path.lstat().st_mode):\n"
-            "        raise RuntimeError('Claude history path is not a directory')\n"
-            "    if path.stat().st_uid == uid:\n"
-            "        path.chmod(0o2770)\n"
-            "projects = config / 'projects'\n"
-            "try:\n"
-            "    projects.symlink_to(shared, target_is_directory=True)\n"
-            "except FileExistsError:\n"
-            "    if not projects.is_symlink() or os.readlink(projects) != str(shared):\n"
-            "        raise RuntimeError('Claude member history link is invalid')\n"
-        )
-        step = MemberStep(
-            (
-                "python3",
-                "-I",
-                "-c",
-                script,
-                claude_member_config_dir(launch.slot_id, launch.thread_id),
-                CLAUDE_SHARED_PROJECTS_DIR,
-            ),
-            timeout_s=30,
-            failure=lambda stderr: DriverError(
-                "Claude member state could not be prepared: "
-                + stderr.decode("utf-8", "replace")[-300:]
-            ),
-        )
-        run_member_steps(
-            self._manager,
-            spec,
-            step,
-            user_uid=MEMBER_UID_BASE + launch.slot_id,
-            user_gid=self._manager.backend.gid,
-            batch=batch,
-        )
-
-    def _http_member_state_argv(self, launch: ResidentLaunch, state_dir: str) -> tuple[str, ...]:
-        """The member command that creates an isolated OpenCode/Kilo XDG root."""
-        runtime_id = launch.runtime_id
-        if runtime_id not in {"opencode", "kilo"}:
-            raise DriverError(f"runtime {runtime_id!r} has no private HTTP state home")
-        script = (
-            'set -eu; target="$1"; runtime="$2"; legacy="$3"; trusted="$4"; '
-            'marker="$target/.freeinference-member-state-v1"; '
-            + _PRIVATE_MEMBER_HOME_PROLOGUE
-            + 'if test ! -e "$marker"; then '
-            '  rm -rf -- "$target/$runtime/state/$runtime/locks"; '
-            '  : > "$marker"; '
-            "fi"
-        )
-        return (
-            "/bin/sh",
-            "-c",
-            script,
-            "sh",
-            state_dir,
-            runtime_id,
-            self._legacy_member_state_dir(launch),
-            str(self._manager.backend.uid),
-        )
-
-    def _codex_member_state_argv(self, launch: ResidentLaunch, state_dir: str) -> tuple[str, ...]:
-        """The member command that creates its Codex home from the image's bootstrap config."""
-        script = (
-            'set -eu; source="$1"; target="$2"; legacy="$3"; trusted="$4"; '
-            'marker="$target/.freeinference-member-state-v1"; '
-            + _PRIVATE_MEMBER_HOME_PROLOGUE
-            + 'if test ! -e "$marker"; then '
-            '  if test -f "$source/config.toml"; then '
-            '    cp -- "$source/config.toml" "$target/config.toml"; '
-            "  fi; "
-            '  mkdir -p -- "$target/tmp" "$target/.tmp"; : > "$marker"; '
-            "fi"
-        )
-        return (
-            "/bin/sh",
-            "-c",
-            script,
-            "sh",
-            CHAT_STATE_DIR,
-            state_dir,
-            self._legacy_member_state_dir(launch),
-            str(self._manager.backend.uid),
-        )
-
     def _clone_private_member_state(
         self,
         spec: ChatSandboxSpec,
@@ -769,8 +481,8 @@ class ResidentTransportFactory:
         target_launch: ResidentLaunch,
     ) -> None:
         """Copy one flushed provider home into the child UID's private home."""
-        source_dir = self._member_state_dir(source_launch)
-        target_dir = self._member_state_dir(target_launch)
+        source_dir = member_state_dir(source_launch)
+        target_dir = member_state_dir(target_launch)
         if source_dir == target_dir:
             raise DriverError("native fork target reused the source provider home")
         runtime_id = source_launch.runtime_id
@@ -790,17 +502,21 @@ class ResidentTransportFactory:
             'exec tar --create --file=- --files-from=/dev/null "$@"'
         )
         unpack = (
-            'set -eu; target="$1"; runtime="$2"; trusted="$3"; '
-            + _NEW_PRIVATE_MEMBER_HOME_PROLOGUE
+            'set -eu; target="$1"; source="$2"; runtime="$3"; trusted="$4"; '
+            + NEW_PRIVATE_MEMBER_HOME_PROLOGUE
             + 'find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; '
             'tar --extract --file=- --directory="$target" --no-same-owner '
             "--no-same-permissions; "
             'mkdir -p -- "$target/tmp" "$target/.tmp"; '
+            'if [ "$runtime" = codex ]; then '
+            'python3 -I - "$target" "$source" <<\'PY\'\n' + CODEX_REBASE_ROLLOUT_PATHS + "\nPY\n"
+            "fi; "
             'case "$runtime" in '
             '  opencode|kilo) rm -rf -- "$target/$runtime/state/$runtime/locks";; '
             "esac; "
             ': > "$target/.freeinference-member-state-v1"'
         )
+
         # The source's open already secured the collections; this also covers
         # a fork recovered by a broker that has not opened the source yet.
         self._manager.ensure_private_member_collections(spec)
@@ -814,6 +530,7 @@ class ResidentTransportFactory:
                 unpack,
                 "sh",
                 target_dir,
+                source_dir,
                 runtime_id,
                 str(self._manager.backend.uid),
             ],
@@ -828,81 +545,16 @@ class ResidentTransportFactory:
                     + result.stderr.decode("utf-8", "replace")[-300:]
                 )
 
-    def _clear_http_member_locks(
-        self,
-        spec: ChatSandboxSpec,
-        launch: ResidentLaunch,
-    ) -> None:
-        """Remove dead OpenCode/Kilo server locks after closing that process.
-
-        Both HTTP runtimes leave a per-project lock in their XDG state tree.
-        The source process is intentionally restarted after native fork, so a
-        lock that still names the closed PID must not survive into that new
-        process generation.  Session history and databases are left intact.
-        """
-        runtime_id = launch.runtime_id
-        if runtime_id not in {"opencode", "kilo"}:
-            raise DriverError(f"runtime {runtime_id!r} has no HTTP member locks")
-        state_dir = self._member_state_dir(launch)
-        uid = MEMBER_UID_BASE + launch.slot_id
-        result = self._manager.exec_capture(
-            spec,
-            [
-                "/bin/sh",
-                "-c",
-                'set -eu; state="$1"; runtime="$2"; '
-                'rm -rf -- "$state/$runtime/state/$runtime/locks"',
-                "sh",
-                state_dir,
-                runtime_id,
-            ],
-            workdir="/",
-            timeout_s=120,
-            user_uid=uid,
-            user_gid=self._manager.backend.gid,
-        )
-        if result.returncode != 0:
-            raise DriverError(
-                f"{runtime_id} stale member locks could not be cleared: "
-                + result.stderr.decode("utf-8", "replace")[-300:]
-            )
-
     def _prepare_runtime_helpers(self, spec: ChatSandboxSpec, launch: ResidentLaunch) -> None:
-        """Install the selected runtime and trusted adapters before its first spawn."""
-        runtime_id = launch.runtime_id
-        # Every runtime: a member's tools reach the sandbox's shared browser
-        # through its service, which no member's own exec may start.
-        ensure_browser_service(self._manager, spec)
-        # Its sandbox MCP servers, or the removal of an earlier launch's.
-        admit_sandbox_mcp(
-            self._manager,
-            spec,
-            slot_id=launch.slot_id,
-            credential=launch.mcp_credential,
-            servers=launch.sandbox_mcp_servers,
-            # The chat's environment, for the servers' ${NAME} references.
-            environment=launch.environment.values("runtime") if launch.environment else {},
-            mcp_base_url=launch.mcp_base_url,
-            thread_id=launch.thread_id,
-        )
-        # HTTP dialects always use the trusted live bridge, and pi its
-        # wrapper and MCP bridge, including turns without MCP. Refresh
-        # them from the host when resuming a retained container so new
-        # native-question commands, and an older image's wrappers'
-        # replacements, arrive without replacing its session state.
-        if launch.runtime_version:
-            # A version an admin updated to after the image was built
-            # is copied in the first time; one the image has is not.
-            self._manager.ensure_downloaded_runtime(spec, runtime_id, launch.runtime_version)
-        if launch.mcp_server_ids or runtime_id in {"pi", "opencode", "kilo"}:
-            self._manager.ensure_mcp_helpers(spec, runtime_id)
-        if runtime_id == "kilo":
-            self._manager.ensure_kilo_mcp_runtime(spec, launch.runtime_version or KILO_MCP_VERSION)
-        if runtime_id == "codex" and launch.mcp_server_ids:
-            self._manager.ensure_codex_mcp_policy(spec, launch.mcp_base_url)
-        if launch.inference_client_protocol or _metered(launch):
-            # A retained container gets this host's helper, not its image's.
-            install_compat_helper(self._manager, spec)
+        """Run each facet's trusted step before the first spawn.
+
+        In :data:`~cloud_agent_host.launch.facets.PREPARE_ORDER`: the browser
+        service, sandbox MCP admission, the runtime's helpers (its CLI
+        package's), then the compatibility helper.
+        """
+        context = PrepareContext(self._manager, spec, launch.slot_id)
+        for kind in PREPARE_ORDER:
+            launch.facet(kind).prepare(context)
 
     def _member_env(self, launch: ResidentLaunch) -> tuple[dict[str, str], str]:
         """The environment one member's CLI starts with, and its inference script.
@@ -915,20 +567,8 @@ class ResidentTransportFactory:
         runtime_id = launch.runtime_id
         home = f"/home/agent-member-{launch.slot_id}"
         base_env = dict(self._manager.backend.base_env())
-        inference_script = ""
-        if launch.environment is not None:
-            from cloud_agent_host.environment_process import tool_environment
-
-            base_env.update(tool_environment())
-            # The CLI reads its platform credential under the same names as the
-            # owner's inference credentials, so those reach only the commands
-            # it runs: every bash it starts sources them from BASH_ENV.
-            runtime_values, inference_script = inference_handoff(
-                launch.environment.values("runtime")
-            )
-            base_env.update(runtime_values)
-            if inference_script:
-                base_env["BASH_ENV"] = member_inference_env_path(launch.slot_id)
+        environment = launch.facet(EnvironmentFacet)
+        base_env.update(environment.env())
         base_env.update(
             {
                 "HOME": home,
@@ -938,18 +578,18 @@ class ResidentTransportFactory:
                 "GIT_CONFIG_VALUE_0": CHAT_WORKDIR,
             }
         )
-        base_env.update(compat_token_env(launch.inference_local_token))
+        base_env.update(launch.facet(InferenceFacet).env())
         # Only the residency's GitHub relay placeholder may authenticate gh and
         # git. Do not fall back to a credential inherited from a custom host
         # backend.
         base_env.pop("GH_TOKEN", None)
         base_env.pop("GITHUB_TOKEN", None)
-        base_env.update(github_relay_env(launch))
+        base_env.update(launch.facet(GitHubRelayFacet).env())
         if launch.runtime_version:
             base_env["PATH"] = (
                 f"{runtime_bin_dir(runtime_id, launch.runtime_version)}:{base_env['PATH']}"
             )
-        return base_env, inference_script
+        return base_env, environment.inference_script
 
     def _launch_context(
         self,
@@ -974,14 +614,15 @@ class ResidentTransportFactory:
             )
         activation_dir = f"{MEMBER_TMPFS_ROOT}/{launch.slot_id}/{runtime_id}"
         base_env, inference_script = self._member_env(launch)
-        instructions = platform_instructions(launch)
+        steps = member_launch(runtime_id)
+        instructions = steps.platform_instructions(launch)
         # The connection's URL is used exactly as written (``ExactBaseUrl``),
         # typed by its protocol, so only the adapter that speaks it accepts it.
         model_base_url = connection_base_url(
             launch.inference_base_url,
             launch.inference_protocol,
             launch.inference_client_protocol,
-            metered=_metered(launch),
+            metered=launch.facet(InferenceFacet).metered,
         )
 
         reaped = False
@@ -1004,7 +645,7 @@ class ResidentTransportFactory:
                 if inference_script:
                     # An exec of its own, after the reap has run: a process an
                     # earlier launch left as this UID could read it from the
-                    # exec that reaps (cloud_agent_host.member_preparation).
+                    # exec that reaps (cloud_agent_host.member_setup.member_preparation).
                     self._manager.write_member_inference_env(
                         spec,
                         inference_script,
@@ -1015,7 +656,7 @@ class ResidentTransportFactory:
                 self._prepare_runtime_helpers(spec, launch)
                 reaped = True
             pidfile = f"{MEMBER_TMPFS_ROOT}/{launch.slot_id}/resident-{secrets.token_hex(16)}.pid"
-            argv, env = with_platform_instructions(runtime_id, argv, env, instructions)
+            argv, env = steps.with_platform_instructions(argv, env, instructions)
             if model_base_url.metered:
                 argv, env = meter_launch(argv, env, launch.inference_base_url)
             return self._manager.spawn(
@@ -1048,19 +689,14 @@ class ResidentTransportFactory:
             state_dir=CHAT_STATE_DIR,
             session_state_dir=state_dir or CHAT_STATE_DIR,
             activation_dir=activation_dir,
-            # Claude's own commit attribution names the platform's co-author.
             install_tool_hooks=lambda update: self._manager.install_tool_hooks(
                 spec,
-                {**update, **claude_attribution(launch)},
+                {**update, **steps.tool_hook_settings(launch)},
                 slot_id=launch.slot_id,
                 thread_id=launch.thread_id,
                 batch=preparation,
             ),
-            claude_config_dir=(
-                claude_member_config_dir(launch.slot_id, launch.thread_id)
-                if runtime_id == "claude-code"
-                else None
-            ),
+            claude_config_dir=steps.config_dir(launch),
         )
 
     def fork_native(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
@@ -1114,8 +750,9 @@ class ResidentTransportFactory:
                 # crash. Retrying that ambiguous mutation would manufacture a
                 # second hidden child, so fail closed for the saga reconciler.
                 raise DriverError("native fork has an ambiguous preparing journal")
-            codex_baseline = self._codex_journal_baseline(existing)
-            child_id = self._recover_codex_fork(
+            codex_baseline = codex_member.journal_baseline(existing)
+            child_id = codex_member.recover_fork(
+                self._manager,
                 spec,
                 source.launch,
                 source_id=source_id,
@@ -1124,7 +761,8 @@ class ResidentTransportFactory:
         else:
             preparing = {**expected, "state": "preparing"}
             if runtime_id == "codex":
-                codex_baseline = self._codex_fork_children(
+                codex_baseline = codex_member.fork_children(
+                    self._manager,
                     spec,
                     source.launch,
                     source_id=source_id,
@@ -1154,7 +792,8 @@ class ResidentTransportFactory:
                 # mutation when exactly one new child points at this source.
                 # Zero may simply mean the write has not become visible yet;
                 # preserve PREPARING and let the idempotent HTTP retry scan it.
-                recovered = self._new_codex_fork_children(
+                recovered = codex_member.new_fork_children(
+                    self._manager,
                     spec,
                     source.launch,
                     source_id=source_id,
@@ -1169,7 +808,8 @@ class ResidentTransportFactory:
             # historical boundary. The supervisor resumes this exact source
             # after the fork, under the source member's existing turn lock.
             source.close()
-            child_id = self._fork_claude(
+            child_id = claude_member.fork_session(
+                self._manager,
                 spec,
                 source_id,
                 source.launch,
@@ -1192,7 +832,7 @@ class ResidentTransportFactory:
             # is also the recovery path when the original RPC response is lost.
             source.close()
             if runtime_id in {"opencode", "kilo"}:
-                self._clear_http_member_locks(spec, source.launch)
+                http_member.clear_member_locks(self._manager, spec, source.launch)
             self._manager.normalize_member_files(
                 spec,
                 slot_id=source.launch.slot_id,
@@ -1228,159 +868,6 @@ class ResidentTransportFactory:
             {**expected, "state": "ready", "target_session_id": child_id},
         )
         return child_id
-
-    def _recover_codex_fork(
-        self,
-        spec: ChatSandboxSpec,
-        source_launch: ResidentLaunch,
-        *,
-        source_id: str,
-        baseline: set[str],
-    ) -> str:
-        recovered = self._new_codex_fork_children(
-            spec,
-            source_launch,
-            source_id=source_id,
-            baseline=baseline,
-        )
-        if len(recovered) != 1:
-            detail = "no child is visible" if not recovered else "multiple children are visible"
-            raise DriverError(f"Codex native fork preparing journal is ambiguous: {detail}")
-        return next(iter(recovered))
-
-    def _new_codex_fork_children(
-        self,
-        spec: ChatSandboxSpec,
-        source_launch: ResidentLaunch,
-        *,
-        source_id: str,
-        baseline: set[str],
-    ) -> set[str]:
-        return (
-            self._codex_fork_children(
-                spec,
-                source_launch,
-                source_id=source_id,
-            )
-            - baseline
-        )
-
-    def _codex_fork_children(
-        self,
-        spec: ChatSandboxSpec,
-        source_launch: ResidentLaunch,
-        *,
-        source_id: str,
-    ) -> set[str]:
-        """Read bounded Codex rollout metadata for crash-safe fork recovery."""
-        state_dir = self._member_state_dir(source_launch)
-        script = """
-import json
-import pathlib
-import sys
-
-root = pathlib.Path(sys.argv[1]) / "sessions"
-source_id = sys.argv[2]
-children = set()
-seen = 0
-if root.is_dir():
-    for path in root.rglob("*.jsonl"):
-        seen += 1
-        if seen > 100000:
-            raise SystemExit(42)
-        try:
-            with path.open("r", encoding="utf-8") as handle:
-                first = handle.readline(1_000_001)
-            if len(first) > 1_000_000:
-                raise SystemExit(43)
-            item = json.loads(first)
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            continue
-        payload = item.get("payload") if isinstance(item, dict) else None
-        if not isinstance(payload, dict) or payload.get("forked_from_id") != source_id:
-            continue
-        child_id = payload.get("session_id") or payload.get("id")
-        if isinstance(child_id, str) and child_id and len(child_id) <= 256:
-            children.add(child_id)
-        if len(children) > 4096:
-            raise SystemExit(44)
-print(json.dumps(sorted(children), separators=(",", ":")))
-"""
-        result = self._manager.exec_capture(
-            spec,
-            ["python3", "-I", "-c", script, state_dir, source_id],
-            workdir="/",
-            timeout_s=30,
-            user_uid=MEMBER_UID_BASE + source_launch.slot_id,
-            user_gid=self._manager.backend.gid,
-        )
-        if result.returncode != 0:
-            raise DriverError(
-                "Codex fork recovery inventory failed: "
-                + result.stderr.decode("utf-8", "replace")[-300:]
-            )
-        try:
-            value = json.loads(result.stdout.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise DriverError("Codex fork recovery inventory returned invalid JSON") from exc
-        if (
-            not isinstance(value, list)
-            or len(value) > 4096
-            or any(not isinstance(item, str) or not item or len(item) > 256 for item in value)
-        ):
-            raise DriverError("Codex fork recovery inventory has an invalid shape")
-        return set(value)
-
-    @staticmethod
-    def _codex_journal_baseline(journal: dict[str, object]) -> set[str]:
-        value = journal.get("source_child_session_ids")
-        if (
-            not isinstance(value, list)
-            or len(value) > 4096
-            or any(not isinstance(item, str) or not item or len(item) > 256 for item in value)
-        ):
-            raise DriverError("Codex native fork journal has no valid recovery baseline")
-        if len(set(value)) != len(value):
-            raise DriverError("Codex native fork journal recovery baseline is not canonical")
-        return set(value)
-
-    def _fork_claude(
-        self,
-        spec: ChatSandboxSpec,
-        source_id: str,
-        source_launch: ResidentLaunch,
-        source_native_turn_no: int,
-    ) -> str:
-        uid = MEMBER_UID_BASE + source_launch.slot_id
-        result = self._manager.exec_capture(
-            spec,
-            ["claude-session-fork", source_id, str(source_native_turn_no)],
-            env={
-                "HOME": f"/home/agent-member-{source_launch.slot_id}",
-                "CLAUDE_CONFIG_DIR": claude_member_config_dir(
-                    source_launch.slot_id, source_launch.thread_id
-                ),
-                "PATH": SANDBOX_PATH,
-                # Its interpreter is the image's Claude SDK venv, so the flag is
-                # passed here: nothing in the member's home may load into it.
-                "PYTHONNOUSERSITE": "1",
-            },
-            workdir=CHAT_WORKDIR,
-            timeout_s=60,
-            user_uid=uid,
-            user_gid=self._manager.backend.gid,
-        )
-        if result.returncode != 0:
-            raise DriverError(
-                "Claude native fork failed: " + result.stderr.decode("utf-8", "replace")[:500]
-            )
-        try:
-            receipt = json.loads(result.stdout.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise DriverError("Claude native fork returned invalid JSON") from exc
-        if not isinstance(receipt, dict) or receipt.get("source_session_id") != source_id:
-            raise DriverError("Claude native fork returned the wrong source session")
-        return str(receipt.get("session_id") or "")
 
     @staticmethod
     def _journal_key(operation_id: str) -> str:

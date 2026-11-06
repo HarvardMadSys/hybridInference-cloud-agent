@@ -36,13 +36,13 @@ from tests.integration.storage.test_context_queries import (
     store as store,
 )
 
-from cloud_agent.context_insights import (
+from cloud_agent.context.context_insights import (
     ContextInsightsCursor,
     InsightsFilters,
     compose,
     context_cursor_scope,
 )
-from cloud_agent.context_profile import CONTEXT_PROFILE_VERSION
+from cloud_agent.context.context_profile import CONTEXT_PROFILE_VERSION
 from cloud_agent.storage.repositories import context_queries
 from cloud_agent.storage.repositories.context_queries import PostgresContextQueries
 from cloud_agent_shared.text_tokens import estimate_text_tokens

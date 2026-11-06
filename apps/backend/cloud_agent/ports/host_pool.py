@@ -40,13 +40,17 @@ class HostPoolRepository(Protocol):
         """
         ...
 
-    async def queue_health(self, *, expected_deployment_sha: str) -> dict[str, int]:
+    async def queue_health(
+        self, *, expected_deployment_sha: str, queue_alert_after_s: float
+    ) -> dict[str, int]:
         """Observe configured queue stalls without claiming or changing jobs.
 
         Occupied slots are ordinary backpressure. Missing/stale/disabled hosts,
         lost deployment markers and a wrong placement pin are not. Retained
         members use their owner, independent of the pin for new conversations.
         No user content, job identifiers or credentials leave this projection.
+        ``queue_alert_after_s`` is how long a turn waits before it counts; the
+        caller reads it from the ``queue_alert_after_s`` setting.
         """
         ...
 

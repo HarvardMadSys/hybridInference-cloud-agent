@@ -607,7 +607,12 @@ def test_a_host_setting_read_outside_its_bootstrap_fails() -> None:
     bootstrap = (
         'import os\ndef _chat_idle_timeout_s():\n    os.environ.get("AGENT_CHAT_IDLE_TIMEOUT_S")\n'
     )
-    assert resolver_bypasses(_reads(bootstrap, "apps/backend/cloud_agent_host/runner.py")) == []
+    assert (
+        resolver_bypasses(
+            _reads(bootstrap, "apps/backend/cloud_agent_host/service/local_settings.py")
+        )
+        == []
+    )
 
 
 def test_an_unnamed_read_or_copy_fails_outside_its_exceptions() -> None:
@@ -624,7 +629,10 @@ def test_an_unnamed_read_or_copy_fails_outside_its_exceptions() -> None:
     assert unexplained_reads(_reads(dynamic)) != []
     copy = "import os, subprocess\ndef f():\n    subprocess.run(['x'], env=dict(os.environ))\n"
     assert unexplained_reads(_reads(copy)) != []
-    assert unexplained_reads(_reads(copy, "apps/backend/cloud_agent_host/docker_engine.py")) != []
+    assert (
+        unexplained_reads(_reads(copy, "apps/backend/cloud_agent_host/container/docker_engine.py"))
+        != []
+    )
 
 
 @dataclass(frozen=True)

@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from cloud_agent_host import model_passthrough, protocol_translator
-from cloud_agent_host.compat_helper import helper_archive
+from cloud_agent_host.member_setup.compat_helper import helper_archive
 from cloud_agent_host.model_passthrough import PassthroughBinding, _PassthroughServer
 from cloud_agent_host.protocol_translator import LaunchError
 from cloud_agent_shared.protocol_compat import ORIGIN_PLACEHOLDER, TOKEN_PLACEHOLDER

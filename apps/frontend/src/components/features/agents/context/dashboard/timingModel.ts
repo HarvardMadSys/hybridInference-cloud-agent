@@ -62,14 +62,11 @@ export function bandAt(bands: readonly { leftPct: number }[], pct: number): numb
 
 /** CSS colours for the gradient (Tailwind classes cannot be interpolated into one). */
 export const TIMING_CSS: Record<TimingKind, string> = {
-  ttft: 'rgb(59 130 246)',
   reasoning: 'rgb(139 92 246)',
   text: 'rgb(236 72 153)',
   toolarg: 'rgb(245 158 11)',
-  gen: 'rgb(232 121 249)',
   tools: 'rgb(20 184 166)',
   unsplit: 'rgb(100 116 139)',
-  other: 'rgb(203 213 225)',
 };
 
 export function stripGradient(bands: readonly StripBand[], only: TimingKind | null): string {
@@ -87,13 +84,4 @@ export function stripGradient(bands: readonly StripBand[], only: TimingKind | nu
 }
 
 /** The ring's order. */
-export const TIMING_ORDER: TimingKind[] = [
-  'ttft',
-  'reasoning',
-  'text',
-  'toolarg',
-  'gen',
-  'tools',
-  'unsplit',
-  'other',
-];
+export const TIMING_ORDER: TimingKind[] = ['reasoning', 'text', 'toolarg', 'tools', 'unsplit'];

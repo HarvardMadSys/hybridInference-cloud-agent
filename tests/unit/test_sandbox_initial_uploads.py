@@ -25,27 +25,31 @@ from tests.unit.test_sandbox_archives import (
     _zero_clock,
 )
 
-from cloud_agent_host import (
+from cloud_agent_host.archive import (
     sandbox_archive_runtime as archive_runtime,
     sandbox_initial_uploads as uploads_mod,
 )
-from cloud_agent_host.chat_sandbox import ChatSandboxManager, RetainedChatBackend
-from cloud_agent_host.sandbox import ProcessBackend
-from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
-from cloud_agent_host.sandbox_archives import SandboxArchiveService
-from cloud_agent_host.sandbox_initial_uploads import (
+from cloud_agent_host.archive.sandbox_archive_runtime import SandboxArchiveController
+from cloud_agent_host.archive.sandbox_archives import SandboxArchiveService
+from cloud_agent_host.archive.sandbox_initial_uploads import (
     InitialUploadSpool,
     InitialUploadWorker,
     SpooledInitialUpload,
 )
+from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, RetainedChatBackend
+from cloud_agent_host.container.sandbox import ProcessBackend
 from cloud_agent_host.sandbox_manager import create_app
+from cloud_agent_host.supervisor.group_archive_policy import ServiceArchivePolicy
 from cloud_agent_shared.errors import SandboxError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
 
-    from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveS3Config, SandboxArchiveS3Uploader
+    from cloud_agent_host.archive.sandbox_archive_s3 import (
+        SandboxArchiveS3Config,
+        SandboxArchiveS3Uploader,
+    )
 
 _WAIT_S = 5.0
 
@@ -645,13 +649,13 @@ class _RecordingArchive:
 @pytest.mark.parametrize(("asked", "deferred"), [({"defer_upload": True}, True), ({}, False)])
 async def test_the_route_defers_only_when_the_runner_asks(asked, deferred) -> None:
     """An older runner omits the field and keeps waiting for the upload."""
-    supervisor = _SharedSupervisor()
+    archive = _RecordingArchive()
+    supervisor = _SharedSupervisor(archive_policy=ServiceArchivePolicy(archive))  # type: ignore[arg-type]
 
     def capture_initial_archive(_thread_id, _token, *, capture, **_kwargs):
         return capture(None, None, ())
 
     supervisor.capture_initial_archive = capture_initial_archive  # type: ignore[attr-defined]
-    archive = _RecordingArchive()
     app = create_app(
         backend=ProcessBackend(acknowledged_unsafe=True),
         token="sandbox-manager-secret",

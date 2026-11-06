@@ -17,7 +17,7 @@ from tests.support.follow_ups import append_follow_up
 from tests.support.migrations import apply_migrations, downgrade_to
 from tests.support.usage import START
 
-from cloud_agent.storage.repositories.sandbox import _DELETION_RETRY_EXHAUSTION_BATCH
+from cloud_agent.storage.repositories.sandbox.admin_deletion import _DELETION_RETRY_EXHAUSTION_BATCH
 from cloud_agent.workers import sandbox_deletion
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]

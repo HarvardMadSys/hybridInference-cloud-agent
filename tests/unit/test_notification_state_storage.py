@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from cloud_agent.notification_state import NotificationStateCursor
+from cloud_agent.schemas.notification_state import NotificationStateCursor
 from cloud_agent.storage import notification_state as notification_state_storage
 from cloud_agent.storage.notification_state import _bootstrap, read_notification_state
 

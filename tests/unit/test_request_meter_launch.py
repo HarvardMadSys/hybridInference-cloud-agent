@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from dataclasses import replace
 
 import pytest
+from tests.support.owners import launch_connection
 
-from cloud_agent_host.compat_helper import LAUNCHER
+from cloud_agent_host.launch.inference import InferenceFacet
+from cloud_agent_host.member_setup.compat_helper import LAUNCHER
 from cloud_agent_host.model_passthrough import PassthroughBinding
-from cloud_agent_host.resident_transport import _metered
+from cloud_agent_host.resident_transport import ResidentLaunch
 from cloud_agent_host.runtimes import (
     ClaudeCodeRuntime,
     CodexRuntime,
@@ -109,16 +111,28 @@ def test_a_cli_on_its_vendors_own_host_is_not_metered():
     assert meters_direct_plan("pi", "https://api.anthropic.com/v1")
 
 
+def _metered(runtime_id: str, base_url: str, client_protocol: str = "") -> bool:
+    launch = replace(
+        ResidentLaunch(
+            thread_id="athr_owner",
+            runtime_id=runtime_id,
+            runtime_version=None,
+            native_session_id=None,
+            model="model",
+            reasoning_effort=None,
+            credential="grant",
+            **launch_connection(runtime_id),
+        ),
+        inference_base_url=base_url,
+        inference_client_protocol=client_protocol,
+        # A translated launch carries its member's loopback token.
+        inference_local_token="t" * 64 if client_protocol else "",
+    )
+    return launch.facet(InferenceFacet).metered
+
+
 def test_only_a_direct_resident_launch_is_metered():
-    launch = SimpleNamespace(
-        runtime_id="codex", inference_base_url=_URL, inference_client_protocol=""
-    )
-    assert _metered(launch)
-    assert not _metered(SimpleNamespace(**{**vars(launch), "inference_client_protocol": "x"}))
-    assert not _metered(
-        SimpleNamespace(
-            runtime_id="claude-code",
-            inference_base_url="https://api.anthropic.com",
-            inference_client_protocol="",
-        )
-    )
+    assert _metered("codex", _URL)
+    # A translated plan's helper measures it already.
+    assert not _metered("codex", _URL, "responses")
+    assert not _metered("claude-code", "https://api.anthropic.com")

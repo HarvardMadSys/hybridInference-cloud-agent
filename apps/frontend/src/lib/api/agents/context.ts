@@ -185,32 +185,18 @@ export interface SessionTokensApi {
   reported_by: string;
 }
 
-export type TimingKind =
-  | 'ttft'
-  | 'reasoning'
-  | 'text'
-  | 'toolarg'
-  | 'gen'
-  | 'tools'
-  | 'unsplit'
-  | 'other';
+export type TimingKind = 'reasoning' | 'text' | 'toolarg' | 'tools' | 'unsplit';
 
 /** Where the executions' time went (GET …/thread/context/timing). */
 export interface ThreadTimingApi {
   active_ms: number;
   totals: Record<TimingKind, number>;
   executions: number;
-  executions_split: number;
-  model_requests: number;
   tool_calls: number;
   tool_calls_unpaired: number;
   blocks: Record<string, number>;
-  output_tps: number | null;
-  gateway: 'available' | 'partial' | 'unavailable' | 'not_recorded';
-  gateway_reason: string | null;
   segments: { kind: TimingKind; start_ms: number; end_ms: number }[];
   segments_merged: boolean;
-  requests: { response_id: string; ttft_ms: number | null; latency_ms: number | null }[];
 }
 
 /** The items requests carried, keyed by stored event (GET …/thread/context/dna). */

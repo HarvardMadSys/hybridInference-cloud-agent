@@ -10,7 +10,8 @@ from typing import Any
 import httpx
 import pytest
 
-from cloud_agent import settings, web_search
+from cloud_agent import settings
+from cloud_agent.providers import web_search
 
 
 def _configure(

@@ -104,7 +104,7 @@ vi.mock('@/components/providers/SiteConfigProvider', () => ({
 }));
 
 // The menu has its own tests; here it only matters where it is rendered.
-vi.mock('@/components/features/agents/AccountMenu', () => ({
+vi.mock('@/components/features/agents/sidebar/AccountMenu', () => ({
   AccountMenu: ({ variant }: { variant: string }) => (
     <button type="button" data-testid={`account-menu-${variant}`}>
       Account menu
@@ -112,7 +112,7 @@ vi.mock('@/components/features/agents/AccountMenu', () => ({
   ),
 }));
 
-vi.mock('@/components/features/agents/AgentsSidebar', () => ({
+vi.mock('@/components/features/agents/sidebar/AgentsSidebar', () => ({
   AgentsSidebar: ({
     collapsed,
     headerAction,

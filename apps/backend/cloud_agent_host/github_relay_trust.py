@@ -24,11 +24,11 @@ import logging
 from typing import TYPE_CHECKING
 
 from cloud_agent_host.github_relay_env import relay_ca_pem
-from cloud_agent_host.install_locks import install_lock
+from cloud_agent_host.member_setup.install_locks import install_lock
 from cloud_agent_shared.errors import SandboxError
 
 if TYPE_CHECKING:
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +101,7 @@ def ensure_github_relay_trust(manager: ChatSandboxManager, spec: ChatSandboxSpec
     """Have the container trust the GitHub relay, and say how a process uses it.
 
     Written once per container and CA, then remembered like a root helper
-    (``ProvenContainers.note_helper``); writing another CA forgets the record
+    (``ExactContainer.note_helper``); writing another CA forgets the record
     of every earlier one, since only the last written is in place. Without a relay configured there is
     nothing to trust and nothing changes. A failed install leaves the process
     on the image's own roots, as without the relay, rather than refusing to
@@ -111,15 +111,15 @@ def ensure_github_relay_trust(manager: ChatSandboxManager, spec: ChatSandboxSpec
     if ca_pem is None:
         return {}
     key = trust_key(ca_pem)
-    proven = manager._proven.get(spec)
-    if manager._proven.holds_helper(proven, key):
+    proven = manager.exact.proven_container(spec)
+    if manager.exact.holds_helper(proven, key):
         return trust_env()
     with install_lock(spec.container_name):
-        if not manager._proven.holds_helper(proven, key):
+        if not manager.exact.holds_helper(proven, key):
             # The bundle is about to be replaced, so what any earlier CA's
             # record said about it no longer holds: after A, B, then A again,
             # A's record would otherwise skip the install while B is in place.
-            manager._proven.forget_helpers(proven, f"{CA_BUNDLE_PATH}@")
+            manager.exact.forget_helpers(proven, f"{CA_BUNDLE_PATH}@")
             try:
                 install_github_relay_trust(manager, spec, ca_pem)
             except SandboxError as exc:
@@ -128,5 +128,5 @@ def ensure_github_relay_trust(manager: ChatSandboxManager, spec: ChatSandboxSpec
                     extra={"sandbox_id": spec.sandbox_id, "detail": str(exc)[:300]},
                 )
                 return {}
-            manager._proven.note_helper(proven, key)
+            manager.exact.note_helper(proven, key)
     return trust_env()

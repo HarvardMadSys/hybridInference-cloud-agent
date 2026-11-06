@@ -15,9 +15,10 @@ from cloud_agent.api._job_views import _iso, _job_response
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api._project_filter import TemporaryFilter, require_single_project_filter
 from cloud_agent.api.deps import get_storage, require_store
+from cloud_agent.api.errors import typed_error
 from cloud_agent.application.residency import close_released_residencies
 from cloud_agent.domain.read_receipts import READ_RECEIPT_BATCH_SIZE
-from cloud_agent.entitlement import REPO_PATTERN
+from cloud_agent.domain.source_control import REPO_PATTERN
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import (
     AgentConversation,
@@ -125,10 +126,7 @@ def _raise_session_mutation_error(result: dict[str, Any]) -> None:
         "not_found": "One or more selected sessions are no longer available.",
         "fork_in_progress": "A selected session is being forked. Wait for the fork to finish.",
     }
-    raise HTTPException(
-        status_code=404 if error == "not_found" else 409,
-        detail={"error": {"type": error, "message": messages[error]}},
-    )
+    raise typed_error(404 if error == "not_found" else 409, error, messages[error])
 
 
 @router.post("/sessions/archive", response_model=AgentSessionArchiveResponse)

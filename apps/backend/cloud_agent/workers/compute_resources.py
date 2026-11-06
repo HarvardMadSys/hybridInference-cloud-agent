@@ -6,8 +6,8 @@ import asyncio
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from cloud_agent.compute_config import current_poll_seconds
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.providers.compute.compute_config import current_poll_seconds
 
 if TYPE_CHECKING:
     from cloud_agent.application.compute_autoscale import CloudLabAutoscaler

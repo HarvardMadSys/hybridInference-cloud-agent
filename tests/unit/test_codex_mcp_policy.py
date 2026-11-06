@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from cloud_agent_host.codex_mcp import INSTALL_POLICY, SANDBOX_MCP_URL, relay_endpoint
+from cloud_agent_host.runtimes.codex.mcp import INSTALL_POLICY, SANDBOX_MCP_URL, relay_endpoint
 
 REPO = Path(__file__).resolve().parents[2]
 IMAGE_DEFAULT = (REPO / "deploy/sandbox/codex-requirements.toml").read_text()

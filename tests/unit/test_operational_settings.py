@@ -8,9 +8,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from cloud_agent import capacity_history, entitlement, operational_health, settings
+from cloud_agent import settings
 from cloud_agent.api import mcp_connections
+from cloud_agent.deployment import operational_health
+from cloud_agent.source_control import entitlement
 from cloud_agent.storage.repositories import host_pool
+from cloud_agent.workers import capacity_history
 
 
 def test_oauth_callbacks_and_repository_access_use_current_settings(monkeypatch):
@@ -65,9 +68,8 @@ async def test_background_workers_pick_up_interval_changes_between_passes(monkey
     assert delays == [5.0, 12.0]
 
 
-async def test_queue_age_is_bound_as_a_runtime_value_in_health_query(monkeypatch):
+async def test_queue_age_is_bound_as_a_runtime_value_in_health_query():
     duration = 600.0
-    monkeypatch.setattr(host_pool, "number_setting", lambda key: duration)
 
     class Transaction:
         async def __aenter__(self):
@@ -96,7 +98,9 @@ async def test_queue_age_is_bound_as_a_runtime_value_in_health_query(monkeypatch
             return None
 
     repository = host_pool.PostgresHostPoolRepository(SimpleNamespace(acquire=Acquire))
-    assert await repository.queue_health(expected_deployment_sha="release") == {
+    assert await repository.queue_health(
+        expected_deployment_sha="release", queue_alert_after_s=duration
+    ) == {
         "queued": 2,
         "unavailable": 1,
         "running": 0,
@@ -104,5 +108,5 @@ async def test_queue_age_is_bound_as_a_runtime_value_in_health_query(monkeypatch
     assert connection.fetchrow.call_args.args[3] == 600.0
     assert "$3 * INTERVAL '1 second'" in connection.fetchrow.call_args.args[0]
     duration = 1200.0
-    await repository.queue_health(expected_deployment_sha="release")
+    await repository.queue_health(expected_deployment_sha="release", queue_alert_after_s=duration)
     assert connection.fetchrow.call_args.args[3] == 1200.0

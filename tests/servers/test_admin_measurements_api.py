@@ -131,8 +131,8 @@ async def test_an_unexpected_admin_read_failure_is_not_cacheable(setup):
 
 async def test_the_local_writer_exposes_its_bounds_and_loss_counts(setup):
     """Queue loss is visible and explicitly scoped to this replica."""
-    from cloud_agent import measurement_writer
-    from cloud_agent.measurement_writer import MeasurementWriter
+    from cloud_agent.measurement import measurement_writer
+    from cloud_agent.measurement.measurement_writer import MeasurementWriter
 
     app, _ = setup
     local = MeasurementWriter()
