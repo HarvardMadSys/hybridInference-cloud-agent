@@ -11,7 +11,8 @@ from __future__ import annotations
 from unittest.mock import AsyncMock
 
 import pytest
-from tests.unit.test_compute_reconcile import _left_behind, _left_behind_container, harness
+from tests.unit.test_compute_reconcile import harness
+from tests.unit.test_compute_retirement import _left_behind, _left_behind_container
 
 from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 

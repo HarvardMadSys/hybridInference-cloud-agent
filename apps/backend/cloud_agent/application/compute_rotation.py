@@ -1299,7 +1299,7 @@ class ComputeRotation:
             allocation = await self.reconciler._allocation(allocation["id"])
         # Abandoning the node cancelled its acquisition, which may hold the
         # only record of the experiment the provider created for it.
-        ref = await self.reconciler._provider_resource(allocation)
+        ref = await self.reconciler.release.provider_resource(allocation)
         if ref is None:
             # The provider never created it, or definitely refused to.
             await self.repository.observe_allocation(
@@ -1317,7 +1317,7 @@ class ComputeRotation:
             return
         # It never ran its Host, so its node scope needs no review: a failed
         # experiment has no nodes at all. Delete by its exact identity.
-        observation = await self.reconciler._delete_by_identity(operation, allocation, ref)
+        observation = await self.reconciler.release.delete_by_identity(operation, allocation, ref)
         if observation.state != "terminated":
             await self.reconciler._finish(
                 operation,
