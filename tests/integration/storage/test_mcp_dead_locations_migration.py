@@ -1,4 +1,4 @@
-"""``0114_mcp_retire_dead_locations`` against a real database.
+"""``0115_mcp_retire_dead_locations`` against a real database.
 
 What only Postgres settles: every row stored at a location nothing runs
 (``managed-worker``, ``user-connector``) becomes a ``sandbox`` program with its
@@ -23,8 +23,8 @@ from tests.support.migrations import REPO, apply_migrations, downgrade_to
 
 pytestmark = pytest.mark.dbtest
 
-_BEFORE = "0113_sandbox_incidents"
-_THIS = "0114_mcp_retire_dead_locations"
+_BEFORE = "0114_admin_audit_attribution"
+_THIS = "0115_mcp_retire_dead_locations"
 _OWNER = "user-owner"
 
 #: A launch a cloud worker would have been given: its mount and working

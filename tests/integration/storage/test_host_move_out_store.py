@@ -908,13 +908,14 @@ async def test_a_reclaimed_machine_finishes_a_pending_discard_without_its_host(
             group["sandbox_id"],
         )
         audit = await conn.fetchrow(
-            "SELECT action, details->>'host_reclaimed' AS reclaimed "
-            "FROM agent_admin_audit_log ORDER BY id DESC LIMIT 1"
+            "SELECT outcome, details->>'host_reclaimed' AS reclaimed "
+            "FROM agent_admin_audit_outcomes ORDER BY created_at DESC LIMIT 1"
         )
     assert (member["context_status"], member["native_state"]) == ("lost", "lost")
     assert queued == "failed"
     assert dict(event) == {"from_state": "pending", "to_state": "deleted", "reclaimed": "true"}
-    assert dict(audit) == {"action": "agent.sandbox.delete.discarded", "reclaimed": "true"}
+    # The worker's result is reported against the administrator's request.
+    assert dict(audit) == {"outcome": "applied", "reclaimed": "true"}
     # Nothing is left for the reclaimed machine's own pass.
     assert (
         await store.compute_resources.lose_reclaimed_groups(

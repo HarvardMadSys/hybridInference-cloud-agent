@@ -29,16 +29,16 @@ A downgrade restores the four-location check, under the same name, so
 ``0111_mcp_sandbox_location``'s downgrade still finds it. Moved rows stay
 ``sandbox``: the previous release reads them as programs.
 
-Revision ID: 0114_mcp_retire_dead_locations
-Revises: 0113_sandbox_incidents
+Revision ID: 0115_mcp_retire_dead_locations
+Revises: 0114_admin_audit_attribution
 """
 
 from __future__ import annotations
 
 from alembic import op
 
-revision = "0114_mcp_retire_dead_locations"
-down_revision = "0113_sandbox_incidents"
+revision = "0115_mcp_retire_dead_locations"
+down_revision = "0114_admin_audit_attribution"
 branch_labels = None
 depends_on = None
 

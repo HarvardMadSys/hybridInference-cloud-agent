@@ -679,8 +679,9 @@ before the same fenced deletion request can be claimed again.
 
 Each claim pass marks at most 50 exhausted requests, oldest request first, before
 claiming due deletion work. Later worker passes continue through any remaining
-exhausted requests. Exhaustion state, trajectory events, and audit records commit
-together; updating the diagnostic attempt history is best-effort.
+exhausted requests. Exhaustion state and trajectory events commit together with
+the request's result on the audit log; updating the diagnostic attempt history
+is best-effort.
 
 **Sandboxes of deleted chats are removed automatically.** When an owner
 permanently deletes the last chat in a sandbox, the deletion worker asks the
@@ -845,15 +846,40 @@ and no column allowlist. If an investigation needs a task's raw events, that is
 a reason to build an audited route, not a reason to go around the audit.
 
 **Reading the trail.** _Admin → Audit log_ (`GET /admin/agent/audit-log`)
-lists what administrators did, newest first: settings and agent-version
-changes, server actions (pause, remove, placement, adding or releasing a
-server) and measurement runs. It filters by `category` (`settings`,
-`servers`, `measurements`, `content`; `content` holds the event-content reads a
-since-retired admin route recorded) and pages with `before`, the oldest `id` of
-the previous page. The Servers page's polling
-reads are not recorded; rows they left before that changed stay in
-`agent_admin_audit_log` and are never listed. The page names an administrator
-by user id only, because identity tokens carry no display name.
+answers who did what, to whom, with what result, newest first. Each action is
+declared once in `cloud_agent/domain/audit.py`, which files it under a
+`category` (`accounts`, `settings`, `servers`, `sandboxes`, `measurements`,
+`sensitive_access`, `access_control`), names what it acted on (`target_type`
+and `target_id`) and the user it affected (`target_user_id`: the account
+itself, or the owner of a sandbox), and says whether its work runs later.
+Pages follow `before`, the oldest `id` of the previous page.
+
+- **Who acted** (`actor_type`) is derived by the database from `actor_id`:
+  `admin` (an administrator's session), `break_glass` (access that belongs to
+  no account: `ADMIN_TOKEN`, first-run setup, the bootstrap command), `service`
+  (a named automation), `system` (the control plane's own policy and workers),
+  `user` (an account changing itself) or `anonymous`. The page shows `admin`
+  and `break_glass` unless asked for everything (`actors=all`); break-glass
+  access is always shown, in red.
+- **Names** are kept as they were when the row was written, with a short id
+  beside them: erasing an account frees its login name for a new account.
+  Erasing an account deletes no audit row.
+- **What came of it.** `outcome` is `applied`, `refused`, `failed`,
+  `replayed`, or `requested` for work that runs later. A requested sandbox
+  deletion carries the deletion worker's final result; a requested compute
+  operation carries the operation's own state. The worker's steps are in the
+  sandbox's trajectory, not the audit log.
+- **One account or object.** `user=<account id>` shows everything about an
+  account (the users page links to it); `target_type=` with `target_id=`
+  everything about one host, sandbox or server operation.
+- **Recording never fails an action.** A row that cannot be written is logged
+  as `agent_admin_audit_write_failed`, counted in
+  `agent_admin_audit_write_failures`, and reported at the top of the page
+  for seven days; the action itself goes ahead.
+
+Reads are not recorded, nor are connection checks. Revision
+`0114_admin_audit_attribution` removed the polling reads older releases
+recorded.
 
 ## Teams
 
@@ -1032,7 +1058,7 @@ What the owner added decides where it runs: an address is a `remote` service
 behind this relay, and a command is a `sandbox` program
 ([sandbox MCP servers](#sandbox-mcp-servers)). Nothing else runs one: there is
 no connector on the owner's machine and no managed worker, and the API refuses
-both locations. `0114_mcp_retire_dead_locations` moved every connection stored
+both locations. `0115_mcp_retire_dead_locations` moved every connection stored
 at `managed-worker` or `user-connector` to `sandbox`, with its command as
 stored ([upgrade notes](upgrade-notes.md#mcp-servers-run-in-two-places)). The
 connector tables and `agent_mcp_connections.connector_id` are unused, and a

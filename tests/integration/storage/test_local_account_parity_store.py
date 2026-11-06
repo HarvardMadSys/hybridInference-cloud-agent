@@ -821,11 +821,16 @@ async def test_erasing_removes_every_row_of_the_accounts_agent_data(storage, poo
             assert left == 0, row["table_name"]
         assert await conn.fetchval("SELECT count(*) FROM agent_jobs WHERE id = $1", other_job) == 1
         audit = await conn.fetch(
-            "SELECT action, details FROM agent_admin_audit_log WHERE target_user_id = $1",
+            "SELECT action, subject_label FROM agent_admin_audit_log "
+            "WHERE target_user_id = $1 ORDER BY id",
             account_id,
         )
-    # Earlier audit rows about the account go; the erasure's own row stays.
-    assert [row["action"] for row in audit] == ["agent.local_account.erase"]
+    # The trail keeps every row about the account, names included: who decided
+    # what about it is still answerable after it is gone.
+    actions = [row["action"] for row in audit]
+    assert "agent.local_account.delete" in actions
+    assert actions[-1] == "agent.local_account.erase"
+    assert {row["subject_label"] for row in audit} == {"erase-all@example.edu"}
     assert other_id and job_id
 
 
