@@ -30,10 +30,15 @@ cannot read is forwarded all the same. Each CLI connection keeps its own
 upstream connection between requests, as the CLI's direct connection would;
 one the provider closed while idle is replaced before it is used.
 
+An answer that ends before the length it declared closes the CLI's connection
+at once, as the provider's own short answer would have, so the CLI sees the
+error and retries rather than waiting for bytes that will never come.
+
 As for the translator: HTTPS with the system trust store, no proxy read from
-the environment, no redirect followed (a 3xx is relayed for the CLI to handle),
-a request the CLI closes is closed upstream at once, and the service exits
-with its CLI.
+the environment, no redirect followed (a 3xx is relayed for the CLI to handle;
+a ``Location`` on the origin's own path is pointed back under ``/<authority>``,
+where the CLI's URL resolves it), a request the CLI closes is closed upstream
+at once, and the service exits with its CLI.
 """
 
 from __future__ import annotations
@@ -155,6 +160,17 @@ class PassthroughBinding:
         if rest and rest[0] not in "/?":
             return None
         return rest if rest.startswith("/") else "/" + rest
+
+    def client_location(self, location: str) -> str:
+        """A redirect's ``Location`` as the CLI must read it to reach the same place.
+
+        The CLI resolves a path against the loopback origin, so a path on the
+        origin (``/v2/messages``) gets the binding's prefix back. A full URL
+        and a relative reference already name the same place for the CLI.
+        """
+        if location.startswith("/") and not location.startswith("//"):
+            return "/" + self.authority + location
+        return location
 
 
 class _Refused(Exception):
@@ -355,13 +371,11 @@ class _PassthroughHandler(BaseHTTPRequestHandler):
         if len(body) > MAX_MEASURED_BODY_BYTES:
             return
         try:
-            line = self.server.meter.line(protocol, json.loads(body))
+            self.server.meter.report(protocol, json.loads(body), emit_record)
         except Exception:
             # A measurement is diagnostic: whatever a body holds, the request
             # it describes was already sent, and its answer is still relayed.
             return
-        if line is not None:
-            emit_record(line)
 
     # -- upstream --------------------------------------------------------------
 
@@ -410,7 +424,9 @@ class _PassthroughHandler(BaseHTTPRequestHandler):
         own = _HOP_HEADERS | _connection_tokens(response.getheader("connection"))
         self.send_response_only(response.status, response.reason)
         for name, value in response.getheaders():
-            if name.lower() not in own:
+            if name.lower() == "location":
+                self.send_header(name, self.server.binding.client_location(value))
+            elif name.lower() not in own:
                 self.send_header(name, value)
         declared = response.getheader("content-length")
         if bodiless and declared is not None:
@@ -442,6 +458,13 @@ class _PassthroughHandler(BaseHTTPRequestHandler):
             if not data:
                 break
             self._write(b"%x\r\n%s\r\n" % (len(data), data) if chunked else data)
+        if response.length:
+            # The provider closed before the length it declared (``read1``
+            # reports that as an end, not an error): end the CLI's answer short
+            # too, now, rather than leave it waiting for the rest.
+            _log("the provider's answer broke off")
+            self.close_connection = True
+            return False
         if chunked:
             self._write(b"0\r\n\r\n")
         return True
@@ -469,13 +492,13 @@ class _PassthroughServer(ThreadingHTTPServer):
         self.tls = ssl.create_default_context()
 
 
-def serve(sock: socket.socket, binding: PassthroughBinding) -> None:
-    """Answer the CLI on ``sock`` until the process ends."""
-    _PassthroughServer(sock, binding).serve_forever()
+def server(sock: socket.socket, binding: PassthroughBinding) -> ThreadingHTTPServer:
+    """The service that answers the CLI on ``sock``, ready to serve."""
+    return _PassthroughServer(sock, binding)
 
 
 __all__ = [
     "MAX_FORWARD_BODY_BYTES",
     "PassthroughBinding",
-    "serve",
+    "server",
 ]

@@ -102,7 +102,7 @@ def records(monkeypatch):
     monkeypatch.setattr(
         model_passthrough,
         "emit_record",
-        lambda line: written.append(read_record(line.decode().rstrip("\n"))),
+        lambda line: written.append(read_record(line.decode().rstrip("\n"))) or True,
     )
     return written
 
@@ -279,7 +279,7 @@ def test_a_passthrough_launch_carries_an_origin_and_nothing_secret(changes):
 
 
 def test_the_cli_reaches_its_provider_directly_when_the_meter_cannot_start(monkeypatch):
-    def unbindable(serve):
+    def unbindable(make):
         raise OSError("no loopback")
 
     started: list[tuple[list[str], dict[str, str]]] = []
@@ -293,6 +293,8 @@ def test_the_cli_reaches_its_provider_directly_when_the_meter_cannot_start(monke
 
     monkeypatch.setattr(protocol_translator, "_start_service", unbindable)
     monkeypatch.setattr(protocol_translator.os, "execvpe", execvpe)
+    # The CLI's side of the fork restores signals Python ignores; not this test process's.
+    monkeypatch.setattr(protocol_translator.signal, "signal", lambda number, handler: None)
     monkeypatch.setattr(
         protocol_translator.os,
         "environ",
@@ -405,3 +407,133 @@ def test_an_idle_connection_is_closed_only_when_it_ended_or_spoke():
     assert model_passthrough._closed(left)
     left.close()
     assert model_passthrough._closed(None)
+
+
+def test_an_answer_that_breaks_off_ends_the_clis_answer_at_once(meter, provider):
+    def short(handler: BaseHTTPRequestHandler) -> None:
+        handler.send_response(200)
+        handler.send_header("content-type", "application/json")
+        handler.send_header("content-length", "100")
+        handler.end_headers()
+        handler.wfile.write(b'{"partial": "answ')
+        handler.wfile.flush()
+        handler.close_connection = True
+
+    provider.respond = short
+    connection = http.client.HTTPConnection("127.0.0.1", meter, timeout=10)
+    connection.request("POST", "/provider.example/v1/messages", body=_body())
+    response = connection.getresponse()
+    # Short at once, as from the provider itself -- not a wait until the timeout.
+    with pytest.raises(http.client.IncompleteRead):
+        response.read()
+
+
+def test_a_redirect_on_the_origins_path_leads_back_through_the_meter(meter, provider):
+    def moved(handler: BaseHTTPRequestHandler) -> None:
+        if handler.path != "/v1/messages":
+            provider.stream(handler)
+            return
+        handler.send_response(307)
+        handler.send_header("location", "/v2/messages")
+        handler.send_header("content-length", "0")
+        handler.end_headers()
+
+    provider.respond = moved
+    connection = http.client.HTTPConnection("127.0.0.1", meter)
+    response, _ = _post(connection, "/provider.example/v1/messages", _body())
+    assert response.status == 307
+    location = response.getheader("location")
+    assert location == "/provider.example/v2/messages"
+    response, body = _post(connection, location, _body())
+    assert response.status == 200 and body == _SSE
+    assert provider.requests[-1]["path"] == "/v2/messages"
+
+
+@pytest.mark.parametrize(
+    ("location", "expected"),
+    [
+        ("/v2/messages", "/provider.example/v2/messages"),
+        ("/", "/provider.example/"),
+        ("https://other.example/v1", "https://other.example/v1"),
+        ("//other.example/v1", "//other.example/v1"),
+        ("messages", "messages"),
+    ],
+)
+def test_only_a_location_on_the_origins_path_is_pointed_back(location, expected):
+    binding = PassthroughBinding(host="provider.example", port=443)
+    assert binding.client_location(location) == expected
+
+
+_BROKEN_SERVICE = """\
+import sys
+zipapp = sys.argv[1]
+sys.path.insert(0, zipapp)
+import cloud_agent_host.model_passthrough as passthrough
+import cloud_agent_host.protocol_translator as launcher
+
+def broken(self, sock, binding):
+    raise RuntimeError("no trust store")
+
+passthrough._PassthroughServer.__init__ = broken
+sys.exit(launcher.main(sys.argv[2:]))
+"""
+
+_PRINT_URL = "import os; print(os.environ['ANTHROPIC_BASE_URL'])"
+
+
+def _run_broken(tmp_path: Path, env: dict[str, str], *cli: str) -> subprocess.CompletedProcess[str]:
+    zipapp = tmp_path / "model-protocol-translator.pyz"
+    zipapp.write_bytes(helper_archive())
+    wrapper = tmp_path / "broken.py"
+    wrapper.write_text(_BROKEN_SERVICE)
+    return subprocess.run(
+        ["/usr/bin/python3", "-I", str(wrapper), str(zipapp), *cli],
+        env={"PATH": os.environ["PATH"], **env},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def test_a_meter_that_fails_after_the_fork_still_lets_the_cli_reach_its_provider(
+    tmp_path: Path,
+):
+    run = _run_broken(
+        tmp_path,
+        {
+            "AGENT_COMPAT_CLIENT": "passthrough",
+            "AGENT_COMPAT_UPSTREAM_URL": "https://provider.example",
+            "ANTHROPIC_BASE_URL": f"{ORIGIN_PLACEHOLDER}/provider.example/anthropic",
+        },
+        sys.executable,
+        "-c",
+        _PRINT_URL,
+    )
+    assert run.returncode == 0, run.stderr
+    assert run.stdout.strip() == "https://provider.example/anthropic"
+    assert "reaches its provider directly" in run.stderr
+
+
+def test_a_translator_that_fails_after_the_fork_stops_the_launch(tmp_path: Path):
+    script = tmp_path / "translated.py"
+    script.write_text(
+        "import sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "import cloud_agent_host.protocol_translator as launcher\n"
+        "def broken(sock):\n"
+        "    raise RuntimeError('no trust store')\n"
+        "try:\n"
+        "    launcher._start_service(broken)\n"
+        "except OSError:\n"
+        "    print('refused')\n"
+    )
+    zipapp = tmp_path / "model-protocol-translator.pyz"
+    zipapp.write_bytes(helper_archive())
+    run = subprocess.run(
+        ["/usr/bin/python3", "-I", str(script), str(zipapp)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    # Not an origin for a service that is not there: the CLI is never pointed at it.
+    assert run.stdout.strip() == "refused", run.stderr

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
-from cloud_agent_host.protocol_translator import PrefixMeter
+from cloud_agent_host.protocol_translator import MAX_PENDING_RECORDS, PrefixMeter, RecordWriter
 from cloud_agent_shared.request_prefix import (
     MAX_RECORD_BYTES,
     MAX_TOOL_ENTRIES,
@@ -125,6 +126,34 @@ def test_a_prefix_is_recorded_whole_once_then_repeated():
     # The conversation is not the prefix: a later request repeats it.
     assert again == {"fp": first["fp"], "repeat": True}
     assert other["fp"] != first["fp"] and "repeat" not in other
+
+
+def test_a_record_that_was_dropped_is_written_whole_next_time():
+    meter = PrefixMeter(mode="passthrough")
+    body = {"system": "s", "tools": [_TOOL], "messages": []}
+    written: list[bytes] = []
+    meter.report("anthropic_messages", body, lambda line: False)
+    for _ in range(2):
+        meter.report("anthropic_messages", body, lambda line: written.append(line) or True)
+    first, again = (read_record(_line(line)) for line in written)
+    # A repeat of a record the host never got would resolve to nothing.
+    assert "repeat" not in first and again == {"fp": first["fp"], "repeat": True}
+
+
+def test_a_record_never_waits_on_a_stderr_nobody_reads():
+    read_end, write_end = os.pipe()
+    writer = RecordWriter(write_end)
+    line = b"x" * 70_000 + b"\n"  # more than a pipe holds: the writer blocks on it
+    queued = [writer.put(line) for _ in range(MAX_PENDING_RECORDS + 3)]
+    # Every put returned at once; past the queue's bound, records were dropped.
+    assert queued[0] and not all(queued)
+    received = b""
+    while len(received) < len(line):
+        received += os.read(read_end, len(line) - len(received))
+    assert received == line
+    # The write end stays open: the writer thread still holds it, and a closed
+    # number could be reused by another test's file.
+    os.close(read_end)
 
 
 def test_a_record_line_round_trips_and_anything_else_is_refused():

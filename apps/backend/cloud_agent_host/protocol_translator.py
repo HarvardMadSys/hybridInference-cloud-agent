@@ -13,7 +13,7 @@ A host starts a member on a translated plan as::
 
 with the upstream and the member's token in the environment
 (``AGENT_COMPAT_*``, never argv). The launcher binds ``127.0.0.1`` on a free port, forks the
-service, then replaces itself with the CLI: the process the host spawned,
+service, waits until the service reports it is serving, then replaces itself with the CLI: the process the host spawned,
 recorded in its pidfile and reaped by UID, *is* the CLI, exactly as on a
 direct plan. Before the exec the loopback origin replaces
 ``ORIGIN_PLACEHOLDER`` in the CLI's argv and environment, the member's token
@@ -45,9 +45,11 @@ builds: it imports the standard library, that package and the request meter,
 and of the host only the passthrough.
 
 A passthrough launch (``AGENT_COMPAT_CLIENT=passthrough``) carries an origin
-and nothing secret. If its service cannot be started, the launcher still
-starts the CLI, pointed at that origin directly: a measurement must never be
-what stops a turn.
+and nothing secret. If its service cannot be started -- or never reports that
+it is serving -- the launcher still starts the CLI, pointed at that origin
+directly: a measurement must never be what stops a turn. For the same reason a
+record never waits on stderr: records go through a short queue to a writer
+thread of their own, and one that finds the queue full is dropped.
 """
 
 from __future__ import annotations
@@ -58,6 +60,7 @@ import hmac
 import http.client
 import json
 import os
+import queue
 import select
 import signal
 import socket
@@ -190,8 +193,21 @@ class PrefixMeter:
     def line(self, protocol: str, body: Any) -> bytes | None:
         """The line to write for one request ``body``, or None when it is not measured."""
         record = measure(protocol, body, mode=self.mode)
-        if record is None:
-            return None
+        return None if record is None else self._line(record)
+
+    def report(self, protocol: str, body: Any, emit: Callable[[bytes], bool]) -> None:
+        """Measure ``body`` and ``emit`` its line.
+
+        A line ``emit`` drops leaves its prefix unreported, so the next request
+        with that prefix writes the whole record again rather than a repeat the
+        host could not resolve.
+        """
+        record = measure(protocol, body, mode=self.mode)
+        if record is not None and not emit(self._line(record)):
+            with self._lock:
+                self._seen.discard(record["fp"])
+
+    def _line(self, record: dict[str, Any]) -> bytes:
         with self._lock:
             if record["fp"] in self._seen:
                 return record_line({"v": RECORD_VERSION, "fp": record["fp"], "repeat": True})
@@ -201,23 +217,53 @@ class PrefixMeter:
         return record_line(record)
 
 
-_RECORD_LOCK = threading.Lock()
+#: Records waiting for stderr. A CLI whose stderr is not being read fills the
+#: pipe; past this many, a record is dropped rather than waited for.
+MAX_PENDING_RECORDS = 64
 
 
-def emit_record(line: bytes) -> None:
-    """Write one request-prefix record on stderr, whole, or not at all.
+class RecordWriter:
+    """Records written on one descriptor from a thread of their own.
 
-    One ``write`` per piece under a lock, so two of the service's own threads
-    never interleave; a full or closed stderr loses the record, never the
-    request it describes.
+    A request's thread only queues its record: a blocked descriptor -- a full
+    pipe nobody is reading -- stalls this writer, never a model request. The
+    thread starts with the first record, in the service process, after the fork.
     """
-    with _RECORD_LOCK:
-        view = memoryview(line)
+
+    def __init__(self, fd: int = 2) -> None:
+        self._fd = fd
+        self._queue: queue.Queue[bytes] = queue.Queue(MAX_PENDING_RECORDS)
+        self._start = threading.Lock()
+        self._started = False
+
+    def put(self, line: bytes) -> bool:
+        """Queue ``line``; False when it was dropped instead."""
+        with self._start:
+            if not self._started:
+                threading.Thread(target=self._run, name="prefix-records", daemon=True).start()
+                self._started = True
         try:
-            while view:
-                view = view[os.write(2, view) :]
-        except OSError:
-            return
+            self._queue.put_nowait(line)
+        except queue.Full:
+            return False
+        return True
+
+    def _run(self) -> None:
+        while True:
+            view = memoryview(self._queue.get())
+            try:
+                while view:
+                    view = view[os.write(self._fd, view) :]
+            except OSError:
+                continue  # A closed stderr: the record is lost, never a request.
+
+
+_RECORDS = RecordWriter()
+
+
+def emit_record(line: bytes) -> bool:
+    """Queue one request-prefix record for stderr; False when it was dropped."""
+    return _RECORDS.put(line)
 
 
 class _ClientGone(Exception):
@@ -351,12 +397,10 @@ class _Handler(BaseHTTPRequestHandler):
     def _measure(self, body: Any) -> None:
         """Record what the CLI's request sends ahead of the conversation; never fail it."""
         try:
-            line = self.server.meter.line(self.server.binding.client, body)
+            self.server.meter.report(self.server.binding.client, body, emit_record)
         except Exception:
             # A measurement is diagnostic: the request is translated regardless.
             return
-        if line is not None:
-            emit_record(line)
 
     # -- upstream --------------------------------------------------------------
 
@@ -553,30 +597,68 @@ def _die_with(parent: int) -> None:
     threading.Thread(target=watch, name="parent-watch", daemon=True).start()
 
 
-def _serve_child(sock: socket.socket, serve: Callable[[], None], parent: int) -> NoReturn:
-    """The forked service: detached from the CLI's stdio, gone when it is."""
-    null = os.open(os.devnull, os.O_RDWR)
-    os.dup2(null, 0)
-    os.dup2(null, 1)
-    _die_with(parent)
+#: How long the launcher waits for its service to report that it is serving.
+READY_TIMEOUT_S = 10.0
+_READY = b"r"
+
+
+def _serve_child(
+    sock: socket.socket,
+    make: Callable[[socket.socket], ThreadingHTTPServer],
+    parent: int,
+    ready: int,
+) -> NoReturn:
+    """The forked service: detached from the CLI's stdio, gone when it is.
+
+    It reports on ``ready`` once its server exists; a service that fails
+    before then just exits, and the launcher sees the pipe close unreported.
+    """
     try:
-        serve()
+        null = os.open(os.devnull, os.O_RDWR)
+        os.dup2(null, 0)
+        os.dup2(null, 1)
+        _die_with(parent)
+        server = make(sock)
+        os.write(ready, _READY)
+        os.close(ready)
+        server.serve_forever()
+    except BaseException:
+        _log("the loopback service stopped")
     finally:
         os._exit(0)
 
 
-def _start_service(serve: Callable[[socket.socket], None]) -> str:
-    """Bind the loopback socket, fork ``serve`` onto it; the origin the CLI is told."""
+def _start_service(make: Callable[[socket.socket], ThreadingHTTPServer]) -> str:
+    """Bind the loopback socket and fork the server ``make`` builds onto it.
+
+    Returns the origin the CLI is told, once the service has reported that it
+    is serving; raises OSError when it cannot start or does not report in time.
+    """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    read_end, write_end = os.pipe()
     try:
         sock.bind(("127.0.0.1", 0))
         sock.listen(128)
         origin = f"http://127.0.0.1:{sock.getsockname()[1]}"
         parent = os.getpid()
-        if os.fork() == 0:
-            _serve_child(sock, lambda: serve(sock), parent)
+        child = os.fork()
+        if child == 0:
+            os.close(read_end)
+            _serve_child(sock, make, parent, write_end)
+        os.close(write_end)
+        write_end = -1
+        readable, _, _ = select.select([read_end], [], [], READY_TIMEOUT_S)
+        if not readable or os.read(read_end, 1) != _READY:
+            with contextlib.suppress(OSError):
+                os.kill(child, signal.SIGKILL)
+            with contextlib.suppress(OSError):
+                os.waitpid(child, 0)
+            raise OSError("the loopback service did not start")
     finally:
         sock.close()
+        for end in (read_end, write_end):
+            if end >= 0:
+                os.close(end)
     return origin
 
 
@@ -605,7 +687,7 @@ def _launch_passthrough(argv: list[str], env: dict[str, str]) -> NoReturn:
     binding = model_passthrough.PassthroughBinding.from_launch(env)
     marked = f"{ORIGIN_PLACEHOLDER}/{binding.authority}"
     try:
-        origin = _start_service(lambda sock: model_passthrough.serve(sock, binding))
+        origin = _start_service(lambda sock: model_passthrough.server(sock, binding))
     except OSError:
         _log("the request meter could not start; the CLI reaches its provider directly")
         _exec_cli(argv, env, {marked: f"https://{binding.authority}"})
@@ -620,7 +702,10 @@ def launch(argv: list[str]) -> NoReturn:
     if env.get(ENV_CLIENT) == PASSTHROUGH:
         _launch_passthrough(argv, env)
     binding = Binding.from_launch(env, argv)
-    origin = _start_service(lambda sock: _Server(sock, binding).serve_forever())
+    try:
+        origin = _start_service(lambda sock: _Server(sock, binding))
+    except OSError:
+        raise LaunchError("the member's loopback service could not start") from None
     _exec_cli(argv, env, {ORIGIN_PLACEHOLDER: origin, TOKEN_PLACEHOLDER: binding.token})
 
 
@@ -642,6 +727,7 @@ __all__ = [
     "Binding",
     "LaunchError",
     "PrefixMeter",
+    "RecordWriter",
     "emit_record",
     "launch",
     "main",

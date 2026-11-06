@@ -36,9 +36,11 @@ passthrough 的要点：
 - **绑定一个上游 origin。** launcher 只拿到 `https://<authority>`，没有 key、token 或 model。CLI 的 URL 改成 `http://127.0.0.1:<port>/<authority><原路径>`；服务只接受这个前缀下的路径，把剩下的部分转发到 origin。
 - **主机名留在 URL 里。** pi 这类 CLI 会用 URL 文本识别厂商（比如 `deepseek.com`），所以 authority 要出现在 CLI 看到的 URL 里，这样识别结果不变。
 - **原样转发。** 请求和响应都原样传递，只处理逐跳头、`Host` 和 body 的分帧（chunked 请求会改成带 Content-Length 转发；没有长度的响应改成 chunked 回传）。厂商的错误连同错误体原样交给 CLI，因为 CLI 要靠它们决定重试和压缩。
+- **响应断在半路，就让 CLI 立刻看到。** 厂商声明了长度却没发完就断开时，服务立即关闭和 CLI 的连接，CLI 会像直连时一样报错并重试，而不是一直等到超时。
+- **重定向。** 3xx 交给 CLI 自己处理。`Location` 如果是 origin 上的路径（如 `/v2/messages`），会补回 `/<authority>` 前缀，否则 CLI 会把它解析到 loopback 的根路径，结果变成 404。完整 URL 和相对引用原样传递。
 - **复用上游连接。** 每个 CLI 连接保持自己的一条上游连接，和 CLI 直连时一样。空闲期间被厂商关掉的连接，会在使用前检测出来并换新。
 - **先转发，后测量。** 请求体发出去以后才解析测量，正好和厂商处理请求的时间重叠。解析失败或 body 太大（> 16 MiB）就不测，但照常转发。
-- **启动失败不挡 turn。** 服务起不来（比如 bind 失败）时，launcher 把占位符换回原始 URL，让 CLI 直接连厂商。
+- **启动失败不挡 turn。** fork 出的服务建好 server 后，通过一个管道告诉 launcher「已就绪」，launcher 收到后才把 CLI 指向 loopback。服务起不来（bind 失败、子进程初始化失败、10 秒内没报就绪）时，launcher 把占位符换回原始 URL，让 CLI 直接连厂商。翻译模式没法直连，这种情况下启动直接报错，CLI 不会被指向一个不存在的端口。等待就绪大约多花十几毫秒（加载系统信任库的时间）。
 
 ### 哪些直连不计量
 
@@ -57,6 +59,8 @@ Claude Code 连 `api.anthropic.com` 时不计量。Claude Code 会按 base URL �
 - 前缀指纹：对 system 和 tools 原值做 sha256。
 
 同一个服务进程里，某个指纹第一次出现时写完整记录，之后只写一行「重复」（`{"fp", "repeat": true}`）。
+
+写 stderr 不能卡住请求：请求线程只把记录放进一个有界队列（64 条），由单独的线程写出。队列满（比如 stderr 管道没人读）时丢掉这条记录，计量器同时忘掉这个指纹，下次再遇到时重新写完整记录，免得 host 收到一条无法还原的「重复」。
 
 ### 怎么报出来
 
