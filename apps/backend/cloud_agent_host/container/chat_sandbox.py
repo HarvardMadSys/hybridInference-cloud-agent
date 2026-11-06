@@ -99,7 +99,6 @@ from cloud_agent_host.container.exact_container import ExactContainer
 from cloud_agent_host.container.guest_root_exec import GuestRootExec
 from cloud_agent_host.container.sandbox import ContainerBackend, SandboxError, TerminalProcess
 from cloud_agent_host.network.chat_sandbox_network import (
-    _GUEST_NETWORK_CHECK as _GUEST_NETWORK_CHECK,
     CHAT_BOOTSTRAP_NETWORK as CHAT_BOOTSTRAP_NETWORK,
     CHAT_NETWORK_BRIDGE_OPTION as CHAT_NETWORK_BRIDGE_OPTION,
     CHAT_NETWORK_PREFIX as CHAT_NETWORK_PREFIX,
