@@ -35,7 +35,6 @@ class McpConnectionRepository(Protocol):
         auth_kind: str,
         auth_config: dict[str, Any],
         template: str | None = None,
-        connector_id: int | None = None,
         account_label: str | None = None,
         request_timeout_s: float | None = None,
         reuse_pending: bool = False,
@@ -548,10 +547,6 @@ class McpConnectionRepository(Protocol):
         record removed rather than left for the reaper to find. Returned rather
         than counted so the caller can close the transports it still holds.
         """
-        ...
-
-    async def list_mcp_connectors(self, *, user_id: str) -> list[dict[str, Any]]:
-        """Every connector this user registered."""
         ...
 
     async def expire_mcp_invocation(self, *, invocation_id: int) -> bool:

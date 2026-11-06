@@ -251,9 +251,9 @@ services:
       AGENT_MCP_GITHUB_CLIENT_SECRET: ${AGENT_MCP_GITHUB_CLIENT_SECRET:-}
 
       # Both widen what a user-added MCP connection may dial, and both are off
-      # by default. Private space is reachable only through a user connector;
-      # plain HTTP would put the credential on the wire in the clear. They are
-      # separate variables because they are separate risks.
+      # by default. A private address may be this service itself; plain HTTP
+      # would put the credential on the wire in the clear. They are separate
+      # variables because they are separate risks.
       AGENT_MCP_ALLOW_PRIVATE_TARGETS: ${AGENT_MCP_ALLOW_PRIVATE_TARGETS:-}
       AGENT_MCP_ALLOW_PLAIN_HTTP: ${AGENT_MCP_ALLOW_PLAIN_HTTP:-}
       # Owners' own model connections, the only inference source. On unless

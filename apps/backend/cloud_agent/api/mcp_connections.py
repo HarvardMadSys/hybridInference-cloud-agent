@@ -23,7 +23,7 @@ somebody else made.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
@@ -67,10 +67,10 @@ from cloud_agent.mcp import (
     oauth_authorization,
     sandbox_servers as sandbox,
 )
-from cloud_agent.mcp.errors import McpConnectionCreateConflict, McpCredentialWriteRejected
+from cloud_agent.mcp.errors import McpCredentialWriteRejected
 from cloud_agent.mcp.host import HostError, McpHost, SessionKey
 from cloud_agent.mcp.http_body import IDENTITY_ENCODING_HEADERS
-from cloud_agent.mcp.launch import LaunchPlanError, ManagedLaunchPolicy, build_launch_plan
+from cloud_agent.mcp.launch import LaunchPlanError, build_launch_plan
 from cloud_agent.mcp.models import (
     AuthKind,
     Capability,
@@ -81,7 +81,6 @@ from cloud_agent.mcp.models import (
     HeaderAuth,
     InvocationStatus,
     LaunchSpec,
-    Mount,
     Transport,
 )
 from cloud_agent.mcp.net_policy import (
@@ -257,7 +256,6 @@ class ConnectionView(BaseModel):
     error_kind: str = ConnectionErrorKind.NONE.value
     error_detail: str | None = None
     account_label: str | None = None
-    connector_id: int | None = None
     has_credential: bool = False
     secret_hint: str | None = None
     expires_at: datetime | None = None
@@ -295,7 +293,6 @@ class CreateConnectionRequest(BaseModel):
     launch: dict[str, Any] | None = None
     auth_kind: str = AuthKind.NONE.value
     template: str | None = None
-    connector_id: int | None = None
     #: Seconds one call to this server may take. Omitted means the relay's
     #: default, which is what every connection had before this was a choice.
     request_timeout_s: float | None = Field(default=None, ge=5, le=900)
@@ -316,8 +313,8 @@ class ImportRequest(BaseModel):
     text: str = Field(min_length=1)
     format_hint: str | None = None
     save: bool = False
-    #: Per-draft overrides, keyed by the draft's label: the run location the
-    #: user chose after seeing what the configuration implied.
+    #: Per-draft locations, keyed by the draft's label, as its preview placed
+    #: it. Only one location fits a draft's shape; any other is refused.
     locations: dict[str, str] = Field(default_factory=dict)
     env_secrets: dict[str, str] = Field(default_factory=dict)
     #: Missing values belong to a server, even when several use the same key.
@@ -500,7 +497,6 @@ async def _view(store: _McpConnectionsStorage, row: Mapping[str, Any]) -> Connec
         error_kind=connection.error_kind.value,
         error_detail=connection.error_detail,
         account_label=row.get("account_label"),
-        connector_id=int(row["connector_id"]) if row.get("connector_id") else None,
         # The credential the server is sent. A stored OAuth client secret is
         # not one: until a sign-in completes there is nothing to send.
         has_credential=bool(row.get("access_token_ciphertext")),
@@ -591,19 +587,6 @@ async def create_connection(
         # column means "which preset this came from", and a value that names
         # nothing makes the provenance unreadable.
         raise _bad_request(f"unknown template: {template!r}")
-    if body.connector_id is not None:
-        # A connection may name only its owner's connector: another user's
-        # answers 404, as a missing one does, and nothing is stored.
-        await _require_connector(job_store, connector_id=body.connector_id, user_id=user["user_id"])
-
-    if body.connector_id is not None:
-        if location is not ExecutionLocation.USER_CONNECTOR:
-            raise _bad_request("connector_id is only valid when location is 'user-connector'")
-        connector = await _require_connector(
-            job_store, connector_id=body.connector_id, user_id=user["user_id"]
-        )
-        if str(connector.get("status")) == "revoked":
-            raise _conflict("that connector has been revoked")
 
     # Encrypt before the insert. A missing key used to commit the row and then
     # return 503, and the next attempt inserted another credential-less row.
@@ -630,7 +613,6 @@ async def create_connection(
             auth_kind=auth_kind.value,
             auth_config=auth_config,
             template=template,
-            connector_id=body.connector_id,
             account_label=body.account_label,
             request_timeout_s=body.request_timeout_s,
             reuse_pending=not body.secret and not body.env_secrets,
@@ -638,8 +620,6 @@ async def create_connection(
             auth_config_patch=auth_config_patch,
             sealed_launch_spec=sealed_launch_spec,
         )
-    except McpConnectionCreateConflict as exc:
-        raise _conflict(str(exc)) from exc
     except McpCredentialWriteRejected as exc:
         raise _conflict("the credential could not be stored with this connection") from exc
     logger.info(
@@ -1646,12 +1626,11 @@ def _validate_target(
     location: ExecutionLocation,
     url: str | None,
     launch: Mapping[str, Any] | None,
-    mounts: Sequence[Mount] = (),
 ) -> tuple[str | None, dict[str, Any] | None]:
     """Check a connection's target and return its storable form.
 
-    ``mounts`` are the ones the platform derived and the owner was shown; a
-    submitted launch document's own ``mounts`` are never read.
+    A submitted launch document's own ``mounts`` are never read: the sandbox
+    takes none.
     """
     if location is ExecutionLocation.REMOTE:
         if transport is Transport.STDIO:
@@ -1674,11 +1653,8 @@ def _validate_target(
             args=tuple(str(arg) for arg in launch.get("args") or ()),
             env={str(k): str(v) for k, v in (launch.get("env") or {}).items()},
             cwd=str(launch["cwd"]) if launch.get("cwd") else None,
-            mounts=tuple(mounts),
         )
-        plan = build_launch_plan(
-            spec, connection_id="draft", location=location, policy=ManagedLaunchPolicy()
-        )
+        build_launch_plan(spec, connection_id="draft", location=location)
     except LaunchPlanError as exc:
         raise _bad_request(str(exc)) from exc
     rendered: dict[str, Any] = {
@@ -1686,10 +1662,7 @@ def _validate_target(
         "args": list(spec.args),
         "env": dict(spec.env),
         "cwd": spec.cwd,
-        "mounts": [
-            {"source": mount.source, "target": mount.target, "read_only": mount.read_only}
-            for mount in plan.mounts
-        ],
+        "mounts": [],
     }
     return None, rendered
 
@@ -1823,17 +1796,13 @@ def _prepare_import_draft(
             "cwd": draft.launch.cwd,
         }
     # The checks create applies, and only the form they render is stored: the
-    # run location must fit the transport, an address must pass the egress
-    # policy and a command must build a launch plan. The local paths a command
-    # names become a managed worker's mounts under that plan's mount rules.
+    # location must fit the transport, an address must pass the egress policy
+    # and a command must pass the sandbox's launch plan.
     url, launch_spec = _validate_target(
         transport=draft.transport,
         location=parsed_location,
         url=draft.url,
         launch=launch_spec,
-        mounts=config_import.mounts_for(draft.paths)
-        if parsed_location is ExecutionLocation.MANAGED_WORKER
-        else (),
     )
     auth_config: dict[str, Any] = {}
     if draft.auth_kind is AuthKind.STATIC and draft.secrets:
@@ -1913,23 +1882,6 @@ def _header_of(row: Mapping[str, Any]) -> str:
     config = row.get("auth_config")
     settings = config if isinstance(config, Mapping) else {}
     return str(settings.get("header_name") or "Authorization")
-
-
-async def _require_connector(
-    store: _McpConnectionsStorage, *, connector_id: int, user_id: str
-) -> dict[str, Any]:
-    """Fetch one of this user's connectors, or refuse."""
-    row = next(
-        (
-            item
-            for item in await store.mcp.list_mcp_connectors(user_id=user_id)
-            if int(item["id"]) == connector_id
-        ),
-        None,
-    )
-    if row is None:
-        raise _not_found("no such connector")
-    return row
 
 
 def _no_encryption_key() -> HTTPException:

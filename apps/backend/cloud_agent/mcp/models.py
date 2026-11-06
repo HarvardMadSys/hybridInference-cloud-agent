@@ -49,14 +49,10 @@ class Transport(StrEnum):
 
 
 class ExecutionLocation(StrEnum):
-    """Where a stdio server actually runs."""
+    """Where a server runs: decided by what was added, never chosen."""
 
     #: An HTTP endpoint reached directly. Only valid with an HTTP transport.
     REMOTE = "remote"
-    #: A platform-managed, isolated worker. Dependencies are pinned at install.
-    MANAGED_WORKER = "managed-worker"
-    #: A connector the user runs on their own machine or private network.
-    USER_CONNECTOR = "user-connector"
     #: Inside the task's own sandbox, next to the agent, behind the sandbox's
     #: MCP gateway: it sees the task's ``localhost``, files and browser. Pinned
     #: packages only, and no secrets (cloud_agent_shared.sandbox_mcp).
@@ -103,7 +99,7 @@ class ConnectionErrorKind(StrEnum):
     NEEDS_AUTHORIZATION = "needs_authorization"
     #: OAuth discovery found no way for us to register a client.
     CLIENT_REGISTRATION_REQUIRED = "client_registration_required"
-    #: The process or connector would not start.
+    #: The process would not start.
     LAUNCH_FAILED = "launch_failed"
     #: The server does not speak a protocol version we implement.
     PROTOCOL_INCOMPATIBLE = "protocol_incompatible"
@@ -144,15 +140,6 @@ class CapabilityKind(StrEnum):
     RESOURCE = "resource"
     RESOURCE_TEMPLATE = "resource_template"
     PROMPT = "prompt"
-
-
-class ConnectorStatus(StrEnum):
-    """Whether a user-run connector is currently reachable."""
-
-    PENDING = "pending"
-    ONLINE = "online"
-    OFFLINE = "offline"
-    REVOKED = "revoked"
 
 
 #: The characters an alias may contain. It becomes a URL path segment on the
@@ -258,7 +245,11 @@ class AuthProfile:
 
 @dataclass(frozen=True)
 class Mount:
-    """One read-only resource a managed stdio worker may see."""
+    """A path a stored launch asks to be given.
+
+    Only the never-shipped managed worker would have honoured one. A row
+    saved for it keeps its mounts, and the sandbox refuses a launch with any.
+    """
 
     source: str
     target: str
@@ -271,14 +262,16 @@ class LaunchSpec:
 
     ``argv`` is executed directly, never through a shell, so a package name
     containing ``;`` is a package name. ``env`` carries *references* to secrets
-    (``secret://NAME``), not values: the worker resolves them into its own
-    environment at start, which is what keeps another connection's secret and
+    (``secret://NAME``), not values: they are opened only for the claim that
+    starts the server, which is what keeps another connection's secret and
     the control plane's own credentials out of reach.
     """
 
     command: str
     args: tuple[str, ...] = ()
     env: Mapping[str, str] = field(default_factory=dict)
+    #: As stored. The sandbox runs a server in the workspace and refuses a
+    #: launch that names either.
     cwd: str | None = None
     mounts: tuple[Mount, ...] = ()
     #: The resolved package and version, once a dependency plan exists.
@@ -326,7 +319,7 @@ class ConnectionConfig:
                 raise ValueError("a remote connection needs a URL")
         else:
             if self.transport is not Transport.STDIO:
-                raise ValueError("a managed, connector or sandbox location is only valid for stdio")
+                raise ValueError("a sandbox location is only valid for stdio")
             if self.launch is None:
                 raise ValueError("a stdio connection needs a launch spec")
 
@@ -352,8 +345,6 @@ class McpConnection:
     enabled: bool = True
     error_kind: ConnectionErrorKind = ConnectionErrorKind.NONE
     error_detail: str | None = None
-    #: The connector a ``user-connector`` connection routes through.
-    connector_id: str | None = None
     config_revision: int = 1
     authorization_epoch: int = 1
     oauth_generation: int = 0
@@ -392,8 +383,7 @@ class McpConnection:
 class McpCredential:
     """The stored secret material for one connection.
 
-    Absent for ``none`` and for a connector-local secret: in both cases there
-    is nothing on the platform to hold. ``expires_at`` is ``None`` when the
+    Absent for ``none``: there is nothing on the platform to hold. ``expires_at`` is ``None`` when the
     issuer gave no expiry, which reads as "live until refused" rather than
     "never expires".
     """
@@ -607,26 +597,6 @@ class Invocation:
 
 
 @dataclass(frozen=True)
-class Connector:
-    """A user-run connector that can serve their stdio and private MCP.
-
-    The platform never asks a connector for a shell or a raw socket: it asks
-    for one named connection's MCP operations, and the connector decides
-    whether that connection is one it was authorized for.
-    """
-
-    connector_id: str
-    user_id: str
-    name: str
-    status: ConnectorStatus = ConnectorStatus.PENDING
-    connection_ids: tuple[str, ...] = ()
-    mounts: tuple[str, ...] = ()
-    created_at: datetime | None = None
-    last_seen_at: datetime | None = None
-    revoked_at: datetime | None = None
-
-
-@dataclass(frozen=True)
 class McpServer:
     """A fully resolved server a job may reach through the relay.
 
@@ -654,7 +624,6 @@ class McpServer:
     #: Where a stdio server runs, for the relay's routing decision.
     location: ExecutionLocation = ExecutionLocation.REMOTE
     launch: LaunchSpec | None = None
-    connector_id: str | None = None
 
     def public(self) -> dict[str, Any]:
         """Render what a job owner may see: never the URL or the headers."""
@@ -700,8 +669,6 @@ __all__ = [
     "ConnectionConfig",
     "ConnectionErrorKind",
     "ConnectionStatus",
-    "Connector",
-    "ConnectorStatus",
     "ExecutionLocation",
     "HeaderAuth",
     "Invocation",

@@ -103,12 +103,12 @@ describe('mcp api', () => {
     );
   });
 
-  it('saves the same paste with the run locations the user chose', async () => {
+  it('saves the same paste with the locations its preview placed', async () => {
     fetchWithAuth.mockResolvedValue(
       jsonResponse({ drafts: [], saved: [], rejected: [], dialect: 'json' }),
     );
 
-    await saveMcpImport('paste', { files: 'managed-worker' }, { TOKEN: 'secret' });
+    await saveMcpImport('paste', { files: 'sandbox' }, { TOKEN: 'secret' });
 
     expect(fetchWithAuth).toHaveBeenCalledWith(
       expect.any(String),
@@ -120,7 +120,7 @@ describe('mcp api', () => {
           text: 'paste',
           format_hint: undefined,
           save: true,
-          locations: { files: 'managed-worker' },
+          locations: { files: 'sandbox' },
           env_secrets: { TOKEN: 'secret' },
         }),
       },
@@ -133,7 +133,7 @@ describe('mcp api', () => {
     await createMcpConnection({
       label: 'Wiki',
       transport: 'stdio',
-      location: 'managed-worker',
+      location: 'sandbox',
       launch: { command: 'npx', args: ['-y', 'server'], env: {}, cwd: null },
       auth_kind: 'none',
     });
@@ -144,7 +144,7 @@ describe('mcp api', () => {
       body: JSON.stringify({
         label: 'Wiki',
         transport: 'stdio',
-        location: 'managed-worker',
+        location: 'sandbox',
         launch: { command: 'npx', args: ['-y', 'server'], env: {}, cwd: null },
         auth_kind: 'none',
       }),

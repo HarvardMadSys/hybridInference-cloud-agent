@@ -231,7 +231,7 @@ def _validate_authorization_endpoint(endpoint: str) -> None:
 
     This endpoint is navigated by the browser, rather than dialled through the
     server's egress checks. It can live on another origin, but must not inherit
-    an insecure connector policy or contain browser/Python parsing ambiguities.
+    an insecure egress policy or contain browser/Python parsing ambiguities.
     """
     try:
         if any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in endpoint):

@@ -11071,17 +11071,6 @@
             "title": "Config Revision",
             "type": "integer"
           },
-          "connector_id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Connector Id"
-          },
           "created_at": {
             "anyOf": [
               {
@@ -12743,17 +12732,6 @@
             "default": "none",
             "title": "Auth Kind",
             "type": "string"
-          },
-          "connector_id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Connector Id"
           },
           "env_secrets": {
             "additionalProperties": {

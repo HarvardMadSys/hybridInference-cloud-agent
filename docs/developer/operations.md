@@ -1052,14 +1052,17 @@ the pinned CLI. It skips when those prerequisites are absent and belongs to the
 external tier. Run it deliberately after changes to the merged endpoint, host,
 or bridge; it crosses seams the per-layer suites do not.
 
-### Connector configuration
+### Where a connection runs
 
-No connector runtime ships, and the routes that registered, bound and revoked a
-user's machine are retired. A `user-connector` connection can still name a
-connector registered before then, and is refused at use. Deleting the
-connection removes its link to that connector, and the connector's authorization
-for it, in the same transaction. Managed-worker connections likewise require an
-available worker. Configuration support does not establish execution support.
+What the owner added decides where it runs: an address is a `remote` service
+behind this relay, and a command is a `sandbox` program
+([sandbox MCP servers](#sandbox-mcp-servers)). Nothing else runs one: there is
+no connector on the owner's machine and no managed worker, and the API refuses
+both locations. `0115_mcp_retire_dead_locations` moved every connection stored
+at `managed-worker` or `user-connector` to `sandbox`, with its command as
+stored ([upgrade notes](upgrade-notes.md#mcp-servers-run-in-two-places)). The
+connector tables and `agent_mcp_connections.connector_id` are unused, and a
+later migration drops them.
 
 ### Deployment and rollback
 
@@ -1102,7 +1105,7 @@ There is no feature switch or preview tier. Rollbacks must retain a schema-compa
 service and leave the migrated connection and binding data in place; fix forward
 when a schema downgrade would discard those records.
 
-MCP and connectors are independent of the owner's model connection. Credential
+MCP is independent of the owner's model connection. Credential
 rotation uses the existing `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY`; domain
 separation prevents source-control and MCP ciphertext from being read as each
 other.

@@ -78,7 +78,6 @@ def _connection(connection_id: int, label: str, **overrides: Any) -> dict[str, A
         "launch_spec": None,
         "auth_kind": "static",
         "auth_config": {"header_name": "Authorization", "scheme": "Bearer"},
-        "connector_id": None,
         "status": "active",
         "error_kind": "none",
         "error_detail": None,
@@ -686,8 +685,8 @@ class TestRoutingACall:
     ) -> None:
         """The refresh before a call uses the policy authorization and Test use.
 
-        This deployment admits private plain-HTTP targets, as one with a
-        connector bridge on its own network does. A refresh that fell back to
+        This deployment admits private plain-HTTP targets, as one whose MCP
+        servers live on its own network does. A refresh that fell back to
         the default policy would refuse that token endpoint only when a job
         asked, and the connection would read as needing reconnection mid-job
         while Test, which refreshes under the deployment's policy, kept
@@ -1073,7 +1072,7 @@ def real_host(monkeypatch: pytest.MonkeyPatch) -> FakeUpstream:
     Two things are arranged rather than mocked away. The connection's URL is an
     https loopback literal, so the egress check keeps its default scheme rule
     and needs no resolver; only the private-address rule is widened, the way a
-    deployment with a private connector bridge widens it. The transport is then
+    deployment with MCP servers on a private network widens it. The transport is then
     mocked, so everything above it -- version negotiation, ``tools/list``, the
     call itself, the result rendering -- is the code that runs in production.
     """
