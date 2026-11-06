@@ -10,17 +10,22 @@ reproduced and fails the test outright.
 
 from __future__ import annotations
 
+import contextlib
 import threading
+from types import SimpleNamespace
 
 import pytest
 from tests.support.archive_policy import hooked_supervisor
 from tests.unit.test_shared_session_supervisor import (
     SessionBusy,
+    SessionLeaseLost,
     SharedChatSessionSupervisor,
     _Manager,
     _members,
     _spec,
 )
+
+from cloud_agent_shared.environment import BoundEnvironment
 
 _WAIT_S = 5.0
 
@@ -54,6 +59,14 @@ class _RaceManager(_Manager):
             self.inspect_entered.set()
             assert self.inspect_release.wait(timeout=_WAIT_S)
         return super().inspect(container_name)
+
+
+class _ThawingManager(_Manager):
+    """Accept the preparation thaw's census option the core fake does not take."""
+
+    def thaw_shared_writers(self, spec, *, require_exact_census: bool = True, **kwargs):
+        del require_exact_census
+        return super().thaw_shared_writers(spec, **kwargs)
 
 
 def _supervisor(manager: _Manager, archives: str) -> SharedChatSessionSupervisor:
@@ -244,4 +257,71 @@ def test_a_group_found_running_is_never_labelled_at_or_below_its_sealed_checkpoi
         raise InvariantBroken(
             f"a running group was labelled {running_label}, at or below the "
             f"sealed checkpoint fence {group.sealed_seq}"
+        )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=InvariantBroken,
+    reason=(
+        "A2 follow-up: a turn's environment preparation (activation_owner, no fence: "
+        "_SAME_RUN) starts a STOPPED container in ensure_running before it checks its "
+        "lease; start_group skips _begin_run_locked for _SAME_RUN, so the new run keeps "
+        "the label the stop's checkpoint already carries"
+    ),
+)
+def test_a_stopped_group_is_never_started_again_under_its_checkpointed_label() -> None:
+    """A run started after a stop never carries the label that stop's checkpoint names.
+
+    The attempt acquired under fence 4. The control plane takes it for
+    orphaned and stops the group (``reason="orphaned_attempt"``): the stop
+    clears the lease and its checkpoint names 4, which covers the group while
+    nothing fences again (``COVERED_GROUP_SQL``: ``c.start_seq = g.start_seq``).
+    The attempt's runner, late, asks to prepare its environment: it sends its
+    lease as ``activation_owner`` and no fence header (``shared_live_attempt``
+    ``_prepare_environment``), so ``start_seq`` is ``_SAME_RUN``
+    (``group_environment.prepare_environment``). ``ensure_running`` starts the
+    stopped container before the lease is checked, and ``start_group`` begins
+    no run, so the restarted container still carries label 4.
+    """
+    manager = _ThawingManager()
+    labels: list[int | None] = []
+    supervisor = hooked_supervisor(
+        manager,
+        stopped=lambda _spec, *_args, start_seq: labels.append(start_seq),
+    )
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+        start_seq=4,
+    )
+    assert supervisor.stop_if_idle("athr_source", generation=1, reason="orphaned_attempt")
+    assert labels == [4]
+    name = _spec().container_name
+    assert manager.items[name].running is False
+
+    not_ready = {"binding_id": "bound", "container_id": "container-shared", "ready": False}
+    scripts_run: list[str] = []
+    preparer = SimpleNamespace(
+        status=lambda _backend, _binding_id: not_ready,
+        prepare=lambda _backend, environment, cancel: (
+            scripts_run.append(environment.setup_script) or {"ready": True}
+        ),
+    )
+    environment = BoundEnvironment(binding_id="bound", setup_script="install")
+    with contextlib.suppress(SessionLeaseLost):
+        supervisor.prepare_environment(
+            "athr_source", environment, preparer, activation_owner=lease.token
+        )
+
+    label = supervisor.start_seq_for("asbx_shared")
+    if manager.items[name].running and label in labels:
+        raise InvariantBroken(
+            f"the stopped group was started again under label {label}, which its "
+            f"last stop's checkpoint already names; scripts run for the stale "
+            f"activation: {scripts_run}"
         )
