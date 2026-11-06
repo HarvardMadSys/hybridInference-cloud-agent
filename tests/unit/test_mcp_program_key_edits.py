@@ -256,6 +256,43 @@ def test_a_different_runner_is_a_different_program() -> None:
 
 
 @pytest.mark.parametrize(
+    "args",
+    [
+        # npx installs the package and runs another command with it.
+        ["-y", "--package", "@scope/search-mcp@1.0.0", "--call", "node other-program.js"],
+        # The same package, given another argument after it.
+        ["-y", "@scope/search-mcp@1.0.0", "--script", "other.js"],
+        # A runner option before the package.
+        ["-y", "--prefer-online", "@scope/search-mcp@1.0.0"],
+    ],
+    ids=["npx-call", "trailing-argument", "runner-option"],
+)
+def test_changing_any_argument_but_the_release_is_a_different_program(args: list[str]) -> None:
+    """Options and arguments can change what runs, so only the release may change."""
+    store = FakeStore()
+    with _client(store) as client:
+        connection = _create(client)
+        refused = _patch(client, connection, launch={**_LAUNCH, "args": args})
+
+    assert refused.status_code == 400, refused.text
+    assert _message(refused).startswith("this edit runs a different program")
+    assert _stored_keys(store, connection["id"]) == {"API_KEY": _KEY}
+
+
+def test_a_new_release_keeps_the_keys_with_every_other_argument_unchanged() -> None:
+    launch = {**_LAUNCH, "args": ["-y", "@scope/search-mcp@1.0.0", "--verbose"]}
+    store = FakeStore()
+    with _client(store) as client:
+        connection = _create(client, launch=launch)
+        bumped = _patch(
+            client, connection, launch={**launch, "args": ["-y", "@scope/search-mcp@1.1.0", "--verbose"]}
+        )
+
+    assert bumped.status_code == 200, bumped.text
+    assert _stored_keys(store, connection["id"]) == {"API_KEY": _KEY}
+
+
+@pytest.mark.parametrize(
     "body",
     [
         {"env_secrets": {"API_KEY": ""}},

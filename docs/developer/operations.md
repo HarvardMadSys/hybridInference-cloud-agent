@@ -1261,9 +1261,10 @@ explains it.
   user reads (`/run/agent-mcp-slots/<slot>/secrets.json`). The admission names
   variables, never values. An edit keeps every stored key it does not set, or
   sets blank, and removes one whose `secret://NAME` its launch no longer names.
-  Stored keys stay only with the same program: a new release of the same
-  package keeps them, but an edit to another package or command is refused
-  until it sends them again.
+  Stored keys stay only with the same program: the same command and the
+  same arguments, of which only the package's release may change. An edit
+  that changes anything else, such as the package, the command, a runner
+  option or an argument, is refused until it sends them again.
 - **How it runs.** Before it launches a member's CLI, the host writes the
   slot's admission as root, then starts the image's MCP gateway,
   `cloud-agent-mcp`, as `agent-mcp` (uid 10003) on

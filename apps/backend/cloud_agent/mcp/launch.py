@@ -293,19 +293,24 @@ def declared_secret_names(env: Mapping[str, str], headers: Mapping[str, str]) ->
 def _program(spec: Mapping[str, Any]) -> tuple[str, ...]:
     """What an edit must leave alone for a program to keep its keys.
 
-    For a package runner that is the command and the package, not its
-    release: a new release of the same package is the same program. For any
-    other command it is the whole argv.
+    The whole argv, except the release of a package runner's package: a new
+    release of the same package is the same program. Every other argument
+    stays part of it, because a runner's options and the arguments after the
+    package can change what runs (``npx --package pkg@1 --call 'node x.js'``
+    installs ``pkg`` but runs ``x.js``).
     """
     command = str(spec.get("command") or "")
     args = tuple(str(arg) for arg in spec.get("args") or ())
     if _ecosystem(command) is not None:
-        reference = next((arg for arg in args if not arg.startswith("-")), None)
-        if reference is not None:
+        # The package is found as _install_for finds it.
+        index = next((i for i, arg in enumerate(args) if not arg.startswith("-")), None)
+        if index is not None:
             try:
-                return (command, split_package_reference(reference)[0])
+                package = split_package_reference(args[index])[0]
             except LaunchPlanError:
                 pass
+            else:
+                return (command, *args[:index], package, *args[index + 1 :])
     return (command, *args)
 
 
