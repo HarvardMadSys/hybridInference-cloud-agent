@@ -81,16 +81,6 @@ def _supervisor(manager: _Manager, archives: str) -> SharedChatSessionSupervisor
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=InvariantBroken,
-    reason=(
-        "A2 §4.4 I5 / §8 Q2-Q3: a concurrent exact stop clears the failed initial "
-        "archive's preservation and snapshot barrier (accept_inspection_locked); a "
-        "restart lands before the capture re-inspects, and initial_archive_capture "
-        "re-sets initial_archive_preservation_pending without the snapshot barrier"
-    ),
-)
 @pytest.mark.parametrize("archives", ["disabled", "enabled"])
 def test_preserved_initial_archive_keeps_its_snapshot_barrier_across_a_restart(
     archives: str,

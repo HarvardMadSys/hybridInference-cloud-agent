@@ -127,7 +127,13 @@ _CASES: list[tuple[Operation, dict[str, Any], bool, type[Exception] | None, str 
     ),
     (Operation.MUTATION, {"container_lost": True}, False, None, None),
     (Operation.MUTATION, {"start_failed": True}, False, None, None),
-    (Operation.MUTATION, {"initial_archive_preservation_pending": True}, False, None, None),
+    (
+        Operation.MUTATION,
+        {"initial_archive_preservation_pending": True, "snapshotting": False},
+        False,
+        None,
+        None,
+    ),
     (Operation.MUTATION, {"operation_tokens": {"fork:op": "athr_source"}}, False, None, None),
     # DELETION: a lost container first, then any lifecycle archive fence.
     (Operation.DELETION, {"container_lost": True, "starting": True}, False, RetainedChatLost, LOST),

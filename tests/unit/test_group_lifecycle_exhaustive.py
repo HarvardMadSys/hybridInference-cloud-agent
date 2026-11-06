@@ -314,7 +314,7 @@ def _closure_calls() -> list[tuple[str, Callable[[GroupLifecycleState], object]]
         ("release_archive", lambda life: life.release_archive_locked("request")),
         ("end_exclusive", lambda life: life.end_exclusive_locked(life.exclusive)),
         ("expect_exclusive", lambda life: life.expect_exclusive_locked(life.exclusive)),
-        ("preserve_initial", lambda life: life.preserve_initial_locked()),
+        ("preserve_initial", lambda life: life.preserve_initial_locked(life.exclusive)),
         ("release_initial", lambda life: life.release_initial_locked(life.exclusive)),
         ("accepted_stopped", lambda life: life.accepted_stopped_locked()),
         ("advance_generation", lambda life: life.advance_generation_locked()),
@@ -422,8 +422,9 @@ def test_no_transition_from_a_valid_state_breaks_a_proven_invariant() -> None:
                     pass
     assert broken == []
     # 23,040 less those breaking I1, with a stop of a stop or reconciliation but
-    # no check, or with a start and a stop in progress (U1).
-    assert valid == 10_080
+    # no check, with a start and a stop in progress (U1), or with a preserved
+    # initial archive whose barrier is not the initial archive's (I5).
+    assert valid == 6_720
 
 
 # Reachable combinations (A2 spec section 7.2, check 3). Starting from an idle
@@ -523,7 +524,7 @@ def _steps(group: _Group) -> Iterator[Callable[[], object]]:
         for holder in ExclusiveHolder:
             yield lambda h=holder: life.begin_exclusive_locked(h)
     if exclusive is ExclusiveHolder.INITIAL_ARCHIVE:
-        yield life.preserve_initial_locked
+        yield lambda: life.preserve_initial_locked(life.exclusive)  # type: ignore[arg-type]
         yield lambda: life.release_initial_locked(life.exclusive)  # type: ignore[arg-type]
     if exclusive is not None:
         yield lambda: life.end_exclusive_locked(life.exclusive)  # type: ignore[arg-type]
