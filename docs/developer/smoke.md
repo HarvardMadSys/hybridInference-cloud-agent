@@ -143,7 +143,7 @@ activation after the host publishes readiness in section 4.
       the provider bills it.
 - [ ] Confirm the turn succeeds with the expected file change. Then ask the
       agent in the conversation to open a pull request, and open the real
-      **draft pull request** it links. Check that you are the author of the
+      **pull request** it links. Check that you are the author of the
       pull request and its commits, the target branch and the diff; record its
       URL. Execution success alone is insufficient.
 - [ ] List files and open a terminal on the retained workspace through the app.
