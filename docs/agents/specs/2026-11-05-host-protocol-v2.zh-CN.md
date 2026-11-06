@@ -266,14 +266,23 @@ class MemberFence(BaseModel):
 | 环境 Secrets | claim 的 `environment`（`cloud_agent_shared/environment.py:271` 的 `secrets()`；243 行 `previous_secrets` 标记 `MASKED`） | 成员环境 | 是 | 是 |
 | `SandboxMcpServer.secret_env` | claim（`cloud_agent_shared/sandbox_mcp.py:81`，`MASKED`） | slot runner | 是 | 是，但短于 8 个字符（`MIN_SECRET_CHARS`，`secret_redaction.py:15`）的值不遮（`sandbox_mcp.py:131–144`） |
 | owner key（`credential`） | residency（`schemas/hosts.py:469`） | 成员 CLI | 是 | 值和 claim 那份相同，所以实际上被遮了 |
-| `mcp_credential`（`amr.`） | residency（479） | 成员 CLI，经 MCP relay | 是 | **否**：`McpRelayFacet.secrets()` 声明了它，但没有接进脱敏器 |
-| `github_credential`（`agh.`） | residency（487） | 成员的 git 和 gh，以 `GH_TOKEN` 注入（`cloud_agent_host/launch/github_relay.py:73`），经 GitHub relay | 是 | **否**：同上（92） |
+| `mcp_credential`（`amr.`） | residency（479） | 成员 CLI，经 MCP relay | 是 | 是：`McpRelayFacet.secrets()` 声明它，打开 residency 后经 `launch_secrets` 加进脱敏器（§6.2，已完成）；借用已有进程的回合还不遮 |
+| `github_credential`（`agh.`） | residency（487） | 成员的 git 和 gh，以 `GH_TOKEN` 注入（`cloud_agent_host/launch/github_relay.py:73`），经 GitHub relay | 是 | 是：`GitHubRelayFacet.secrets()`，同上（§6.2，已完成） |
 
 runner 的脱敏器在每轮开始时用 `claim_secret_values(job)` 构造（`cloud_agent_host/turn_child.py:151–152`）。这个函数按字段上的 `MASKED` 标记推出脱敏集合（`claimed_job.py:206–221`，由 `tests/unit/test_claim_secret_masking.py` 保证），这就是结构重构里的 B1，基线上已经完成。residency 是在这之后、启动成员时才拿到的（`control_plane_client.py:499`，`shared_live_attempt.py:947`），它的值从来没有加进去过。`launch/facet.py:58–63` 的文档字符串也写着"not yet wired into it"。
 
-结构重构 §10.3 表里说 `secret_env` "否"，这一点在 #1104 里已经改了（`c30d7dfa2` 又补上了短值的规则）。两个占位凭据的"否"现在仍然成立。
+结构重构 §10.3 表里说 `secret_env` "否"，这一点在 #1104 里已经改了（`c30d7dfa2` 又补上了短值的规则）。两个占位凭据原来也是"否"，§6.2 已经把它们接进脱敏器。
 
 ### 6.2 第一步：不改协议，把 residency 的值接进脱敏器
+
+**状态：已完成**（`fix(host): mask residency credentials in turn output`）。实际做法：
+
+- `ControlPlane.add_secrets(values)`（`cloud_agent_host/control_plane_client.py`）把值并进 `_secret_values`（`cloud_agent_shared/secret_redaction.py` 的 `merged_secrets`：已经遮的值保留原名；名字被别的值占了时，新值记作 `NAME@1`，不丢任何值），重建 `_redactor`。已经打开的流式预览，按 reset 的规则用新集合重建，但保留旧脱敏器还扣着的尾巴（`SecretRedactor.continued`）。
+- `launch_secrets(launch)`（`cloud_agent_host/launch/facets.py`）按比较顺序合并每个 facet 的 `secrets()`，短于 `MIN_SECRET_CHARS` 的值不遮，规则和 sandbox 程序的 key 一样。`cloud_agent_host/turn/shared_live_attempt.py` 的 `_open_resident` 在拿到 residency、构造出 `ResidentLaunch` 之后、启动成员进程之前调用 `add_secrets(launch_secrets(launch))`。
+- facet 里装凭据的字段写成 `field(repr=False, metadata=SECRET)`（`cloud_agent_host/launch/facet.py`）。`tests/unit/test_launch_secret_masking.py` 列出所有标记字段，断言每个都出现在本 facet 的 `secrets()` 里，并断言每个 facet 和 `ResidentLaunch` 里 `repr=False` 的值都进了 `launch_secrets`；另有一个测试走完整个 shared-live 启动，成员打印的 `amr.`/`agh.` 在存下的事件里只剩 `[secret:mcp_credential]` 和 `[secret:github_credential]`。
+- 还没覆盖的：借用已有进程（probe 成功）的回合拿不到 residency，所以 runner 不知道那个进程持有的 `amr.`/`agh.` 值，这一轮不会遮。要遮它们得让 runner 拿到值，这需要改协议，留给 §6.3。
+
+原计划：
 
 - `ControlPlane`（`cloud_agent_host/control_plane_client.py:81`）加一个方法 `add_secrets(values)`：它往 `_secret_values` 里追加，然后重建 `_redactor`。已经打开的流式预览，按现有的 reset 规则重建（`control_plane_client.py:182–184`）。
 - `shared_live_attempt` 拿到 residency、构造出 `ResidentLaunch` 之后，立刻用 `launch_secrets(launch)` 调用它。`launch_secrets` 合并所有 facet 的 `secrets()`，取代 facet.py 文档里说的"另一半"。

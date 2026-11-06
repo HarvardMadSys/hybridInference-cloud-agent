@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, override
 
-from cloud_agent_host.launch.facet import LaunchFacet
+from cloud_agent_host.launch.facet import SECRET, LaunchFacet
 from cloud_agent_host.member_setup.compat_helper import compat_token_env, install_compat_helper
 
 if TYPE_CHECKING:
@@ -24,14 +24,14 @@ class InferenceFacet(LaunchFacet):
     """
 
     # Never in a repr: the owner connection's own key.
-    credential: str | None = field(repr=False)
+    credential: str | None = field(repr=False, metadata=SECRET)
     base_url: str
     protocol: str
     source: str
     # The CLI's own protocol behind its compatibility helper; empty is direct.
     client_protocol: str
     # That member's loopback token on a translated plan.
-    local_token: str = field(repr=False)
+    local_token: str = field(repr=False, metadata=SECRET)
 
     @override
     def fingerprint(self) -> Mapping[str, object]:

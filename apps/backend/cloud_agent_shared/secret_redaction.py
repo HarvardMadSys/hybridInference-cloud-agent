@@ -54,6 +54,28 @@ def secret_patterns(value: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys((value, *lines)))
 
 
+def merged_secrets(*sets: Mapping[str, str]) -> dict[str, str]:
+    """``sets`` as one secret set, in order, losing no value.
+
+    A value keeps the first name it has. A later value under a name already
+    taken is named ``NAME@1`` (``NAME@2``, ... if that is taken too), so a
+    marker still says what it hides. Empty values are left out.
+    """
+    merged: dict[str, str] = {}
+    known: set[str] = set()
+    for values in sets:
+        for name, value in values.items():
+            if not value or value in known:
+                continue
+            key, index = name, 0
+            while key in merged:
+                index += 1
+                key = f"{name}@{index}"
+            merged[key] = value
+            known.add(value)
+    return merged
+
+
 def _starts_longer(items: tuple[str, ...], rest: str) -> bool:
     """Whether one of the sorted ``items`` is longer than ``rest`` and starts with it."""
     # The items starting with ``rest`` sort together from where ``rest`` would.
@@ -219,6 +241,16 @@ class SecretRedactor:
     def flush(self) -> str:
         """Finish a logical stream without uploading unchecked pending text."""
         return self.feed("", final=True)
+
+    def continued(self, secrets: Mapping[str, str]) -> SecretRedactor:
+        """This stream under ``secrets``: the new redactor holds back what this one holds.
+
+        What this one already let through stays sent; the tail it holds is
+        masked by the new set once the rest of it arrives.
+        """
+        redactor = SecretRedactor(secrets)
+        redactor._pending = self._pending
+        return redactor
 
     def payload(self, value: Any, *, text_data: bool = False) -> Any:
         """Mask text content while preserving protocol control fields."""
