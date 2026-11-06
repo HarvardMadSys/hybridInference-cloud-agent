@@ -442,6 +442,7 @@ class GroupLifecycleController:
                 if not refused:
                     group.start_failed = not start_completed
                 group.starting = False
+                group.lifecycle.record_combination(site="end_start")
                 self._state.condition.notify_all()
 
     def _admit_start_locked(self, group: _Group) -> tuple[tuple[SharedMemberManifest, ...], str]:
@@ -768,6 +769,7 @@ class GroupLifecycleController:
             finally:
                 with self._state.lock:
                     group.stopping = False
+                    group.lifecycle.record_combination(site="end_stop")
                     self._state.condition.notify_all()
             raise SandboxError("shared sandbox final archive marker remains unreadable")
 
@@ -777,6 +779,7 @@ class GroupLifecycleController:
             finally:
                 with self._state.lock:
                     group.stopping = False
+                    group.lifecycle.record_combination(site="end_stop")
                     self._state.condition.notify_all()
             with self._state.lock:
                 if group.stop_archive_blocked:
@@ -789,6 +792,7 @@ class GroupLifecycleController:
             finally:
                 with self._state.lock:
                     group.stopping = False
+                    group.lifecycle.record_combination(site="end_stop")
                     self._state.condition.notify_all()
             with self._state.lock:
                 return self._state.descriptor(group, requested)
@@ -914,6 +918,7 @@ class GroupLifecycleController:
                                 "restarting" if member.native_session_id else "stopped"
                             )
                 group.stopping = False
+                group.lifecycle.record_combination(site="end_stop")
                 if inspection is None:
                     self._state.arm_idle_if_quiescent(group, allow_lifecycle_check=True)
                 self._state.condition.notify_all()
@@ -926,6 +931,7 @@ class GroupLifecycleController:
                 if reason == "lost":
                     member.context_status = "lost"
             group.stopping = False
+            group.lifecycle.record_combination(site="end_stop")
             group.idle_deadline = None
             descriptor = self._state.descriptor(group, requested)
             self._state.condition.notify_all()

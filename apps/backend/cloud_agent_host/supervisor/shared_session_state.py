@@ -345,6 +345,7 @@ class SharedSessionState:
         for member in group.members.values():
             member.context_status = "lost"
             member.resident_state = "lost"
+        group.lifecycle.record_combination(site="container_lost")
 
     def accept_inspection_locked(
         self,
@@ -382,6 +383,7 @@ class SharedSessionState:
             tuple(group.members.items()),
         )
         group.lifecycle_check = check
+        group.lifecycle.record_combination(site="begin_lifecycle_check")
         return check
 
     def require_lifecycle_check_locked(self, check: _LifecycleCheck) -> None:
@@ -407,6 +409,7 @@ class SharedSessionState:
         if check.group.lifecycle_check is check:
             check.group.lifecycle_check = None
             check.group.lifecycle_generation += 1
+            check.group.lifecycle.record_combination(site="end_lifecycle_check")
             self.condition.notify_all()
 
     def require_current_inspection(self, group: _Group) -> ChatSandboxInspection:

@@ -8,6 +8,7 @@ decides the message a caller sees.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import pytest
@@ -22,6 +23,7 @@ from cloud_agent_host.session_lifecycle import SessionBusy
 from cloud_agent_host.supervisor.group_lifecycle import (
     ADMISSION,
     Blocker,
+    CombinationCounts,
     GroupLifecycle,
     Operation,
 )
@@ -399,3 +401,43 @@ def test_the_view_reads_the_groups_fields_in_place() -> None:
     group.starting = True
     with pytest.raises(SessionBusy, match=START):
         lifecycle.admit(Operation.MUTATION)
+
+
+def test_a_combination_lists_what_holds_in_a_fixed_order() -> None:
+    assert _group().lifecycle.combination() == ()
+    group = _group(
+        stopping=True,
+        lifecycle_check=HELD_CHECK,
+        snapshotting=True,
+        stop_archive_pending=True,
+        start_failed=True,
+    )
+    assert group.lifecycle.combination() == (
+        "stop:check",
+        "exclusive:initial_archive",
+        "check",
+        "start_failed",
+        "final_archive",
+    )
+
+
+def test_combinations_are_logged_when_first_seen_and_counted_hourly(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = [0.0]
+    counts = CombinationCounts(clock=lambda: now[0], interval_s=3600.0)
+    caplog.set_level(logging.INFO, logger="cloud_agent_host.supervisor.group_lifecycle")
+
+    counts.observe(("start",), site="end_start")
+    counts.observe(("start",), site="end_start")
+    counts.observe((), site="end_lifecycle_check")
+    now[0] = 3600.0
+    counts.observe(("start",), site="end_start")
+
+    events = [(record.getMessage(), record.__dict__) for record in caplog.records]
+    first_seen = [extra["combination"] for message, extra in events if message.endswith("ation")]
+    assert first_seen == ["start", "idle"]
+    reports = [
+        extra["counts"] for message, extra in events if message.endswith("combination_counts")
+    ]
+    assert reports == [{"start": 3, "idle": 1}]
