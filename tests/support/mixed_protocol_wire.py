@@ -15,6 +15,7 @@ message satisfies the model at all.
 from __future__ import annotations
 
 import importlib
+import json
 import pkgutil
 import types
 import typing
@@ -155,8 +156,63 @@ def body_annotation(route: Any) -> Any | None:
     return params[0].field_info.annotation
 
 
+class WireRecorder:
+    """An ASGI wrapper recording each request's route, status and the body keys its model drops.
+
+    ``prefixes`` limits it to those paths (all when ``None``). The route is the
+    one Starlette leaves in the scope, or else the one among ``routes`` that
+    matches.
+    """
+
+    def __init__(
+        self, app: Any, *, prefixes: tuple[str, ...] | None = None, routes: list[Any] = ()
+    ) -> None:
+        self.app = app
+        self.prefixes = prefixes
+        self.routes = list(routes)
+        self.calls: list[dict[str, Any]] = []
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http" or (
+            self.prefixes is not None and not scope["path"].startswith(self.prefixes)
+        ):
+            await self.app(scope, receive, send)
+            return
+        chunks: list[bytes] = []
+        status: list[int] = []
+
+        async def receive_recorded() -> dict[str, Any]:
+            message = await receive()
+            if message["type"] == "http.request":
+                chunks.append(message.get("body", b""))
+            return message
+
+        async def send_recorded(message: dict[str, Any]) -> None:
+            if message["type"] == "http.response.start":
+                status.append(int(message["status"]))
+            await send(message)
+
+        await self.app(scope, receive_recorded, send_recorded)
+        route = scope.get("route") or matching_route(self.routes, scope)
+        call: dict[str, Any] = {
+            "method": scope["method"],
+            "route": getattr(route, "path", scope["path"]),
+            "status": status[0] if status else None,
+            "dropped": [],
+        }
+        body = b"".join(chunks)
+        annotation = body_annotation(route) if route is not None else None
+        if annotation is not None and body:
+            try:
+                call["dropped"] = unknown_fields(annotation, json.loads(body))
+            except ValueError:
+                call["dropped"] = ["<body is not JSON>"]
+        self.calls.append(call)
+
+
 __all__ = [
     "HOST_PREFIXES",
+    "WireRecorder",
     "body_annotation",
     "contract_errors",
     "host_routes",

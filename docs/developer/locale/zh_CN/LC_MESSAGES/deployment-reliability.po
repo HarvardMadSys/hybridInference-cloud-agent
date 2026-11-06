@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-05 21:50-0500\n"
+"POT-Creation-Date: 2026-11-05 22:08-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -401,13 +401,13 @@ msgid ""
 "previous host against this control plane, and each release against itself"
 " as the baseline."
 msgstr ""
-"主机先于控制平面部署，而托管计算资源上的主机要等新的控制平面上线之后才跟进，所以有一段时间，两边各自在和对方的上一个发布通信。"
-"只要改动涉及主机协议（worker 和主机的路由与 schema、`cloud_agent_shared`、主机端的控制平面客户端、注册和认领的代码，或者沙箱管理器线上协议的任何一侧），"
-"同一个 Postgres 任务就会针对同一个上一版发布运行 "
-"[`scripts/check_mixed_protocol.py`](../../scripts/check_mixed_protocol.py)。"
-"它把那个发布归档出来，按它自己的锁文件给它建一个独立的环境，然后跑四组配对，每组各用一个随机命名的 "
-"`mixed_protocol_test_*` 数据库，并用该组控制平面自己的 Alembic 迁移图迁移：本版主机对上一版控制平面，"
-"上一版主机对本版控制平面，以及每个发布和它自己配对，作为基准。"
+"主机先于控制平面部署，而托管计算资源上的主机要等新的控制平面上线之后才跟进，所以有一段时间，两边各自在和对方的上一个发布通信。只要改动涉及主机协议（worker"
+" 和主机的路由与 "
+"schema、`cloud_agent_shared`、主机端的控制平面客户端、注册和认领的代码，或者沙箱管理器线上协议的任何一侧），同一个 "
+"Postgres 任务就会针对同一个上一版发布运行 "
+"[`scripts/check_mixed_protocol.py`](../../scripts/check_mixed_protocol.py)。它把那个发布归档出来，按它自己的锁文件给它建一个独立的环境，然后跑四组配对，每组各用一个随机命名的"
+" `mixed_protocol_test_*` 数据库，并用该组控制平面自己的 Alembic "
+"迁移图迁移：本版主机对上一版控制平面，上一版主机对本版控制平面，以及每个发布和它自己配对，作为基准。"
 
 #: ../developer/deployment-reliability.md:210
 msgid ""
@@ -422,20 +422,36 @@ msgid ""
 "It runs no image, no sandbox and no model, so it does not replace the "
 "release acceptance or the Kata check."
 msgstr ""
-"每组配对里，控制平面真实的应用在回环地址上提供服务，主机自己的注册、认领和 attempt 客户端完成注册和心跳，"
-"跑一个新对话的轮次和两个后续轮次，看到一次取消，完成结算、放弃和收尾，并执行控制平面下发的一次停止和一次 residency 驱逐。"
-"Docker 由一个按脚本应答的沙箱管理器代替。只要有调用被拒绝，接收方自己的模型拒收一条消息或会悄悄丢掉其中的字段，"
-"或者在上述任何一步之后数据库和基准的不一样，这组配对就失败。它不跑镜像、沙箱和模型，所以不能代替发布验收和 Kata 检查。"
+"每组配对里，控制平面真实的应用在回环地址上提供服务，主机自己的注册、认领和 attempt "
+"客户端完成注册和心跳，跑一个新对话的轮次和两个后续轮次，看到一次取消，完成结算、放弃和收尾，并执行控制平面下发的一次停止和一次 residency"
+" 驱逐。Docker "
+"由一个按脚本应答的沙箱管理器代替。只要有调用被拒绝，接收方自己的模型拒收一条消息或会悄悄丢掉其中的字段，或者在上述任何一步之后数据库和基准的不一样，这组配对就失败。它不跑镜像、沙箱和模型，所以不能代替发布验收和"
+" Kata 检查。"
 
 #: ../developer/deployment-reliability.md:221
+msgid ""
+"Four more pairings check the control plane's own calls to a host's "
+"sandbox manager: this release's client against the previous release's "
+"sandbox manager, the previous client against this one, and each against "
+"itself. Behind each sandbox manager is the fake supervisor from that "
+"release's tests. They cover the inventory, a member's status, group "
+"registration, a residency loss, an SSH access push and terminal suspend "
+"and resume, and fail on a refused call, a dropped field, or an answer "
+"missing a key the client's own release sends."
+msgstr ""
+"另外四组配对检查控制平面自己对主机沙箱管理器的直接调用：本版的客户端对上一版的沙箱管理器、上一版的客户端对本版的，以及每一版和自己配对。"
+"每个沙箱管理器后面是那一版测试里的假 supervisor。覆盖的调用有：清单、一个成员的状态、group 注册、residency 丢失、SSH 访问推送，以及终端挂起和恢复；"
+"只要有调用被拒绝、有字段被丢掉，或者应答缺了客户端自己那一版会给的键，就失败。"
+
+#: ../developer/deployment-reliability.md:229
 msgid "Run it against disposable local Postgres with the same tag as above:"
 msgstr "用一个可以随时丢弃的本地 Postgres、和上面同一个标签来跑："
 
-#: ../developer/deployment-reliability.md:228
+#: ../developer/deployment-reliability.md:236
 msgid "Detection after deployment"
 msgstr "部署之后的检测"
 
-#: ../developer/deployment-reliability.md:230
+#: ../developer/deployment-reliability.md:238
 msgid ""
 "The main API runs one queue monitor; the MCP listener runs none. After "
 "two consecutive observations one minute apart, it reports queue heads at "
@@ -490,7 +506,7 @@ msgstr ""
 msgid "A reported problem cleared."
 msgstr "之前报告的问题已经消失。"
 
-#: ../developer/deployment-reliability.md:241
+#: ../developer/deployment-reliability.md:249
 msgid ""
 "Follow-ups waiting behind an earlier turn are excluded. Occupied slots "
 "with running work are normal backpressure. The monitor reports state; it "
@@ -504,7 +520,7 @@ msgstr ""
 " compute worker 的升级操作跟上新的控制平面 commit，这个操作会走主机 recipe 里的排空流程。外部的进程和 HTTP "
 "监控仍然不可少，因为 API 自己挂了，是没法监控自己的。"
 
-#: ../developer/deployment-reliability.md:248
+#: ../developer/deployment-reliability.md:256
 msgid ""
 "Events are logged even without external delivery. To enable "
 "notifications, set `AGENT_ALERT_WEBHOOK_URL` in the control-plane `.env` "
@@ -517,7 +533,7 @@ msgstr ""
 "设为运维人员自己的接收端。队列告警发送的 JSON 包含 `text`、`event`、`deployment_sha`，以及汇总的 "
 "`queue` 计数。接收端必须能处理这个格式；聊天工具可能需要加一层适配。部署工作流本身的告警，由下游发行版负责。"
 
-#: ../developer/deployment-reliability.md:255
+#: ../developer/deployment-reliability.md:263
 msgid ""
 "Queue notifications contain no prompts, repository names, job IDs, host "
 "credentials or log dumps. Redirects are refused. Delivery failures are "
@@ -531,11 +547,11 @@ msgstr ""
 "URL），但不影响请求，也不影响 reaper。通知只在状态变化时发送；状态不变时，最多每 30 "
 "分钟重复一次；投递失败会在下一分钟重试。只有部署负责人配置好接收端和它的凭据之后，外部告警才会真正生效。"
 
-#: ../developer/deployment-reliability.md:262
+#: ../developer/deployment-reliability.md:270
 msgid "Recovery boundaries"
 msgstr "恢复的边界"
 
-#: ../developer/deployment-reliability.md:264
+#: ../developer/deployment-reliability.md:272
 msgid ""
 "The [backup and recovery runbook](disaster-recovery.md) defines initial "
 "retention and recovery targets, coordinated database/host recovery sets, "
@@ -545,7 +561,7 @@ msgstr ""
 "初始的保留期和恢复目标、彼此对应的数据库与主机恢复集、加密密钥的保存、恢复演练的验收标准，以及如何退回上一个产物发布，都写在[备份与恢复手册"
 "](disaster-recovery.md)里。"
 
-#: ../developer/deployment-reliability.md:268
+#: ../developer/deployment-reliability.md:276
 msgid ""
 "Inspect both machines' deployment markers and the failure reason, then "
 "retry the same verified target. A failed host rollout remains a failed "
@@ -554,7 +570,7 @@ msgid ""
 "database downgrade."
 msgstr "先看两台机器上的部署标记和失败原因，然后对同一个已核实的目标重试。主机上线失败了，就算已经恢复到记录的那一代，也仍然算一次失败的上线。控制平面失败时，兼容的迁移会保留下来；数据库不会自动降级。"
 
-#: ../developer/deployment-reliability.md:273
+#: ../developer/deployment-reliability.md:281
 msgid ""
 "A hard-cancelled host activation may leave the readiness marker pending "
 "while Docker Engine continues the unbounded graceful runner stop. Running"
@@ -567,7 +583,7 @@ msgstr ""
 "优雅停止。正在跑的轮次仍会自然结束，部署信号不会传到它们的子进程。runner "
 "退出后，这台主机会一直不可用，直到对同一个已核实的目标重新执行激活。不要手动发布就绪状态。"
 
-#: ../developer/deployment-reliability.md:279
+#: ../developer/deployment-reliability.md:287
 msgid ""
 "If the host succeeds before the control plane fails, the exact-SHA gate "
 "can keep new work queued until the retry succeeds. The queue monitor "
@@ -579,11 +595,11 @@ msgstr ""
 "的门槛会让新工作一直排队，直到重试成功为止。队列监控器能发现这种情况。这些检查能防止部署中断造成破坏，并把问题暴露出来；但激活本身仍然横跨两台机器和"
 " PostgreSQL，不是在一个事务里完成的。"
 
-#: ../developer/deployment-reliability.md:284
+#: ../developer/deployment-reliability.md:292
 msgid "Push and pull-request failures"
 msgstr "推送和 pull request 失败"
 
-#: ../developer/deployment-reliability.md:286
+#: ../developer/deployment-reliability.md:294
 msgid ""
 "The platform does not publish workspaces, so there is no publication to "
 "retry or repair. A push or pull request the agent could not make is part "

@@ -358,7 +358,6 @@ def heartbeat(
     runtime_versions_available: dict[str, list[str]] | None = None,
     retained_sandboxes: list[dict[str, Any]] | None = None,
     capacity: dict[str, Any] | None = None,
-    profiling: dict[str, Any] | None = None,
     settings_applied: dict[str, int | float] | None = None,
     settings_local: dict[str, int | float] | None = None,
     sandbox_archive_settings_applied_revision: int | None = None,
@@ -415,7 +414,6 @@ def heartbeat(
             "runtime_versions_available": runtime_versions_available,
             "retained_sandboxes": retained_sandboxes,
             "capacity": capacity,
-            "profiling": profiling,
             "settings_applied": settings_applied,
             "settings_local": settings_local,
             "sandbox_archive_settings_applied_revision": (
@@ -607,7 +605,6 @@ class HostHeartbeat:
         readiness_marker: str | None = None,
         retained_sandbox_beats: Callable[[], list[dict[str, Any]] | None] | None = None,
         capacity_beats: Callable[[], dict[str, Any] | None] | None = None,
-        profiling: Callable[[], dict[str, Any] | None] | None = None,
         settings_report: (
             Callable[[], tuple[dict[str, int | float], dict[str, int | float]]] | None
         ) = None,
@@ -662,11 +659,6 @@ class HostHeartbeat:
         # sample, or once the newest one is too old to be worth sending —
         # simply omits the field.
         self._capacity_beats = capacity_beats
-        # Asked freshly on every beat. It reports the revision this process has
-        # *applied*, which is what lets the Admin page tell "this host has not
-        # heard about the Stop" from "this host is not there" -- two different
-        # problems with two different fixes.
-        self._profiling = profiling
         # Asked per beat for what this host applies now, and told after each
         # answered beat what an admin set. The callback runs on this thread and
         # must not raise; one that does is logged and the beats go on.
@@ -781,7 +773,6 @@ class HostHeartbeat:
                         else None
                     ),
                     capacity=(self._capacity_beats() if self._capacity_beats is not None else None),
-                    profiling=(self._profiling() if self._profiling is not None else None),
                     settings_applied=settings_applied,
                     settings_local=settings_local,
                     sandbox_archive_settings_applied_revision=(archive_settings_applied_revision),

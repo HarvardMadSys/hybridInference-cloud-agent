@@ -22,6 +22,14 @@ expects, neither side's models dropped a field the other sent or refused one
 they require, and the control plane's database ends the way the same-version
 baseline left it.
 
+Four more pairings cover the control plane's direct calls to a host's sandbox
+manager (``tests/support/mixed_protocol_manager.py``): this release's
+``SandboxManagerClient`` against the previous release's sandbox manager app,
+the previous client against this one, and each with itself. Behind each app is
+the fake supervisor from that release's own tests. A pairing passes when every
+call was accepted by both ends, the manager's request models dropped nothing,
+and no answer lacks a key the client's own release's manager sends.
+
 Never touches a configured database: it creates and drops its own on the server
 the ``TEST_DB_*`` variables name. CI resolves ``--base`` from the last
 published release reachable from the change's base commit, as for
@@ -106,7 +114,8 @@ def previous_release(base: str, directory: Path) -> Release:
         contents.extractall(tree, filter="data")
     env = {key: value for key, value in os.environ.items() if key != "VIRTUAL_ENV"}
     env["UV_PROJECT_ENVIRONMENT"] = str(tree / ".venv")
-    subprocess.run(["uv", "sync", "--frozen", "--no-dev", "--quiet"], cwd=tree, env=env, check=True)
+    # With the dev group: the sandbox manager pairing borrows its tests' fake.
+    subprocess.run(["uv", "sync", "--frozen", "--quiet"], cwd=tree, env=env, check=True)
     return Release(base, tree, str(tree / ".venv" / "bin" / "python"))
 
 
@@ -382,6 +391,93 @@ def _diff(expected: Any, actual: Any) -> str:
     return "\n".join(f"  {line}" for line in lines)
 
 
+async def run_manager_pairing(client: Release, manager: Release, workdir: Path) -> dict[str, Any]:
+    """The control plane's sandbox manager calls from one release to another's manager."""
+    name = f"{client.label} control plane -> {manager.label} sandbox manager"
+    env = {key: os.environ[key] for key in _INHERITED if key in os.environ} | {"PYTHONPATH": ""}
+    script = str(SUPPORT / "mixed_protocol_manager.py")
+    logs = workdir / f"{uuid.uuid4().hex}"
+    logs.mkdir()
+    started = time.monotonic()
+    processes: list[asyncio.subprocess.Process] = []
+    try:
+        with (
+            (logs / "sandbox-manager.log").open("wb") as manager_log,
+            (logs / "client.log").open("wb") as client_log,
+        ):
+            served = await asyncio.create_subprocess_exec(
+                manager.python,
+                script,
+                "serve",
+                str(manager.tree),
+                cwd=manager.tree,
+                env=env,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=manager_log,
+            )
+            processes.append(served)
+            _, ready = await _line(served, ("READY",))
+            caller = await asyncio.create_subprocess_exec(
+                client.python,
+                script,
+                "call",
+                str(client.tree),
+                f"http://127.0.0.1:{json.loads(ready)['port']}",
+                cwd=client.tree,
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=client_log,
+            )
+            processes.append(caller)
+            _, done = await _line(caller, ("DONE",))
+            assert served.stdin is not None
+            served.stdin.write(b"report\n")
+            await served.stdin.drain()
+            _, recorded = await _line(served, ("REPORT",))
+            await asyncio.wait_for(served.wait(), 30)
+            await asyncio.wait_for(caller.wait(), 30)
+        return {
+            "name": name,
+            "calls": json.loads(done)["calls"],
+            "received": json.loads(recorded)["calls"],
+            "seconds": round(time.monotonic() - started, 1),
+            "logs": str(logs),
+        }
+    finally:
+        for process in processes:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+
+
+def manager_problems(result: dict[str, Any], baseline: dict[str, Any] | None) -> list[str]:
+    """Everything wrong with one sandbox manager pairing."""
+    found = [
+        f"{call['call']}: the control plane's client refused the answer: {call['error']}"
+        for call in result["calls"]
+        if call["error"]
+    ]
+    for call in result["received"]:
+        where = f"sandbox manager {call['method']} {call['route']}"
+        if call["status"] is None or call["status"] >= 400:
+            found.append(f"{where} answered {call['status']}")
+        if dropped := _dropped("sandbox manager", call["route"], call["dropped"]):
+            found.append(f"{where}: the sandbox manager's request model drops {dropped}")
+    if baseline is not None:
+        # The answers are plain JSON to the client, so the contract is what its
+        # own release's sandbox manager answers: nothing it reads may be missing.
+        expected = {call["call"]: set(call.get("keys") or ()) for call in baseline["calls"]}
+        for call in result["calls"]:
+            missing = expected.get(call["call"], set()) - set(call.get("keys") or ())
+            if missing and not call["error"]:
+                found.append(
+                    f"{call['call']}: the answer lacks {sorted(missing)}, which the client's "
+                    "own release's sandbox manager sends"
+                )
+    return found
+
+
 async def check(base: str, report: Path | None = None) -> int:
     current = Release("this checkout", ROOT, sys.executable)
     with tempfile.TemporaryDirectory(prefix="mixed-protocol-") as directory:
@@ -398,10 +494,20 @@ async def check(base: str, report: Path | None = None) -> int:
             (previous, current),  # direction 2
             (current, current),  # its baseline
         ]
-        results = await asyncio.wait_for(
-            asyncio.gather(*(run_pairing(host, cp, workdir) for host, cp in pairings)),
+        managers = [
+            (current, previous),  # this control plane's calls, the previous manager
+            (previous, previous),
+            (previous, current),  # the previous control plane's calls, this manager
+            (current, current),
+        ]
+        everything = await asyncio.wait_for(
+            asyncio.gather(
+                *(run_pairing(host, cp, workdir) for host, cp in pairings),
+                *(run_manager_pairing(client, sm, workdir) for client, sm in managers),
+            ),
             PAIRING_TIMEOUT_S,
         )
+        results, wires = everything[:4], everything[4:]
         verdicts = [
             (results[0], problems(results[0], results[1])),
             (results[1], problems(results[1], None)),
@@ -426,8 +532,28 @@ async def check(base: str, report: Path | None = None) -> int:
                         print(f"  --- {log} (tail) ---\n{tail}", flush=True)
             else:
                 print(f"pass {result['name']} ({calls} calls, {result['seconds']}s)", flush=True)
+        # A client's baseline is its own release's sandbox manager.
+        for wire, found in (
+            (wires[0], manager_problems(wires[0], wires[3])),
+            (wires[1], manager_problems(wires[1], None)),
+            (wires[2], manager_problems(wires[2], wires[1])),
+            (wires[3], manager_problems(wires[3], None)),
+        ):
+            if found:
+                failed = True
+                print(f"FAIL {wire['name']} ({len(wire['calls'])} calls):", flush=True)
+                for problem in found:
+                    print(f"  - {problem}", flush=True)
+                for log in ("sandbox-manager.log", "client.log"):
+                    tail = (Path(wire["logs"]) / log).read_text(errors="replace")[-2000:]
+                    print(f"  --- {log} (tail) ---\n{tail}", flush=True)
+            else:
+                print(
+                    f"pass {wire['name']} ({len(wire['calls'])} calls, {wire['seconds']}s)",
+                    flush=True,
+                )
         if report is not None:
-            report.write_text(json.dumps(results, indent=1, default=str))
+            report.write_text(json.dumps(everything, indent=1, default=str))
         print(f"mixed protocol check took {time.monotonic() - started:.0f}s", flush=True)
         return 1 if failed else 0
 

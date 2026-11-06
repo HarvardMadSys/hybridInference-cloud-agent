@@ -218,6 +218,14 @@ differs from the baseline's after any of those steps. It runs no image, no
 sandbox and no model, so it does not replace the release acceptance or the
 Kata check.
 
+Four more pairings check the control plane's own calls to a host's sandbox
+manager: this release's client against the previous release's sandbox manager,
+the previous client against this one, and each against itself. Behind each
+sandbox manager is the fake supervisor from that release's tests. They cover
+the inventory, a member's status, group registration, a residency loss, an SSH
+access push and terminal suspend and resume, and fail on a refused call, a
+dropped field, or an answer missing a key the client's own release sends.
+
 Run it against disposable local Postgres with the same tag as above:
 
 ```bash
