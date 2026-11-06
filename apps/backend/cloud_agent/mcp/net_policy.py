@@ -17,9 +17,9 @@ a public address and ``127.0.0.1`` is refused rather than raced.
 the origin it belongs to and never when it does not, which is what stops a
 redirect -- or a compromised metadata document -- from collecting it.
 
-**Private space is reached through a connector, not through a hole.** A
-deployment may allow specific private ranges for its own connector bridges by
-configuration, and nothing else. The default is public-only.
+**Private space is closed unless the operator opens it.** A deployment may
+allow private ranges, or specific hosts, by configuration, and nothing else.
+The default is public-only.
 """
 
 from __future__ import annotations
@@ -73,8 +73,7 @@ FORBIDDEN_HEADER_PREFIXES: tuple[str, ...] = ("x-forwarded-", "x-real-ip", "forw
 
 #: Addresses that are always refused, whatever the deployment policy says.
 #: Link-local covers IPv4 cloud metadata services. The IPv6 ones sit in
-#: unique-local space, which a deployment may open for its connectors, so each
-#: is named: AWS's (``fd00:ec2::254``) and Google Cloud's (``fd20:ce::254``).
+#: unique-local space, which a deployment may open, so each is named: AWS's (``fd00:ec2::254``) and Google Cloud's (``fd20:ce::254``).
 #: Azure's WireServer (``168.63.129.16``) serves a VM its provisioning and
 #: extension data from a public address, so nothing else covers it; the
 #: sandbox rules protect it on every host for the same reason.
@@ -93,8 +92,7 @@ ALWAYS_BLOCKED_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ..
     ipaddress.ip_network("100.64.0.0/10"),
 )
 
-#: Refused unless the deployment explicitly widens the policy for connector
-#: traffic. Loopback is in neither list's default allowance: a remote
+#: Refused unless the deployment explicitly widens the policy. Loopback is in neither list's default allowance: a remote
 #: connection that reaches loopback reaches *this* service.
 PRIVATE_NETWORKS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
     ipaddress.ip_network("10.0.0.0/8"),
@@ -133,8 +131,8 @@ _IPV4_COMPATIBLE = ipaddress.ip_network("::/96")
 MAX_REDIRECTS = 3
 ALLOWED_SCHEMES = frozenset({"https"})
 #: Plain HTTP is refused for a remote server: the credential would travel in
-#: the clear. A deployment may allow it for a connector bridge on a private
-#: network, which is a deliberate, reviewable choice.
+#: the clear. A deployment may allow it for servers on a private network,
+#: which is a deliberate, reviewable choice.
 ALLOWED_SCHEMES_INSECURE = frozenset({"https", "http"})
 
 
@@ -162,7 +160,7 @@ class EndpointRejected(ValueError):
 class EgressPolicy:
     """One deployment's answer to "what may a connection reach".
 
-    ``allow_private`` is for a user connector bridge that genuinely lives on a
+    ``allow_private`` is for a deployment whose MCP servers genuinely live on a
     private network; it is still bounded by :data:`ALWAYS_BLOCKED_NETWORKS`, so
     widening it cannot reach the metadata service.
     """
@@ -170,8 +168,8 @@ class EgressPolicy:
     allow_private: bool = False
     allow_plain_http: bool = False
     #: Extra hosts, exact matches only, that may resolve to private addresses.
-    #: For a deployment whose connector gateway the operator has decided to
-    #: trust. These remain bounded by ALWAYS_BLOCKED_NETWORKS.
+    #: For a private server the operator has decided to trust. These remain
+    #: bounded by ALWAYS_BLOCKED_NETWORKS.
     allowed_hosts: frozenset[str] = frozenset()
     max_redirects: int = MAX_REDIRECTS
     #: Hosts a redirect may land on, on top of the request's own origin. Empty
@@ -298,8 +296,8 @@ def _blocked_reason(
     for network in PRIVATE_NETWORKS:
         if address.version == network.version and address in network:
             return (
-                f"{address} is a private or loopback address. Connect this server through "
-                "a user connector instead of a public URL."
+                f"{address} is a private or loopback address, which this deployment does not "
+                "dial. Use the server's public URL."
             )
     return None
 
@@ -541,7 +539,7 @@ def policy_from_environment() -> EgressPolicy:
     Read here rather than at each call site because there are now two of them --
     the connection API that tests a server and the relay host that dials one --
     and a policy applied at one of two doors is not a policy. Both default off:
-    private space is reached through a connector, and plain HTTP would put the
+    a private address may be this service itself, and plain HTTP would put the
     credential on the wire in the clear.
     """
     from cloud_agent.settings import setting_env

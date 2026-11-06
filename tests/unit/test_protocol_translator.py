@@ -29,6 +29,7 @@ from cloud_agent_host import protocol_translator as compat_server
 from cloud_agent_host.member_setup.compat_helper import helper_archive
 from cloud_agent_host.protocol_translator import Binding, LaunchError, _Server
 from cloud_agent_shared.protocol_compat import ORIGIN_PLACEHOLDER, TOKEN_PLACEHOLDER
+from cloud_agent_shared.request_prefix import read_record
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -180,6 +181,23 @@ def test_a_request_goes_to_the_bound_upstream_with_the_key(service, upstream):
     assert sent["body"]["model"] == "m" and sent["body"]["stream"] is True
     assert ("response.completed" if binding.client == "responses" else "message_stop") in text
     assert _KEY not in text
+
+
+def test_a_translated_request_is_measured_as_the_cli_sent_it(service, upstream, monkeypatch):
+    binding, port = service
+    written: list[bytes] = []
+    monkeypatch.setattr(compat_server, "emit_record", written.append)
+    tools = [{"type": "function", "name": "shell", "parameters": {}}]
+    if binding.client == "anthropic_messages":
+        body = _body(binding, system="be brief", tools=[{"name": "shell", "input_schema": {}}])
+    else:
+        body = _body(binding, instructions="be brief", tools=tools)
+    assert _call(port, _path(binding), token=_TOKEN, body=body)[0] == 200
+    (line,) = written
+    record = read_record(line.decode().rstrip("\n"))
+    assert record["mode"] == "translated" and record["protocol"] == binding.client
+    assert record["system"]["chars"] == len("be brief")
+    assert record["entries"][0][0] == "shell"
 
 
 def test_the_model_cannot_be_chosen_by_the_caller(service, upstream):

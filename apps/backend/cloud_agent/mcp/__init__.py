@@ -12,7 +12,7 @@ Modules are layered so that each one can be tested by calling it:
 
 ``models``
     The domain records: connections, credentials, capability snapshots,
-    thread bindings, invocations and connectors.
+    thread bindings and invocations.
 ``errors``
     A credential write that matched no row, so the connection insert rolls back.
 ``net_policy``
@@ -20,7 +20,7 @@ Modules are layered so that each one can be tested by calling it:
 ``config_import``
     Parsing the several ``mcpServers`` dialects into one connection draft.
 ``launch``
-    Turning a stdio draft into a pinned, shell-free launch plan.
+    Checking a stdio draft against the sandbox's pinned, shell-free launch rules.
 ``oauth``
     Discovery, registration, PKCE authorization and token-response contracts.
 ``refresh``

@@ -1,14 +1,16 @@
 """Whether a shared sandbox group admits an operation now, decided from one table.
 
-A group (``shared_session_state._Group``) keeps its lifecycle in separate
-fields: the operations in progress (``starting``, ``stopping``,
-``snapshotting``), records of what happened (``start_failed``,
-``container_lost``), barriers that wait for unfinished work (the ``*_pending``
-and ``*_blocked`` fields), and the holders using the group (its operation and
-terminal tokens, its members' leases and turns, a lifecycle check).
+A group (``shared_session_state._Group``) keeps its lifecycle in one
+:class:`~cloud_agent_host.supervisor.group_lifecycle_state.GroupLifecycleState`:
+the operations in progress (a start, a stop, the exclusive workspace, a
+lifecycle check), records of what happened (the last start failed, the
+container was lost), and barriers that wait for unfinished work (a final
+archive or an orphan finalization owed, a preserved initial archive, a start
+completion). The holders using the group -- its operation and terminal tokens,
+its members' leases and turns -- stay on the group.
 
-:class:`GroupLifecycle` is a view over those same fields and keeps no state of
-its own. :data:`ADMISSION` lists, for each :class:`Operation`, the checks that
+:class:`GroupLifecycle` is a view over that state and the group's holders and
+keeps no state of its own. :data:`ADMISSION` lists, for each :class:`Operation`, the checks that
 refuse it in the order they are made. The first check that holds decides the
 exception and its message, so the order is part of each row: two callers that
 check the same state in a different order are two rows.
@@ -23,9 +25,11 @@ from typing import TYPE_CHECKING, Final
 
 from cloud_agent_host.container.chat_sandbox_models import RetainedChatLost
 from cloud_agent_host.session_lifecycle import SessionBusy
+from cloud_agent_host.supervisor.group_lifecycle_state import COMBINATIONS
 
 if TYPE_CHECKING:
     from cloud_agent_host.container.sandbox import SandboxError
+    from cloud_agent_host.supervisor.group_lifecycle_state import Hold
     from cloud_agent_host.supervisor.shared_session_state import _Group
 
 
@@ -46,6 +50,11 @@ class Operation(Enum):
     START_WAIT = "start_wait"
     #: Why an activation still waits for a transition to finish.
     ACTIVATION_WAIT = "activation_wait"
+    #: Why the pre-prompt archive still waits before it raises its barrier.
+    INITIAL_ARCHIVE_WAIT = "initial_archive_wait"
+    #: Why the pre-prompt archive, its barrier raised, still waits for the
+    #: requests admitted before it.
+    INITIAL_ARCHIVE_DRAIN = "initial_archive_drain"
     #: Run the group for a request, once nothing transitions it.
     RUN = "run"
     #: Count an admitted request in the run the group is in.
@@ -54,8 +63,12 @@ class Operation(Enum):
     STOP = "stop"
     #: Stop the group because it is idle.
     IDLE_STOP = "idle_stop"
-    #: Take the group's stop for a final archive retry or finalization.
+    #: Take the group's stop for a final archive retry or finalization, under
+    #: the caller's own lifecycle check.
     TAKE_STOP = "take_stop"
+    #: Take the group's stop for the shutdown's final archive retry, which
+    #: holds no lifecycle check: a start or a check in progress refuses it.
+    SHUTDOWN_TAKE_STOP = "shutdown_take_stop"
     #: Take the group's stop to finish an orphaned group's final archive.
     ORPHAN_FINALIZATION = "orphan_finalization"
     #: Reserve the group for a lifecycle check, or release an archive barrier.
@@ -86,6 +99,8 @@ class Blocker(Enum):
     NOT_RUNNING = "not_running"
     #: An operation or holder keeps the group from being quiescent.
     NOT_QUIESCENT = "not_quiescent"
+    #: A workspace operation or terminal is open on the group.
+    OPEN_MUTATIONS = "open_mutations"
 
 
 @dataclass(frozen=True)
@@ -173,6 +188,15 @@ ADMISSION: Final[dict[Operation, tuple[Refusal, ...]]] = {
         _busy(Blocker.STARTING, message=_START_IN_PROGRESS),
         _busy(Blocker.STOPPING, message=_STOP_IN_PROGRESS),
     ),
+    Operation.INITIAL_ARCHIVE_WAIT: (
+        _busy(Blocker.STARTING, message=_START_IN_PROGRESS),
+        _busy(Blocker.LIFECYCLE_CHECK, message=_CHECK_IN_PROGRESS),
+    ),
+    Operation.INITIAL_ARCHIVE_DRAIN: (
+        _busy(Blocker.STARTING, message=_START_IN_PROGRESS),
+        _busy(Blocker.LIFECYCLE_CHECK, message=_CHECK_IN_PROGRESS),
+        _busy(Blocker.OPEN_MUTATIONS, message="shared workspace still has active mutations"),
+    ),
     Operation.RUN: (
         _busy(Blocker.STOP_ARCHIVE_PENDING, message=_ARCHIVE_RETRY_PENDING),
         _busy(Blocker.ORPHAN_FINALIZATION, message=_ORPHAN_PENDING),
@@ -190,6 +214,10 @@ ADMISSION: Final[dict[Operation, tuple[Refusal, ...]]] = {
         _busy(Blocker.NOT_QUIESCENT, message="shared sandbox group still has active members"),
     ),
     Operation.TAKE_STOP: _TAKE_STOP,
+    Operation.SHUTDOWN_TAKE_STOP: (
+        *_STOP,
+        _busy(Blocker.LIFECYCLE_CHECK, message=_CHECK_IN_PROGRESS),
+    ),
     Operation.ORPHAN_FINALIZATION: (
         _busy(
             Blocker.STOPPING,
@@ -209,32 +237,31 @@ ADMISSION: Final[dict[Operation, tuple[Refusal, ...]]] = {
 _Holds = Callable[["GroupLifecycle", bool], bool]
 
 _HOLDS: Final[dict[Blocker, _Holds]] = {
-    Blocker.LIFECYCLE_CHECK: lambda life, allow: (
-        life.group.lifecycle_check is not None and not allow
-    ),
+    Blocker.LIFECYCLE_CHECK: lambda life, allow: life.group.life.check is not None and not allow,
     Blocker.LIFECYCLE_CHECK_OUTSIDE_STOP: lambda life, allow: (
-        life.group.lifecycle_check is not None and not allow and not life.group.stopping
+        life.group.life.check is not None and not allow and life.group.life.stop is None
     ),
-    Blocker.SNAPSHOTTING: lambda life, _: life.group.snapshotting,
-    Blocker.STARTING: lambda life, _: life.group.starting,
-    Blocker.STOPPING: lambda life, _: life.group.stopping,
-    Blocker.CONTAINER_LOST: lambda life, _: life.group.container_lost,
-    Blocker.INITIAL_ARCHIVE_PRESERVATION: lambda life, _: (
-        life.group.initial_archive_preservation_pending
-    ),
-    Blocker.STOP_ARCHIVE_PENDING: lambda life, _: life.group.stop_archive_pending,
-    Blocker.STOP_ARCHIVE_BLOCKED: lambda life, _: life.group.stop_archive_blocked,
-    Blocker.ORPHAN_FINALIZATION: lambda life, _: life.group.orphan_finalization_pending,
-    Blocker.START_ARCHIVE_COMPLETION: lambda life, _: life.group.start_archive_completion_pending,
-    Blocker.ARCHIVE_REQUEST: lambda life, _: life.group.archive_request_id is not None,
+    Blocker.SNAPSHOTTING: lambda life, _: life.group.life.exclusive is not None,
+    Blocker.STARTING: lambda life, _: life.group.life.start is not None,
+    Blocker.STOPPING: lambda life, _: life.group.life.stop is not None,
+    Blocker.CONTAINER_LOST: lambda life, _: life.group.life.container_lost,
+    Blocker.INITIAL_ARCHIVE_PRESERVATION: lambda life, _: life.group.life.initial_preservation,
+    Blocker.STOP_ARCHIVE_PENDING: lambda life, _: life.group.life.final_archive_pending,
+    Blocker.STOP_ARCHIVE_BLOCKED: lambda life, _: life.group.life.final_archive_blocked,
+    Blocker.ORPHAN_FINALIZATION: lambda life, _: life.group.life.orphan is not None,
+    Blocker.START_ARCHIVE_COMPLETION: lambda life, _: life.group.life.start_completion_pending,
+    Blocker.ARCHIVE_REQUEST: lambda life, _: life.group.life.archive_request_id is not None,
     Blocker.NOT_RUNNING: lambda life, _: not life.group.inspection.running,
     Blocker.NOT_QUIESCENT: lambda life, allow: not life.is_quiescent(allow_lifecycle_check=allow),
+    Blocker.OPEN_MUTATIONS: lambda life, _: bool(
+        life.group.operation_tokens or life.group.terminal_tokens
+    ),
 }
 
 
 @dataclass(frozen=True)
 class GroupLifecycle:
-    """The admission decisions over one group's lifecycle fields, which it reads in place.
+    """The admission decisions over one group's lifecycle state, which it reads in place.
 
     ``allow_lifecycle_check`` lets a caller that holds the group's lifecycle
     check through the checks that the check would otherwise refuse.
@@ -245,11 +272,12 @@ class GroupLifecycle:
     def is_quiescent(self, *, allow_lifecycle_check: bool = False) -> bool:
         """Whether no operation in progress and no holder is using the group."""
         group = self.group
+        life = group.life
         return (
-            (allow_lifecycle_check or group.lifecycle_check is None)
-            and not group.snapshotting
-            and not group.starting
-            and not group.stopping
+            (allow_lifecycle_check or life.check is None)
+            and life.exclusive is None
+            and life.start is None
+            and life.stop is None
             and not group.operation_tokens
             and not group.terminal_tokens
             and all(
@@ -258,14 +286,28 @@ class GroupLifecycle:
             )
         )
 
+    def combination(self) -> tuple[str, ...]:
+        """The group's operations in progress with their holders, its records and its barriers."""
+        return self.group.life.combination()
+
+    def record_combination(self, *, site: str) -> None:
+        """Count the group's current :meth:`combination` in this process's counts."""
+        COMBINATIONS.observe(self.group.life.checked_combination(), site=site)
+
     def holds(self, blocker: Blocker, *, allow_lifecycle_check: bool = False) -> bool:
         """Whether the group's state is ``blocker`` now."""
         return _HOLDS[blocker](self, allow_lifecycle_check)
 
-    def _refusing(self, operation: Operation, allow_lifecycle_check: bool) -> Refusal | None:
+    def _refusing(
+        self,
+        operation: Operation,
+        allow_lifecycle_check: bool,
+        ignored: Blocker | None = None,
+    ) -> Refusal | None:
         for refusal in ADMISSION[operation]:
             if any(
-                self.holds(blocker, allow_lifecycle_check=allow_lifecycle_check)
+                blocker is not ignored
+                and self.holds(blocker, allow_lifecycle_check=allow_lifecycle_check)
                 for blocker in refusal.blockers
             ):
                 return refusal
@@ -288,3 +330,15 @@ class GroupLifecycle:
         refused = self.refusal(operation, allow_lifecycle_check=allow_lifecycle_check)
         if refused is not None:
             raise refused
+
+    def admit_as(self, hold: Hold, operation: Operation) -> None:
+        """As :meth:`admit`, for the caller holding the exclusive workspace as ``hold``.
+
+        That hold is the one exclusive workspace the caller expects, so it
+        does not count as :attr:`Blocker.SNAPSHOTTING`; everything else is
+        checked as usual.
+        """
+        self.group.life.expect_exclusive_locked(hold)
+        refusal = self._refusing(operation, False, ignored=Blocker.SNAPSHOTTING)
+        if refusal is not None:
+            raise refusal.error(refusal.message)

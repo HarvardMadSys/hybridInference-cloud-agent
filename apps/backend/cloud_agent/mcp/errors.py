@@ -3,10 +3,6 @@
 from __future__ import annotations
 
 
-class McpConnectionCreateConflict(Exception):
-    """A connection draft became invalid before its atomic insert."""
-
-
 class McpCredentialWriteRejected(Exception):
     """A credential write matched no row, so its connection must not remain.
 

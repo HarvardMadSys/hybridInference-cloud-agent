@@ -115,10 +115,11 @@ async def rig(store, hosts, monkeypatch):
     sandbox_manager = SimpleNamespace(
         health=AsyncMock(return_value={}), list_sandboxes=AsyncMock(return_value=[])
     )
-    monkeypatch.setattr(
-        "cloud_agent.application.compute_reconcile.sandbox_manager_for_host",
-        lambda host: sandbox_manager,
-    )
+    for module in ("compute_reconcile", "compute_acquisition", "compute_retirement"):
+        monkeypatch.setattr(
+            f"cloud_agent.application.{module}.sandbox_manager_for_host",
+            lambda host: sandbox_manager,
+        )
     reconciler = ComputeReconciler(commands=commands, host_pool=hosts, bootstrap=bootstrap)
     request_id = str(uuid4())
     op = await store.compute_resources.create_allocation_operation(

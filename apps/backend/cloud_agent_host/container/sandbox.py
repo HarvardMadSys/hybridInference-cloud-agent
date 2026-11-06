@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from cloud_agent_host.bounded_output import TextTail, byte_chunks, protocol_lines, text_chunks
 from cloud_agent_host.container.docker_engine import DockerEngine, engine_from_env
 from cloud_agent_host.logging_utils import get_logger
+from cloud_agent_host.request_prefixes import PrefixRecords
 from cloud_agent_host.runtime_images import DownloadedVersions
 from cloud_agent_shared.egress import SandboxNetwork, network_from_env
 from cloud_agent_shared.errors import SandboxError
@@ -242,6 +243,27 @@ class SandboxProcess(ABC):
     @abstractmethod
     def stderr_text(self) -> str:
         """Return whatever the agent wrote to stderr."""
+
+    #: The member request meter's records, split from stderr by ``sieve_stderr``.
+    _prefix_records: PrefixRecords | None = None
+
+    def sieve_stderr(self, chunk: str) -> str:
+        """Take the member request meter's records out of one stderr chunk.
+
+        For the adapter draining this process's stderr: what is left is the
+        diagnostic text, and the records wait for :meth:`request_prefixes`.
+        """
+        if self._prefix_records is None:
+            self._prefix_records = PrefixRecords()
+        return self._prefix_records.feed(chunk)
+
+    def request_prefixes(self) -> list[dict[str, Any]]:
+        """Request-meter records read from stderr since the last call (``request_prefixes``).
+
+        None for a process whose stderr is not sieved, or without a meter.
+        """
+        records = self._prefix_records
+        return records.take() if records is not None else []
 
     @property
     def container(self) -> str | None:

@@ -910,12 +910,12 @@ ENVIRONMENT_COPIES: dict[tuple[str, str], str] = {
         "the ssh client, minus SSH_AUTH_SOCK so no agent is forwarded"
     ),
     (
-        "apps/backend/cloud_agent_host/container/chat_sandbox.py",
-        "ChatSandboxManager.exec_client_env",
+        "apps/backend/cloud_agent_host/container/chat_sandbox_members.py",
+        "MemberExecMixin.exec_client_env",
     ): ("the Docker CLI's own configuration; sandbox values are added only by name"),
     (
-        "apps/backend/cloud_agent_host/container/chat_sandbox.py",
-        "ChatSandboxManager.export_archive",
+        "apps/backend/cloud_agent_host/container/chat_sandbox_workspace.py",
+        "WorkspaceFilesMixin.export_archive",
     ): ("docker cp, configured by the host's Docker client variables"),
     ("apps/backend/cloud_agent_host/container/exact_container.py", "ExactContainer.run_bytes"): (
         "a Docker CLI call, configured by the host's Docker client variables"
@@ -926,8 +926,13 @@ ENVIRONMENT_COPIES: dict[tuple[str, str], str] = {
     ("apps/backend/cloud_agent_host/runtime_probe.py", "_context.spawn"): (
         "docker exec for a runtime probe; its values pass by name, never in argv"
     ),
-    ("apps/backend/cloud_agent_host/protocol_translator.py", "launch"): (
-        "the member's CLI, after the launcher has consumed its own AGENT_COMPAT_* names"
+    ("apps/backend/cloud_agent_host/protocol_translator.py", "_exec_cli"): (
+        "the member's CLI, with the launcher's placeholders written over; its own"
+        " AGENT_COMPAT_* names were consumed before"
+    ),
+    ("apps/backend/cloud_agent_host/protocol_translator.py", "_launch_passthrough"): (
+        "a passthrough launch: refused if any value holds the token placeholder, its"
+        " AGENT_COMPAT_* names consumed, the rest handed to the CLI"
     ),
     ("apps/backend/cloud_agent_shared/git/source_archive.py", "build_base_bundle"): (
         "git, with the repository's fixed Git environment on top"

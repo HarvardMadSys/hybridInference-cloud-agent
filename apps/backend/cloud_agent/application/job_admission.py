@@ -255,6 +255,7 @@ async def _resolve_mcp_bindings(
                 "invalid_request",
                 "Unknown MCP capability policy; use deny, confirm or allow.",
             ) from exc
+        defaults = bool(getattr(entry, "use_defaults", False))
         has_selection = any(rule["policy"] != "deny" for rule in rules.values()) or any(
             policy != "deny" for policies in other_rules.values() for policy in policies.values()
         )
@@ -262,7 +263,8 @@ async def _resolve_mcp_bindings(
             {
                 "connection_id": connection_id,
                 "alias": "",
-                "enabled": bool(getattr(entry, "enabled", True)) and has_selection,
+                "enabled": bool(getattr(entry, "enabled", True)) and (has_selection or defaults),
+                "selection_pending": defaults,
                 "config_revision": resolved.connection.config_revision,
                 "authorization_epoch": resolved.connection.authorization_epoch,
                 "capability_revision": resolved.connection.capability_revision,

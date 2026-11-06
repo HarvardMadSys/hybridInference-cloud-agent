@@ -19,6 +19,9 @@ RESPONSES = "responses"
 ANTHROPIC_MESSAGES = "anthropic_messages"
 CHAT_COMPLETIONS = "chat_completions"
 CLIENTS: tuple[str, ...] = (RESPONSES, ANTHROPIC_MESSAGES)
+#: The launcher's other mode: a direct plan's CLI, its requests forwarded
+#: unchanged and measured (``cloud_agent_host.model_passthrough``).
+PASSTHROUGH = "passthrough"
 
 #: Where the launcher writes the loopback origin into the CLI's argv and env.
 ORIGIN_PLACEHOLDER = "@@MODEL_PROTOCOL_COMPAT_ORIGIN@@"
@@ -38,6 +41,17 @@ ENV_TOKEN = "AGENT_COMPAT_TOKEN"
 #: Every variable the launcher consumes; none reaches the CLI.
 LAUNCH_ENV = (ENV_CLIENT, ENV_UPSTREAM_URL, ENV_UPSTREAM_KEY, ENV_MODEL, ENV_TOKEN)
 
+
+def passthrough_authority(host: str, port: int | None) -> str:
+    """How a passthrough's one upstream is named in its CLI's URL: ``host[:port]``.
+
+    The host builds the CLI's URL with it and the launcher checks every
+    request's path against it, so the two cannot spell one origin two ways.
+    """
+    host = host.lower()
+    return host if port in (None, 443) else f"{host}:{port}"
+
+
 __all__ = [
     "ANTHROPIC_MESSAGES",
     "CHAT_COMPLETIONS",
@@ -49,6 +63,8 @@ __all__ = [
     "ENV_UPSTREAM_URL",
     "LAUNCH_ENV",
     "ORIGIN_PLACEHOLDER",
+    "PASSTHROUGH",
     "RESPONSES",
     "TOKEN_PLACEHOLDER",
+    "passthrough_authority",
 ]

@@ -401,6 +401,8 @@ from cloud_agent.schemas.workspace import (
     AgentTerminalSessionResizeRequest,
     AgentTerminalSessionResponse,
     AgentWorkspaceEntry,
+    AgentWorkspaceImage,
+    AgentWorkspaceImagesResponse,
     AgentWorkspaceResponse,
     AgentWorkspaceWriteRequest,
 )
@@ -538,6 +540,8 @@ __all__ = [
     "AgentTrajectoryTimingRequest",
     "AgentTrajectoryTimingResponse",
     "AgentWorkspaceEntry",
+    "AgentWorkspaceImage",
+    "AgentWorkspaceImagesResponse",
     "AgentWorkspaceResponse",
     "AgentWorkspaceWriteRequest",
     "AttemptResources",

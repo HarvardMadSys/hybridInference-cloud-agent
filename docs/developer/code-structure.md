@@ -97,8 +97,10 @@ names: a type a new port needs moves to `domain/` or `schemas/` first.
 Do not add a port that only repeats its repository's methods: the assembly then
 names the repository class, and each caller declares the narrow Protocol it
 uses, as `api/config.py` does for model preferences.
-Application flows may use the existing FastAPI exception contracts; moving
-files does not imply those interfaces have become framework-independent.
+Application flows do not raise HTTP errors: they raise the domain errors
+`Refused` and `Unavailable` (`domain/errors.py`), and `api/errors.py` maps them
+to the same status, headers and body. A test refuses `HTTPException` in
+`application/`.
 
 MCP session ownership lives in `mcp/runtime.py`: lazy host construction,
 fenced session reaping, maintenance, and closing. Both the relay's handlers
@@ -173,7 +175,16 @@ narrow container protocol; exact container identity, bounded exec, and
 fail-stop operations stay with the manager. Existing manager network entry
 points delegate to that owner. Network snapshots remain scoped to one
 operation, and operational log names are stable.
-`container/chat_sandbox.py` manages retained groups and their members;
+`container/chat_sandbox.py` manages retained groups and their members. Its
+`ChatSandboxManager` is assembled from mixins, one module per concern:
+container creation (`chat_sandbox_create.py`), member execs and processes
+(`chat_sandbox_members.py`), workspace and home files
+(`chat_sandbox_workspace.py`), the guest observer (`chat_sandbox_observation.py`)
+and archive markers (`chat_sandbox_markers.py`); terminals and the retained
+backend are in `chat_sandbox_terminal.py` and `retained_backend.py`. A test pins
+the manager's method set. The in-guest network check is
+`network/guest_network_check.py`, and the retained-container inventory the
+capacity report reads is `observe/sandbox_inventory.py`.
 `container/sandbox.py` owns the container/process boundary. The Sandbox Manager
 and session supervisor coordinate native sessions and workspace operations. The
 supervisor's metadata lock protects in-memory ownership only. Stop, orphan
@@ -183,6 +194,15 @@ identities before accepting the result. Other groups remain available; failed
 checks release their temporary reservation, while durable archive and
 native-flush barriers remain in force. Public sandbox model imports through
 `chat_sandbox` continue to work.
+
+A group's lifecycle is one value, `GroupLifecycleState`
+(`supervisor/group_lifecycle_state.py`): which start, stop, exclusive workspace
+operation and lifecycle check hold it, each with its holder, the barriers
+still owed (a final archive, an orphan finalization), and the run's fence
+label. Only that module's transitions change it, and a test refuses any other
+assignment. `supervisor/group_lifecycle.py` is the admission table that decides
+what may run now. The [design](../agents/specs/2026-11-05-group-lifecycle-state.zh-CN.md)
+records which combinations are reachable and the invariants the tests check.
 
 The runtime adapters are a package under `cloud_agent_host/runtimes/`, with one
 package per CLI:

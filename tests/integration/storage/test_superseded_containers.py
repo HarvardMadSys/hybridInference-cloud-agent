@@ -585,7 +585,7 @@ async def test_a_release_removes_what_a_group_never_resumed_left_behind(
         )
 
     monkeypatch.setattr(
-        "cloud_agent.application.compute_reconcile.sandbox_manager_for_host", manager_for
+        "cloud_agent.application.compute_retirement.sandbox_manager_for_host", manager_for
     )
 
     async def release(ref, intent):

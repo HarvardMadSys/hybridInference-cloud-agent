@@ -124,7 +124,6 @@ def test_the_mcp_connection_repository_keeps_its_methods() -> None:
         "get_mcp_invocation",
         "list_mcp_bindings",
         "list_mcp_connections",
-        "list_mcp_connectors",
         "list_mcp_invocations",
         "open_mcp_transport_session",
         "reap_mcp_transport_sessions",

@@ -34,8 +34,8 @@ from cloud_agent_host.container.chat_sandbox import (
     ChatSandboxManager,
     ChatSandboxSpec,
     ChatSandboxStatus,
-    RetainedChatBackend,
 )
+from cloud_agent_host.container.retained_backend import RetainedChatBackend
 from cloud_agent_host.supervisor.shared_session_state import SharedMemberManifest
 from cloud_agent_shared.errors import SandboxError
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy

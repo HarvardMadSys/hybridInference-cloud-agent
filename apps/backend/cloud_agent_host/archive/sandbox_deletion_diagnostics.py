@@ -86,20 +86,6 @@ KNOWN_REASONS = frozenset(
 #: is logged as its own field instead.
 _NO_MEMBERSHIP = re.compile(r"chat '[^']*' has no shared sandbox membership")
 
-#: The group state any of which refuses a deletion
-#: (``Operation.IDLE_DELETION`` in ``group_lifecycle.ADMISSION``).
-_BARRIERS = (
-    "container_lost",
-    "snapshotting",
-    "starting",
-    "stopping",
-    "initial_archive_preservation_pending",
-    "stop_archive_pending",
-    "stop_archive_blocked",
-    "orphan_finalization_pending",
-    "orphan_marker_unreadable",
-    "start_archive_completion_pending",
-)
 
 #: Every receipt one deletion request can have written.
 RECEIPTS = (
@@ -181,7 +167,7 @@ def _group_state(
         )
     except Exception:
         bridge = None
-    request = group.archive_request_id
+    request = group.life.archive_request_id
     archive_request = "none" if request is None else "other"
     if request == identity.request_id:
         archive_request = "this"
@@ -192,8 +178,10 @@ def _group_state(
         "container_running": group.inspection.running,
         "bridge_attached": bridge,
         "archive_request": archive_request,
-        "lifecycle_check": group.lifecycle_check is not None,
-        "barriers": [name for name in _BARRIERS if getattr(group, name)],
+        "lifecycle_check": group.life.check is not None,
+        # The group state any of which refuses a deletion
+        # (``Operation.IDLE_DELETION`` in ``group_lifecycle.ADMISSION``).
+        "barriers": [name for name, held in group.life.flags().items() if held],
         "operations": len(group.operation_tokens),
         "terminals": len(group.terminal_tokens),
         "members": len(group.members),

@@ -20,7 +20,7 @@ pytestmark = pytest.mark.dbtest
 _BEFORE = "0057_admin_sandbox_trajectory"
 _THIS = "0058_mcp_connector_invariant"
 _NEXT = "0059_counter_constraints"
-_HEAD = "0114_admin_audit_attribution"
+_HEAD = "0115_mcp_retire_dead_locations"
 _OWNER = "user-owner"
 _OTHER = "user-other"
 _PRESERVED_AUTHORIZED_AT = datetime(2001, 2, 3, 4, 5, 6, tzinfo=UTC)
@@ -109,7 +109,11 @@ def test_mcp_connector_invariant_revision_follows_trajectory_merge() -> None:
     assert (
         script.get_revision("0113_sandbox_incidents").down_revision == "0112_thread_pull_requests"
     )
-    assert script.get_revision(_HEAD).down_revision == "0113_sandbox_incidents"
+    assert (
+        script.get_revision("0114_admin_audit_attribution").down_revision
+        == "0113_sandbox_incidents"
+    )
+    assert script.get_revision(_HEAD).down_revision == "0114_admin_audit_attribution"
     assert script.get_revision("0109_local_account_parity").down_revision == "0108_local_accounts"
     assert script.get_revision("0108_local_accounts").down_revision == (
         "0107_attempt_context_profiles"
@@ -172,23 +176,38 @@ def test_mcp_connector_invariant_revision_follows_trajectory_merge() -> None:
 
 
 async def _local_connection(
-    store: Storage,
+    pool: asyncpg.Pool,
     *,
     label: str,
     connector_id: int | None = None,
 ) -> dict:
-    """Create one local connection through the normal repository."""
-    return await store.mcp.create_mcp_connection(
-        user_id=_OWNER,
-        label=label,
-        transport="stdio",
-        location="user-connector",
-        url=None,
-        launch_spec={"command": "mcp-server", "args": [], "env": {}, "mounts": []},
-        auth_kind="none",
-        auth_config={},
-        connector_id=connector_id,
-    )
+    """Create one connector-routed connection as that release's repository did.
+
+    Its route and the connector's authorization were written together; the
+    repository no longer writes either, so the rows are inserted directly.
+    """
+    async with pool.acquire() as conn, conn.transaction():
+        row = await conn.fetchrow(
+            """
+            INSERT INTO agent_mcp_connections
+                (user_id, label, transport, location, launch_spec, auth_kind, auth_config,
+                 connector_id)
+            VALUES ($1, $2, 'stdio', 'user-connector', $3::jsonb, 'none', '{}'::jsonb, $4)
+            RETURNING id
+            """,
+            _OWNER,
+            label,
+            '{"command": "mcp-server", "args": [], "env": {}, "mounts": []}',
+            connector_id,
+        )
+        if connector_id is not None:
+            await conn.execute(
+                "INSERT INTO agent_mcp_connector_connections (connector_id, connection_id) "
+                "VALUES ($1, $2)",
+                connector_id,
+                row["id"],
+            )
+    return dict(row)
 
 
 async def _remote_connection(store: Storage, *, label: str) -> dict:
@@ -218,14 +237,14 @@ async def test_migration_repairs_routes_and_preserves_only_the_canonical_pair(po
     revoked = await insert_connector(pool, user_id=_OWNER, name="Revoked", revoked=True)
 
     valid = await _local_connection(
-        store, label="Valid canonical", connector_id=int(canonical["id"])
+        pool, label="Valid canonical", connector_id=int(canonical["id"])
     )
-    missing = await _local_connection(store, label="Valid missing mapping")
+    missing = await _local_connection(pool, label="Valid missing mapping")
     remote = await _remote_connection(store, label="Invalid remote")
-    foreign = await _local_connection(store, label="Invalid owner")
-    revoked_route = await _local_connection(store, label="Invalid revoked")
-    deleted = await _local_connection(store, label="Invalid deleted")
-    no_route = await _local_connection(store, label="No route")
+    foreign = await _local_connection(pool, label="Invalid owner")
+    revoked_route = await _local_connection(pool, label="Invalid revoked")
+    deleted = await _local_connection(pool, label="Invalid deleted")
+    no_route = await _local_connection(pool, label="No route")
 
     async with pool.acquire() as conn:
         await conn.execute(

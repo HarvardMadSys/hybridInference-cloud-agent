@@ -28,7 +28,6 @@ from cloud_agent_host.container.chat_sandbox import (
     CHAT_WORKDIR,
     ChatSandboxManager,
     ChatSandboxSpec,
-    RetainedChatBackend,
 )
 from cloud_agent_host.container.sandbox import SandboxBackend, SandboxSpec
 from cloud_agent_host.service.local_settings import source_import_max_bytes
@@ -56,6 +55,7 @@ if TYPE_CHECKING:
     from cloud_agent_host.claimed_job import (
         ClaimedJob,
     )
+    from cloud_agent_host.container.retained_backend import RetainedChatBackend
 
 _CANCEL_POLL_S = 0.1
 

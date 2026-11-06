@@ -22,10 +22,9 @@ This module is that surface. It owns:
   authorization layer reads.
 - **Calling**, including the multi-round-trip continuation, and normalizing a
   result into the bounded, honest shape the runtimes render.
-- **Refusing stdio it cannot run.** A ``managed-worker`` or ``user-connector``
-  server needs a worker or a connector, and neither is a Python object in this
-  process. Rather than pretending, the host raises and says which component is
-  missing.
+- **Refusing stdio it cannot run.** A stdio server is a program in the task's
+  sandbox, started by the sandbox's MCP gateway, not by this process. Rather
+  than pretending, the host raises and says where it runs.
 """
 
 from __future__ import annotations
@@ -46,7 +45,6 @@ from cloud_agent.mcp import protocol
 from cloud_agent.mcp.jsonrpc import JsonRpcError
 from cloud_agent.mcp.models import (
     CapabilitySnapshot,
-    ExecutionLocation,
     McpConnection,
     Transport,
 )
@@ -98,19 +96,17 @@ def _unreadable(exc: Exception, *, connection_id: str) -> HostError:
     return HostError("the server's reply could not be processed", kind="protocol_incompatible")
 
 
-class ConnectorRequired(HostError):
-    """Raised for a stdio connection with no worker or connector behind it."""
+class SandboxProgram(HostError):
+    """Raised for a stdio connection: it runs in the task's sandbox, not here."""
 
-    def __init__(self, connection_id: str, location: ExecutionLocation) -> None:
-        """Name the connection and the component that would have to run it."""
+    def __init__(self, connection_id: str) -> None:
+        """Name the connection and where it runs instead."""
         super().__init__(
-            f"connection {connection_id} runs a local process, which needs a "
-            f"{'managed worker' if location is ExecutionLocation.MANAGED_WORKER else 'user connector'} "
-            "that this deployment has not been given",
+            f"connection {connection_id} is a program that runs in the chat's sandbox, "
+            "not through the MCP relay",
             kind="launch_failed",
         )
         self.connection_id = connection_id
-        self.location = location
 
 
 @dataclass(frozen=True)
@@ -661,7 +657,7 @@ class McpHost:
         """Build and connect the transport one connection's config implies."""
         config = connection.config
         if config.transport is Transport.STDIO:
-            raise ConnectorRequired(connection.connection_id, config.location)
+            raise SandboxProgram(connection.connection_id)
         if not config.url:
             raise HostError("this connection has no address", kind="unreachable")
 
@@ -1041,11 +1037,11 @@ def new_invocation_id() -> str:
 __all__ = [
     "MAX_CONTENT_BLOCKS",
     "MAX_CONTENT_BYTES",
-    "ConnectorRequired",
     "ContentBlock",
     "HostError",
     "HostLimits",
     "McpHost",
+    "SandboxProgram",
     "Session",
     "SessionFingerprint",
     "SessionKey",

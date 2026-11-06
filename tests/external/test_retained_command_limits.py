@@ -28,8 +28,8 @@ from cloud_agent_host.container.chat_sandbox import (
     CHAT_WORKDIR,
     ChatSandboxManager,
     ChatSandboxSpec,
-    RetainedChatBackend,
 )
+from cloud_agent_host.container.retained_backend import RetainedChatBackend
 from cloud_agent_host.container.sandbox import ContainerBackend, SandboxProcess, SandboxSpec
 from cloud_agent_host.environment_process import ACTION_UIDS, ENVIRONMENT_UIDS
 from cloud_agent_host.manager_api.workspace_commands import _run_sandbox

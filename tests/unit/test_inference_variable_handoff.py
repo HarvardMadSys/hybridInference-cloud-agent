@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from tests.support.member_loopback import HELPER_IN_PLACE
 from tests.support.owners import launch_connection
 
 from cloud_agent.sandbox_manager.sandbox_manager_client import (
@@ -17,11 +18,13 @@ from cloud_agent.sandbox_manager.sandbox_manager_client import (
     SandboxManagerError as ControlPlaneError,
 )
 from cloud_agent_host.container.chat_sandbox import (
-    MEMBER_REAPER_TARGET,
     MEMBER_TMPFS_ROOT,
     MEMBER_UID_BASE,
     ChatSandboxManager,
     ChatSandboxSpec,
+)
+from cloud_agent_host.container.chat_sandbox_members import (
+    MEMBER_REAPER_TARGET,
     member_inference_env_path,
 )
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
@@ -153,6 +156,7 @@ def _launch_context(environment: BoundEnvironment | None):
             ("write", script, kwargs)
         ),
         spawn=spawn,
+        exact=HELPER_IN_PLACE,
     )
     spec = ChatSandboxSpec(
         thread_id="athr_owner",
@@ -263,6 +267,7 @@ def test_a_launch_without_them_leaves_no_earlier_credentials_in_the_slot(tmp_pat
         ensure_member_process_reaper=lambda spec: None,
         backend=SimpleNamespace(gid=10001, base_env=lambda: {}),
         spawn=lambda spec, argv, **kwargs: object(),
+        exact=HELPER_IN_PLACE,
     )
     manager.reap_member_processes = partial(ChatSandboxManager.reap_member_processes, manager)
     manager.write_member_inference_env = partial(

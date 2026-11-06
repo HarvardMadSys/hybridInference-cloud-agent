@@ -24,6 +24,8 @@ from cloud_agent_host.launch.mcp_relay import McpRelayFacet
 from cloud_agent_host.launch.plugins import PluginsFacet
 from cloud_agent_host.launch.runtime import RuntimeFacet
 from cloud_agent_host.launch.sandbox_mcp import SandboxMcpFacet
+from cloud_agent_host.runtimes import meters_direct_plan
+from cloud_agent_shared.secret_redaction import MIN_SECRET_CHARS, merged_secrets
 
 if TYPE_CHECKING:
     from cloud_agent_host.launch.facet import LaunchFacet
@@ -49,6 +51,11 @@ def launch_facets(launch: ResidentLaunch) -> tuple[LaunchFacet, ...]:
             source=launch.inference_source,
             client_protocol=launch.inference_client_protocol,
             local_token=launch.inference_local_token,
+            # A translated plan's helper measures every request already; a
+            # direct one is metered unless its CLI treats the provider's host
+            # as its vendor's own.
+            metered=not launch.inference_client_protocol
+            and meters_direct_plan(launch.runtime_id, launch.inference_base_url),
         ),
         McpRelayFacet(
             server_ids=launch.mcp_server_ids,
@@ -77,6 +84,26 @@ def launch_facets(launch: ResidentLaunch) -> tuple[LaunchFacet, ...]:
             mcp_server_ids=launch.mcp_server_ids,
             mcp_base_url=launch.mcp_base_url,
         ),
+    )
+
+
+def launch_secrets(launch: ResidentLaunch) -> dict[str, str]:
+    """Every value ``launch``'s facets bring into the sandbox, by name, in comparison order.
+
+    A residency's credentials are known only once its member's process is
+    opened, after the claim's values built the turn's redactor, so the attempt
+    adds these to it. A value shorter than ``MIN_SECRET_CHARS`` is left out,
+    as for a sandbox program's key: masking it would blank ordinary output.
+    """
+    return merged_secrets(
+        *(
+            {
+                name: value
+                for name, value in facet.secrets().items()
+                if len(value.strip()) >= MIN_SECRET_CHARS
+            }
+            for facet in launch.facets
+        )
     )
 
 

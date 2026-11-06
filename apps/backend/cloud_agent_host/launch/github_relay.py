@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Self, override
 
-from cloud_agent_host.launch.facet import LaunchFacet
+from cloud_agent_host.launch.facet import SECRET, LaunchFacet
 from cloud_agent_shared.shared_protocol import is_residency_github_credential
 
 if TYPE_CHECKING:
@@ -27,7 +27,7 @@ class GitHubRelayFacet(LaunchFacet):
     """
 
     # Kept in this member's environment, never in shared workspace or image config.
-    credential: str = field(repr=False)
+    credential: str = field(repr=False, metadata=SECRET)
     repo: str
     author_name: str
     author_email: str

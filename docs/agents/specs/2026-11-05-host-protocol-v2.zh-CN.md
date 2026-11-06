@@ -63,7 +63,7 @@
 
 ### 3.2 A 层：线上协议对照，不用镜像
 
-**放在哪里。** 新脚本 `scripts/check_mixed_protocol.py`，在 test-db 任务（`ci.yml:544`）里紧接滚动升级检查执行，用同一个 Postgres 服务，只在 shard 1 上跑。只要改动涉及下列任何一处，`changes` 任务就把它标成需要跑：`schemas/workers.py`、`schemas/hosts.py`、`api/worker.py`、`api/hosts.py`、`cloud_agent_shared/`、`cloud_agent_host/control_plane_client.py`、`cloud_agent_host/service/enrollment.py`、`cloud_agent_host/claimed_job.py`、`sandbox_manager/`、`cloud_agent_host/manager_api/`。
+**放在哪里。** 新脚本 `scripts/check_mixed_protocol.py`，在 test-db 任务（`ci.yml:544`）里紧接滚动升级检查执行，用同一个 Postgres 服务，只在 shard 1 上跑。只要改动涉及下列任何一处，`changes` 任务就把它标成需要跑：`schemas/workers.py`、`schemas/hosts.py`、`api/worker.py`、`api/hosts.py`、`cloud_agent_shared/`、`cloud_agent_host/control_plane_client.py`、`cloud_agent_host/service/enrollment.py`、`cloud_agent_host/claimed_job.py`、`sandbox_manager/`、`cloud_agent_host/manager_api/`。（实现时改为：任何后端包、`pyproject.toml`、`uv.lock` 或检查本身有改动就跑。线上模型和负载分散在 `schemas/` 的其他模块、`attachments/models.py`、`application/turn_claim.py`、`host_capacity.py`、`observe/sandbox_inventory.py`、`turn/shared_live_attempt.py` 等处，按文件列举总会漏；检查只要几秒。）
 
 **做法。** 两个方向各起一个随机数据库，用对应控制面那一版自己的 Alembic 迁移：
 
@@ -147,6 +147,20 @@
 1. 第一个 PR 只加 A 层，不改协议。合并前在 dev 上连续跑绿一周，同时人为制造一次不兼容（例如删掉一个老 host 会发的字段），确认它会失败。
 2. 第二个 PR 加 B 层。
 3. §4–§9 的每个协议 PR，两层都要在那个 PR 上跑绿，并把结果写进 PR 描述。`check_rolling_upgrade.py` 仍然要通过。
+
+**A 层的现状（2026-11-05）。** 已实现，尚未在 dev 上连续跑满一周：
+
+- 脚本 `scripts/check_mixed_protocol.py`，两个进程驱动 `tests/support/mixed_protocol_control.py`（某一版的控制面）和 `tests/support/mixed_protocol_host.py`（某一版的 host 端代码），共用的模型检查在 `tests/support/mixed_protocol_wire.py`。上一版用 `git archive` 取出，在自己的目录里 `uv sync --frozen` 建 venv（含 dev 依赖：Sandbox Manager 配对要用那一版 tests 里的 fake）。
+- 四组配对并行跑：本版 host 对上一版控制面、上一版 host 对本版控制面，以及两版各自同版本配对作为基准。每组一个随机数据库，用该组控制面自己的 Alembic 迁移。控制面是真实的 `create_app()`（含后台任务），出站 HTTP 指向一个关闭的代理端口。
+- 覆盖 §3.4 的 1–7 步：注册和心跳（`retained_sandboxes` 由那一版自己的心跳行构建函数从假 Sandbox Manager 读出）；新对话 claim 和两次后续 claim；reserve、running、residency、process、admit；事件和 attempt 心跳，第二轮中途取消并在心跳里看到 `cancel_requested`；settle 和 finish，第三轮 abandon 和 finish；心跳下发空闲停止、host 停掉后下一次心跳报告已停止；驱逐 residency 后心跳返回 `residencies_lost`。
+- 断言：每次调用的状态码；接收方用自己那一版的模型解析——控制面按路由的请求模型、host 按路由的响应模型、假 Sandbox Manager 按 host 那一版的 `manager_api` 请求模型——出现被拒收或被静默丢弃的非空字段就失败；数据库状态在第一轮之后、驱逐之后、空闲停止之后和结束时，都要和同版本基准一致。已知的丢弃只有一项白名单：控制面在终端挂起和恢复里发的 `lease_generation`，由 `sandbox_manager_client.py` 的 `COMPAT(remove-after=2026-11-30)` 管着。
+- CI：`ci.yml` 的 test-db 任务在滚动升级检查之后、只在 shard 1 上跑，由 `changes` 任务的 `protocol` 输出控制（任何后端包、`pyproject.toml`、`uv.lock` 或检查自己的文件有改动就跑，见 §3.2 的说明）。本地对 `agent-9a2b9e1` 跑一次约 10 秒。
+- 人为不兼容已验证会失败：把 settle 的 `native_session_id` 改名，两个混合方向都报"控制面的请求模型丢弃该字段"和数据库差异，基准两组通过；把心跳响应的 `retained_sandboxes_stop` 改名，两个混合方向都报 host 的响应模型丢弃该字段、没收到停止，以及空闲停止之后的数据库差异。
+- Sandbox Manager 线上协议（§3.2 第三条）：另跑四组配对（`tests/support/mixed_protocol_manager.py`）——本版控制面的 `SandboxManagerClient` 对上一版的 Sandbox Manager app、上一版的 client 对本版的 app，以及两版各自同版本配对。app 后面是那一版自己 `tests/unit/test_agent_sandbox_manager.py` 里的假 supervisor（`_SharedSupervisor`，补上它测试里没用到的 `residency_lost`）。覆盖 §9.1 里算作命令或状态的调用：`health`、`list_sandboxes`（全部和按 thread）、`shared_chat_sandbox_status`、`register_shared_sandbox`、`shared_residency_lost`、`sync_ssh_access`、`suspend_terminals`、`resume_terminals`、`resume_settled_terminals`。断言：两端都不报错、无 4xx、Sandbox Manager 的请求模型没有丢弃非空字段（`lease_generation` 同上白名单）、应答不缺 client 自己那一版 Sandbox Manager 会给的键（应答是普通 JSON，client 没有模型）。人为把 residency-lost 的 `generation` 改名，两个混合方向都报 422 和字段丢弃，基准两组通过。
+- §3.4 第 8 步：host 流程在 running 之后调 `suspend_terminals("workspace_preparing")` 和 `resume_terminals()`，控制面再直接调 Sandbox Manager 的 suspend/resume，由假 Sandbox Manager 按 host 那一版的模型检查；finish 时控制面对 Sandbox Manager 的 `register` 和终端 resume 同样被检查。状态、SSH 同步和 residency 丢失走上面的 Sandbox Manager 配对。
+- 未做：删除和 archive（`admin-delete/*`）的五个调用——它们有自己的持久状态机，请求体由 `workers/sandbox_deletion.py` 按数据库行构建，假 supervisor 后面也没有导出和上传，手写请求体测的就不是控制面真实发出的东西；环境准备和状态；交互式调用（文件、终端 I/O、git、问答、Fork、mid-turn 输入）。控制面主动推 SSH 访问（`push_ssh_access`）要求 owner 有 SSH 服务器，A 层没有建，只对照了线上形状。本地全套（八组）约 10–14 秒。
+- 已知局限："host 按路由的响应模型"是 host 那一版控制面路由上声明的响应模型，而 host 的客户端代码读的是普通 dict。所以一个 host 代码要读、在它那一版模型里却是可选的字段，新控制面不再发送时，模型检查不会报错，只能靠脚本里的行为断言（数据库对照）发现。补上它需要记录 host 代码实际读取的键，留待 §4 的协议版本 PR。
+- 顺带：host 心跳里一直发送的 `"profiling": null` 已删除——没有调用方传值，本版和上一版控制面的 `HostHeartbeatRequest` 都没有这个字段。host 仍读心跳应答里的 `profiling`，两版控制面的 `HostHeartbeatResponse` 也都没有这个字段，未改动。
 
 ## 4. 10.1 协议版本
 
@@ -266,14 +280,23 @@ class MemberFence(BaseModel):
 | 环境 Secrets | claim 的 `environment`（`cloud_agent_shared/environment.py:271` 的 `secrets()`；243 行 `previous_secrets` 标记 `MASKED`） | 成员环境 | 是 | 是 |
 | `SandboxMcpServer.secret_env` | claim（`cloud_agent_shared/sandbox_mcp.py:81`，`MASKED`） | slot runner | 是 | 是，但短于 8 个字符（`MIN_SECRET_CHARS`，`secret_redaction.py:15`）的值不遮（`sandbox_mcp.py:131–144`） |
 | owner key（`credential`） | residency（`schemas/hosts.py:469`） | 成员 CLI | 是 | 值和 claim 那份相同，所以实际上被遮了 |
-| `mcp_credential`（`amr.`） | residency（479） | 成员 CLI，经 MCP relay | 是 | **否**：`McpRelayFacet.secrets()` 声明了它，但没有接进脱敏器 |
-| `github_credential`（`agh.`） | residency（487） | 成员的 git 和 gh，以 `GH_TOKEN` 注入（`cloud_agent_host/launch/github_relay.py:73`），经 GitHub relay | 是 | **否**：同上（92） |
+| `mcp_credential`（`amr.`） | residency（479） | 成员 CLI，经 MCP relay | 是 | 是：`McpRelayFacet.secrets()` 声明它，打开 residency 后经 `launch_secrets` 加进脱敏器（§6.2，已完成）；借用已有进程的回合还不遮 |
+| `github_credential`（`agh.`） | residency（487） | 成员的 git 和 gh，以 `GH_TOKEN` 注入（`cloud_agent_host/launch/github_relay.py:73`），经 GitHub relay | 是 | 是：`GitHubRelayFacet.secrets()`，同上（§6.2，已完成） |
 
 runner 的脱敏器在每轮开始时用 `claim_secret_values(job)` 构造（`cloud_agent_host/turn_child.py:151–152`）。这个函数按字段上的 `MASKED` 标记推出脱敏集合（`claimed_job.py:206–221`，由 `tests/unit/test_claim_secret_masking.py` 保证），这就是结构重构里的 B1，基线上已经完成。residency 是在这之后、启动成员时才拿到的（`control_plane_client.py:499`，`shared_live_attempt.py:947`），它的值从来没有加进去过。`launch/facet.py:58–63` 的文档字符串也写着"not yet wired into it"。
 
-结构重构 §10.3 表里说 `secret_env` "否"，这一点在 #1104 里已经改了（`c30d7dfa2` 又补上了短值的规则）。两个占位凭据的"否"现在仍然成立。
+结构重构 §10.3 表里说 `secret_env` "否"，这一点在 #1104 里已经改了（`c30d7dfa2` 又补上了短值的规则）。两个占位凭据原来也是"否"，§6.2 已经把它们接进脱敏器。
 
 ### 6.2 第一步：不改协议，把 residency 的值接进脱敏器
+
+**状态：已完成**（`fix(host): mask residency credentials in turn output`）。实际做法：
+
+- `ControlPlane.add_secrets(values)`（`cloud_agent_host/control_plane_client.py`）把值并进 `_secret_values`（`cloud_agent_shared/secret_redaction.py` 的 `merged_secrets`：已经遮的值保留原名；名字被别的值占了时，新值记作 `NAME@1`，不丢任何值），重建 `_redactor`。已经打开的流式预览，按 reset 的规则用新集合重建，但保留旧脱敏器还扣着的尾巴（`SecretRedactor.continued`）。
+- `launch_secrets(launch)`（`cloud_agent_host/launch/facets.py`）按比较顺序合并每个 facet 的 `secrets()`，短于 `MIN_SECRET_CHARS` 的值不遮，规则和 sandbox 程序的 key 一样。`cloud_agent_host/turn/shared_live_attempt.py` 的 `_open_resident` 在拿到 residency、构造出 `ResidentLaunch` 之后、启动成员进程之前调用 `add_secrets(launch_secrets(launch))`。
+- facet 里装凭据的字段写成 `field(repr=False, metadata=SECRET)`（`cloud_agent_host/launch/facet.py`）。`tests/unit/test_launch_secret_masking.py` 列出所有标记字段，断言每个都出现在本 facet 的 `secrets()` 里，并断言每个 facet 和 `ResidentLaunch` 里 `repr=False` 的值都进了 `launch_secrets`；另有一个测试走完整个 shared-live 启动，成员打印的 `amr.`/`agh.` 在存下的事件里只剩 `[secret:mcp_credential]` 和 `[secret:github_credential]`。
+- 还没覆盖的：借用已有进程（probe 成功）的回合拿不到 residency，所以 runner 不知道那个进程持有的 `amr.`/`agh.` 值，这一轮不会遮。要遮它们得让 runner 拿到值，这需要改协议，留给 §6.3。
+
+原计划：
 
 - `ControlPlane`（`cloud_agent_host/control_plane_client.py:81`）加一个方法 `add_secrets(values)`：它往 `_secret_values` 里追加，然后重建 `_redactor`。已经打开的流式预览，按现有的 reset 规则重建（`control_plane_client.py:182–184`）。
 - `shared_live_attempt` 拿到 residency、构造出 `ResidentLaunch` 之后，立刻用 `launch_secrets(launch)` 调用它。`launch_secrets` 合并所有 facet 的 `secrets()`，取代 facet.py 文档里说的"另一半"。
@@ -508,7 +531,7 @@ send-now；终端挂起和恢复；环境运行；删除和 archive；任何交�
 
 | 顺序 | 项 | 改协议吗 | 依赖 |
 |---|---|---|---|
-| 1 | §3 A 层 | 否 | — |
+| 1 | §3 A 层（已实现，见 §3.5） | 否 | — |
 | 2 | §6.2 residency 值进入脱敏器 | 否 | — |
 | 3 | §3 B 层 | 否 | 1 |
 | 4 | §4 协议版本（v2） | 是 | 1、3 |

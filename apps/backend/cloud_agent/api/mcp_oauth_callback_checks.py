@@ -1,6 +1,6 @@
 """The OAuth callback's refusals that need no database read.
 
-Split from :mod:`cloud_agent.api.mcp_connections`, which answers the callback;
+Split from the callback, which :mod:`cloud_agent.api.mcp_authorization` answers;
 each function names the message the callback redirects with, or ``None``.
 """
 

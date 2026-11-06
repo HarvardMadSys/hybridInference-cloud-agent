@@ -22,7 +22,9 @@ from cloud_agent_host.manager_api.workspace_commands import _run_git, _run_git_m
 from cloud_agent_host.operation_call import open_call
 from cloud_agent_host.retained_workspace import (
     RetainedWorkspaceError,
+    list_retained_images,
     read_retained_file,
+    read_retained_image,
     write_retained_file,
 )
 from cloud_agent_host.ssh_access import apply_ssh_access
@@ -34,7 +36,7 @@ from cloud_agent_shared.workspace_browser import WorkspacePathError, normalize_w
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from cloud_agent_host.container.chat_sandbox import RetainedChatBackend
+    from cloud_agent_host.container.retained_backend import RetainedChatBackend
     from cloud_agent_host.manager_api.context import ManagerContext
     from cloud_agent_host.operation_call import SandboxManagerCall
 
@@ -87,6 +89,35 @@ class WorkspaceRoutes:
             return body
 
         return self._context.retained_operation(workspace_id, _read, call=call, start_seq=start_seq)
+
+    @route("GET", "/workspaces/{workspace_id}/files/image")
+    def file_image(
+        self,
+        workspace_id: str,
+        request: Request,
+        path: str = Query(..., min_length=1, max_length=4096),
+    ) -> dict[str, Any]:
+        """Open one image file under the image bound, which is larger than a preview's."""
+        relative = _relative_path(path)
+        return self._context.retained_operation(
+            workspace_id,
+            lambda retained, _call: read_retained_image(retained, relative),
+            start_seq=parse_start_fence(request.headers.get(START_FENCE_HEADER)),
+        )
+
+    @route("GET", "/workspaces/{workspace_id}/artifacts/images")
+    def artifact_images(
+        self,
+        workspace_id: str,
+        request: Request,
+        since: float = Query(0.0, ge=0.0),
+    ) -> dict[str, Any]:
+        """The images saved under the artifacts directory since a Unix time, newest first."""
+        return self._context.retained_operation(
+            workspace_id,
+            lambda retained, _call: list_retained_images(retained, since=since),
+            start_seq=parse_start_fence(request.headers.get(START_FENCE_HEADER)),
+        )
 
     @route("PUT", "/workspaces/{workspace_id}/files")
     def write_file(

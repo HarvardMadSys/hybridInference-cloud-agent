@@ -75,9 +75,9 @@ if TYPE_CHECKING:
     from cloud_agent_host.container.chat_sandbox import (
         ChatSandboxManager,
         ChatSandboxSpec,
-        RetainedChatBackend,
         SandboxActionFacts,
     )
+    from cloud_agent_host.container.retained_backend import RetainedChatBackend
     from cloud_agent_host.drivers import DialectRuntime, InputOutcome
     from cloud_agent_host.supervisor.member_sessions import SharedTurnTelemetry
     from cloud_agent_host.supervisor.native_session_fork import NativeSessionForkResult
@@ -685,7 +685,7 @@ class SharedChatSessionSupervisor:
         state = self.state
         with state.lock:
             group = state.groups.get(sandbox_id)
-            if group is None or group.stopping or not group.inspection.running:
+            if group is None or group.life.stop is not None or not group.inspection.running:
                 return None
             return group.spec, group.inspection.container_id
 

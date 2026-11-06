@@ -85,7 +85,7 @@ async def write_mcp_bindings(
                 (thread_id, connection_id, alias, enabled, selection_pending,
                  config_revision, authorization_epoch, capability_revision,
                  policy_revision, rules, resource_rules, prompt_rules)
-            VALUES ($1, $2, $3, $4, FALSE, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb)
+            VALUES ($1, $2, $3, $4, $12, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb)
             """,
             thread_id,
             int(binding["connection_id"]),
@@ -98,4 +98,5 @@ async def write_mcp_bindings(
             json.dumps(binding.get("rules") or {}),
             json.dumps(binding.get("resource_rules") or {}),
             json.dumps(binding.get("prompt_rules") or {}),
+            bool(binding.get("selection_pending", False)),
         )

@@ -26,7 +26,8 @@ class SandboxMcpFacet(LaunchFacet):
 
     servers: tuple[SandboxMcpServer, ...]
     # The gateway authenticates the relay's credential, and a server reports
-    # through the relay's address.
+    # through the relay's address. The relay's facet names that credential
+    # among its secrets, so this one does not.
     relay_credential: str = field(repr=False)
     relay_url: str
     # The chat's environment, for the servers' ${NAME} references.

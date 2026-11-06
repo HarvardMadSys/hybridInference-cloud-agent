@@ -51,7 +51,8 @@ from cloud_agent_host.member_setup.member_preparation import (
     MemberStep,
     run_member_steps,
 )
-from cloud_agent_host.runtimes import RuntimeMCPConfig, connection_base_url
+from cloud_agent_host.request_prefixes import TurnPrefixes
+from cloud_agent_host.runtimes import RuntimeMCPConfig, connection_base_url, meter_launch
 from cloud_agent_host.runtimes.claude import member as claude_member
 from cloud_agent_host.runtimes.codex import member as codex_member
 from cloud_agent_host.runtimes.codex.fork_state import CODEX_REBASE_ROLLOUT_PATHS
@@ -179,16 +180,31 @@ class ResidentTurn(Generic[_RuntimeT_co]):
     def __init__(self, turn: HarnessTurn[_RuntimeT_co]) -> None:
         self._turn = turn
 
+    def _request_prefixes(self) -> list[dict[str, Any]]:
+        """The member's request-meter records its CLI process read since the last call."""
+        # Read from the turn's own process: every driver's turn holds the one
+        # it reads, and a stand-in process without a meter has none to give.
+        take = getattr(getattr(self._turn, "_process", None), "request_prefixes", None)
+        return take() if callable(take) else []
+
     def lines(self) -> Iterator[HarnessEvent]:
-        """Yield normalized driver events through the exact turn boundary."""
+        """Yield normalized driver events through the exact turn boundary.
+
+        Ahead of each line's events, the prefixes the member's request meter
+        measured since the line before (``request_prefixes``): a request's
+        record is written as it is sent, before any of its answer.
+        """
+        prefixes = TurnPrefixes()
         try:
             for line in self._turn.raw_lines():
+                yield from prefixes.events(self._request_prefixes())
                 yield from self._turn.events_for_line(line)
         except Exception:
             # A stream that breaks before its boundary still reports what the
             # driver had gathered from it, ahead of the failure.
             yield from self._turn.flush_events()
             raise
+        yield from prefixes.events(self._request_prefixes())
 
     def wait(self) -> TurnResult:
         """Return the settled result while leaving a healthy transport alive."""
@@ -600,6 +616,14 @@ class ResidentTransportFactory:
         base_env, inference_script = self._member_env(launch)
         steps = member_launch(runtime_id)
         instructions = steps.platform_instructions(launch)
+        # The connection's URL is used exactly as written (``ExactBaseUrl``),
+        # typed by its protocol, so only the adapter that speaks it accepts it.
+        model_base_url = connection_base_url(
+            launch.inference_base_url,
+            launch.inference_protocol,
+            launch.inference_client_protocol,
+            metered=launch.facet(InferenceFacet).metered,
+        )
 
         reaped = False
 
@@ -633,6 +657,8 @@ class ResidentTransportFactory:
                 reaped = True
             pidfile = f"{MEMBER_TMPFS_ROOT}/{launch.slot_id}/resident-{secrets.token_hex(16)}.pid"
             argv, env = steps.with_platform_instructions(argv, env, instructions)
+            if model_base_url.metered:
+                argv, env = meter_launch(argv, env, launch.inference_base_url)
             return self._manager.spawn(
                 spec,
                 argv,
@@ -647,13 +673,7 @@ class ResidentTransportFactory:
         mcp_enabled = bool(launch.mcp_server_ids)
         return LaunchContext(
             workdir=CHAT_WORKDIR,
-            # The connection's URL is used exactly as written (``ExactBaseUrl``),
-            # typed by its protocol, so only the adapter that speaks it accepts it.
-            model_base_url=connection_base_url(
-                launch.inference_base_url,
-                launch.inference_protocol,
-                launch.inference_client_protocol,
-            ),
+            model_base_url=model_base_url,
             credential=credential,
             provides_isolation=True,
             spawn_live=spawn_live,

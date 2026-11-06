@@ -1052,14 +1052,17 @@ the pinned CLI. It skips when those prerequisites are absent and belongs to the
 external tier. Run it deliberately after changes to the merged endpoint, host,
 or bridge; it crosses seams the per-layer suites do not.
 
-### Connector configuration
+### Where a connection runs
 
-No connector runtime ships, and the routes that registered, bound and revoked a
-user's machine are retired. A `user-connector` connection can still name a
-connector registered before then, and is refused at use. Deleting the
-connection removes its link to that connector, and the connector's authorization
-for it, in the same transaction. Managed-worker connections likewise require an
-available worker. Configuration support does not establish execution support.
+What the owner added decides where it runs: an address is a `remote` service
+behind this relay, and a command is a `sandbox` program
+([sandbox MCP servers](#sandbox-mcp-servers)). Nothing else runs one: there is
+no connector on the owner's machine and no managed worker, and the API refuses
+both locations. `0115_mcp_retire_dead_locations` moved every connection stored
+at `managed-worker` or `user-connector` to `sandbox`, with its command as
+stored ([upgrade notes](upgrade-notes.md#mcp-servers-run-in-two-places)). The
+connector tables and `agent_mcp_connections.connector_id` are unused, and a
+later migration drops them.
 
 ### Deployment and rollback
 
@@ -1102,7 +1105,7 @@ There is no feature switch or preview tier. Rollbacks must retain a schema-compa
 service and leave the migrated connection and binding data in place; fix forward
 when a schema downgrade would discard those records.
 
-MCP and connectors are independent of the owner's model connection. Credential
+MCP is independent of the owner's model connection. Credential
 rotation uses the existing `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY`; domain
 separation prevents source-control and MCP ciphertext from being read as each
 other.
@@ -1226,7 +1229,12 @@ why it is built this way and what comes next.
   threads. The launcher allows at most four renderer processes.
 - **Screenshots.** Tools write them to `/workspace/.cloud-agent-artifacts`
   (`CLOUD_AGENT_ARTIFACTS_DIR`). It shows in the workspace files and is added to
-  `.git/info/exclude`, so it never reaches a diff or a published branch.
+  `.git/info/exclude`, so it never reaches a diff or a published branch. A turn
+  shows the images written there while it ran (`GET
+  /v1/agent/jobs/{job_id}/artifacts/images`, at most 200, newest first), and an
+  image opens through `GET /v1/agent/jobs/{job_id}/files/image`, which answers
+  PNG, JPEG, GIF and WebP files, recognized by their bytes, up to 10 MiB, past
+  the text preview's bound.
 
 The image build starts the service and runs `cloud-agent-browser self-test` as
 the unprivileged user: two clients connect, one loads and screenshots a page,
@@ -1250,12 +1258,18 @@ explains it.
   cannot find, is refused. It may use the owner's credentials, as
   any command the agent runs may: keys pasted with it are sealed at rest and
   named `secret://NAME`, and `${NAME}` is filled from the chat's environment.
-  A sealed key shorter than 8 characters is refused when it is added or
-  imported, as a short environment Secret is: the runner masks only longer
-  keys in the chat's output. One stored before that rule still runs, unmasked.
+  A sealed key shorter than 8 characters is refused when it is added,
+  imported or set by an edit, as a short environment Secret is: the runner
+  masks only longer keys in the chat's output. One stored before that rule
+  still runs, unmasked.
   The host hands both only to the slot's runner, in a file only that runner's
   user reads (`/run/agent-mcp-slots/<slot>/secrets.json`). The admission names
-  variables, never values.
+  variables, never values. An edit keeps every stored key it does not set, or
+  sets blank, and removes one whose `secret://NAME` its launch no longer names.
+  Stored keys stay only with the same program: the same command and the
+  same arguments, of which only the package's release may change. An edit
+  that changes anything else, such as the package, the command, a runner
+  option or an argument, is refused until it sends them again.
 - **How it runs.** Before it launches a member's CLI, the host writes the
   slot's admission as root, then starts the image's MCP gateway,
   `cloud-agent-mcp`, as `agent-mcp` (uid 10003) on

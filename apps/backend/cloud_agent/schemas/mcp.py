@@ -35,6 +35,11 @@ class McpBindingInput(BaseModel):
     The policy map is name to ``deny`` / ``confirm`` / ``allow``. A name that
     is absent is denied: a session means what it says, and a capability the
     server adds later is not covered by what its owner chose earlier.
+
+    ``use_defaults`` turns the server on before its tools are known: every
+    tool it lists asks first, as a server the owner connected later does. A
+    program in the chat's sandbox needs it, because it lists its tools only
+    once a chat has started it.
     """
 
     connection_id: int
@@ -47,6 +52,7 @@ class McpBindingInput(BaseModel):
     resources: dict[str, str] = Field(default_factory=dict)
     prompts: dict[str, str] = Field(default_factory=dict)
     enabled: bool = True
+    use_defaults: bool = False
 
 
 class McpBindingSummary(BaseModel):

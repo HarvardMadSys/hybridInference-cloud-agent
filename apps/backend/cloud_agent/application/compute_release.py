@@ -223,3 +223,85 @@ class ComputeRelease:
                 result={"external_pending": True},
                 retry=30,
             )
+
+    async def absent_resource(self, operation: dict[str, Any], allocation: dict[str, Any]) -> None:
+        """Finish retirement of a server whose provider resource was never observed.
+
+        Inspect and delete both require an experiment id. A missing profile, or
+        a create cancelled before submission, leaves none: recording absence
+        locally is the whole release. A create the provider answered left its
+        id with the acquisition, and that experiment is deleted. No Host ran
+        there: deployment starts only on a node an observation recorded.
+        """
+        ref = await self.provider_resource(allocation)
+        if ref is not None:
+            observation = await self.delete_by_identity(operation, allocation, ref)
+            if observation.state != "terminated":
+                await self.reconciler._finish(
+                    operation,
+                    "waiting",
+                    "confirming_release",
+                    "Waiting for provider termination confirmation.",
+                    result={"external_pending": True},
+                    retry=30,
+                )
+                return
+            await self.reconciler._save_observation(operation, allocation, observation)
+            await self.released(operation, release_evidence(operation, observation))
+            return
+        await self.reconciler.repository.observe_allocation(
+            allocation_id=allocation["id"],
+            observation={
+                "observed_state": "absent",
+                "provider_state": "not_created",
+                "scope_complete": True,
+                "expiration_known": False,
+            },
+            **self.reconciler._fence(operation),
+        )
+        await self.released(
+            operation,
+            NEVER_CREATED,
+            "No provider resource exists for this server, so it was released locally.",
+        )
+
+    async def provider_resource(self, allocation: dict[str, Any]) -> ResourceRef | None:
+        """The provider resource of this allocation, or None if none was ever named.
+
+        Its identity is the allocation's once an observation recorded it. Until
+        then only the acquisition the provider answered keeps it.
+        """
+        if allocation.get("external_id"):
+            return self.reconciler._ref(allocation)
+        for prior in await self.reconciler.repository.list_operations(
+            allocation_id=allocation["id"], kinds=["acquire", "import"]
+        ):
+            result = prior.get("result") or {}
+            if result.get("resource_ref"):
+                return ResourceRef.model_validate(result["resource_ref"])
+            named = result.get("external_id") or result.get("resolved_external_id")
+            if named:
+                return ResourceRef(external_id=named, config=allocation["configuration"])
+        return None
+
+    async def delete_by_identity(
+        self, operation: dict[str, Any], allocation: dict[str, Any], ref: ResourceRef
+    ) -> ResourceObservation:
+        """Delete one resource by its exact identity and return what the provider reports.
+
+        Its node scope is not reviewed: the caller knows no Host of ours ran there.
+        A DELETE this operation already saw acknowledged is not sent again.
+        """
+        acknowledged = acknowledged_release(operation, ref)
+        if acknowledged is not None:
+            return acknowledged
+        provider = self.reconciler.commands.registry.get(allocation["provider_id"]).provider
+        observation = await provider.inspect(ref)
+        if observation.state != "terminated":
+            await self.reconciler._checkpoint(
+                operation, "releasing", {"release_requested": True, "external_pending": True}
+            )
+            receipt = await provider.release(ref, self.reconciler._intent(operation, allocation))
+            await self.keep_receipt(operation, ref, receipt)
+            observation = receipt.observation or await provider.inspect(ref)
+        return observation

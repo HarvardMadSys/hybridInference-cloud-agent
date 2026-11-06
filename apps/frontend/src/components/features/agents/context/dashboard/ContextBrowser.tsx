@@ -33,6 +33,7 @@ import {
 import { filterEntries, type EntryOrder } from '../requestPresent';
 import { DashCard, Toggle, shareText } from './DashCard';
 import { labelOf, swatchOf } from './palette';
+import { PrefixRows } from './PrefixRows';
 
 type Base = 'step' | 'turn';
 type RebuiltApi = RequestCompositionApi['reconstructed'];
@@ -224,18 +225,7 @@ function Carried({
             onOpenTurn={onOpenTurn}
           />
         ))}
-        {['system_prompt', 'tool_schemas'].map((key) => (
-          <li key={key} className="flex items-center justify-between gap-2 px-2 py-1.5 opacity-70">
-            <span className="flex items-center gap-1.5">
-              <span
-                aria-hidden="true"
-                className="h-2 w-2 shrink-0 rounded-full border border-dashed border-muted"
-              />
-              <span className="text-foreground">{t(labelOf(key))}</span>
-            </span>
-            <span className="text-muted">{t('dashboard.notRecorded')}</span>
-          </li>
-        ))}
+        <PrefixRows prefix={composition.prefix} />
       </ul>
       <BoundaryNote rebuilt={rebuilt} />
       {/* Where the numbers come from, and what was left out: on request. */}

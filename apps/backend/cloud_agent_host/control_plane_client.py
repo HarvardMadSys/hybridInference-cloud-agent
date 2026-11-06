@@ -20,12 +20,12 @@ from cloud_agent_host.event_sender import OrderedSender
 from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_host.measurement_delivery import DELIVERY_TIMEOUT_S
 from cloud_agent_host.runtimes import NormalizedEvent  # noqa: TC001 — Public method introspection.
-from cloud_agent_shared.secret_redaction import SecretRedactor
+from cloud_agent_shared.secret_redaction import SecretRedactor, merged_secrets
 from cloud_agent_shared.shared_protocol import ABANDON_DETAIL_MAX_CHARS
 from cloud_agent_shared.storable_text import storable_json
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
 # Heartbeats must answer before ordinary lifecycle requests consume the lease.
 _HEARTBEAT_TIMEOUT_S = 10.0
@@ -107,6 +107,23 @@ class ControlPlane:
         heartbeat's own flag, and a lost lease ends the turn there.
         """
         return self._events.lease_lost
+
+    def add_secrets(self, values: Mapping[str, str]) -> None:
+        """Mask ``values`` too, from the next write on.
+
+        Nothing already masked is lost (``merged_secrets``). Every open
+        preview is rebuilt from the new set as a reset would rebuild it, but
+        keeps the tail it holds back, so a value that tail begins is still
+        masked once the rest of it arrives.
+        """
+        with self._appending:
+            merged = merged_secrets(self._secret_values, values)
+            if merged == self._secret_values:
+                return
+            self._secret_values = merged
+            self._redactor = SecretRedactor(merged)
+            for stream_id, redactor in tuple(self._preview_redactors.items()):
+                self._preview_redactors[stream_id] = redactor.continued(merged)
 
     def close(self) -> None:
         """Stop the event sender and release the HTTP connection pool.

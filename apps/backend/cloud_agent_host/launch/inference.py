@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, override
 
-from cloud_agent_host.launch.facet import LaunchFacet
+from cloud_agent_host.launch.facet import SECRET, LaunchFacet
 from cloud_agent_host.member_setup.compat_helper import compat_token_env, install_compat_helper
 
 if TYPE_CHECKING:
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class InferenceFacet(LaunchFacet):
-    """The connection's key, exact Base URL, protocol, revision and translation plan.
+    """The connection's key, exact Base URL, protocol, revision, and translation or meter.
 
     The key is not process-fixed: a probe carries none and borrows the live
     process's. Everything else is, the source above all: it names the key's
@@ -24,14 +24,18 @@ class InferenceFacet(LaunchFacet):
     """
 
     # Never in a repr: the owner connection's own key.
-    credential: str | None = field(repr=False)
+    credential: str | None = field(repr=False, metadata=SECRET)
     base_url: str
     protocol: str
     source: str
     # The CLI's own protocol behind its compatibility helper; empty is direct.
     client_protocol: str
     # That member's loopback token on a translated plan.
-    local_token: str = field(repr=False)
+    local_token: str = field(repr=False, metadata=SECRET)
+    # A direct plan whose CLI runs behind the member's request meter
+    # (``cloud_agent_host.model_passthrough``). Not a fingerprint of its own:
+    # it follows from the runtime and the Base URL, both already compared.
+    metered: bool = False
 
     @override
     def fingerprint(self) -> Mapping[str, object]:
@@ -45,7 +49,7 @@ class InferenceFacet(LaunchFacet):
 
     @override
     def prepare(self, context: PrepareContext) -> None:
-        if self.client_protocol:
+        if self.client_protocol or self.metered:
             # A retained container gets this host's helper, not its image's.
             install_compat_helper(context.manager, context.spec)
 

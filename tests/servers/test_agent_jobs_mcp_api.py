@@ -312,6 +312,32 @@ async def test_new_jobs_honor_mcp_resource_and_prompt_only_selections(
         }
 
 
+async def test_a_server_whose_tools_are_not_known_yet_can_be_turned_on_asking_first(
+    client: AsyncClient, store: FakeStorage
+):
+    """A program in the chat's sandbox lists its tools only once a chat started it.
+
+    ``use_defaults`` turns it on before that, every tool asking first; without
+    it, a selection that names nothing is a server switched off.
+    """
+    program = store.connect_mcp(user_id=_OWNER, label="Fetch", template=None, tools=())
+    created = await client.post(
+        "/v1/agent/jobs",
+        json=_job_body(mcp_bindings=[_binding(program["id"], tools={}, use_defaults=True)]),
+    )
+    assert created.status_code == 201, created.text
+    (binding,) = store.mcp_bindings[created.json()["thread_id"]]
+    assert binding["enabled"] is True and binding["selection_pending"] is True
+    assert binding["rules"] == {}
+
+    off = await client.post(
+        "/v1/agent/jobs", json=_job_body(mcp_bindings=[_binding(program["id"], tools={})])
+    )
+    assert off.status_code == 201, off.text
+    (binding,) = store.mcp_bindings[off.json()["thread_id"]]
+    assert binding["enabled"] is False and binding["selection_pending"] is False
+
+
 async def test_naming_a_connection_the_caller_does_not_own_is_refused_at_creation(
     client: AsyncClient, store: FakeStorage
 ):

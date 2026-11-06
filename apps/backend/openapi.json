@@ -8668,6 +8668,52 @@
         "title": "AgentWorkspaceEntry",
         "type": "object"
       },
+      "AgentWorkspaceImage": {
+        "description": "One image saved under the workspace's artifacts directory.",
+        "properties": {
+          "modified_at": {
+            "title": "Modified At",
+            "type": "number"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path",
+          "size",
+          "modified_at"
+        ],
+        "title": "AgentWorkspaceImage",
+        "type": "object"
+      },
+      "AgentWorkspaceImagesResponse": {
+        "description": "The artifacts directory's images since a time, newest first.",
+        "properties": {
+          "images": {
+            "items": {
+              "$ref": "#/components/schemas/AgentWorkspaceImage"
+            },
+            "title": "Images",
+            "type": "array"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "images"
+        ],
+        "title": "AgentWorkspaceImagesResponse",
+        "type": "object"
+      },
       "AgentWorkspaceResponse": {
         "description": "A directory listing or bounded file payload from a job workspace.",
         "properties": {
@@ -11071,17 +11117,6 @@
             "title": "Config Revision",
             "type": "integer"
           },
-          "connector_id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Connector Id"
-          },
           "created_at": {
             "anyOf": [
               {
@@ -12743,17 +12778,6 @@
             "default": "none",
             "title": "Auth Kind",
             "type": "string"
-          },
-          "connector_id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Connector Id"
           },
           "env_secrets": {
             "additionalProperties": {
@@ -17120,7 +17144,7 @@
         "type": "object"
       },
       "McpBindingInput": {
-        "description": "One connection's use by a session, as the caller asks for it.\n\nThe policy map is name to ``deny`` / ``confirm`` / ``allow``. A name that\nis absent is denied: a session means what it says, and a capability the\nserver adds later is not covered by what its owner chose earlier.",
+        "description": "One connection's use by a session, as the caller asks for it.\n\nThe policy map is name to ``deny`` / ``confirm`` / ``allow``. A name that\nis absent is denied: a session means what it says, and a capability the\nserver adds later is not covered by what its owner chose earlier.\n\n``use_defaults`` turns the server on before its tools are known: every\ntool it lists asks first, as a server the owner connected later does. A\nprogram in the chat's sandbox needs it, because it lists its tools only\nonce a chat has started it.",
         "properties": {
           "alias": {
             "anyOf": [
@@ -17164,6 +17188,11 @@
             },
             "title": "Tools",
             "type": "object"
+          },
+          "use_defaults": {
+            "default": false,
+            "title": "Use Defaults",
+            "type": "boolean"
           }
         },
         "required": [
@@ -17334,6 +17363,116 @@
           "label"
         ],
         "title": "McpIntegrationResponse",
+        "type": "object"
+      },
+      "MeasuredPrefix": {
+        "additionalProperties": false,
+        "description": "What the request's attempt sent ahead of the conversation, as its meter measured it.",
+        "properties": {
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode"
+          },
+          "other_prefixes": {
+            "minimum": 0.0,
+            "title": "Other Prefixes",
+            "type": "integer"
+          },
+          "protocol": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Protocol"
+          },
+          "source": {
+            "const": "member_request_meter",
+            "default": "member_request_meter",
+            "title": "Source",
+            "type": "string"
+          },
+          "system_chars": {
+            "minimum": 0.0,
+            "title": "System Chars",
+            "type": "integer"
+          },
+          "system_parts": {
+            "minimum": 0.0,
+            "title": "System Parts",
+            "type": "integer"
+          },
+          "system_tokens": {
+            "minimum": 0.0,
+            "title": "System Tokens",
+            "type": "integer"
+          },
+          "token_basis": {
+            "default": "chars_cjk_v1",
+            "title": "Token Basis",
+            "type": "string"
+          },
+          "tool_chars": {
+            "minimum": 0.0,
+            "title": "Tool Chars",
+            "type": "integer"
+          },
+          "tool_count": {
+            "minimum": 0.0,
+            "title": "Tool Count",
+            "type": "integer"
+          },
+          "tool_tokens": {
+            "minimum": 0.0,
+            "title": "Tool Tokens",
+            "type": "integer"
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/PrefixTool"
+            },
+            "title": "Tools",
+            "type": "array"
+          },
+          "tools_omitted": {
+            "minimum": 0.0,
+            "title": "Tools Omitted",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "system_chars",
+          "system_tokens",
+          "system_parts",
+          "tool_count",
+          "tool_chars",
+          "tool_tokens",
+          "tools",
+          "tools_omitted",
+          "other_prefixes"
+        ],
+        "title": "MeasuredPrefix",
         "type": "object"
       },
       "MemoryProjects": {
@@ -18701,6 +18840,33 @@
         "title": "PhoneVerifyRequest",
         "type": "object"
       },
+      "PrefixTool": {
+        "additionalProperties": false,
+        "description": "One tool schema a request sent, by its name.",
+        "properties": {
+          "chars": {
+            "minimum": 0.0,
+            "title": "Chars",
+            "type": "integer"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "tokens": {
+            "minimum": 0.0,
+            "title": "Tokens",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "label",
+          "chars",
+          "tokens"
+        ],
+        "title": "PrefixTool",
+        "type": "object"
+      },
       "ProcessObservation": {
         "description": "One process created during a turn, observed by the Kata guest kernel.",
         "properties": {
@@ -19493,6 +19659,16 @@
           "native_status": {
             "title": "Native Status",
             "type": "string"
+          },
+          "prefix": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MeasuredPrefix"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "reconstructed": {
             "$ref": "#/components/schemas/ReconstructedComposition"
@@ -24499,6 +24675,13 @@
               }
             ],
             "title": "Auth Kind"
+          },
+          "env_secrets": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Env Secrets",
+            "type": "object"
           },
           "expected_config_revision": {
             "minimum": 1.0,
@@ -37584,6 +37767,73 @@
         "summary": "Archive Agent Thread"
       }
     },
+    "/v1/agent/jobs/{job_id}/artifacts/images": {
+      "get": {
+        "description": "The images saved under the workspace's artifacts directory since ``since``.\n\n``since`` is a Unix time; the newest images come first. This is how a turn\nshows the screenshots its tools saved without the agent having to say so.",
+        "operationId": "list_agent_job_artifact_images_v1_agent_jobs__job_id__artifacts_images_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "default": 0.0,
+              "minimum": 0.0,
+              "title": "Since",
+              "type": "number"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentWorkspaceImagesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Agent Job Artifact Images"
+      }
+    },
     "/v1/agent/jobs/{job_id}/attempts/{attempt_id}/telemetry": {
       "get": {
         "description": "Read measurements for one attempt belonging to the caller's job.",
@@ -37927,6 +38177,71 @@
           }
         },
         "summary": "Write Agent Job Workspace File"
+      }
+    },
+    "/v1/agent/jobs/{job_id}/files/image": {
+      "get": {
+        "description": "One PNG, JPEG, GIF or WebP file from the chat's workspace, as its own bytes.\n\nA file preview is bounded for text; a full-page screenshot is usually past\nthat bound, so an image has its own, larger one.",
+        "operationId": "get_agent_job_workspace_image_v1_agent_jobs__job_id__files_image_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Agent Job Workspace Image"
       }
     },
     "/v1/agent/jobs/{job_id}/fork": {

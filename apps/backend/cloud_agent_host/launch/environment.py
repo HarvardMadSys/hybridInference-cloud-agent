@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from typing import TYPE_CHECKING, override
 
-from cloud_agent_host.container.chat_sandbox import member_inference_env_path
+from cloud_agent_host.container.chat_sandbox_members import member_inference_env_path
 from cloud_agent_host.launch.facet import LaunchFacet
 from cloud_agent_shared.environment import inference_handoff
 

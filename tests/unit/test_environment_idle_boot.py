@@ -104,7 +104,7 @@ def test_an_empty_start_script_is_recorded_for_this_boot_without_a_writer_freeze
     assert [(step["state"], step["ran"]) for step in start] == [("succeeded", False)]
     backend = SimpleNamespace(manager=manager, spec=_spec())
     assert preparer.status(backend, "bound")["ready"] is True
-    assert supervisor.state.members["athr_source"].snapshotting is False
+    assert supervisor.state.members["athr_source"].life.exclusive is None
 
 
 def test_a_start_skipped_for_this_turn_is_recorded_without_a_writer_freeze(tmp_path):
@@ -162,7 +162,7 @@ def test_a_lease_lost_during_an_unfrozen_preparation_is_still_refused(tmp_path):
 
     def prepare(_backend, _environment, *, cancel: threading.Event):
         with supervisor.state.lock:
-            supervisor.state.members["athr_source"].lifecycle_generation += 1
+            supervisor.state.members["athr_source"].life.generation += 1
         assert cancel.wait(5), "the lease monitor did not revoke the preparation"
         return {"steps": []}
 
@@ -175,7 +175,7 @@ def test_a_lease_lost_during_an_unfrozen_preparation_is_still_refused(tmp_path):
         )
 
     assert _froze(manager) == []
-    assert supervisor.state.members["athr_source"].snapshotting is False
+    assert supervisor.state.members["athr_source"].life.exclusive is None
 
 
 def test_an_unfrozen_preparation_still_proves_its_exact_container(tmp_path):

@@ -41,6 +41,8 @@ from .base import (
     compat_launch,
     connection_base_url,
     merged_mcp_server,
+    meter_launch,
+    meters_direct_plan,
 )
 from .claude.adapter import ClaudeCodeRuntime
 from .codex.adapter import CodexRuntime
@@ -102,5 +104,7 @@ __all__ = [
     "connection_base_url",
     "get_runtime",
     "merged_mcp_server",
+    "meter_launch",
+    "meters_direct_plan",
     "registered_runtimes",
 ]

@@ -1608,8 +1608,8 @@ class StartupSandbox:
         from cloud_agent_host.container.chat_sandbox import (
             ChatSandboxManager,
             ChatSandboxSpec,
-            RetainedChatBackend,
         )
+        from cloud_agent_host.container.retained_backend import RetainedChatBackend
         from cloud_agent_host.container.sandbox import ContainerBackend
         from cloud_agent_shared.egress import network_from_env
 

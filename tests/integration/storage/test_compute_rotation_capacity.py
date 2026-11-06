@@ -186,7 +186,12 @@ async def rig(db, store, hosts, monkeypatch, *, node_types=("t1", "t2")):
     sandbox_manager = SimpleNamespace(
         health=AsyncMock(return_value={}), list_sandboxes=AsyncMock(return_value=[])
     )
-    for module in ("compute_reconcile", "compute_rotation"):
+    for module in (
+        "compute_reconcile",
+        "compute_acquisition",
+        "compute_retirement",
+        "compute_rotation",
+    ):
         monkeypatch.setattr(
             f"cloud_agent.application.{module}.sandbox_manager_for_host",
             lambda host: sandbox_manager,

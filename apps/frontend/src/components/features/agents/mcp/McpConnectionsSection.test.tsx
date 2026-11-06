@@ -52,7 +52,6 @@ const connection: McpConnectionApi = {
   error_kind: 'needs_authorization',
   error_detail: 'the server rejected the credential',
   account_label: 'wiki-bot',
-  connector_id: null,
   has_credential: false,
   secret_hint: null,
   expires_at: null,

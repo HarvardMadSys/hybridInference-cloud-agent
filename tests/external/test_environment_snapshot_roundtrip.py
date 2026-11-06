@@ -27,10 +27,8 @@ from cloud_agent_host.archive.sandbox_checkpoints import (
     SandboxCheckpointCapture,
     SandboxCheckpointStore,
 )
-from cloud_agent_host.container.chat_sandbox import (
-    SHARED_WORKSPACE_PERMISSIONS_SCRIPT,
-    ChatSandboxSpec,
-)
+from cloud_agent_host.container.chat_sandbox import ChatSandboxSpec
+from cloud_agent_host.container.chat_sandbox_workspace import SHARED_WORKSPACE_PERMISSIONS_SCRIPT
 from cloud_agent_shared.environment_snapshots import (
     owner_hash,
     snapshot_image_reference,

@@ -21,12 +21,13 @@ import tempfile
 from typing import TYPE_CHECKING
 
 from cloud_agent_host.container.chat_sandbox_models import RetainedChatLost
+from cloud_agent_host.container.chat_sandbox_workspace import WorkspaceFilesMixin
 from cloud_agent_host.container.sandbox import SandboxError
+from cloud_agent_shared.environment_snapshots import SETUP_MARKER_NAME
 
 if TYPE_CHECKING:
     import subprocess
 
-    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
     from cloud_agent_host.container.chat_sandbox_models import (
         ChatSandboxInspection,
         ChatSandboxSpec,
@@ -290,7 +291,7 @@ _ABSENT = 44
 
 
 def require_container(
-    manager: ChatSandboxManager,
+    manager: ArchiveMarkersMixin,
     spec: ChatSandboxSpec,
     expected_container_id: str,
     *,
@@ -319,7 +320,7 @@ def check_payload(payload: object, max_bytes: int, what: str) -> None:
 
 
 def _run(
-    manager: ChatSandboxManager,
+    manager: ArchiveMarkersMixin,
     spec: ChatSandboxSpec,
     program: str,
     *,
@@ -369,7 +370,7 @@ def _stderr_tail(result: subprocess.CompletedProcess[bytes]) -> str:
 
 
 def read(
-    manager: ChatSandboxManager,
+    manager: ArchiveMarkersMixin,
     spec: ChatSandboxSpec,
     *,
     name: str,
@@ -397,7 +398,7 @@ def read(
 
 
 def write(
-    manager: ChatSandboxManager,
+    manager: ArchiveMarkersMixin,
     spec: ChatSandboxSpec,
     payload: bytes,
     *,
@@ -422,7 +423,7 @@ def write(
 
 
 def clear_final(
-    manager: ChatSandboxManager, spec: ChatSandboxSpec, *, expected_container_id: str
+    manager: ArchiveMarkersMixin, spec: ChatSandboxSpec, *, expected_container_id: str
 ) -> None:
     """Remove the final marker, if any, from the exact running container."""
     require_container(
@@ -448,7 +449,7 @@ def clear_final(
 
 
 def delete_initial(
-    manager: ChatSandboxManager,
+    manager: ArchiveMarkersMixin,
     spec: ChatSandboxSpec,
     expected_payload: bytes,
     *,
@@ -472,7 +473,7 @@ def delete_initial(
 
 
 def read_stopped_final(
-    manager: ChatSandboxManager, spec: ChatSandboxSpec, *, expected_container_id: str
+    manager: ArchiveMarkersMixin, spec: ChatSandboxSpec, *, expected_container_id: str
 ) -> bytes:
     """Copy the final marker out of the exact stopped container, checking its tar entry first."""
     require_container(
@@ -519,7 +520,7 @@ def read_stopped_final(
 
 
 def write_stopped_final(
-    manager: ChatSandboxManager,
+    manager: ArchiveMarkersMixin,
     spec: ChatSandboxSpec,
     payload: bytes,
     *,
@@ -572,3 +573,220 @@ def write_stopped_final(
         payload
     ):
         raise SandboxError("stopped final archive marker failed verification")
+
+
+class ArchiveMarkersMixin(WorkspaceFilesMixin):
+    """Read and write a chat container's private markers; part of ``ChatSandboxManager``."""
+
+    def read_initial_archive_marker(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        expected_container_id: str,
+    ) -> bytes | None:
+        """Read the bounded sandbox-manager-private marker from one exact container.
+
+        Absence is the only soft outcome.  A symlink, non-regular file,
+        unexpected owner/mode/link count, oversized payload, or identity race
+        fails closed before any S3 decision can cause workspace preparation to
+        be skipped.
+        """
+        return read(
+            self,
+            spec,
+            name=INITIAL_ARCHIVE_MARKER_NAME,
+            max_bytes=INITIAL_ARCHIVE_MARKER_MAX_BYTES,
+            what="initial archive marker",
+            expected_container_id=expected_container_id,
+        )
+
+    def write_initial_archive_marker(
+        self,
+        spec: ChatSandboxSpec,
+        payload: bytes,
+        *,
+        expected_container_id: str,
+    ) -> None:
+        """Atomically publish and fsync one exact immutable marker.
+
+        An identical existing marker is idempotent.  A different marker is
+        never overwritten: it may describe an initial object whose commit
+        response was lost, so replacing it would destroy the only safe retry
+        proof.
+        """
+        check_payload(payload, INITIAL_ARCHIVE_MARKER_MAX_BYTES, "initial archive marker")
+        write(
+            self,
+            spec,
+            payload,
+            name=INITIAL_ARCHIVE_MARKER_NAME,
+            max_bytes=INITIAL_ARCHIVE_MARKER_MAX_BYTES,
+            expected_container_id=expected_container_id,
+            replace_existing=False,
+        )
+
+    def read_environment_setup_marker(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        expected_container_id: str,
+    ) -> bytes | None:
+        """Read the root-only "installation done" marker, which travels with the layer.
+
+        It sits beside the archive markers, so the sandbox user can neither
+        write nor forge it, and a checkpoint or snapshot carries it along.
+        """
+        return read(
+            self,
+            spec,
+            name=SETUP_MARKER_NAME,
+            max_bytes=SETUP_MARKER_MAX_BYTES,
+            what="environment setup marker",
+            expected_container_id=expected_container_id,
+        )
+
+    def write_environment_setup_marker(
+        self,
+        spec: ChatSandboxSpec,
+        payload: bytes,
+        *,
+        expected_container_id: str,
+    ) -> None:
+        """Record, root-only, which installation this container's layer holds."""
+        check_payload(payload, SETUP_MARKER_MAX_BYTES, "environment setup marker")
+        write(
+            self,
+            spec,
+            payload,
+            name=SETUP_MARKER_NAME,
+            max_bytes=SETUP_MARKER_MAX_BYTES,
+            expected_container_id=expected_container_id,
+            replace_existing=True,
+        )
+
+    def write_final_archive_marker(
+        self,
+        spec: ChatSandboxSpec,
+        payload: bytes,
+        *,
+        expected_container_id: str,
+    ) -> None:
+        """Atomically fence a pending final archive to one immutable policy.
+
+        A marker from a completed prior stop may remain in the writable layer.
+        The caller invokes this only while the exact container is running and
+        before its next stop, so replacing that stale marker is both necessary
+        and safe. The owned bridge remains the durable pending/completed bit.
+        """
+        check_payload(payload, FINAL_ARCHIVE_MARKER_MAX_BYTES, "final archive marker")
+        require_container(
+            self,
+            spec,
+            expected_container_id,
+            running=True,
+            before="archive marker",
+            refusal="final archive marker requires the exact running container",
+        )
+        write(
+            self,
+            spec,
+            payload,
+            name=FINAL_ARCHIVE_MARKER_NAME,
+            max_bytes=FINAL_ARCHIVE_MARKER_MAX_BYTES,
+            expected_container_id=expected_container_id,
+            replace_existing=True,
+        )
+
+    def read_running_final_archive_marker(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        expected_container_id: str,
+    ) -> bytes | None:
+        """Read a trusted final marker before replacing it on a running stop."""
+        require_container(
+            self,
+            spec,
+            expected_container_id,
+            running=True,
+            before="marker read",
+            refusal="running final archive marker requires a running container",
+        )
+        return read(
+            self,
+            spec,
+            name=FINAL_ARCHIVE_MARKER_NAME,
+            max_bytes=FINAL_ARCHIVE_MARKER_MAX_BYTES,
+            what="running final archive marker",
+            expected_container_id=expected_container_id,
+        )
+
+    def read_final_archive_marker(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        expected_container_id: str,
+    ) -> bytes:
+        """Read and validate the root-owned marker from a stopped container.
+
+        ``docker cp`` works without starting the retained container. Its tar
+        metadata is checked before reading bytes; nothing is extracted onto the
+        host filesystem and the exact immutable container id fences the copy.
+        Absence or any malformed ownership/mode/type fails closed.
+        """
+        return read_stopped_final(self, spec, expected_container_id=expected_container_id)
+
+    def read_stopped_final_archive_marker_optional(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        expected_container_id: str,
+    ) -> bytes | None:
+        """Read a stopped marker, softening only an explicit fixed-path absence."""
+        try:
+            return self.read_final_archive_marker(
+                spec,
+                expected_container_id=expected_container_id,
+            )
+        except FileNotFoundError as exc:
+            # export_archive normalizes only Docker's exact missing source
+            # for the inspected container. Host-side missing files and other
+            # Docker failures must still prevent activation.
+            if exc.args != (FINAL_ARCHIVE_MARKER_PATH,):
+                raise
+            return None
+
+    def write_stopped_final_archive_marker(
+        self,
+        spec: ChatSandboxSpec,
+        payload: bytes,
+        *,
+        expected_container_id: str,
+    ) -> None:
+        """Replace the trusted marker in one exact stopped writable layer.
+
+        This is used only to publish the post-upload receipt or to arm a
+        possible start fail-stop. A partial Docker copy leaves an invalid
+        marker and therefore fails closed; the read-back must exactly match
+        before the caller can release the retained bridge.
+        """
+        write_stopped_final(self, spec, payload, expected_container_id=expected_container_id)
+
+    def clear_final_archive_marker(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        expected_container_id: str,
+    ) -> None:
+        """Remove any trusted stale completion marker while the container runs."""
+        clear_final(self, spec, expected_container_id=expected_container_id)
+
+    def delete_initial_archive_marker(
+        self,
+        spec: ChatSandboxSpec,
+        expected_payload: bytes,
+        *,
+        expected_container_id: str,
+    ) -> None:
+        """Atomically unlink and fsync only the marker the caller read."""
+        delete_initial(self, spec, expected_payload, expected_container_id=expected_container_id)

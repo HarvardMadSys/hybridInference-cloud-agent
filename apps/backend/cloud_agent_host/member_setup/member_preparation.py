@@ -41,7 +41,8 @@ if TYPE_CHECKING:
     import subprocess
     from collections.abc import Callable, Sequence
 
-    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox_members import MemberExecMixin
 
 #: Reads its steps as JSON on stdin and writes each one's exit status (``null``
 #: for a step that outlived its timeout) and stderr as a line of JSON on stdout
@@ -132,7 +133,7 @@ class MemberPreparation:
 
     def __init__(
         self,
-        manager: ChatSandboxManager,
+        manager: MemberExecMixin,
         spec: ChatSandboxSpec,
         *,
         user_uid: int,
@@ -226,7 +227,7 @@ class MemberPreparation:
 
 
 def run_member_steps(
-    manager: ChatSandboxManager,
+    manager: MemberExecMixin,
     spec: ChatSandboxSpec,
     *steps: MemberStep,
     user_uid: int,

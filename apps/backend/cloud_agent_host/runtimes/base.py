@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 from cloud_agent_shared.model_connections import ANTHROPIC_MESSAGES, RESPONSES
 from cloud_agent_shared.protocol_compat import (
@@ -13,7 +14,9 @@ from cloud_agent_shared.protocol_compat import (
     ENV_UPSTREAM_KEY,
     ENV_UPSTREAM_URL,
     ORIGIN_PLACEHOLDER,
+    PASSTHROUGH,
     TOKEN_PLACEHOLDER,
+    passthrough_authority,
 )
 from cloud_agent_shared.sandbox_mcp import SANDBOX_MCP_SERVER_NAME, SANDBOX_MCP_URL
 
@@ -62,6 +65,16 @@ class ExactBaseUrl(str):
     """
 
     __slots__ = ()
+    #: The CLI reaches this URL through its member's request meter
+    #: (``meter_launch``), at the address ``metered_cli_url`` gives it.
+    metered = False
+
+
+class MeteredBaseUrl(ExactBaseUrl):
+    """An OpenAI-style connection's URL, reached through the member's request meter."""
+
+    __slots__ = ()
+    metered = True
 
 
 class MessagesBaseUrl(ExactBaseUrl):
@@ -74,6 +87,13 @@ class MessagesBaseUrl(ExactBaseUrl):
     """
 
     __slots__ = ()
+
+
+class MeteredMessagesBaseUrl(MessagesBaseUrl):
+    """An Anthropic Messages connection's URL, reached through the member's request meter."""
+
+    __slots__ = ()
+    metered = True
 
 
 class TranslatedBaseUrl(ExactBaseUrl):
@@ -110,14 +130,60 @@ class RuntimeConnectionUnsupportedError(RuntimeError):
 COMPAT_LAUNCHER = ("/usr/bin/python3", "-I", "/usr/local/libexec/model-protocol-translator.pyz")
 
 
-def connection_base_url(base_url: str, protocol: str, client_protocol: str = "") -> ExactBaseUrl:
-    """The launch-context form of an owner connection's URL, typed by its plan."""
+#: Provider hosts a CLI treats as its vendor's own, deciding features from the
+#: host name it is pointed at: Claude Code turns MCP tool search off by default
+#: for any other host. A direct plan to one is not metered, so the CLI never
+#: sees another host and does the same as it would without the meter.
+FIRST_PARTY_HOSTS: dict[str, frozenset[str]] = {
+    "claude-code": frozenset({"api.anthropic.com"}),
+}
+
+
+def meters_direct_plan(runtime_id: str, base_url: str) -> bool:
+    """Whether a direct plan's CLI runs behind its member's request meter."""
+    host = (urlsplit(base_url).hostname or "").lower()
+    return host not in FIRST_PARTY_HOSTS.get(runtime_id, frozenset())
+
+
+def connection_base_url(
+    base_url: str, protocol: str, client_protocol: str = "", *, metered: bool = False
+) -> ExactBaseUrl:
+    """The launch-context form of an owner connection's URL, typed by its plan.
+
+    ``metered`` puts a direct plan's CLI behind its member's request meter; a
+    translated plan's helper measures its requests anyway.
+    """
     if client_protocol and client_protocol != protocol:
         translated = {RESPONSES: ResponsesViaChatUrl, ANTHROPIC_MESSAGES: MessagesViaChatUrl}
         return translated[client_protocol](base_url)
     if protocol == ANTHROPIC_MESSAGES:
-        return MessagesBaseUrl(base_url)
-    return ExactBaseUrl(base_url)
+        return MeteredMessagesBaseUrl(base_url) if metered else MessagesBaseUrl(base_url)
+    return MeteredBaseUrl(base_url) if metered else ExactBaseUrl(base_url)
+
+
+def metered_cli_url(url: str) -> str:
+    """Where a metered CLI is told ``url`` is: its member's meter, then the authority and path.
+
+    ``https://api.example.com/v1`` becomes ``<origin>/api.example.com/v1``; the
+    launcher writes the meter's loopback origin over the placeholder, and the
+    meter forwards what follows the authority to ``https://api.example.com``.
+    """
+    parts = urlsplit(url)
+    authority = passthrough_authority(parts.hostname or "", parts.port)
+    return f"{ORIGIN_PLACEHOLDER}/{authority}{parts.path}"
+
+
+def meter_launch(
+    argv: list[str], env: dict[str, str], url: str
+) -> tuple[list[str], dict[str, str]]:
+    """A direct plan's CLI launch behind its member's request meter, in passthrough.
+
+    The launcher is told the upstream's origin and nothing else: the CLI keeps
+    its own key and sends it itself (``cloud_agent_host.model_passthrough``).
+    """
+    parts = urlsplit(url)
+    origin = f"https://{passthrough_authority(parts.hostname or '', parts.port)}"
+    return [*COMPAT_LAUNCHER, *argv], {**env, ENV_CLIENT: PASSTHROUGH, ENV_UPSTREAM_URL: origin}
 
 
 def compat_launch(
@@ -179,7 +245,7 @@ def openai_base_url(base_url: str) -> str:
             "this agent is not run through the protocol compatibility helper"
         )
     if isinstance(base_url, ExactBaseUrl):
-        return str(base_url)
+        return metered_cli_url(base_url) if base_url.metered else str(base_url)
     return base_url.rstrip("/").removesuffix("/v1") + "/v1"
 
 

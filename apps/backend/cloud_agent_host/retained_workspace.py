@@ -10,10 +10,11 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_host.container.chat_sandbox import CHAT_WORKDIR, RetainedChatBackend
+from cloud_agent_host.container.chat_sandbox import CHAT_WORKDIR
 from cloud_agent_host.container.sandbox import SandboxError
 
 if TYPE_CHECKING:
+    from cloud_agent_host.container.retained_backend import RetainedChatBackend
     from cloud_agent_shared.operation_profiling import StageObserver
 
 
@@ -29,9 +30,11 @@ class RetainedWorkspaceError(SandboxError):
 _READ_PROGRAM = r"""
 import base64, json, os, stat, sys
 
-root_path, relative, max_raw, entries_raw = sys.argv[1:]
+root_path, relative, max_raw, entries_raw, *mode = sys.argv[1:]
 max_bytes = int(max_raw)
 max_entries = int(entries_raw)
+# "images": answer only a passive raster image, under its own larger bound.
+images_only = mode == ["images"]
 
 def emit(value):
     print(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
@@ -73,6 +76,8 @@ try:
             "path": relative, "kind": "symlink", "size": info.st_size,
             "writable": False, "source": "workspace", "omitted_reason": "symlink",
         })
+    elif images_only and not stat.S_ISREG(info.st_mode):
+        fail(49, "workspace path is not an image")
     elif stat.S_ISDIR(info.st_mode):
         try:
             directory_fd = parent_fd if name is None else os.open(
@@ -183,6 +188,15 @@ try:
                 media_type = "image/gif"
             elif raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
                 media_type = "image/webp"
+            if images_only and media_type is None:
+                # The larger bound is for images; anything else answers nothing.
+                emit({
+                    "path": relative, "kind": "file", "content": None,
+                    "size": len(raw), "binary": binary, "truncated": False,
+                    "writable": False, "source": "workspace",
+                    "omitted_reason": "not_an_image",
+                })
+                raise SystemExit(0)
             emit({
                 "path": relative, "kind": "file", "content": content,
                 "content_base64": base64.b64encode(raw).decode("ascii")
@@ -198,6 +212,83 @@ finally:
             os.close(fd)
         except OSError:
             pass
+"""
+
+
+#: Where agents and their browser tools save screenshots (CLOUD_AGENT_ARTIFACTS_DIR).
+ARTIFACTS_RELATIVE = ".cloud-agent-artifacts"
+#: How large an image the image read answers; the text preview stays smaller.
+IMAGE_MAX_BYTES = 10 * 1024 * 1024
+#: How many images one listing answers, newest first, and how many entries it
+#: looks at to find them.
+ARTIFACT_IMAGES_MAX = 200
+ARTIFACT_SCAN_MAX = 5000
+
+_IMAGES_PROGRAM = r"""
+import json, os, stat, sys
+
+root_path, artifacts, since_raw, max_raw, scan_raw = sys.argv[1:]
+since = float(since_raw)
+max_images = int(max_raw)
+max_scan = int(scan_raw)
+suffixes = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+images = []
+scanned = 0
+truncated = False
+
+def walk(directory_fd, prefix, depth):
+    global scanned, truncated
+    try:
+        names = sorted(os.listdir(directory_fd))
+    except OSError:
+        return
+    for name in names:
+        if scanned >= max_scan:
+            truncated = True
+            return
+        scanned += 1
+        try:
+            name.encode("utf-8")
+            info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except (OSError, UnicodeEncodeError):
+            continue
+        path = prefix + "/" + name
+        if stat.S_ISDIR(info.st_mode) and depth < 8:
+            try:
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                dir_fd=directory_fd)
+            except OSError:
+                continue
+            try:
+                walk(child, path, depth + 1)
+            finally:
+                os.close(child)
+        elif (stat.S_ISREG(info.st_mode) and name.lower().endswith(suffixes)
+              and info.st_mtime >= since):
+            images.append({"path": path, "size": info.st_size, "modified_at": info.st_mtime})
+
+try:
+    root = os.open(root_path, os.O_RDONLY | os.O_DIRECTORY)
+except OSError:
+    print(json.dumps({"error": "workspace cannot be read"}))
+    raise SystemExit(49)
+try:
+    try:
+        top = os.open(artifacts, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
+    except OSError:
+        top = None
+    if top is not None:
+        try:
+            walk(top, artifacts, 0)
+        finally:
+            os.close(top)
+finally:
+    os.close(root)
+images.sort(key=lambda image: (-image["modified_at"], image["path"]))
+if len(images) > max_images:
+    truncated = True
+print(json.dumps({"images": images[:max_images], "truncated": truncated},
+                 ensure_ascii=False, separators=(",", ":")))
 """
 
 
@@ -362,6 +453,80 @@ def read_retained_file(
     return payload
 
 
+def read_retained_image(
+    backend: RetainedChatBackend,
+    relative: str,
+    *,
+    observer: StageObserver | None = None,
+) -> dict[str, Any]:
+    """Read one PNG, JPEG, GIF or WebP file, up to :data:`IMAGE_MAX_BYTES`.
+
+    The text preview's bound is far smaller than a full-page screenshot, so an
+    image has its own. The larger bound buys nothing else: a file that is not
+    one of those formats, by its bytes rather than its name, answers no content.
+    """
+    result = backend.manager.exec_capture(
+        backend.spec,
+        [
+            "/usr/bin/python3",
+            "-I",
+            "-c",
+            _READ_PROGRAM,
+            CHAT_WORKDIR,
+            relative,
+            str(IMAGE_MAX_BYTES),
+            "1",
+            "images",
+        ],
+        workdir="/",
+        timeout_s=60,
+        observer=observer,
+    )
+    if result.returncode != 0:
+        raise _error_from_result(result.returncode, result.stdout, result.stderr)
+    try:
+        payload = json.loads(result.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RetainedWorkspaceError(502, "retained workspace returned invalid data") from exc
+    if not isinstance(payload, dict) or payload.get("kind") not in {"file", "symlink"}:
+        raise RetainedWorkspaceError(502, "retained workspace returned invalid data")
+    return payload
+
+
+def list_retained_images(backend: RetainedChatBackend, *, since: float) -> dict[str, Any]:
+    """The images under the artifacts directory modified at or after ``since``, newest first.
+
+    ``since`` is a Unix time. At most :data:`ARTIFACT_IMAGES_MAX` are answered,
+    from at most :data:`ARTIFACT_SCAN_MAX` entries; ``truncated`` says either
+    bound was reached. A workspace without the directory has no images.
+    """
+    result = backend.manager.exec_capture(
+        backend.spec,
+        [
+            "/usr/bin/python3",
+            "-I",
+            "-c",
+            _IMAGES_PROGRAM,
+            CHAT_WORKDIR,
+            ARTIFACTS_RELATIVE,
+            repr(float(since)),
+            str(ARTIFACT_IMAGES_MAX),
+            str(ARTIFACT_SCAN_MAX),
+        ],
+        workdir="/",
+        timeout_s=60,
+    )
+    if result.returncode != 0:
+        raise _error_from_result(result.returncode, result.stdout, result.stderr)
+    try:
+        payload = json.loads(result.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RetainedWorkspaceError(502, "retained workspace returned invalid data") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("images"), list):
+        raise RetainedWorkspaceError(502, "retained workspace returned invalid data")
+    return payload
+
+
 def write_retained_file(
     backend: RetainedChatBackend,
     relative: str,
@@ -408,7 +573,11 @@ def write_retained_file(
 
 
 __all__ = [
+    "ARTIFACTS_RELATIVE",
+    "IMAGE_MAX_BYTES",
     "RetainedWorkspaceError",
+    "list_retained_images",
     "read_retained_file",
+    "read_retained_image",
     "write_retained_file",
 ]

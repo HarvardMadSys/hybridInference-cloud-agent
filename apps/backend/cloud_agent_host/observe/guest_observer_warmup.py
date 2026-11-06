@@ -26,14 +26,14 @@ from typing import TYPE_CHECKING
 from cloud_agent_host.container.sandbox import KATA_RUNTIME
 
 if TYPE_CHECKING:
-    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
     from cloud_agent_host.container.chat_sandbox_models import ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox_observation import GuestObserverMixin
 
 logger = logging.getLogger("cloud_agent_host.guest_observer_warmup")
 
 
 def warm_guest_observer(
-    manager: ChatSandboxManager, spec: ChatSandboxSpec, container_id: str
+    manager: GuestObserverMixin, spec: ChatSandboxSpec, container_id: str
 ) -> threading.Thread | None:
     """Start the observer of the just-proven guest ``container_id`` on a daemon thread.
 
@@ -56,7 +56,7 @@ def warm_guest_observer(
     return thread
 
 
-def _warm(manager: ChatSandboxManager, spec: ChatSandboxSpec, container_id: str) -> None:
+def _warm(manager: GuestObserverMixin, spec: ChatSandboxSpec, container_id: str) -> None:
     """Ensure the helper under its container's lock, if that container is still this one."""
     try:
         with manager._guest_observers.container(spec.container_name) as observers:
