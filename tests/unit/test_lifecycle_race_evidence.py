@@ -1,11 +1,9 @@
-"""Evidence for lifecycle races the A2 spec could not rule out (§4.4, §8).
+"""Regression tests for lifecycle races the A2 spec could not rule out (§4.4, §8).
 
-Each case drives the real supervisor into the state the spec's invariant
-forbids and asserts the invariant. They are strict xfails: they pass while the
-race exists and fail, asking to be promoted to ordinary tests, once it is
-fixed. Only the final invariant check may produce the expected failure (it
-raises :class:`InvariantBroken`); any other failure means the race was not
-reproduced and fails the test outright.
+Each case drives the real supervisor into the interleaving that used to
+reach the state the spec's invariant forbids, and asserts the invariant: the
+final check raises :class:`InvariantBroken` if the race is back. They were
+strict xfails until each race was fixed (A2 spec §9).
 """
 
 from __future__ import annotations
@@ -242,16 +240,6 @@ def test_a_group_found_running_is_never_labelled_at_or_below_its_sealed_checkpoi
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=InvariantBroken,
-    reason=(
-        "A2 follow-up: a turn's environment preparation (activation_owner, no fence: "
-        "_SAME_RUN) starts a STOPPED container in ensure_running before it checks its "
-        "lease; start_group skips _begin_run_locked for _SAME_RUN, so the new run keeps "
-        "the label the stop's checkpoint already carries"
-    ),
-)
 def test_a_stopped_group_is_never_started_again_under_its_checkpointed_label() -> None:
     """A run started after a stop never carries the label that stop's checkpoint names.
 

@@ -1818,3 +1818,26 @@ def test_shutdown_leaves_a_start_in_progress_its_own_final_archive():
     with supervisor.state.lock:
         assert group.life.start is None
         assert not group.life.final_archive_pending
+
+
+def test_a_turns_start_whose_lease_a_stop_cleared_starts_nothing():
+    """The lease is rechecked right before Docker starts a stopped container.
+
+    A request in the run it was admitted to begins no run, so a stale
+    activation's start would carry the label of the stop that cleared it.
+    It is refused, and it is not recorded as a failed start.
+    """
+    manager = _Manager()
+    spec = _spec()
+    manager.items[spec.container_name] = manager._inspection(spec, running=False)
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(spec, _members())
+    group = supervisor.state.groups[spec.sandbox_id]
+
+    with pytest.raises(SessionLeaseLost, match="Environment preparation lease was lost"):
+        supervisor._lifecycle.start_group(group, activation_owner="lease-a-stop-cleared")
+
+    assert manager.items[spec.container_name].running is False
+    with supervisor.state.lock:
+        assert group.life.start is None
+        assert group.life.last_start_failed is False

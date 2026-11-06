@@ -365,6 +365,7 @@ class GroupLifecycleController:
         start_seq: int | _SameRun | None = _SAME_RUN,
         facts: SandboxActionFacts | None = None,
         observer: StageRecorder | None = None,
+        activation_owner: str | None = None,
     ) -> tuple[ChatSandboxInspection, bool]:
         """Start a group and archive a guest-network fail-stop exactly once.
 
@@ -374,6 +375,12 @@ class GroupLifecycleController:
         A running container is reused as it is: the request joins its run
         once it is admitted (:meth:`SharedSessionState.join_run_locked`). The flag says whether
         ``start`` proved the network here; a retried archive completion did not.
+
+        A request in the run it was admitted to (``_SAME_RUN``) begins no new
+        run, so when ``activation_owner`` names its lease, a stopped container
+        is started only while a member still holds that lease: one a stop
+        cleared would restart the group under the label that stop's checkpoint
+        names. Refused, the start raises :class:`SessionLeaseLost`.
         """
         with self._state.lock:
             self._state.wait_for_start_locked(group, retry_failed=True)
@@ -383,12 +390,17 @@ class GroupLifecycleController:
         refused = False
 
         def prepare_stopped_start(current: ChatSandboxInspection) -> None:
-            nonlocal start_fence_prepared
+            nonlocal start_fence_prepared, refused
             # Docker has just proved this exact container stopped, and starts
             # it next: this is where a new run begins.
-            if start_seq is not _SAME_RUN:
-                with self._state.lock:
+            with self._state.lock:
+                if start_seq is not _SAME_RUN:
                     group.life.begin_run_locked(start_seq)
+                elif activation_owner is not None and all(
+                    member.lease_token != activation_owner for member in group.members.values()
+                ):
+                    refused = True
+                    raise SessionLeaseLost("Environment preparation lease was lost")
             if not self._archive.prepare_start(group.spec, current):
                 return
             with self._state.lock:
@@ -1057,6 +1069,7 @@ class GroupLifecycleController:
         start_seq: int | _SameRun | None = _SAME_RUN,
         facts: SandboxActionFacts | None = None,
         observer: StageRecorder | None = None,
+        activation_owner: str | None = None,
     ) -> ChatSandboxInspection:
         """Start the group if it is stopped, and prove its network once for one request.
 
@@ -1064,17 +1077,25 @@ class GroupLifecycleController:
         running container it reused is proved here instead.
         """
         inspection, proved = self.start_group(
-            group, start_seq=start_seq, facts=facts, observer=observer
+            group,
+            start_seq=start_seq,
+            facts=facts,
+            observer=observer,
+            activation_owner=activation_owner,
         )
         if not proved:
             self._manager.require_network(group.spec, observer=observer)
         return inspection
 
     def ensure_running(
-        self, group: _Group, *, start_seq: int | _SameRun | None = _SAME_RUN
+        self,
+        group: _Group,
+        *,
+        start_seq: int | _SameRun | None = _SAME_RUN,
+        activation_owner: str | None = None,
     ) -> None:
         """Start the group if it is stopped, and prove its network for this request."""
-        ensure_running(self, group, start_seq=start_seq)
+        ensure_running(self, group, start_seq=start_seq, activation_owner=activation_owner)
 
     def recover_start_archive_completion(self, group: _Group) -> None:
         """Retry an idempotent post-start marker completion before admission."""
