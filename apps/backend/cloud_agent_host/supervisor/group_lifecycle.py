@@ -284,7 +284,7 @@ class GroupLifecycle:
 
     def record_combination(self, *, site: str) -> None:
         """Count the group's current :meth:`combination` in this process's counts."""
-        COMBINATIONS.observe(self.combination(), site=site)
+        COMBINATIONS.observe(self.group.life.checked_combination(), site=site)
 
     def holds(self, blocker: Blocker, *, allow_lifecycle_check: bool = False) -> bool:
         """Whether the group's state is ``blocker`` now."""
