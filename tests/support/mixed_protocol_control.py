@@ -38,13 +38,7 @@ sys.path.insert(0, str(_tree / "apps" / "backend"))
 
 import asyncpg
 import uvicorn
-from mixed_protocol_wire import (
-    HOST_PREFIXES,
-    body_annotation,
-    host_routes,
-    matching_route,
-    unknown_fields,
-)
+from mixed_protocol_wire import HOST_PREFIXES, WireRecorder, host_routes
 
 import cloud_agent
 
@@ -63,51 +57,6 @@ from cloud_agent_shared.model_connections import PROTOCOLS
 
 _OWNER_EMAIL = "mixed-protocol@example.org"
 _MODEL = "mixed-protocol-model"
-
-
-class WireRecorder:
-    """Record each host request's route, status and the body keys its model drops."""
-
-    def __init__(self, app: Any) -> None:
-        self.app = app
-        self.routes = host_routes()
-        self.calls: list[dict[str, Any]] = []
-
-    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
-        if scope["type"] != "http" or not scope["path"].startswith(HOST_PREFIXES):
-            await self.app(scope, receive, send)
-            return
-        chunks: list[bytes] = []
-        status: list[int] = []
-
-        async def receive_recorded() -> dict[str, Any]:
-            message = await receive()
-            if message["type"] == "http.request":
-                chunks.append(message.get("body", b""))
-            return message
-
-        async def send_recorded(message: dict[str, Any]) -> None:
-            if message["type"] == "http.response.start":
-                status.append(int(message["status"]))
-            await send(message)
-
-        await self.app(scope, receive_recorded, send_recorded)
-        # The route that served it, which Starlette leaves in the scope.
-        route = scope.get("route") or matching_route(self.routes, scope)
-        call: dict[str, Any] = {
-            "method": scope["method"],
-            "route": getattr(route, "path", scope["path"]),
-            "status": status[0] if status else None,
-            "dropped": [],
-        }
-        body = b"".join(chunks)
-        annotation = body_annotation(route) if route is not None else None
-        if annotation is not None and body:
-            try:
-                call["dropped"] = unknown_fields(annotation, json.loads(body))
-            except ValueError:
-                call["dropped"] = ["<body is not JSON>"]
-        self.calls.append(call)
 
 
 async def _account(storage: Any) -> str:
@@ -209,7 +158,7 @@ async def main() -> None:
     """Serve until stdin closes or says ``quit``."""
     host = os.environ["MIXED_PROTOCOL_HOST"]
     app = create_app()
-    recorder = WireRecorder(app)
+    recorder = WireRecorder(app, prefixes=HOST_PREFIXES, routes=host_routes())
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     server = uvicorn.Server(

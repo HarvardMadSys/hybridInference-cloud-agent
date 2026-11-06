@@ -40,6 +40,7 @@ def _steps() -> list[dict[str, object]]:
         "tests/support/mixed_protocol_host.py",
         "tests/support/mixed_protocol_control.py",
         "tests/support/mixed_protocol_wire.py",
+        "tests/support/mixed_protocol_manager.py",
         # A CI edit runs every check, this one included.
         ".github/workflows/ci.yml",
     ],

@@ -447,6 +447,12 @@ class Driver:
         control.mark_chat_sandbox_running(
             **group, container_id=container_id, context_status=context_status
         )
+        # §3.4 step 8: the workspace phase that freezes the owner's terminals,
+        # which the control plane passes on to the sandbox manager directly.
+        self.wire.step = "8 terminals suspend"
+        control.suspend_terminals("workspace_preparing")
+        self.wire.step = "8 terminals resume"
+        control.resume_terminals()
         self.wire.step = "3 residency"
         residency = control.establish_shared_residency(
             sandbox_id=sandbox_id,
