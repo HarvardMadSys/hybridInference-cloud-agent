@@ -313,7 +313,10 @@ class InitialArchiveCapture:
             # be another caller's, so neither is put back or touched.
             released_by_stop = group.life.exclusive is not barrier
             if released_by_stop:
-                if preserve_frozen_writers:
+                # This capture's own fail-stop returning is the expected
+                # release; log only one its fail-stop did not complete, which
+                # another stop (or a later stop of the same group) made.
+                if preserve_frozen_writers and preservation_error is not None:
                     logger.info(
                         "sandbox_initial_archive_preservation_released_by_stop",
                         extra={

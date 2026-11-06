@@ -9,6 +9,7 @@ strict xfails until each race was fixed (A2 spec §9).
 from __future__ import annotations
 
 import contextlib
+import logging
 import threading
 from types import SimpleNamespace
 
@@ -26,6 +27,11 @@ from tests.unit.test_shared_session_supervisor import (
 from cloud_agent_shared.environment import BoundEnvironment
 
 _WAIT_S = 5.0
+
+
+def _released_by_stop(caplog: pytest.LogCaptureFixture) -> int:
+    event = "sandbox_initial_archive_preservation_released_by_stop"
+    return sum(getattr(record, "event", None) == event for record in caplog.records)
 
 
 class InvariantBroken(AssertionError):
@@ -81,7 +87,7 @@ def _supervisor(manager: _Manager, archives: str) -> SharedChatSessionSupervisor
 
 @pytest.mark.parametrize("archives", ["disabled", "enabled"])
 def test_preserved_initial_archive_keeps_its_snapshot_barrier_across_a_restart(
-    archives: str,
+    archives: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     """I5: ``initial_archive_preservation_pending`` implies ``snapshotting``.
 
@@ -156,6 +162,7 @@ def test_preserved_initial_archive_keeps_its_snapshot_barrier_across_a_restart(
             outcomes["capture"] = exc
 
     capture_thread = threading.Thread(target=run_capture)
+    caplog.set_level(logging.INFO, logger="cloud_agent_host.shared_session_supervisor")
     try:
         capture_thread.start()
         assert collided.wait(timeout=_WAIT_S), outcomes
@@ -194,6 +201,7 @@ def test_preserved_initial_archive_keeps_its_snapshot_barrier_across_a_restart(
             "snapshot barrier is gone: writers are admitted while preservation "
             "claims to hold them off"
         )
+    assert _released_by_stop(caplog) == 1
 
 
 def test_a_group_found_running_is_never_labelled_at_or_below_its_sealed_checkpoint() -> None:
@@ -295,3 +303,32 @@ def test_a_stopped_group_is_never_started_again_under_its_checkpointed_label() -
             f"last stop's checkpoint already names; scripts run for the stale "
             f"activation: {scripts_run}"
         )
+
+
+def test_an_initial_archives_own_fail_stop_releasing_its_fence_is_not_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Only a release another stop made is logged; the capture's own is the expected one."""
+    manager = _Manager()
+    supervisor = _supervisor(manager, "enabled")
+    lease = supervisor.acquire(
+        _spec(),
+        thread_id="athr_source",
+        owner="attempt:1",
+        activation_generation=1,
+        has_settled_context=True,
+        manifest=_members(),
+    )
+
+    def capture(*_args):
+        manager.initial_archive_marker = b"prepared-initial-marker"
+        raise RuntimeError("initial upload failed")
+
+    caplog.set_level(logging.INFO, logger="cloud_agent_host.shared_session_supervisor")
+    with pytest.raises(RuntimeError, match="initial upload failed"):
+        supervisor.capture_initial_archive("athr_source", lease.token, capture=capture)
+
+    group = supervisor.state.members["athr_source"]
+    assert group.life.exclusive is None
+    assert not group.life.initial_preservation
+    assert _released_by_stop(caplog) == 0
