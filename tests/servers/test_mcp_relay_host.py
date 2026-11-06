@@ -31,10 +31,11 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from tests.support.storage import AllCapabilities, OneFake
 
-from cloud_agent.api import mcp_relay as agent_mcp_router
+from cloud_agent.api import _mcp_relay_callers, mcp_relay as agent_mcp_router
 from cloud_agent.api.deps import get_storage
 from cloud_agent.mcp import protocol, runtime as mcp_runtime
 from cloud_agent.mcp.host import ContentBlock, Session, ToolResult
+from cloud_agent.mcp.invocations import MAX_HELD_ARGUMENTS_BYTES
 from cloud_agent.mcp.net_policy import EgressPolicy
 from cloud_agent.mcp.protocol import Handshake
 from cloud_agent.mcp.registry import mcp_cipher
@@ -574,7 +575,7 @@ class TestTheMergedCatalogue:
             refreshed.append(row["id"])
             return row
 
-        monkeypatch.setattr(agent_mcp_router, "ensure_fresh", refresh)
+        monkeypatch.setattr(_mcp_relay_callers, "ensure_fresh", refresh)
         listed = await client.post(_HOST_URL, json=_rpc("tools/list"), headers=_auth())
         called = await client.post(
             _HOST_URL,
@@ -701,7 +702,7 @@ class TestRoutingACall:
             seen.append(policy)
             return row
 
-        monkeypatch.setattr(agent_mcp_router, "ensure_fresh", refresh)
+        monkeypatch.setattr(_mcp_relay_callers, "ensure_fresh", refresh)
         response = await client.post(
             _HOST_URL,
             json=_rpc("tools/call", name="docs__search", arguments={"q": "nsi"}),
@@ -759,7 +760,7 @@ class TestRoutingACall:
         store.bindings = [
             _binding(7, "github", rules={"get_issue": {"policy": "confirm", "fingerprint": ""}})
         ]
-        arguments = {"body": "x" * agent_mcp_router.MAX_HELD_ARGUMENTS_BYTES}
+        arguments = {"body": "x" * MAX_HELD_ARGUMENTS_BYTES}
 
         response = await client.post(
             _HOST_URL,
@@ -1341,7 +1342,7 @@ async def test_inactive_connection_never_refreshes_or_delays_healthy_tools(
         assert row["id"] == 8, "inactive connection must not enter refresh"
         return row
 
-    monkeypatch.setattr(agent_mcp_router, "ensure_fresh", refresh)
+    monkeypatch.setattr(_mcp_relay_callers, "ensure_fresh", refresh)
     listed = await client.post(_HOST_URL, json=_rpc("tools/list"), headers=_auth())
     assert _tool_names(listed) == _catalogue("docs__search")
     assert refreshed == []
