@@ -69,8 +69,10 @@ def _entry(row: dict[str, Any]) -> AdminAuditLogEntry:
     details = row.get("details")
     details = details if isinstance(details, dict) else None
     declared = audit_action(row["action"])
-    # A row the previous release wrote during the rollout has no attribution
-    # stored; it reads as this release would have written it.
+    # Every row has its attribution stored: the migration backfilled the old
+    # ones and its trigger fills those the previous release writes during the
+    # rollout. This covers only a row that trigger could not fill, which no
+    # filter finds but the unfiltered page still shows.
     fallback = attribute(
         row["action"],
         details=details,

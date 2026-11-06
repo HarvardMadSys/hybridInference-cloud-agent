@@ -79,7 +79,8 @@ async def _seed(conn, admin: str, alice: str) -> None:
     await _legacy(
         conn, "agent.sandbox.delete.retry_exhausted", _WORKER, alice, _deletion("s2", "r2")
     )
-    # Ran out, then an administrator resumed it: open again.
+    # Ran out, then an administrator resumed it: the request failed, the
+    # resumption is still running.
     await _legacy(
         conn, "agent.sandbox.delete.requested", f"admin:{admin}", alice, _deletion("s3", "r3")
     )
@@ -100,8 +101,37 @@ async def _seed(conn, admin: str, alice: str) -> None:
         alice,
         _deletion("s4", "r4") | {"host_reclaimed": True},
     )
+    # Stopped, resumed, then completed: each row has its own result.
+    await _legacy(
+        conn, "agent.sandbox.delete.requested", f"admin:{admin}", alice, _deletion("s5", "r5")
+    )
+    await _legacy(conn, "agent.sandbox.delete.failed", _WORKER, alice, _deletion("s5", "r5"), False)
+    await _legacy(
+        conn, "agent.sandbox.delete.retry_resumed", f"admin:{admin}", alice, _deletion("s5", "r5")
+    )
+    await _legacy(
+        conn,
+        "agent.sandbox.delete.completed",
+        _WORKER,
+        alice,
+        _deletion("s5", "r5") | {"archive_key": "s3://b/k"},
+    )
     # A worker row no request names stays.
     await _legacy(conn, "agent.sandbox.delete.completed", _WORKER, alice, _deletion("s9", "r9"))
+
+
+async def _results(conn) -> dict[tuple[str, str], tuple[str, dict]]:
+    """Each request or resumption's final result, by (action suffix, request)."""
+    return {
+        (row["action"].rsplit(".", 1)[1], row["request_id"]): (
+            row["outcome"],
+            json.loads(row["details"]),
+        )
+        for row in await conn.fetch(
+            "SELECT l.action, l.correlation_id AS request_id, r.outcome, r.details "
+            "FROM agent_admin_audit_outcomes r JOIN agent_admin_audit_log l ON l.id = r.event_id"
+        )
+    }
 
 
 async def test_existing_rows_gain_attribution_and_worker_steps_become_results(store) -> None:
@@ -122,13 +152,7 @@ async def test_existing_rows_gain_attribution_and_worker_steps_become_results(st
             (row["action"], row["details"] and json.loads(row["details"]).get("request_id")): row
             for row in await conn.fetch("SELECT * FROM agent_admin_audit_log ORDER BY id")
         }
-        results = {
-            row["request_id"]: (row["outcome"], json.loads(row["details"]))
-            for row in await conn.fetch(
-                "SELECT l.correlation_id AS request_id, r.outcome, r.details "
-                "FROM agent_admin_audit_outcomes r JOIN agent_admin_audit_log l ON l.id = r.event_id"
-            )
-        }
+        results = await _results(conn)
     finally:
         await conn.close()
 
@@ -140,9 +164,12 @@ async def test_existing_rows_gain_attribution_and_worker_steps_become_results(st
         ("agent.sandbox.delete.completed", "r9")
     ]
     assert results == {
-        "r1": ("applied", {}),
-        "r2": ("failed", {}),
-        "r4": ("applied", {"host_reclaimed": True}),
+        ("requested", "r1"): ("applied", {}),
+        ("requested", "r2"): ("failed", {}),
+        ("requested", "r3"): ("failed", {}),
+        ("requested", "r4"): ("applied", {"host_reclaimed": True}),
+        ("requested", "r5"): ("failed", {}),
+        ("retry_resumed", "r5"): ("applied", {"archive_key": "s3://b/k"}),
     }
 
     approve = rows[("agent.local_account.approve", None)]
@@ -180,6 +207,95 @@ async def test_existing_rows_gain_attribution_and_worker_steps_become_results(st
         "requested",
     )
     assert delete["subject_label"] == "alice@example.edu"
+
+
+async def test_rows_the_previous_release_writes_during_the_rollout_read_as_this_ones(
+    store,
+) -> None:
+    """The previous release keeps running beside this one until the rollout ends.
+
+    It writes only the columns it knows, its deletion worker writes a row per
+    step, and its erasure deletes the account's rows. Each must still work and
+    read as this release would have written it.
+    """
+    admin = await make_account(store, "juncheng@example.edu", admission="approved", admin=True)
+    alice = await make_account(store, "alice@example.edu", admission="approved")
+    config = _db_config()
+    apply_migrations(config, _THIS)
+    conn = await asyncpg.connect(**config)
+    try:
+        await conn.execute("DELETE FROM agent_admin_audit_log")
+        await _legacy(conn, "agent.local_account.approve", f"admin:{admin}", alice, {"version": 2})
+        await _legacy(
+            conn, "agent.compute.server.add", f"admin:{admin}", None, {"operation_id": "op-roll"}
+        )
+        await conn.execute(
+            "INSERT INTO agent_compute_operations (id, request_id, fingerprint, kind, state, "
+            "completed_at) VALUES ('op-roll', 'req-roll', 'f', 'server.add', 'succeeded', NOW())"
+        )
+        await _legacy(
+            conn, "agent.sandbox.delete.requested", f"admin:{admin}", alice, _deletion("s6", "r6")
+        )
+        await _legacy(conn, "agent.sandbox.delete.archived", _WORKER, alice, _deletion("s6", "r6"))
+        await _legacy(
+            conn,
+            "agent.sandbox.delete.completed",
+            _WORKER,
+            alice,
+            _deletion("s6", "r6") | {"archive_key": "s3://b/k6"},
+        )
+        approve = await conn.fetchrow(
+            "SELECT * FROM agent_admin_audit_log WHERE action = 'agent.local_account.approve'"
+        )
+        results = await _results(conn)
+    finally:
+        await conn.close()
+
+    assert (approve["target_type"], approve["target_id"], approve["outcome"]) == (
+        "account",
+        alice,
+        "applied",
+    )
+    assert approve["actor_label"] == "juncheng@example.edu"
+    assert approve["subject_label"] == approve["target_label"] == "alice@example.edu"
+    assert results == {("requested", "r6"): ("applied", {"archive_key": "s3://b/k6"})}
+
+    # What the page filters on and joins against is stored, not guessed.
+    by_target = await store.audit_log.list_admin_actions(target=("account", alice), limit=10)
+    assert [row["action"] for row in by_target] == ["agent.local_account.approve"]
+    deletion = await store.audit_log.list_admin_actions(target=("sandbox", "s6"), limit=10)
+    assert [(row["action"], row["result"]) for row in deletion] == [
+        ("agent.sandbox.delete.requested", "applied")
+    ]
+    add = await store.audit_log.list_admin_actions(actions=["agent.compute.server.add"], limit=10)
+    assert [(row["outcome"], row["result"]) for row in add] == [("requested", "applied")]
+
+    # The previous release's erasure deletes the account's rows, results and all.
+    conn = await asyncpg.connect(**config)
+    try:
+        await conn.execute("DELETE FROM agent_admin_audit_log WHERE target_user_id = $1", alice)
+        assert await conn.fetchval("SELECT count(*) FROM agent_admin_audit_outcomes") == 0
+        await conn.execute("DELETE FROM agent_compute_operations WHERE id = 'op-roll'")
+    finally:
+        await conn.close()
+
+
+async def test_a_row_this_release_writes_is_left_as_written(store) -> None:
+    """The rollout trigger fills only rows that arrive without attribution."""
+    config = _db_config()
+    apply_migrations(config, _THIS)
+    conn = await asyncpg.connect(**config)
+    try:
+        await conn.execute("DELETE FROM agent_admin_audit_log")
+        await conn.execute(
+            "INSERT INTO agent_admin_audit_log (action, actor_id, admin_ip, details, success, "
+            "target_type, target_id, outcome) VALUES ('agent.runner_host.drain', 'admin-token', "
+            "'203.0.113.9', '{\"host\": \"rtx\"}'::jsonb, TRUE, 'host', 'other', 'applied')"
+        )
+        row = await conn.fetchrow("SELECT target_id, actor_label FROM agent_admin_audit_log")
+    finally:
+        await conn.close()
+    assert (row["target_id"], row["actor_label"]) == ("other", None)
 
 
 async def test_the_downgrade_drops_the_attribution_and_keeps_the_rows(store) -> None:

@@ -425,11 +425,7 @@ async def test_a_requested_row_reads_with_its_reported_result(
             reported_by="w",
         )
         assert (await log.list_admin_actions(limit=1))[0]["result"] == "failed"
-        # Resumed: open again; then done.
-        await report_final_outcome(
-            conn, requested_actions=requested, correlation_id="req-1", outcome=None, reported_by="w"
-        )
-        assert (await log.list_admin_actions(limit=1))[0]["result"] is None
+        # Reported again: the newer word wins.
         await report_final_outcome(
             conn,
             requested_actions=requested,

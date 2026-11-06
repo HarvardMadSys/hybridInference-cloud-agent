@@ -22,7 +22,8 @@ to which user" without guessing:
 - ``outcome`` (``applied``, ``requested``, ``refused``, ``failed``,
   ``replayed``), ``reason`` and ``correlation_id``: the operation or request a
   ``requested`` row's final result is reported against.
-- ``agent_admin_audit_outcomes``: that final result, one row per request.
+- ``agent_admin_audit_outcomes``: that final result, one row per request or
+  administrator's resumption of it.
 - ``agent_admin_audit_write_failures``: an audit write that failed, so the
   page can say so. Recording an action must never make the action fail.
 
@@ -36,6 +37,12 @@ checks (a read; no longer written), and the sandbox deletion worker's
 per-step rows, whose final result moves to ``agent_admin_audit_outcomes``
 against the administrator's request. A worker row that names no request is
 kept. The steps themselves remain in ``agent_sandbox_events``.
+
+The previous release keeps writing rows while this one rolls out, without the
+new columns, and its deletion worker keeps writing a row per step. A trigger
+attributes those rows as this release would have and turns a final step into
+its request's result. It touches no row this release writes, and the next
+revision drops it.
 
 The SQL uses ``starts_with`` rather than ``LIKE``: some callers replay
 migrations through drivers that treat ``%`` as a placeholder.
@@ -205,7 +212,10 @@ def _add_columns() -> None:
     op.execute(
         """
         CREATE TABLE agent_admin_audit_outcomes (
-            event_id BIGINT PRIMARY KEY REFERENCES agent_admin_audit_log (id),
+            -- The previous release's erasure still deletes an account's rows
+            -- during the rollout; a result goes with its row.
+            event_id BIGINT PRIMARY KEY
+                REFERENCES agent_admin_audit_log (id) ON DELETE CASCADE,
             outcome TEXT NOT NULL CHECK (outcome IN ('applied', 'failed', 'cancelled')),
             reported_by TEXT NOT NULL,
             details JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -299,47 +309,81 @@ def _backfill_names() -> None:
     )
 
 
+#: The rows a deletion's final result is reported against: the request, and
+#: each administrator's resumption of it. A worker step belongs to the newest
+#: one written before it.
+_DELETION_REQUESTS = "('agent.sandbox.delete.requested', 'agent.sandbox.delete.retry_resumed')"
+
+#: True when sandbox deletion ``:request`` stopped with no retry scheduled:
+#: retries were exhausted or stopped, or the failure was not retained.
+_DELETION_STOPPED = """
+    EXISTS (
+        SELECT 1 FROM agent_sandboxes x
+        WHERE x.deletion_request_id = {request}
+          AND x.deletion_state <> 'deleted'
+          AND (x.deletion_state = 'failed' OR x.deletion_retry_exhausted_at IS NOT NULL)
+    )
+"""
+
+
+def _step_outcome(action: str, request: str, superseded: str = "FALSE") -> str:
+    """A worker step's final result, or NULL for a step after which work goes on."""
+    return f"""
+        CASE
+            WHEN {action} IN ('agent.sandbox.delete.completed',
+                              'agent.sandbox.delete.discarded') THEN 'applied'
+            WHEN {action} = 'agent.sandbox.delete.retry_exhausted' THEN 'failed'
+            WHEN {action} = 'agent.sandbox.delete.failed'
+                 AND ({superseded} OR {_DELETION_STOPPED.format(request=request)}) THEN 'failed'
+        END
+    """
+
+
+def _step_details(details: str) -> str:
+    return f"""
+        jsonb_strip_nulls(jsonb_build_object(
+            'archive_key', {details}->>'archive_key',
+            'host_reclaimed', ({details}->>'host_reclaimed')::boolean
+        ))
+    """
+
+
 def _move_worker_results() -> None:
-    """The worker's last word on each request becomes that request's result."""
+    """The worker's last word after each request or resumption becomes its result.
+
+    A failure followed by a resumption was final for the attempt it ended; the
+    sandbox's current state speaks only for the newest one.
+    """
     op.execute(
         f"""
-        WITH steps AS (
-            SELECT DISTINCT ON (details->>'request_id')
-                details->>'request_id' AS request_id, action, details, created_at
-            FROM agent_admin_audit_log
-            WHERE (actor_id = '{_WORKER}' OR action = 'agent.sandbox.delete.retry_resumed')
-              AND details->>'request_id' IS NOT NULL
-            ORDER BY details->>'request_id', id DESC
+        WITH requests AS (
+            SELECT id, correlation_id FROM agent_admin_audit_log
+            WHERE action IN {_DELETION_REQUESTS} AND correlation_id IS NOT NULL
+        ), steps AS (
+            SELECT DISTINCT ON (s.owner) s.owner, s.request_id, s.action, s.details, s.created_at,
+                EXISTS (
+                    SELECT 1 FROM requests later
+                    WHERE later.correlation_id = s.request_id AND later.id > s.owner
+                ) AS superseded
+            FROM (
+                SELECT l.id, l.action, l.details, l.created_at,
+                       l.details->>'request_id' AS request_id,
+                       (SELECT max(r.id) FROM requests r
+                        WHERE r.correlation_id = l.details->>'request_id' AND r.id < l.id) AS owner
+                FROM agent_admin_audit_log l
+                WHERE l.actor_id = '{_WORKER}' AND l.details->>'request_id' IS NOT NULL
+            ) s
+            WHERE s.owner IS NOT NULL
+            ORDER BY s.owner, s.id DESC
         ), finals AS (
-            SELECT s.request_id, s.details, s.created_at,
-                CASE
-                    WHEN s.action IN ('agent.sandbox.delete.completed',
-                                      'agent.sandbox.delete.discarded') THEN 'applied'
-                    WHEN s.action = 'agent.sandbox.delete.retry_exhausted' THEN 'failed'
-                    WHEN s.action = 'agent.sandbox.delete.failed' AND EXISTS (
-                        SELECT 1 FROM agent_sandboxes x
-                        WHERE x.deletion_request_id = s.request_id
-                          AND x.deletion_state <> 'deleted'
-                          AND (x.deletion_state = 'failed'
-                               OR x.deletion_retry_exhausted_at IS NOT NULL)
-                    ) THEN 'failed'
-                END AS outcome
-            FROM steps s
-        ), requests AS (
-            SELECT DISTINCT ON (correlation_id) id, correlation_id
-            FROM agent_admin_audit_log
-            WHERE action = 'agent.sandbox.delete.requested' AND correlation_id IS NOT NULL
-            ORDER BY correlation_id, id DESC
+            SELECT owner, details, created_at,
+                   {_step_outcome("action", "request_id", "superseded")} AS outcome
+            FROM steps
         )
         INSERT INTO agent_admin_audit_outcomes (event_id, outcome, reported_by, details, created_at)
-        SELECT r.id, f.outcome, '{_WORKER}',
-               jsonb_strip_nulls(jsonb_build_object(
-                   'archive_key', f.details->>'archive_key',
-                   'host_reclaimed', (f.details->>'host_reclaimed')::boolean
-               )),
-               f.created_at
-        FROM finals f JOIN requests r ON r.correlation_id = f.request_id
-        WHERE f.outcome IS NOT NULL
+        SELECT owner, outcome, '{_WORKER}', {_step_details("details")}, created_at
+        FROM finals
+        WHERE outcome IS NOT NULL
         """
     )
     op.execute(
@@ -348,10 +392,130 @@ def _move_worker_results() -> None:
         WHERE l.actor_id = '{_WORKER}'
           AND EXISTS (
               SELECT 1 FROM agent_admin_audit_log r
-              WHERE r.action = 'agent.sandbox.delete.requested'
+              WHERE r.action IN {_DELETION_REQUESTS}
                 AND r.correlation_id = l.details->>'request_id'
+                AND r.id < l.id
           )
         """
+    )
+
+
+def _literal(value: str | bool | None) -> str:
+    if value is None:
+        return "NULL::text"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _name_of(account: str) -> str:
+    return f"(SELECT n.label FROM ({_NAMES} WHERE a.id = {account}) n LIMIT 1)"
+
+
+def _add_rollout_trigger() -> None:
+    """Attribute the rows the previous release writes while it still runs.
+
+    That release writes only the columns it knows. Without this its rows would
+    have no target, so no filter would find them and a compute request would
+    never show its result; and its deletion worker would still write a row per
+    step instead of reporting the final result. The trigger fills the row as
+    this release would have, from the same frozen table as the backfill, and
+    turns a final worker step into its request's result. This release fills
+    every column itself, so the trigger leaves its rows alone.
+
+    It never raises: the previous release fails an action whose audit write
+    fails. The next revision drops it with the rollout it serves.
+    """
+    frozen = ",\n".join(
+        "(" + ", ".join(_literal(value) for value in row) + ")" for row in _FROZEN
+    )
+    actor_account = (
+        "CASE WHEN starts_with(NEW.actor_id, 'admin:') THEN substr(NEW.actor_id, 7) "
+        "WHEN starts_with(NEW.actor_id, 'self:') THEN substr(NEW.actor_id, 6) END"
+    )
+    remembered = (
+        "(SELECT r.subject_label FROM agent_admin_audit_log r "
+        "WHERE r.target_user_id = NEW.target_user_id AND r.subject_label IS NOT NULL "
+        "ORDER BY r.id DESC LIMIT 1)"
+    )
+    request = "NEW.details->>'request_id'"
+    op.execute(
+        f"""
+        CREATE FUNCTION agent_admin_audit_attribute_legacy() RETURNS trigger
+        LANGUAGE plpgsql AS $fn$
+        DECLARE
+            declared RECORD;
+            later BOOLEAN := FALSE;
+            result_outcome TEXT;
+            request_event BIGINT;
+        BEGIN
+            IF NEW.target_type IS NOT NULL THEN
+                RETURN NEW;
+            END IF;
+            BEGIN
+                SELECT * INTO declared FROM (VALUES
+                    {frozen}
+                ) AS f(action, target_type, target_key, fixed_target, correlation_key, runs_later)
+                WHERE f.action = NEW.action;
+                IF FOUND THEN
+                    NEW.target_type := declared.target_type;
+                    NEW.target_id := COALESCE(
+                        NULLIF(NEW.details->>declared.target_key, ''),
+                        CASE WHEN declared.target_type = 'account' THEN NEW.target_user_id END,
+                        declared.fixed_target,
+                        'unknown'
+                    );
+                    NEW.correlation_id := NULLIF(NEW.details->>declared.correlation_key, '');
+                    later := declared.runs_later;
+                ELSE
+                    NEW.target_type := 'unknown';
+                    NEW.target_id := COALESCE(NEW.target_user_id, 'unknown');
+                END IF;
+                NEW.outcome := CASE
+                    WHEN NEW.details->>'outcome' IN ('refused', 'replayed')
+                        THEN NEW.details->>'outcome'
+                    WHEN NOT NEW.success THEN 'failed'
+                    WHEN later THEN 'requested'
+                    ELSE 'applied'
+                END;
+                NEW.actor_label := COALESCE(NEW.actor_label, {_name_of(actor_account)});
+                IF NEW.target_user_id IS NOT NULL THEN
+                    NEW.subject_label := COALESCE(
+                        NEW.subject_label, {_name_of("NEW.target_user_id")}, {remembered}
+                    );
+                    IF NEW.target_type = 'account' AND NEW.target_id = NEW.target_user_id THEN
+                        NEW.target_label := COALESCE(NEW.target_label, NEW.subject_label);
+                    END IF;
+                END IF;
+
+                IF NEW.actor_id = '{_WORKER}' AND {request} IS NOT NULL THEN
+                    result_outcome := {_step_outcome("NEW.action", request)};
+                    IF result_outcome IS NOT NULL THEN
+                        SELECT r.id INTO request_event FROM agent_admin_audit_log r
+                        WHERE r.correlation_id = {request} AND r.action IN {_DELETION_REQUESTS}
+                        ORDER BY r.id DESC LIMIT 1;
+                        IF request_event IS NOT NULL THEN
+                            INSERT INTO agent_admin_audit_outcomes
+                                (event_id, outcome, reported_by, details)
+                            VALUES (request_event, result_outcome, '{_WORKER}', {_step_details("NEW.details")})
+                            ON CONFLICT (event_id) DO UPDATE
+                            SET outcome = EXCLUDED.outcome, details = EXCLUDED.details,
+                                reported_by = EXCLUDED.reported_by, created_at = NOW();
+                        END IF;
+                    END IF;
+                END IF;
+            EXCEPTION WHEN OTHERS THEN
+                RAISE WARNING USING MESSAGE = 'agent_admin_audit_attribute_legacy: ' || SQLERRM;
+            END;
+            RETURN NEW;
+        END
+        $fn$
+        """
+    )
+    op.execute(
+        "CREATE TRIGGER agent_admin_audit_attribute_legacy "
+        "BEFORE INSERT ON agent_admin_audit_log "
+        "FOR EACH ROW EXECUTE FUNCTION agent_admin_audit_attribute_legacy()"
     )
 
 
@@ -362,6 +526,7 @@ def upgrade() -> None:
     _backfill_targets()
     _backfill_names()
     _move_worker_results()
+    _add_rollout_trigger()
 
 
 def downgrade() -> None:
@@ -370,6 +535,8 @@ def downgrade() -> None:
     The rows the upgrade removed — reads and the worker's per-step rows — are
     not restored; the steps remain in ``agent_sandbox_events``.
     """
+    op.execute("DROP TRIGGER IF EXISTS agent_admin_audit_attribute_legacy ON agent_admin_audit_log")
+    op.execute("DROP FUNCTION IF EXISTS agent_admin_audit_attribute_legacy()")
     op.execute("DROP TABLE IF EXISTS agent_admin_audit_write_failures")
     op.execute("DROP TABLE IF EXISTS agent_admin_audit_outcomes")
     for index in (

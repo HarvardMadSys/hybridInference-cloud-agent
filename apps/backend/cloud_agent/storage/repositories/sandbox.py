@@ -69,8 +69,11 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-#: The administrator's deletion request a worker's final result belongs to.
-_DELETION_REQUESTS = ("agent.sandbox.delete.requested",)
+#: The rows a deletion's final result is reported against: the request, and
+#: each administrator's resumption of it. The newest one gets the result, so a
+#: resumed request keeps the failure that stopped it and the resumption gets
+#: its own result.
+_DELETION_REQUESTS = ("agent.sandbox.delete.requested", "agent.sandbox.delete.retry_resumed")
 _DELETION_WORKER = "sandbox-deletion-worker"
 _DELETION_ATTEMPT_TELEMETRY_TIMEOUT_SECONDS = 0.25
 _DELETION_RETRY_MAX_ATTEMPTS = 8
@@ -1268,7 +1271,9 @@ class PostgresSandboxRepository:
                     retry_scheduled=retry_scheduled,
                     cleanup_outcome=cleanup_outcome,
                 )
-            if automatic_retry_stopped or retry_budget_exhausted:
+            if not retry_scheduled:
+                # Stopped, exhausted or not retained: nothing runs again unless
+                # an administrator resumes it.
                 await self._report_deletion_result(conn, request_id=request_id, outcome="failed")
             if updated is None:
                 raise RuntimeError("sandbox deletion failure transition lost its row")
@@ -1340,14 +1345,6 @@ class PostgresSandboxRepository:
         confirmed_docker_status: str | None = None,
     ) -> None:
         """Record a deletion request, or its resumption, with its transition."""
-        if action == "agent.sandbox.delete.retry_resumed":
-            await report_final_outcome(
-                conn,
-                requested_actions=_DELETION_REQUESTS,
-                correlation_id=request_id,
-                outcome=None,
-                reported_by=_DELETION_WORKER,
-            )
         await insert_audit_row(
             conn,
             action=action,

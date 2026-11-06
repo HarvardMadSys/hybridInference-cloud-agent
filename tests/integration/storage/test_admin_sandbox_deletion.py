@@ -511,6 +511,9 @@ async def test_safe_prearchive_failure_preserves_native_resume(db, store):
     detail = await store.admin_sandboxes.detail("asbx_failed")
     assert detail is not None and detail.sandbox.deletion_state == "failed"
     assert detail.sandbox.deletion_retry_exhausted_at is None
+    async with db.acquire() as conn:
+        # Not retained, so nothing runs again: the request has failed.
+        assert await final_result(conn) == ("failed", "sandbox-deletion-worker", {})
     assert await store.sandbox.thread_workspace_ready(thread_id=origin["thread_id"])
     assert await request_delete(store, "asbx_failed") == "accepted"
     replacement = await store.admin_sandboxes.detail("asbx_failed")
@@ -900,6 +903,14 @@ async def test_nontransient_failure_stops_retries_and_preserves_archive(
     assert retry is not None
     assert retry["deletion_request_id"] == claim["deletion_request_id"]
     assert retry["deletion_archive_key"] == ARCHIVE_URI
+
+    # The request keeps the failure that stopped it; the resumption gets its own result.
+    assert await store.sandbox.complete_admin_sandbox_deletion(**worker_fence(retry))
+    async with db.acquire() as conn:
+        requested = await final_result(conn)
+        resumed_result = await final_result(conn, "agent.sandbox.delete.retry_resumed")
+    assert requested == ("failed", "sandbox-deletion-worker", {})
+    assert resumed_result == ("applied", "sandbox-deletion-worker", {"archive_key": ARCHIVE_URI})
 
 
 async def test_automatic_retry_budget_exhaustion_preserves_receipt_and_resumes_same_request(

@@ -373,11 +373,15 @@ FreeInference 当初不回填，是因为它的 `admin_ip` 一个字段里混着
    `codex-ops-stale-cleanup` 归为 `service`。
 3. **用 `correlation_id` 代替 HTTP `request_id`。** 它存的是异步工作的标识：沙箱删除的
    request id，或 compute 操作的 operation id。这次没有加请求 id 中间件。
-4. **结果的来源。** 沙箱删除的最终结果由 worker 写入 `agent_admin_audit_outcomes`。管理员恢复
-   重试（`retry_resumed`）时会清掉已有结果，所以这张表是"当前已知结果"的投影，可以更新，
-   不受只追加约束；审计行本身仍然只追加。compute 操作的结果不复制，读取时直接 join
-   `agent_compute_operations` 的状态。worker 的 `archived` 和非终态 `failed` 步骤不再写任何
-   审计数据，它们本来就记录在 `agent_sandbox_events` 里。
+4. **结果的来源。** 沙箱删除的最终结果由 worker 写入 `agent_admin_audit_outcomes`，挂在
+   同一 request id 下最新的一条"请求"或"恢复重试"（`retry_resumed`）记录上。所以原请求保留
+   让它停下的那次失败，恢复记录有自己的结果，页面上两行都不会一直显示"进行中"。
+   失败后没有安排自动重试（重试停止、用完次数，或不保留的失败）就算最终失败。同一个结果
+   可能被再次上报（以最新的为准），所以这张表可以更新，不受只追加约束；审计行本身仍然
+   只追加。它的外键是 `ON DELETE CASCADE`，因为滚动发布期间旧版本擦除账号时仍会删审计行。
+   compute 操作的结果不复制，读取时直接 join `agent_compute_operations` 的状态。worker 的
+   `archived` 和非终态 `failed` 步骤不再写任何审计数据，它们本来就记录在
+   `agent_sandbox_events` 里。
 5. **名字快照。** 写入时查账号表：优先登录名，没有则依次用邮箱、手机号、`user_name`。查不到时
    （例如 erase 这一行是在账号身份删除之后写的），回退到审计日志里该账号最近一次记下的名字。
    因此审计行现在可能存有邮箱或手机号。`docs/developer/local-accounts.md` 原本写的"审计行不记录
@@ -394,8 +398,15 @@ FreeInference 当初不回填，是因为它的 `admin_ip` 一个字段里混着
    `target_type` 记为 `unknown`。
 8. **`agent.compute.connection.validate` 不再记录。**
 9. **只追加触发器推迟到下一个发布。** 原因是上一个发布在擦除账号时仍会 `DELETE` 审计行；
-   如果这次就加触发器，滚动发布窗口内的擦除操作会失败。
+   如果这次就加触发器，滚动发布窗口内的擦除操作会失败。下一个发布同时删掉第 11 条的
+   回填触发器。
 10. **入口。** 用户详情页加了"查看审计记录"链接（`/admin/audit?user=<id>`），沙箱详情页加了
     "Audit history"。主机页的组件在 eslint 复杂度名单里，没有改动；主机的历史从审计页
     每一行的 "Show only this" 进入。按用户查看时，页面默认包含该账号自己的操作。
+11. **滚动发布期间旧版本写入的行。** 旧版本只写它认识的列，它的删除 worker 也还在逐步写行。
+    如果只在 API 返回时补算，SQL 的筛选（按对象、按 `outcome`）和 compute 结果的 join 都会
+    漏掉这些行。所以迁移加了一个 `BEFORE INSERT` 触发器 `agent_admin_audit_attribute_legacy`：
+    遇到 `target_type` 为空的行，按与回填相同的冻结表补全对象、`correlation_id`、`outcome`
+    和名字；遇到旧 worker 的终态步骤，就把它转成对应请求的最终结果。本版本写入的行自带这些列，
+    触发器不碰。触发器内部吞掉所有错误，因为旧版本的审计写失败会让操作失败。
 

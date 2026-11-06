@@ -206,24 +206,18 @@ async def report_final_outcome(
     *,
     requested_actions: tuple[str, ...],
     correlation_id: str,
-    outcome: FinalOutcome | None,
+    outcome: FinalOutcome,
     reported_by: str,
     details: Mapping[str, Any] | None = None,
 ) -> None:
-    """Set, or with ``None`` clear, the final result of a ``requested`` row; never raise.
+    """Set the final result of the newest matching ``requested`` row; never raise.
 
-    Cleared when work that had stopped is resumed: its result is open again.
     A request recorded by no row is left alone.
     """
     try:
         async with conn.transaction():
             event_id = await conn.fetchval(_REQUEST_SQL, correlation_id, list(requested_actions))
             if event_id is None:
-                return
-            if outcome is None:
-                await conn.execute(
-                    "DELETE FROM agent_admin_audit_outcomes WHERE event_id = $1", event_id
-                )
                 return
             await conn.execute(
                 """
