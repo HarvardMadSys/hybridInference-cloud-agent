@@ -18,6 +18,7 @@ from tests.support.group_lifecycle import new_state
 
 from cloud_agent_host.session_lifecycle import StaleStartFence
 from cloud_agent_host.supervisor.group_lifecycle_state import (
+    FLAG_NAMES,
     START,
     ExclusiveHolder,
     FinalArchive,
@@ -598,3 +599,14 @@ def test_the_open_invariants_are_named_but_not_enforced() -> None:
 def test_a_start_and_a_stop_in_progress_at_once_break_u1() -> None:
     life = new_state(starting=True, stopping=True)
     assert life.check_invariants() == ["U1"]
+
+
+def test_the_state_keeps_the_flag_names_the_wire_and_the_logs_use() -> None:
+    life = new_state(stopping=True, orphan_marker_unreadable=True)
+    flags = life.flags()
+    assert tuple(flags) == FLAG_NAMES
+    assert [name for name, held in flags.items() if held] == [
+        "stopping",
+        "orphan_finalization_pending",
+        "orphan_marker_unreadable",
+    ]
