@@ -119,6 +119,11 @@ jsonb_strip_nulls(jsonb_build_object(
                      WHEN e.event_type = 'lifecycle' AND e.payload->>'phase' = 'init'
                           AND jsonb_typeof(e.payload->'harness') = 'object'
                      THEN jsonb_build_object('source', 'claude_init', 'status', 'ok') END,
+    -- The request meter's sizes (cloud_agent_shared.request_prefix); its tools'
+    -- names stay on the event, read only for one request's composition.
+    'prefix', CASE WHEN e.event_type = 'lifecycle' AND e.payload->>'phase' = 'request_prefix'
+                        AND jsonb_typeof(e.payload->'prefix') = 'object'
+                   THEN (e.payload->'prefix') - 'entries' END,
     'completed', CASE WHEN e.event_type = 'lifecycle' THEN e.payload->'completed' END,
     'context_windows', e.payload->'context_windows',
     'input_tokens', CASE WHEN e.event_type = 'usage' THEN e.payload->'input_tokens' END,

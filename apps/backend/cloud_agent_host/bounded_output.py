@@ -79,6 +79,8 @@ class TextTail:
 
     def append(self, text: str) -> None:
         """Append diagnostic text while trimming older bytes."""
+        if not text:
+            return
         chunk = text.encode("utf-8", "replace")[-self.limit :]
         with self._lock:
             self._chunks.append(chunk)

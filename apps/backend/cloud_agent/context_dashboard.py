@@ -11,7 +11,9 @@ agent CLIs stream. Two families of numbers stay apart here:
   up to the request (:mod:`cloud_agent.context_running`). A completed
   compaction starts the carried content over; a retried attempt's content is
   not carried into the next turn (the kept attempt's is). CLI system prompts
-  and tool schemas are never stored, so they have no number at all.
+  and tool schemas are never stored; they are what the member's request meter
+  measured the latest turn's agent sending (``context_profile.main_prefix``),
+  and have no number for a conversation whose turns ran before the meter.
 - **Provider actuals** (exact): every request's reported input, cache reads
   and writes, and output, summed over every attempt, the delegated agents'
   apart.
@@ -27,7 +29,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from cloud_agent.context_profile import profile_is_current
+from cloud_agent.context_profile import main_prefix, profile_is_current
 from cloud_agent.context_running import POINT_CATEGORIES
 from cloud_agent_shared.text_tokens import ESTIMATE_BASIS
 
@@ -43,7 +45,7 @@ _CONTENT_KEY = {
     "tool_calls": "tool_calls",
     "tool_results": "tool_results",
 }
-#: Categories every request carries but no stored record can size.
+#: Categories every request carries that only the request meter can size.
 NOT_RECORDED: tuple[str, ...] = ("system_prompt", "tool_schemas")
 
 
@@ -150,10 +152,12 @@ class SessionTokens(BaseModel):
     basis: str = ESTIMATE_BASIS
     #: Each stored item once: turn prompts, what the platform and the CLI
     #: injected (skills apart), compaction summaries, answers, reasoning,
-    #: tool calls and results. The kept attempt of each turn only.
+    #: tool calls and results. The kept attempt of each turn only. Ahead of
+    #: them, the system prompt and the tool schemas (items: its tools) the
+    #: latest measured turn's agent sent, once.
     recorded: list[SessionCategoryShare]
     recorded_total: int = Field(ge=0)
-    #: Every request carries these, but no stored record sizes them.
+    #: Every request carries these, but nothing measured them.
     not_recorded: list[str] = Field(default_factory=lambda: list(NOT_RECORDED))
     #: Turns whose kept attempt has a current profile, and turns in all.
     turns_read: int = Field(ge=0)
@@ -184,6 +188,7 @@ def session_tokens(
     sub = {"requests": 0, "prompt_tokens": 0, "output_tokens": 0}
     turns_read = 0
     truncated = False
+    prefix: Mapping[str, Any] | None = None
     for job in jobs:
         prompt = _int(job.get("prompt_tokens"))
         tokens["user"] += prompt
@@ -199,6 +204,7 @@ def session_tokens(
         if kept is None:
             continue
         turns_read += 1
+        prefix = main_prefix(kept) or prefix
         for index, value in enumerate(platform_vector(kept)):
             tokens[POINT_CATEGORIES[index]] += value
             items[POINT_CATEGORIES[index]] += 1 if value else 0
@@ -210,13 +216,18 @@ def session_tokens(
                 tokens[category] += _int(share.get("tokens"))
                 items[category] += _int(share.get("items"))
     input_tokens = sums["prompt_tokens"]
+    measured = _prefix_shares(prefix)
     return SessionTokens(
         recorded=[
-            SessionCategoryShare(key=key, tokens=tokens[key], items=items[key])
-            for key in POINT_CATEGORIES
-            if tokens[key]
+            *(share for share in measured if share.tokens),
+            *(
+                SessionCategoryShare(key=key, tokens=tokens[key], items=items[key])
+                for key in POINT_CATEGORIES
+                if tokens[key]
+            ),
         ],
-        recorded_total=sum(tokens.values()),
+        recorded_total=sum(tokens.values()) + sum(share.tokens for share in measured),
+        not_recorded=[key for key in NOT_RECORDED if key not in {s.key for s in measured}],
         turns_read=turns_read,
         turns=len(jobs),
         truncated=truncated,
@@ -233,6 +244,24 @@ def session_tokens(
             cache_hit=sums["cache_read_tokens"] / input_tokens if input_tokens else None,
         ),
     )
+
+
+def _prefix_shares(prefix: Mapping[str, Any] | None) -> list[SessionCategoryShare]:
+    """The system prompt and tool schemas one measured prefix carried."""
+    if prefix is None:
+        return []
+    return [
+        SessionCategoryShare(
+            key="system_prompt",
+            tokens=_int(prefix.get("system_tokens")),
+            items=_int(prefix.get("system_parts")),
+        ),
+        SessionCategoryShare(
+            key="tool_schemas",
+            tokens=_int(prefix.get("tool_tokens")),
+            items=_int(prefix.get("tool_count")),
+        ),
+    ]
 
 
 def step_durations(points: Sequence[Any], spans: Mapping[int, int]) -> dict[int, int]:

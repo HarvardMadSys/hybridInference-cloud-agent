@@ -3578,7 +3578,7 @@ class _RetainedExecProcess(SandboxProcess):
     def _drain_stderr(self) -> None:
         assert self._process.stderr is not None
         for chunk in text_chunks(self._process.stderr):
-            self._stderr_tail.append(chunk)
+            self._stderr_tail.append(self.sieve_stderr(chunk))
 
     def lines(self) -> Iterator[str]:
         try:

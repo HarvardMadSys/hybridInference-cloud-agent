@@ -22,6 +22,7 @@ from .base import (
     RuntimeMCPConfig,
     compat_cli_credential,
     compat_launch,
+    metered_cli_url,
 )
 from .events import (
     ERROR,
@@ -263,7 +264,8 @@ class ClaudeCodeRuntime(AgentRuntime):
         the last stop before a key reached a protocol it is not for.
         """
         if isinstance(model_base_url, MessagesBaseUrl):
-            return anthropic_base_url(str(model_base_url))
+            url = anthropic_base_url(str(model_base_url))
+            return metered_cli_url(url) if model_base_url.metered else url
         if isinstance(model_base_url, MessagesViaChatUrl):
             # The member's compatibility helper, at the origin its launcher binds.
             return COMPAT_ORIGIN

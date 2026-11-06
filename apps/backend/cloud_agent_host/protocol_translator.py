@@ -1,4 +1,11 @@
-"""The launcher and loopback service a translated member runs beside its CLI.
+"""The launcher and loopback service a member runs beside its CLI.
+
+The service has two modes. On a translated plan it translates (below); on a
+direct plan it forwards the CLI's requests unchanged
+(:mod:`cloud_agent_host.model_passthrough`). In both it measures what each
+model request sends ahead of the conversation -- its system prompt and tool
+schemas -- and writes the record on the CLI's stderr
+(:mod:`cloud_agent_shared.request_prefix`), the only thing either mode adds.
 
 A host starts a member on a translated plan as::
 
@@ -34,8 +41,13 @@ the service logs only what kind of thing happened.
 The pure conversion it relies on is ``cloud_agent_shared.protocol_compat``,
 which the control plane's connection check shares. This module is the I/O
 around it and runs only in the sandbox, from the zipapp ``compat_helper``
-builds: it imports the standard library and that package, nothing else of
-the host.
+builds: it imports the standard library, that package and the request meter,
+and of the host only the passthrough.
+
+A passthrough launch (``AGENT_COMPAT_CLIENT=passthrough``) carries an origin
+and nothing secret. If its service cannot be started, the launcher still
+starts the CLI, pointed at that origin directly: a measurement must never be
+what stops a turn.
 """
 
 from __future__ import annotations
@@ -68,11 +80,13 @@ from cloud_agent_shared.protocol_compat import (
     ENV_UPSTREAM_URL,
     LAUNCH_ENV,
     ORIGIN_PLACEHOLDER,
+    PASSTHROUGH,
     RESPONSES,
     TOKEN_PLACEHOLDER,
 )
 from cloud_agent_shared.protocol_compat.gate import CompatRejected, prepare
 from cloud_agent_shared.protocol_compat.stream import ClientStream, client_error, client_response
+from cloud_agent_shared.request_prefix import RECORD_VERSION, measure, record_line
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, MutableMapping
@@ -155,6 +169,55 @@ def _argv_model(argv: list[str]) -> str:
 def _log(category: str) -> None:
     """One line on stderr naming what happened; never a body, key or token."""
     print(f"model-protocol-translator: {category}", file=sys.stderr, flush=True)
+
+
+#: Prefixes one meter remembers before it starts over (and repeats a record).
+MAX_REMEMBERED_PREFIXES = 256
+
+
+class PrefixMeter:
+    """Measure each request; a whole record for a prefix seen first, a repeat after.
+
+    Thread-safe: the loopback service answers each connection on a thread of
+    its own.
+    """
+
+    def __init__(self, *, mode: str) -> None:
+        self.mode = mode
+        self._seen: set[str] = set()
+        self._lock = threading.Lock()
+
+    def line(self, protocol: str, body: Any) -> bytes | None:
+        """The line to write for one request ``body``, or None when it is not measured."""
+        record = measure(protocol, body, mode=self.mode)
+        if record is None:
+            return None
+        with self._lock:
+            if record["fp"] in self._seen:
+                return record_line({"v": RECORD_VERSION, "fp": record["fp"], "repeat": True})
+            if len(self._seen) >= MAX_REMEMBERED_PREFIXES:
+                self._seen.clear()
+            self._seen.add(record["fp"])
+        return record_line(record)
+
+
+_RECORD_LOCK = threading.Lock()
+
+
+def emit_record(line: bytes) -> None:
+    """Write one request-prefix record on stderr, whole, or not at all.
+
+    One ``write`` per piece under a lock, so two of the service's own threads
+    never interleave; a full or closed stderr loses the record, never the
+    request it describes.
+    """
+    with _RECORD_LOCK:
+        view = memoryview(line)
+        try:
+            while view:
+                view = view[os.write(2, view) :]
+        except OSError:
+            return
 
 
 class _ClientGone(Exception):
@@ -279,10 +342,21 @@ class _Handler(BaseHTTPRequestHandler):
             _log(f"refused a request ({rejected.status})")
             self._error(rejected.status, rejected.message)
             return
+        self._measure(body)
         try:
             self._relay(prepared.chat, body, prepared.names)
         except _ClientGone:
             _log("the client closed the request")
+
+    def _measure(self, body: Any) -> None:
+        """Record what the CLI's request sends ahead of the conversation; never fail it."""
+        try:
+            line = self.server.meter.line(self.server.binding.client, body)
+        except Exception:
+            # A measurement is diagnostic: the request is translated regardless.
+            return
+        if line is not None:
+            emit_record(line)
 
     # -- upstream --------------------------------------------------------------
 
@@ -311,7 +385,7 @@ class _Handler(BaseHTTPRequestHandler):
                 # Held apart from the connection: ``http.client`` hands a
                 # close-delimited answer's socket to the response and forgets it.
                 upstream_socket = connection.sock
-                _watch_client(self.connection, upstream_socket, done)
+                watch_client(self.connection, upstream_socket, done)
                 if upstream_socket is not None:
                     upstream_socket.settimeout(IDLE_TIMEOUT_S)
                 response = connection.getresponse()
@@ -326,7 +400,7 @@ class _Handler(BaseHTTPRequestHandler):
             done.set()
             if response is not None:
                 response.close()
-            _shutdown(upstream_socket)
+            shutdown_socket(upstream_socket)
             connection.close()
 
     def _answer(
@@ -393,13 +467,14 @@ class _Handler(BaseHTTPRequestHandler):
         self._send_json(200, answer)
 
 
-def _shutdown(sock: socket.socket | None) -> None:
+def shutdown_socket(sock: socket.socket | None) -> None:
+    """End both directions of ``sock`` now, if there is one."""
     if sock is not None:
         with contextlib.suppress(OSError):
             sock.shutdown(socket.SHUT_RDWR)
 
 
-def _watch_client(
+def watch_client(
     client: socket.socket, upstream: socket.socket | None, done: threading.Event
 ) -> None:
     """From the moment the request is sent until ``done``: the CLI's close cancels it."""
@@ -428,10 +503,14 @@ def _close_upstream_when_client_leaves(
                 break
         except (OSError, ValueError):
             break
+        if readable:
+            # The CLI sent more before this answer ended (a pipelined request
+            # on a kept connection): not a close, and not a reason to spin.
+            time.sleep(0.25)
     else:
         return
     if not done.is_set():
-        _shutdown(upstream)
+        shutdown_socket(upstream)
 
 
 class _Server(ThreadingHTTPServer):
@@ -452,6 +531,7 @@ class _Server(ThreadingHTTPServer):
         self.server_address = sock.getsockname()
         self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
         self.binding = binding
+        self.meter = PrefixMeter(mode="translated")
         self.tls = ssl.create_default_context()
 
 
@@ -473,16 +553,63 @@ def _die_with(parent: int) -> None:
     threading.Thread(target=watch, name="parent-watch", daemon=True).start()
 
 
-def _serve_child(sock: socket.socket, binding: Binding, parent: int) -> NoReturn:
+def _serve_child(sock: socket.socket, serve: Callable[[], None], parent: int) -> NoReturn:
     """The forked service: detached from the CLI's stdio, gone when it is."""
     null = os.open(os.devnull, os.O_RDWR)
     os.dup2(null, 0)
     os.dup2(null, 1)
     _die_with(parent)
     try:
-        _Server(sock, binding).serve_forever()
+        serve()
     finally:
         os._exit(0)
+
+
+def _start_service(serve: Callable[[socket.socket], None]) -> str:
+    """Bind the loopback socket, fork ``serve`` onto it; the origin the CLI is told."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(128)
+        origin = f"http://127.0.0.1:{sock.getsockname()[1]}"
+        parent = os.getpid()
+        if os.fork() == 0:
+            _serve_child(sock, lambda: serve(sock), parent)
+    finally:
+        sock.close()
+    return origin
+
+
+def _exec_cli(argv: list[str], env: dict[str, str], replacements: dict[str, str]) -> NoReturn:
+    cli = [_replaced(arg, replacements) for arg in argv]
+    cli_env = {name: _replaced(value, replacements) for name, value in env.items()}
+    # Only the CLI's side of the fork: the service is Python, where a closed
+    # client must stay an error rather than a SIGPIPE.
+    for number in _PYTHON_IGNORED:
+        signal.signal(number, signal.SIG_DFL)
+    os.execvpe(cli[0], cli, cli_env)
+
+
+def _replaced(value: str, replacements: dict[str, str]) -> str:
+    for placeholder, actual in replacements.items():
+        value = value.replace(placeholder, actual)
+    return value
+
+
+def _launch_passthrough(argv: list[str], env: dict[str, str]) -> NoReturn:
+    """A direct plan's member: its CLI behind the meter, or straight at its origin."""
+    from cloud_agent_host import model_passthrough
+
+    if any(TOKEN_PLACEHOLDER in value for value in (*argv, *env.values())):
+        raise LaunchError("a passthrough has no token to write")
+    binding = model_passthrough.PassthroughBinding.from_launch(env)
+    marked = f"{ORIGIN_PLACEHOLDER}/{binding.authority}"
+    try:
+        origin = _start_service(lambda sock: model_passthrough.serve(sock, binding))
+    except OSError:
+        _log("the request meter could not start; the CLI reaches its provider directly")
+        _exec_cli(argv, env, {marked: f"https://{binding.authority}"})
+    _exec_cli(argv, env, {ORIGIN_PLACEHOLDER: origin})
 
 
 def launch(argv: list[str]) -> NoReturn:
@@ -490,25 +617,11 @@ def launch(argv: list[str]) -> NoReturn:
     if not argv:
         raise LaunchError("no CLI to launch")
     env = dict(os.environ)
+    if env.get(ENV_CLIENT) == PASSTHROUGH:
+        _launch_passthrough(argv, env)
     binding = Binding.from_launch(env, argv)
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("127.0.0.1", 0))
-    sock.listen(128)
-    origin = f"http://127.0.0.1:{sock.getsockname()[1]}"
-    parent = os.getpid()
-    if os.fork() == 0:
-        _serve_child(sock, binding, parent)
-    sock.close()
-    cli = [arg.replace(ORIGIN_PLACEHOLDER, origin) for arg in argv]
-    cli_env = {
-        name: value.replace(ORIGIN_PLACEHOLDER, origin).replace(TOKEN_PLACEHOLDER, binding.token)
-        for name, value in env.items()
-    }
-    # Only the CLI's side of the fork: the service is Python, where a closed
-    # client must stay an error rather than a SIGPIPE.
-    for number in _PYTHON_IGNORED:
-        signal.signal(number, signal.SIG_DFL)
-    os.execvpe(cli[0], cli, cli_env)
+    origin = _start_service(lambda sock: _Server(sock, binding).serve_forever())
+    _exec_cli(argv, env, {ORIGIN_PLACEHOLDER: origin, TOKEN_PLACEHOLDER: binding.token})
 
 
 def main(argv: list[str]) -> int:
@@ -523,9 +636,15 @@ def main(argv: list[str]) -> int:
 
 __all__ = [
     "CLIENT_PATHS",
+    "CONNECT_TIMEOUT_S",
+    "IDLE_TIMEOUT_S",
     "MIN_TOKEN_CHARS",
     "Binding",
     "LaunchError",
+    "PrefixMeter",
+    "emit_record",
     "launch",
     "main",
+    "shutdown_socket",
+    "watch_client",
 ]

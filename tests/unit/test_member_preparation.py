@@ -32,6 +32,7 @@ from cloud_agent_host.chat_sandbox import (
 )
 from cloud_agent_host.chat_sandbox_inspect import container_inspection
 from cloud_agent_host.chat_sandbox_models import BROWSER_SERVICE_UID
+from cloud_agent_host.compat_helper import helper_key
 from cloud_agent_host.drivers import DriverError
 from cloud_agent_host.member_preparation import (
     RUNNER,
@@ -446,6 +447,9 @@ def _manager(guest: _Guest) -> ChatSandboxManager:
         ),
     )
     manager._proven.note_helper(proven, MEMBER_REAPER_TARGET)
+    # So was this host's member loopback service, which a direct plan's CLI
+    # starts behind: once found, a launch spends no exec on it.
+    manager._proven.note_helper(proven, helper_key())
     manager.exec_capture = guest.exec_capture
     manager.spawn = lambda *_a, **_kw: guest.events.append(("spawn", None, None))
     for root_only in ("ensure_mcp_helpers", "ensure_kilo_mcp_runtime", "ensure_codex_mcp_policy"):
@@ -664,6 +668,10 @@ def test_claude_slot_is_reaped_before_new_member_launch_state(monkeypatch):
     monkeypatch.setattr(
         factory, "_prepare_claude_member_state", lambda *_args: events.append("prepare")
     )
+    # A direct plan's CLI starts behind its request meter, installed last.
+    monkeypatch.setattr(
+        resident_transport, "install_compat_helper", lambda *_args: events.append("helper")
+    )
 
     def launch_live(context):
         contexts.append(context)
@@ -678,5 +686,5 @@ def test_claude_slot_is_reaped_before_new_member_launch_state(monkeypatch):
 
     factory.open(_SPEC, _launch("claude-code", native_session_id=None, thread_id="athr_new"))
 
-    assert events == ["reap", "prepare", "browser", "mcp", "spawn"]
+    assert events == ["reap", "prepare", "browser", "mcp", "helper", "spawn"]
     assert contexts[0].claude_config_dir == claude_member_config_dir(1, "athr_new")

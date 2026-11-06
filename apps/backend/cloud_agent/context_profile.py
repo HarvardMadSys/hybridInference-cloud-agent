@@ -19,6 +19,11 @@ Four kinds of number are kept apart, because they answer different questions:
 - **Content estimate** is stored conversation text priced at four characters
   per token (the reference plugin's density). It is an estimate and, where a
   preview was clipped, an undercount.
+- **Request prefixes** are what the member's request meter measured the
+  attempt's requests sending ahead of the conversation -- the system prompt
+  and the tool schemas -- one per distinct prefix, from ``request_prefix``
+  lifecycle events (``cloud_agent_shared.request_prefix``). Estimates too,
+  from character counts; the platform stores neither text.
 
 A compaction is only ever a compaction the CLI reported. A falling request size
 is not one, and nothing here turns a drop into a compaction.
@@ -57,7 +62,7 @@ from cloud_agent_shared.text_tokens import ESTIMATE_BASIS, estimate_from_counts
 
 #: Rollups name their reducer; a semantic change bumps it so every stored
 #: profile is rebuilt from the ledger instead of being served stale.
-CONTEXT_PROFILE_VERSION = 5
+CONTEXT_PROFILE_VERSION = 6
 #: Request points one attempt keeps. Past it, the first and last halves are
 #: kept and the number left out is recorded; peaks and counts still see every
 #: request.
@@ -68,6 +73,9 @@ MAX_ATTEMPT_COMPACTIONS = 200
 MAX_ATTEMPT_SNAPSHOTS = 20
 #: Context events one attempt keeps (injections, prunes, modes); counted beyond.
 MAX_ATTEMPT_EVENTS = 200
+#: Distinct request prefixes one attempt keeps (the agent's, delegated agents');
+#: counted beyond.
+MAX_ATTEMPT_PREFIXES = 20
 #: Names one platform injection lists (skills, attachments); counted beyond.
 MAX_INJECTION_NAMES = 20
 #: The reference plugin's density, and the harness token meter it mirrors.
@@ -312,6 +320,11 @@ class ContextProfileAccumulator:
         #: The CLI's own context snapshots of this attempt, without entries.
         self._snapshots: list[dict[str, Any]] = []
         self._snapshot_window: int | None = None
+        #: What the attempt's requests sent ahead of the conversation, by
+        #: prefix, without the tools' names (those stay on the event).
+        self._prefixes: list[dict[str, Any]] = []
+        self._prefix_fingerprints: set[str] = set()
+        self._prefixes_seen = 0
 
     # -- entry -------------------------------------------------------------
 
@@ -571,6 +584,8 @@ class ContextProfileAccumulator:
             self._windows(payload.get("context_windows"))
         elif phase == "context_snapshot":
             self._snapshot(payload.get("snapshot"), meta)
+        elif phase == "request_prefix":
+            self._prefix(payload.get("prefix"), meta)
         elif phase == "compact_boundary":
             # Claude Code's own boundary, and pi's completed compaction (which
             # says ``completed`` alongside); either is a compaction that happened.
@@ -603,6 +618,46 @@ class ContextProfileAccumulator:
         )
         if status in {"ok", "partial"} and window:
             self._snapshot_window = window
+
+    def _prefix(self, report: Any, meta: tuple[int, int | None, str | None]) -> None:
+        """Note one prefix the request meter measured; its tools' names stay on the event."""
+        if not isinstance(report, Mapping):
+            return
+        fingerprint = _label(report.get("fp"), 64)
+        system, tools = report.get("system"), report.get("tools")
+        system = system if isinstance(system, Mapping) else {}
+        tools = tools if isinstance(tools, Mapping) else {}
+        sizes = [
+            _count(part.get(key)) for part in (system, tools) for key in ("chars", "ascii", "cjk")
+        ]
+        if not fingerprint or fingerprint in self._prefix_fingerprints or None in sizes:
+            return
+        self._prefix_fingerprints.add(fingerprint)
+        self._prefixes_seen += 1
+        if len(self._prefixes) >= MAX_ATTEMPT_PREFIXES:
+            return
+        counts = [value or 0 for value in sizes]
+        self._prefixes.append(
+            {
+                "seq": meta[0],
+                "event_id": meta[1],
+                "at": meta[2],
+                "fingerprint": fingerprint,
+                "protocol": _label(report.get("protocol"), 32) or None,
+                "mode": _label(report.get("mode"), 32) or None,
+                "model": _label(report.get("model"), 256) or None,
+                "system_chars": counts[0],
+                "system_tokens": estimate_from_counts(
+                    counts[1], counts[2], counts[0] - counts[1] - counts[2]
+                ),
+                "system_parts": _count(system.get("parts")) or 0,
+                "tool_count": _count(tools.get("count")) or 0,
+                "tool_chars": counts[3],
+                "tool_tokens": estimate_from_counts(
+                    counts[4], counts[5], counts[3] - counts[4] - counts[5]
+                ),
+            }
+        )
 
     # -- raw protocol rows ---------------------------------------------------
 
@@ -847,6 +902,8 @@ class ContextProfileAccumulator:
             "events_omitted": max(0, self._events_seen - len(self._events)),
             "unparsed_raw": self.unparsed_raw,
             "snapshots": self._snapshots,
+            "prefixes": self._prefixes,
+            "prefixes_omitted": max(0, self._prefixes_seen - len(self._prefixes)),
             "summary": {
                 "main_requests": len(requests),
                 "subagent_requests": self.subagent_requests,
@@ -923,6 +980,18 @@ class StoredProfile:
     attempt_id: int
     job_id: str
     profile: dict[str, Any] = field(default_factory=dict)
+
+
+def main_prefix(profile: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    """The prefix the conversation's own agent sent in this attempt, when one was measured.
+
+    The first that offers tools: a turn starts with the agent answering its
+    prompt, and what comes before or beside it -- a title or a summary, which
+    offer none -- or after it -- a delegated agent's own prefix -- is not the
+    conversation's. Without any that offers tools, the first.
+    """
+    prefixes = [p for p in (profile or {}).get("prefixes") or [] if isinstance(p, Mapping)]
+    return next((p for p in prefixes if p.get("tool_count")), prefixes[0] if prefixes else None)
 
 
 def profile_is_current(profile: Any) -> bool:

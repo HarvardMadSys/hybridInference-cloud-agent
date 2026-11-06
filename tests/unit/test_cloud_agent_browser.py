@@ -23,6 +23,7 @@ import pytest
 from tests.support.owners import launch_connection
 
 from cloud_agent_host.chat_sandbox import ChatSandboxSpec
+from cloud_agent_host.chat_sandbox_exec import ProvenContainers
 from cloud_agent_host.chat_sandbox_models import BROWSER_SERVICE_UID
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
 from cloud_agent_host.sandbox import SandboxError
@@ -155,6 +156,10 @@ def test_every_runtime_launch_starts_the_service_first(runtime_id):
         ensure_mcp_helpers=lambda *args: events.append(("helpers",)),
         ensure_kilo_mcp_runtime=lambda *args: events.append(("kilo",)),
         ensure_codex_mcp_policy=lambda *args: events.append(("codex",)),
+        # A direct plan's member starts behind its request meter, which the
+        # host installs (found in place here) after the browser service.
+        _proven=ProvenContainers(),
+        _require=lambda spec: SimpleNamespace(container_id="container-1"),
     )
     spec = ChatSandboxSpec(
         thread_id="athr_owner",

@@ -10,7 +10,7 @@ export const contextDashboardEn = {
   'dashboard.browser.noMatch': 'No item in this category matches.',
   'dashboard.notRecorded': 'not recorded',
   'dashboard.notRecordedTip':
-    'Every request carries it, but no stored record says how large it is, so it has no share here.',
+    'Every request carries it, but nothing measured it for these turns: they ran before the request meter, or on the provider’s own host. It has no share here.',
   'dashboard.cat.system_prompt': 'System prompt',
   'dashboard.cat.tool_schemas': 'Tool schemas',
   'dashboard.cat.user': 'User messages',
@@ -28,7 +28,7 @@ export const contextDashboardEn = {
   'dashboard.tokens.basis': 'What the ring counts',
   'dashboard.tokens.recorded': 'Recorded',
   'dashboard.tokens.recordedTip':
-    'Stored text by category, each item once, estimated from characters.',
+    'Stored text by category, each item once, and the system prompt and tool schemas the latest turn’s requests sent, estimated from characters.',
   'dashboard.tokens.provider': 'Reported',
   'dashboard.tokens.providerTip':
     'Every request’s input and output as the providers reported them, summed: text the conversation kept counts again in each request.',
@@ -153,6 +153,13 @@ export const contextDashboardEn = {
     'Each stored item this request carried, in order (recorded estimates).',
   'dashboard.browser.added': '{count} new since the compared request',
   'dashboard.browser.new': 'new',
+  'dashboard.browser.prefix.measuredTip':
+    'Measured as the request was sent, ahead of the conversation; its text is not stored.',
+  'dashboard.browser.prefix.tools': '{count} tools',
+  'dashboard.browser.prefix.toolList': 'Tool schemas by size',
+  'dashboard.browser.prefix.omitted': '{count} smaller tools are not listed.',
+  'dashboard.browser.prefix.others':
+    'This turn’s requests also sent {count} other prefixes (delegated agents, titles), not shown here.',
 } as const;
 
 export const contextDashboardZhCN: Record<keyof typeof contextDashboardEn, string> = {
@@ -162,7 +169,7 @@ export const contextDashboardZhCN: Record<keyof typeof contextDashboardEn, strin
   'dashboard.browser.noMatch': '这一类里没有匹配的条目。',
   'dashboard.notRecorded': '未记录',
   'dashboard.notRecordedTip':
-    '每次请求都会带上它，但没有任何存储记录说明它有多大，所以这里不给它份额。',
+    '每次请求都会带上它，但这些轮次没有测量过它：它们早于请求计量，或者直接连的是厂商自己的官方地址。这里不给它份额。',
   'dashboard.cat.system_prompt': '系统提示词',
   'dashboard.cat.tool_schemas': '工具定义',
   'dashboard.cat.user': '用户消息',
@@ -179,7 +186,8 @@ export const contextDashboardZhCN: Record<keyof typeof contextDashboardEn, strin
   'dashboard.tokens.title': 'Token 统计',
   'dashboard.tokens.basis': '圆环统计的是什么',
   'dashboard.tokens.recorded': '记录',
-  'dashboard.tokens.recordedTip': '存下的文字按类别统计，每一项只算一次，按字符数估算。',
+  'dashboard.tokens.recordedTip':
+    '存下的文字按类别统计，每一项只算一次；再加上最近一轮请求发出的系统提示词和工具定义。都按字符数估算。',
   'dashboard.tokens.provider': '报告',
   'dashboard.tokens.providerTip':
     '每次请求的输入和输出以服务商报告为准并求和：会话保留的内容每次请求都会再算一次。',
@@ -300,4 +308,10 @@ export const contextDashboardZhCN: Record<keyof typeof contextDashboardEn, strin
   'dashboard.browser.dnaTip': '这次请求带上的每一项存储内容，按顺序排列（记录估算）。',
   'dashboard.browser.added': '与比较的请求相比新增 {count} 项',
   'dashboard.browser.new': '新增',
+  'dashboard.browser.prefix.measuredTip': '在请求发出时测量，位于对话内容之前；原文不会保存。',
+  'dashboard.browser.prefix.tools': '{count} 个工具',
+  'dashboard.browser.prefix.toolList': '各工具定义的大小',
+  'dashboard.browser.prefix.omitted': '另有 {count} 个较小的工具没有列出。',
+  'dashboard.browser.prefix.others':
+    '这一轮的请求还发出了另外 {count} 种前缀（子 agent、生成标题等），这里不显示。',
 };
