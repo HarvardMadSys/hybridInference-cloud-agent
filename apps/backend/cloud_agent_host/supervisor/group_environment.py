@@ -76,8 +76,16 @@ class GroupEnvironmentPreparation:
         if ready is not None:
             return ready
         with self._state.lock:
-            group, _ = self._state.member(thread_id)
-        self._lifecycle.ensure_running(group, start_seq=start_seq)
+            group, member = self._state.member(thread_id)
+            # A turn's preparation runs under its activation's lease. One that
+            # lost it (a stop cleared it) must not start a stopped container:
+            # it carries no fence, so the run would keep the label the stop's
+            # checkpoint names. ``start_group`` rechecks this right before
+            # Docker starts the container.
+            _require_activation_lease(member, activation_owner)
+        self._lifecycle.ensure_running(
+            group, start_seq=start_seq, activation_owner=activation_owner
+        )
         with self._state.lock:
             group, member = self._state.member(thread_id)
             observed = group.inspection
@@ -93,7 +101,7 @@ class GroupEnvironmentPreparation:
             if receipt.get("ready") and prepared_in(receipt, group.inspection):
                 return receipt
             hold, cancelled, generation, expected, slots = self._reserve_preparation_locked(
-                group, activation_owner=activation_owner, start_seq=start_seq
+                group, member, activation_owner=activation_owner, start_seq=start_seq
             )
         monitor_stop = threading.Event()
         monitor_thread = self._start_lease_fence(
@@ -165,6 +173,7 @@ class GroupEnvironmentPreparation:
     def _reserve_preparation_locked(
         self,
         group: _Group,
+        member: _Member,
         *,
         activation_owner: str | None,
         start_seq: int | _SameRun | None,
@@ -176,6 +185,7 @@ class GroupEnvironmentPreparation:
         and the member slots whose writers it may freeze.
         """
         group.lifecycle.admit(Operation.MUTATION)
+        _require_activation_lease(member, activation_owner)
         if group.operation_tokens or any(
             m.current_turn is not None
             or (m.lease_token is not None and m.lease_token != activation_owner)
@@ -225,6 +235,12 @@ class GroupEnvironmentPreparation:
             group, _ = self._state.member(thread_id)
             if group.environment_owner == activation_owner and group.environment_cancel:
                 group.environment_cancel.set()
+
+
+def _require_activation_lease(member: _Member, activation_owner: str | None) -> None:
+    """Refuse a turn's preparation whose member no longer holds its activation lease."""
+    if activation_owner is not None and member.lease_token != activation_owner:
+        raise SessionLeaseLost("Environment preparation lease was lost")
 
 
 __all__ = [

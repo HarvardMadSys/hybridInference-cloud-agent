@@ -92,16 +92,26 @@ def _standing_proof(
 
 
 def ensure_running(
-    lifecycle: GroupLifecycleController, group: _Group, *, start_seq: int | _SameRun | None
+    lifecycle: GroupLifecycleController,
+    group: _Group,
+    *,
+    start_seq: int | _SameRun | None,
+    activation_owner: str | None = None,
 ) -> None:
-    """Start the group if it is stopped, and prove its network for this request."""
+    """Start the group if it is stopped, and prove its network for this request.
+
+    ``activation_owner`` is the lease a turn's own request runs under; a
+    stopped container is started for it only while a member still holds it.
+    """
     current = lifecycle.state.manager.inspect(group.spec.container_name)
     if current is None:
         raise RetainedChatLost("shared sandbox container is missing")
     with lifecycle.state.lock:
         group.lifecycle.admit(Operation.RUN)
     # The start runs Docker without the lock and revalidates under it.
-    inspection = lifecycle.start_and_prove(group, start_seq=start_seq)
+    inspection = lifecycle.start_and_prove(
+        group, start_seq=start_seq, activation_owner=activation_owner
+    )
     with lifecycle.state.lock:
         group.inspection = inspection
 

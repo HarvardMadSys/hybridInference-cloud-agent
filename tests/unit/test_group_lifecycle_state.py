@@ -29,6 +29,7 @@ from cloud_agent_host.supervisor.group_lifecycle_state import (
     RunLabel,
     StartOutcome,
     StopHolder,
+    set_strict_checks,
 )
 
 if TYPE_CHECKING:
@@ -249,8 +250,22 @@ _ROWS: list[tuple[str, dict[str, Any], Callable[[GroupLifecycleState], object], 
     (
         "preserve_initial",
         {"snapshotting": True},
-        lambda life: life.preserve_initial_locked(),
+        lambda life: life.preserve_initial_locked(life.exclusive),
         ("exclusive:initial_archive", "initial_preservation"),
+    ),
+    (
+        "preserve_initial/released",
+        {},
+        lambda life: life.preserve_initial_locked(Hold(ExclusiveHolder.INITIAL_ARCHIVE)),
+        AssertionError,
+    ),
+    (
+        "preserve_initial/environment",
+        {},
+        lambda life: life.preserve_initial_locked(
+            life.begin_exclusive_locked(ExclusiveHolder.ENVIRONMENT)
+        ),
+        AssertionError,
     ),
     (
         "release_initial",
@@ -262,7 +277,13 @@ _ROWS: list[tuple[str, dict[str, Any], Callable[[GroupLifecycleState], object], 
         "release_initial/released_by_a_stopped_inspection",
         {},
         lambda life: life.release_initial_locked(Hold(ExclusiveHolder.INITIAL_ARCHIVE)),
-        (),
+        AssertionError,
+    ),
+    (
+        "end_exclusive/preserved",
+        {"snapshotting": True, "initial_archive_preservation_pending": True},
+        lambda life: life.end_exclusive_locked(life.exclusive),
+        AssertionError,
     ),
     (
         "release_initial/another_holder",
@@ -275,6 +296,12 @@ _ROWS: list[tuple[str, dict[str, Any], Callable[[GroupLifecycleState], object], 
         {"snapshotting": True, "initial_archive_preservation_pending": True},
         lambda life: life.accepted_stopped_locked(),
         (),
+    ),
+    (
+        "accepted_stopped/preserved_without_its_barrier",
+        {"initial_archive_preservation_pending": True, "snapshotting": False},
+        lambda life: life.accepted_stopped_locked(),
+        AssertionError,
     ),
     (
         "accepted_stopped/nothing_preserved",
@@ -489,18 +516,22 @@ def test_the_check_and_the_loss_advance_the_generation() -> None:
         assert life.advance_generation_locked() == 3
 
 
-def test_a_stopped_inspection_releases_a_foreign_exclusive_workspace_and_logs_it(
+def test_a_stopped_inspection_never_releases_another_holders_exclusive_workspace(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """Without strict checks (production), a stray preservation is dropped, the slot kept."""
     life = new_state(initial_archive_preservation_pending=True)
-    with life.condition:
-        life.begin_exclusive_locked(ExclusiveHolder.ENVIRONMENT)
-        with caplog.at_level(logging.WARNING):
+    life.exclusive = hold = Hold(ExclusiveHolder.ENVIRONMENT)
+    set_strict_checks(False)
+    try:
+        with life.condition, caplog.at_level(logging.WARNING):
             life.accepted_stopped_locked()
-    assert life.exclusive is None
+    finally:
+        set_strict_checks(True)
+    assert life.exclusive is hold
     assert not life.initial_preservation
     events = [getattr(record, "event", None) for record in caplog.records]
-    assert events == ["group_lifecycle_foreign_exclusive_release"]
+    assert events == ["group_lifecycle_violation"]
 
 
 def test_a_final_archive_without_final_archives_records_only_a_block() -> None:
@@ -563,8 +594,11 @@ def test_a_run_begins_only_inside_a_start() -> None:
         (RunLabel(start_seq=5), 3, RunLabel(start_seq=5)),
         (RunLabel(start_seq=5), 8, RunLabel(start_seq=8)),
         (RunLabel(start_seq=5), None, RunLabel(start_seq=5, unfenced=True)),
-        # U3, open in the spec: a join is not compared with the seal.
-        (RunLabel(sealed_seq=9), 2, RunLabel(start_seq=2, sealed_seq=9)),
+        # U3: a fence at or below the seal is not counted.
+        (RunLabel(sealed_seq=9), 2, RunLabel(sealed_seq=9)),
+        (RunLabel(sealed_seq=9), 9, RunLabel(sealed_seq=9)),
+        (RunLabel(start_seq=12, sealed_seq=9), 3, RunLabel(start_seq=12, sealed_seq=9)),
+        (RunLabel(sealed_seq=9), 10, RunLabel(start_seq=10, sealed_seq=9)),
     ],
 )
 def test_a_joined_request_raises_the_runs_label(
@@ -586,14 +620,9 @@ def test_a_transition_that_leaves_a_proven_invariant_broken_fails() -> None:
             life.advance_generation_locked()
 
 
-def test_the_open_invariants_are_named_but_not_enforced() -> None:
-    life = new_state(initial_archive_preservation_pending=True)
-    life.run = RunLabel(start_seq=2, sealed_seq=5)
-    with life.condition:
-        life.advance_generation_locked()
-    assert life.check_invariants() == []
-    assert life.unproven() == ["I5", "U3"]
-    assert life.checked_combination()[-2:] == ("unproven:I5", "unproven:U3")
+def test_a_preservation_without_the_initial_archives_barrier_breaks_i5() -> None:
+    life = new_state(initial_archive_preservation_pending=True, snapshotting=False)
+    assert life.check_invariants() == ["I5"]
 
 
 def test_a_start_and_a_stop_in_progress_at_once_break_u1() -> None:

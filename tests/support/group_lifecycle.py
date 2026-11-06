@@ -6,7 +6,9 @@ these helpers write the equivalent state directly, the way a test arranges
 any other field. A ``stopping`` group is stopped by a shutdown retry, the one
 holder that needs no lifecycle check, and an ``archive_request_id`` holds the
 stop for that request. ``orphan_marker_unreadable`` implies the orphan
-finalization it belongs to (I3 in the A2 spec).
+finalization it belongs to (I3 in the A2 spec), and
+``initial_archive_preservation_pending`` the initial archive's exclusive
+workspace (I5) unless ``snapshotting`` is given too.
 """
 
 from __future__ import annotations
@@ -88,7 +90,18 @@ def apply_flags(life: GroupLifecycleState, **flags: Any) -> None:
     if "container_lost" in flags:
         life.container_lost = bool(flags["container_lost"])
     if "initial_archive_preservation_pending" in flags:
-        life.initial_preservation = bool(flags["initial_archive_preservation_pending"])
+        preserved = bool(flags["initial_archive_preservation_pending"])
+        life.initial_preservation = preserved
+        # I5: a preserved initial archive holds the exclusive workspace, and
+        # loses both together. An explicit ``snapshotting`` is kept as given.
+        if "snapshotting" not in flags:
+            initial = life.exclusive is not None and (
+                life.exclusive.kind is ExclusiveHolder.INITIAL_ARCHIVE
+            )
+            if preserved and life.exclusive is None:
+                life.exclusive = Hold(ExclusiveHolder.INITIAL_ARCHIVE)
+            elif not preserved and initial:
+                life.exclusive = None
     if {"stop_archive_pending", "stop_archive_blocked", "stop_archive_members"} & set(flags):
         owed = life.final_archive
         pending = flags.get("stop_archive_pending", life.final_archive_pending)

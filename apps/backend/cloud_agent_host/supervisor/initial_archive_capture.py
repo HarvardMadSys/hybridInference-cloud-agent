@@ -230,7 +230,7 @@ class InitialArchiveCapture:
                 preserve_frozen_writers = initial_marker is not None
             if preserve_frozen_writers:
                 with self._state.lock:
-                    group.life.preserve_initial_locked()
+                    group.life.preserve_initial_locked(barrier)
                 try:
                     stopped = self._lifecycle.stop_if_idle(
                         thread_id,
@@ -306,11 +306,30 @@ class InitialArchiveCapture:
                 and not group.inspection.running
             ):
                 release_snapshot_barrier = True
-            if release_snapshot_barrier:
+            # A concurrent exact stop that accepted a STOPPED inspection has
+            # already released this preservation and its barrier together
+            # (``accepted_stopped_locked``): that stop kept the frozen bytes.
+            # The group may have started again since, and the barrier may now
+            # be another caller's, so neither is put back or touched.
+            released_by_stop = group.life.exclusive is not barrier
+            if released_by_stop:
+                if preserve_frozen_writers:
+                    logger.info(
+                        "sandbox_initial_archive_preservation_released_by_stop",
+                        extra={
+                            "event": "sandbox_initial_archive_preservation_released_by_stop",
+                            "sandbox_id": authoritative_spec.sandbox_id,
+                            "generation": authoritative_spec.generation,
+                            "container_running": group.inspection.running,
+                        },
+                    )
+                release_snapshot_barrier = True
+                self._state.arm_idle_if_quiescent(group)
+            elif release_snapshot_barrier:
                 group.life.release_initial_locked(barrier)
                 self._state.arm_idle_if_quiescent(group)
             elif preserve_frozen_writers:
-                group.life.preserve_initial_locked()
+                group.life.preserve_initial_locked(barrier)
             self._state.condition.notify_all()
         if preservation_error is not None:
             assert capture_error is not None
@@ -329,7 +348,12 @@ class InitialArchiveCapture:
                     "was treated as uncertain; error type: "
                     f"{_safe_error_type(marker_read_error)}"
                 )
-            if preservation_inspection_error is not None:
+            if released_by_stop:
+                preservation_error.add_note(
+                    "a concurrent exact stop kept the frozen bytes and released the "
+                    "snapshot admission barrier"
+                )
+            elif preservation_inspection_error is not None:
                 preservation_error.add_note(
                     "the exact container state could not be confirmed after fail-stop; "
                     "the snapshot admission barrier remains set; error type: "

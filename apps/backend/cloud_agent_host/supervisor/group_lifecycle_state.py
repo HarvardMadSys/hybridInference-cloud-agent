@@ -19,8 +19,7 @@ A precondition that does not hold is a violation: it is logged as
 ``group_lifecycle_violation`` and the transition then does what the code
 before this state did, so a violation changes no behaviour. The invariants
 the A2 spec proves (:meth:`GroupLifecycleState.check_invariants`) are logged
-with the combination counts (``violation:<name>`` parts), and those it does
-not prove (:meth:`GroupLifecycleState.unproven`) as ``unproven:<name>``.
+with the combination counts (``violation:<name>`` parts).
 
 Tests switch on :func:`set_strict_checks`: a violated precondition then raises
 ``AssertionError``, and every transition asserts that its caller holds the
@@ -304,6 +303,12 @@ class GroupLifecycleState:
         if self.start is not None and self.stop is not None:
             # U1: admission keeps a start and a stop apart (step 4 of the spec).
             broken.append("U1")
+        exclusive = self.exclusive
+        if self.initial_preservation and (
+            exclusive is None or exclusive.kind is not ExclusiveHolder.INITIAL_ARCHIVE
+        ):
+            # I5: a preserved initial archive still holds the exclusive workspace.
+            broken.append("I5")
         stop = self.stop
         under_check = (StopHolder.STOP, StopHolder.FINALIZE)
         if stop is not None and stop.kind in under_check and self.check is None:
@@ -311,22 +316,11 @@ class GroupLifecycleState:
             broken.append("stop_under_check")
         return broken
 
-    def unproven(self) -> list[str]:
-        """The invariants the A2 spec leaves open (section 4.4) that this state breaks."""
-        broken: list[str] = []
-        if self.initial_preservation and self.exclusive is None:
-            broken.append("I5")
-        start_seq, sealed_seq = self.run.start_seq, self.run.sealed_seq
-        if start_seq is not None and sealed_seq is not None and start_seq <= sealed_seq:
-            broken.append("U3")
-        return broken
-
     def checked_combination(self) -> tuple[str, ...]:
         """:meth:`combination`, followed by the invariants this state breaks."""
         return (
             *self.combination(),
             *(f"violation:{name}" for name in self.check_invariants()),
-            *(f"unproven:{name}" for name in self.unproven()),
         )
 
     # Preconditions ---------------------------------------------------------
@@ -391,11 +385,29 @@ class GroupLifecycleState:
 
     @_transition
     def join_run_locked(self, start_seq: int | None) -> None:
-        """Count a request the caller admitted with ``JOIN_RUN`` in the run's label."""
+        """Count a request the caller admitted with ``JOIN_RUN`` in the run's label.
+
+        A fence at or below the sealed one is not counted (U3): the run may
+        be one found going after a restart, sealed at the checkpoint it was
+        found with, and a request fenced before that checkpoint was taken
+        must not label the run as if the checkpoint covered it. The request
+        itself is admitted as before; only the label ignores it.
+        """
+        run = self.run
         if start_seq is None:
-            self.run = replace(self.run, unfenced=True)
-        elif self.run.start_seq is None or start_seq > self.run.start_seq:
-            self.run = replace(self.run, start_seq=start_seq)
+            self.run = replace(run, unfenced=True)
+        elif run.sealed_seq is not None and start_seq <= run.sealed_seq:
+            logger.warning(
+                "sandbox_run_join_below_sealed_checkpoint",
+                extra={
+                    "event": "sandbox_run_join_below_sealed_checkpoint",
+                    "start_seq": start_seq,
+                    "sealed_seq": run.sealed_seq,
+                    "run_start_seq": run.start_seq,
+                },
+            )
+        elif run.start_seq is None or start_seq > run.start_seq:
+            self.run = replace(run, start_seq=start_seq)
 
     @_transition
     def owe_start_completion_locked(self) -> None:
@@ -478,9 +490,13 @@ class GroupLifecycleState:
 
     @_transition
     def end_exclusive_locked(self, hold: Hold) -> None:
-        """Release the caller's exclusive workspace."""
+        """Release the caller's exclusive workspace; a preserved one ends by a stop instead."""
         self._expect(
             self.exclusive is hold, "an exclusive workspace ended that is not the held one"
+        )
+        self._expect(
+            not self.initial_preservation,
+            "an exclusive workspace ended while the initial archive's writers are preserved",
         )
         self.exclusive = None
         self.condition.notify_all()
@@ -500,21 +516,28 @@ class GroupLifecycleState:
             self.exclusive = hold
 
     @_transition
-    def preserve_initial_locked(self) -> None:
-        """Keep the initial archive's frozen writers until an accepted STOPPED inspection."""
+    def preserve_initial_locked(self, hold: Hold) -> None:
+        """Keep the initial archive's frozen writers until an accepted STOPPED inspection.
+
+        Only the initial archive holding the exclusive workspace preserves it,
+        so the preservation always has that barrier behind it (I5).
+        """
+        self._expect(
+            hold is not None
+            and self.exclusive is hold
+            and hold.kind is ExclusiveHolder.INITIAL_ARCHIVE,
+            "an initial archive preserved its writers without holding the exclusive workspace",
+        )
         self.initial_preservation = True
 
     @_transition
     def release_initial_locked(self, hold: Hold) -> None:
-        """Release the initial archive's preservation and its exclusive workspace.
-
-        An accepted STOPPED inspection may already have released both.
-        """
-        self.initial_preservation = False
+        """Release the initial archive's preservation and its exclusive workspace."""
         self._expect(
-            self.exclusive is hold or self.exclusive is None,
-            "an initial archive released an exclusive workspace another caller holds",
+            self.exclusive is hold,
+            "an initial archive released an exclusive workspace it does not hold",
         )
+        self.initial_preservation = False
         self.exclusive = None
         self.condition.notify_all()
 
@@ -522,24 +545,20 @@ class GroupLifecycleState:
     def accepted_stopped_locked(self) -> None:
         """An accepted inspection says the container stopped: release a preserved initial archive.
 
-        The exclusive workspace is released whoever holds it, as before this
-        state existed (A2 spec Q2); a holder other than an initial archive is
-        logged as ``group_lifecycle_foreign_exclusive_release``.
+        The preservation and the initial archive's exclusive workspace go
+        together (A2 spec Q2): the stop has kept the frozen bytes. Another
+        holder's exclusive workspace is never released here.
         """
         if not self.initial_preservation:
             return
         exclusive = self.exclusive
-        if exclusive is not None and exclusive.kind is not ExclusiveHolder.INITIAL_ARCHIVE:
-            logger.warning(
-                "group_lifecycle_foreign_exclusive_release",
-                extra={
-                    "event": "group_lifecycle_foreign_exclusive_release",
-                    "holder": _kind(exclusive),
-                    "combination": render_combination(self.combination()),
-                },
-            )
+        held = self._expect(
+            exclusive is not None and exclusive.kind is ExclusiveHolder.INITIAL_ARCHIVE,
+            "an initial archive was preserved without its exclusive workspace",
+        )
         self.initial_preservation = False
-        self.exclusive = None
+        if held:
+            self.exclusive = None
         self.condition.notify_all()
 
     # The lifecycle check ---------------------------------------------------
