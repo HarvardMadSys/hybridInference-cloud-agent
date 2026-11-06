@@ -1200,7 +1200,12 @@ why it is built this way and what comes next.
   threads. The launcher allows at most four renderer processes.
 - **Screenshots.** Tools write them to `/workspace/.cloud-agent-artifacts`
   (`CLOUD_AGENT_ARTIFACTS_DIR`). It shows in the workspace files and is added to
-  `.git/info/exclude`, so it never reaches a diff or a published branch.
+  `.git/info/exclude`, so it never reaches a diff or a published branch. A turn
+  shows the images written there while it ran (`GET
+  /v1/agent/jobs/{job_id}/artifacts/images`, at most 200, newest first), and an
+  image opens through `GET /v1/agent/jobs/{job_id}/files/image`, which answers
+  PNG, JPEG, GIF and WebP files, recognized by their bytes, up to 10 MiB, past
+  the text preview's bound.
 
 The image build starts the service and runs `cloud-agent-browser self-test` as
 the unprivileged user: two clients connect, one loads and screenshots a page,

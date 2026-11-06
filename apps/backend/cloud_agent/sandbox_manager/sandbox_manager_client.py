@@ -48,7 +48,7 @@ MAX_SANDBOX_MANAGER_CONTENT_BYTES = 32 * 1024 * 1024
 #: cut from protocol records of at most 8 MiB.
 MAX_SANDBOX_MANAGER_CONTROL_BYTES = 16 * 1024 * 1024
 #: The route suffixes whose replies are workspace content.
-_CONTENT_ROUTES = frozenset({"files", "git"})
+_CONTENT_ROUTES = frozenset({"files", "files/image", "git"})
 
 
 async def _read_capped(response: httpx.Response, limit: int) -> bytes | None:
@@ -520,6 +520,16 @@ class SandboxManagerClient:
             "files",
             params={"path": path},
             headers=self._profiling_headers(profiling),
+        )
+
+    async def file_image(self, workspace_id: str, path: str) -> dict[str, Any]:
+        """Read one image file from a live workspace, under the image bound."""
+        return await self._request("GET", workspace_id, "files/image", params={"path": path})
+
+    async def artifact_images(self, workspace_id: str, since: float) -> dict[str, Any]:
+        """List the images saved under the workspace's artifacts directory since ``since``."""
+        return await self._request(
+            "GET", workspace_id, "artifacts/images", params={"since": repr(float(since))}
         )
 
     async def write_file(self, workspace_id: str, path: str, content: str) -> dict[str, Any]:

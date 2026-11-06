@@ -8505,6 +8505,52 @@
         "title": "AgentWorkspaceEntry",
         "type": "object"
       },
+      "AgentWorkspaceImage": {
+        "description": "One image saved under the workspace's artifacts directory.",
+        "properties": {
+          "modified_at": {
+            "title": "Modified At",
+            "type": "number"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path",
+          "size",
+          "modified_at"
+        ],
+        "title": "AgentWorkspaceImage",
+        "type": "object"
+      },
+      "AgentWorkspaceImagesResponse": {
+        "description": "The artifacts directory's images since a time, newest first.",
+        "properties": {
+          "images": {
+            "items": {
+              "$ref": "#/components/schemas/AgentWorkspaceImage"
+            },
+            "title": "Images",
+            "type": "array"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "images"
+        ],
+        "title": "AgentWorkspaceImagesResponse",
+        "type": "object"
+      },
       "AgentWorkspaceResponse": {
         "description": "A directory listing or bounded file payload from a job workspace.",
         "properties": {
@@ -37323,6 +37369,73 @@
         "summary": "Archive Agent Thread"
       }
     },
+    "/v1/agent/jobs/{job_id}/artifacts/images": {
+      "get": {
+        "description": "The images saved under the workspace's artifacts directory since ``since``.\n\n``since`` is a Unix time; the newest images come first. This is how a turn\nshows the screenshots its tools saved without the agent having to say so.",
+        "operationId": "list_agent_job_artifact_images_v1_agent_jobs__job_id__artifacts_images_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "default": 0.0,
+              "minimum": 0.0,
+              "title": "Since",
+              "type": "number"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentWorkspaceImagesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Agent Job Artifact Images"
+      }
+    },
     "/v1/agent/jobs/{job_id}/attempts/{attempt_id}/telemetry": {
       "get": {
         "description": "Read measurements for one attempt belonging to the caller's job.",
@@ -37666,6 +37779,71 @@
           }
         },
         "summary": "Write Agent Job Workspace File"
+      }
+    },
+    "/v1/agent/jobs/{job_id}/files/image": {
+      "get": {
+        "description": "One PNG, JPEG, GIF or WebP file from the chat's workspace, as its own bytes.\n\nA file preview is bounded for text; a full-page screenshot is usually past\nthat bound, so an image has its own, larger one.",
+        "operationId": "get_agent_job_workspace_image_v1_agent_jobs__job_id__files_image_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Agent Job Workspace Image"
       }
     },
     "/v1/agent/jobs/{job_id}/fork": {

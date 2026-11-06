@@ -218,6 +218,17 @@ ROUTES: tuple[tuple[str, str, str, str, str | None, tuple[str, ...]], ...] = (
     ),
     ("GET", "/sandboxes", "list_chat_sandboxes", _ANY, None, ("thread_id",)),
     ("GET", "/workspaces/{workspace_id}/files", "files", _ANY, None, ("path",)),
+    # Added after this list was frozen: a turn's screenshots, and an image past
+    # the text preview's bound.
+    ("GET", "/workspaces/{workspace_id}/files/image", "file_image", _ANY, None, ("path",)),
+    (
+        "GET",
+        "/workspaces/{workspace_id}/artifacts/images",
+        "artifact_images",
+        _ANY,
+        None,
+        ("since",),
+    ),
     (
         "PUT",
         "/workspaces/{workspace_id}/files",

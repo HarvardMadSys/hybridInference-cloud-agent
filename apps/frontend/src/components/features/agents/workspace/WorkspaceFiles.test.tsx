@@ -4,7 +4,12 @@ import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { getAgentJobFiles, type AgentJobFileApi, type AgentJobFilesApi } from '@/lib/api/agents';
+import {
+  getAgentJobFiles,
+  getAgentJobImage,
+  type AgentJobFileApi,
+  type AgentJobFilesApi,
+} from '@/lib/api/agents';
 import { LocaleProvider } from '@/components/providers/LocaleProvider';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 import { APIError } from '@/lib/utils/errors';
@@ -12,7 +17,7 @@ import { toDiffFileDetails, toDiffFiles } from '../adapt/diff';
 import type { AgentJob } from '../types';
 import { WorkspaceFiles } from './WorkspaceFiles';
 
-vi.mock('@/lib/api/agents', () => ({ getAgentJobFiles: vi.fn() }));
+vi.mock('@/lib/api/agents', () => ({ getAgentJobFiles: vi.fn(), getAgentJobImage: vi.fn() }));
 
 const JOB: AgentJob = {
   id: 'ajob_workspace',
@@ -800,12 +805,25 @@ describe('connected workspace previews', () => {
   });
 
   it('does not create partial downloads for files omitted by the size bound', async () => {
+    // Past the image bound too, so the image read has nothing either.
+    vi.mocked(getAgentJobImage).mockRejectedValue(new Error('image_too_large'));
     respondWith(binaryFile({ truncated: true, content_base64: null, omitted_reason: 'too_large' }));
     render(<WorkspaceFiles job={JOB} active requestedPath="large.png" />);
 
     expect(await screen.findByText(/This file exceeds the workspace preview limit/)).toBeVisible();
     expect(screen.queryByRole('link', { name: 'Download file' })).not.toBeInTheDocument();
     expect(createObjectURL).not.toHaveBeenCalled();
+  });
+
+  it('previews an image past the preview bound through the image read', async () => {
+    vi.mocked(getAgentJobImage).mockResolvedValue(new Blob(['png'], { type: 'image/png' }));
+    respondWith(binaryFile({ truncated: true, content_base64: null, omitted_reason: 'too_large' }));
+    render(<WorkspaceFiles job={JOB} active requestedPath="large.png" />);
+
+    expect(await screen.findByAltText('Preview of large.png')).toBeVisible();
+    expect(getAgentJobImage).toHaveBeenCalledWith(JOB.id, 'large.png', expect.any(AbortSignal));
+    // Still no download: the file is past the bound a download is built from.
+    expect(screen.queryByRole('link', { name: 'Download file' })).not.toBeInTheDocument();
   });
 
   it('never previews or offers downloads for symlinks', async () => {
