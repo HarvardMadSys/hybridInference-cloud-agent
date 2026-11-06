@@ -179,7 +179,7 @@ out of imported accounts. The report names line numbers, never an identifier.
   login name needs a password, and a hash in another format is dropped,
   leaving its holder to reset the password by email.
 - Each account is created and approved in one transaction, audited as
-  `agent.local_account.import` with the actor `account-import`. No mail is
+  `agent.local_account.import` with the actor `operator:account-import`. No mail is
   sent, no model connection is created, and the Terms are not recorded as
   accepted.
 
@@ -272,9 +272,13 @@ access; the `ADMIN_TOKEN` can.
 Every account or admission change increments the account's `version`, which is
 `WaitlistEntry.version`. An administrator action names the version it read and
 is refused with 409 `version_conflict` when the account has changed since. The
-change and its `agent_admin_audit_log` row commit in one transaction. The
-audit row records the states, the version and whether a reason was given; it
-never records an email address, password, hash or token. The acting
+change and its `agent_admin_audit_log` row are written in one transaction; a
+row that cannot be written never fails the change, which commits without it
+and is counted on the Audit log page. The audit row records the states, the
+version and the administrator's reason, and keeps the names of the
+administrator and the account as they were (the login name, else the email
+or phone number), so the trail still says who decided what about whom after
+either is renamed or erased. It never records a password, hash or token. The acting
 administrator's own permission is checked again inside that transaction, so
 an administrator who is suspended while a request is in flight changes
 nothing (`actor_not_admin`).
@@ -378,7 +382,8 @@ Erasure then removes every row of the account's Agent data, walking the
 foreign keys from the catalog (children first), and never touches another
 owner's row: a row of another owner that refers to the account's data
 blocks the erasure. Its identifiers, password, sessions, tokens, codes,
-sign-in events, mail recipients and earlier audit rows go too. The account row
+sign-in events and mail recipients go too. The admin audit trail keeps every
+row about the account, names included. The account row
 stays as a tombstone, erased, which every gate keeps denying and which can
 never be resumed. The erasure's own audit row records the rows removed, the
 teams deleted, the team environments handed over and the sandbox deletion

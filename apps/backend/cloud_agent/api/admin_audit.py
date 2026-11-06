@@ -1,92 +1,44 @@
 """The admin audit trail, read back for the Audit log page.
 
-Every admin handler records what it did through
-:func:`cloud_agent.api.deps.log_admin_action`. Until this route nothing read
-those rows back, so "who changed this, and when" had no answer short of a
-database shell. This is that answer: newest first, a page at a time, filtered
-by what the change was about.
-
-Only changes, and reads of a user's content, are shown. The Servers page used
-to record each of its polling reads as an action — 11,566 of the 11,582 rows
-staging wrote in the week before this route — and those rows stay in the
-table but never on the page.
+What is recorded, and how each action is filed, is declared once in
+:mod:`cloud_agent.domain.audit`. This route answers "who did what, to whom,
+with what result": newest first, a page at a time, by default only what
+people did — an administrator's session or break-glass access — and on request
+everything, the automation, the control plane's own policy and accounts
+changing themselves included. It narrows to one filter, one affected user or
+one target.
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from cloud_agent.api.deps import get_storage, require_store, verify_admin_access
-from cloud_agent.ports import AuditLogQueries  # noqa: TC001 — FastAPI resolves this at runtime.
-from cloud_agent.schemas import AdminAuditLogEntry, AdminAuditLogResponse
-
-AuditCategory = Literal["settings", "servers", "measurements", "content", "database"]
-
-#: The Audit log's filters and the actions each covers. A name ending in ``.``
-#: is a prefix; any other is one exact action. ``settings`` comes first: a
-#: server's own settings are recorded under ``agent.runner_host.`` but read as
-#: a settings change, and an action belongs to the first filter that covers it.
-AUDIT_CATEGORIES: dict[AuditCategory, tuple[str, ...]] = {
-    "settings": (
-        "agent.settings.",
-        "agent.host_settings.",
-        "agent.sandbox_archive_settings.",
-        "agent.runtime_version.",
-        "agent.runner_host.set_settings",
-        "agent.compute.cloudlab_defaults.set",
-    ),
-    "servers": ("agent.runner_host.", "agent.compute.", "agent.sandbox."),
-    "measurements": ("agent.profiling.",),
-    "content": ("agent.run.event_content.",),
-    "database": ("agent.database.",),
-}
-
-#: Reads the Servers page polls, recorded as actions before this release. They
-#: are not changes, so the Audit log never shows the rows already written.
-POLLING_READS: tuple[str, ...] = (
-    "agent.compute.providers.list",
-    "agent.compute.connections.list",
-    "agent.compute.servers.list",
-    "agent.compute.operations.list",
-    "agent.compute.operation.read",
-    "agent.compute.allocation.retirement_impact",
+from cloud_agent.domain.audit import (
+    PEOPLE,
+    AuditCategory,
+    actions_in,
+    actor_account_id,
+    attribute,
+    audit_action,
 )
+from cloud_agent.ports import AuditLogQueries  # noqa: TC001 — FastAPI resolves this at runtime.
+from cloud_agent.schemas import AdminAuditLogEntry, AdminAuditLogResponse, AuditWriteFailures
 
 #: The most entries one page may ask for.
 MAX_PAGE = 100
 
-
-def _covers(pattern: str, action: str) -> bool:
-    return action.startswith(pattern) if pattern.endswith(".") else action == pattern
+#: How far back the page's "audit writes failed" notice looks.
+FAILURE_WINDOW = timedelta(days=7)
 
 
 def audit_category(action: str) -> AuditCategory | None:
-    """The first filter that covers ``action``, or ``None`` when none does."""
-    for category, patterns in AUDIT_CATEGORIES.items():
-        if any(_covers(pattern, action) for pattern in patterns):
-            return category
-    return None
-
-
-def _excluded_for(category: AuditCategory | None) -> tuple[str, ...]:
-    """What a filter leaves out besides polling reads.
-
-    An exact action another filter claims — the per-server settings change
-    under ``agent.runner_host.`` — stays out of the broader prefix's filter,
-    so every action appears under exactly one.
-    """
-    if category is None:
-        return POLLING_READS
-    claimed = tuple(
-        pattern
-        for other, patterns in AUDIT_CATEGORIES.items()
-        if other != category
-        for pattern in patterns
-        if not pattern.endswith(".")
-    )
-    return POLLING_READS + claimed
+    """The filter that shows ``action``, or ``None`` for an undeclared action."""
+    declared = audit_action(action)
+    return declared.category if declared is not None else None
 
 
 class _AdminAuditStorage(Protocol):
@@ -115,15 +67,41 @@ router = APIRouter(
 
 def _entry(row: dict[str, Any]) -> AdminAuditLogEntry:
     details = row.get("details")
+    details = details if isinstance(details, dict) else None
+    declared = audit_action(row["action"])
+    # Every row has its attribution stored: the migration backfilled the old
+    # ones and its trigger fills those the previous release writes during the
+    # rollout. This covers only a row that trigger could not fill, which no
+    # filter finds but the unfiltered page still shows.
+    fallback = attribute(
+        row["action"],
+        details=details,
+        subject_user_id=row.get("target_user_id"),
+        success=row["success"],
+    )
     return AdminAuditLogEntry(
         id=row["id"],
         action=row["action"],
-        category=audit_category(row["action"]),
+        category=declared.category if declared is not None else None,
+        kind=declared.kind if declared is not None else None,
         actor_id=row.get("actor_id"),
+        actor_type=row["actor_type"],
+        actor_account_id=actor_account_id(row.get("actor_id")),
+        actor_label=row.get("actor_label"),
+        actor_deleted=bool(row.get("actor_deleted")),
         admin_ip=row["admin_ip"],
         target_user_id=row.get("target_user_id"),
-        details=details if isinstance(details, dict) else None,
+        subject_label=row.get("subject_label"),
+        subject_deleted=bool(row.get("subject_deleted")),
+        target_type=row.get("target_type") or fallback.target_type,
+        target_id=row.get("target_id") or fallback.target_id,
+        target_label=row.get("target_label"),
+        details=details,
         success=row["success"],
+        outcome=row.get("outcome") or fallback.outcome,
+        result=row.get("result"),
+        result_at=row.get("result_at"),
+        reason=row.get("reason"),
         created_at=row["created_at"],
     )
 
@@ -131,21 +109,41 @@ def _entry(row: dict[str, Any]) -> AdminAuditLogEntry:
 @router.get("", response_model=AdminAuditLogResponse)
 async def list_admin_audit_log(
     category: AuditCategory | None = None,
+    actors: Literal["people", "all"] = Query(
+        "people",
+        description=(
+            "``people``: administrators' sessions and break-glass access. ``all`` adds "
+            "services, the control plane's own policy and accounts changing themselves."
+        ),
+    ),
+    user: str | None = Query(
+        None, max_length=128, description="Only rows about this account or what it owns."
+    ),
+    target_type: str | None = Query(None, max_length=64),
+    target_id: str | None = Query(None, max_length=512),
     before: int | None = Query(None, ge=1, description="Return entries older than this id."),
     limit: int = Query(50, ge=1, le=MAX_PAGE),
     queries: AuditLogQueries = Depends(get_audit_log_queries),
 ) -> AdminAuditLogResponse:
-    """Return recorded admin actions, newest first, a page at a time."""
+    """Return recorded actions, newest first, a page at a time."""
+    if (target_type is None) != (target_id is None):
+        raise HTTPException(
+            status_code=422, detail="Pass target_type and target_id together, or neither."
+        )
     rows = await queries.list_admin_actions(
-        actions=AUDIT_CATEGORIES[category] if category is not None else (),
-        excluded_actions=_excluded_for(category),
+        actions=actions_in(category) if category is not None else (),
+        actor_types=PEOPLE if actors == "people" else (),
+        subject_user_id=user,
+        target=(target_type, target_id) if target_type and target_id else None,
         before_id=before,
         # One more than asked for says whether an older page exists without
         # counting the whole table.
         limit=limit + 1,
     )
     page = rows[:limit]
+    failures, latest = await queries.write_failures_since(datetime.now(UTC) - FAILURE_WINDOW)
     return AdminAuditLogResponse(
         entries=[_entry(row) for row in page],
         next_before=page[-1]["id"] if len(rows) > limit else None,
+        write_failures=AuditWriteFailures(count=failures, latest_at=latest),
     )

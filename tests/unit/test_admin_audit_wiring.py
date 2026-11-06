@@ -22,9 +22,24 @@ from cloud_agent.api.deps import log_admin_action
 from cloud_agent.storage.assembly import Storage
 
 
+class _Savepoint:
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
 class _RecordingConnection:
     def __init__(self, calls: list[tuple[str, tuple[Any, ...]]]) -> None:
         self._calls = calls
+
+    def transaction(self) -> _Savepoint:
+        return _Savepoint()
+
+    async def fetch(self, sql: str, *args: Any) -> list[Any]:
+        self._calls.append((sql, args))
+        return []
 
     async def fetchval(self, sql: str, *args: Any) -> int:
         self._calls.append((sql, args))
@@ -78,11 +93,19 @@ async def test_an_admin_action_reaches_the_assembled_trail() -> None:
     assert "INSERT INTO agent_admin_audit_log" in sql
     assert args == (
         "agent.runner_host.drain",
+        "admin-1",
         "203.0.113.9",
         None,
         '{"host": "runner-a"}',
         True,
-        "admin-1",
+        None,  # actor_label: "admin-1" names no account
+        "host",
+        "runner-a",
+        None,
+        None,
+        "applied",
+        None,
+        None,
     )
 
 

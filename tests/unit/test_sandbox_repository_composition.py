@@ -4,7 +4,7 @@
 until it was split into one mixin per aggregate. ``BEFORE_SPLIT`` is the set of
 methods that class defined, read from that file at commit ``3e0400ef7``; the
 composed class must define exactly these, private ones included, each in one
-place.
+place, plus the methods :data:`ADDED_SINCE` names.
 """
 
 from __future__ import annotations
@@ -69,6 +69,14 @@ BEFORE_SPLIT = frozenset(
 )
 
 
+#: Methods added after the split, each with the change that added it.
+ADDED_SINCE = frozenset(
+    {
+        "_report_deletion_result",  # the admin audit trail's final results (#1117)
+    }
+)
+
+
 def _defined_methods(cls: type) -> dict[str, list[str]]:
     """Each method name the class and its bases define, with every defining class."""
     found: dict[str, list[str]] = {}
@@ -82,7 +90,7 @@ def _defined_methods(cls: type) -> dict[str, list[str]]:
 
 
 def test_the_composed_repository_has_exactly_the_methods_of_the_single_class() -> None:
-    assert set(_defined_methods(PostgresSandboxRepository)) == BEFORE_SPLIT
+    assert set(_defined_methods(PostgresSandboxRepository)) == BEFORE_SPLIT | ADDED_SINCE
 
 
 def test_no_method_is_defined_by_two_mixins() -> None:

@@ -3,6 +3,7 @@
 // note, the message a suspended account is shown at sign-in, and its recent
 // sign-in attempts (which can be purged, once confirmed), as HybridInference's
 // user detail.
+import Link from 'next/link';
 import { useState, type ReactNode } from 'react';
 import { AccountNotice } from '@/components/features/auth/AccountFrame';
 import { useT } from '@/components/providers/LocaleProvider';
@@ -120,6 +121,12 @@ export function SignInHistory({ accountId }: { accountId: string }) {
         <button className="ui-button ui-button-secondary" onClick={() => void load()}>
           {t('adminAccounts.history.show')}
         </button>
+        <Link
+          href={`/admin/audit?${new URLSearchParams({ user: accountId }).toString()}`}
+          className="ui-button ui-button-secondary"
+        >
+          {t('adminAccounts.history.audit')}
+        </Link>
         {events && events.length > 0 && !confirming && (
           <button className="ui-button ui-button-ghost" onClick={() => setConfirming(true)}>
             {t('adminAccounts.history.purge')}

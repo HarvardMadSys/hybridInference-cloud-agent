@@ -22,7 +22,7 @@ A dry run writes nothing and reports what an apply would do. An account any
 of whose identifiers already belongs to someone here is skipped whole and
 left untouched, so a second apply imports nothing twice. Each account is
 created and approved in one audited transaction (``agent.local_account.import``,
-actor ``account-import``); no mail is sent and the Terms are not recorded as
+actor ``operator:account-import``); no mail is sent and the Terms are not recorded as
 accepted.
 """
 
@@ -52,7 +52,9 @@ if TYPE_CHECKING:
 
     from cloud_agent.ports.accounts import LocalAccountRepository
 
-ACTOR = "account-import"
+#: Break-glass in the audit trail, as the bootstrap command is: whoever runs
+#: this holds the deployment's database credential, not an account.
+ACTOR = "operator:account-import"
 
 #: The canonical E.164 form a phone sign-in normalizes to, without this
 #: deployment's SMS prefix policy: that limits where codes are sent, not who

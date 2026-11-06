@@ -8,7 +8,6 @@ failure that settle a deletion.
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -25,6 +24,7 @@ from cloud_agent.domain.sandbox_group import (
 )
 from cloud_agent.ports.sandbox import DeletionFailureDecision
 from cloud_agent.schemas.capacity_protocol import FRESH_AFTER_SECONDS
+from cloud_agent.storage._sql.admin_audit import insert_audit_row, report_final_outcome
 from cloud_agent.storage._sql.hosts import RECLAIMED_HOST_SQL
 from cloud_agent.storage._sql.jobs import fail_unrunnable_follow_ups
 from cloud_agent.storage._sql.sandbox_transitions import (
@@ -53,6 +53,14 @@ if TYPE_CHECKING:
 
     import asyncpg
 
+    from cloud_agent.domain.audit import FinalOutcome
+
+#: The rows a deletion's final result is reported against: the request, and
+#: each administrator's resumption of it. The newest one gets the result, so a
+#: resumed request keeps the failure that stopped it and the resumption gets
+#: its own result.
+_DELETION_REQUESTS = ("agent.sandbox.delete.requested", "agent.sandbox.delete.retry_resumed")
+_DELETION_WORKER = "sandbox-deletion-worker"
 _DELETION_ATTEMPT_TELEMETRY_TIMEOUT_SECONDS = 0.25
 _DELETION_RETRY_EXHAUSTION_BATCH = 50
 
@@ -151,23 +159,19 @@ class AdminDeletionMixin(SandboxRepositoryBase):
             )
             # Visibility and its audit receipt commit together. Never delete
             # the container, native membership or immutable execution ledger.
-            await conn.execute(
-                "INSERT INTO agent_admin_audit_log "
-                "(action, actor_id, admin_ip, target_user_id, details, success) "
-                "VALUES ($1, $2, $3, $4, $5::jsonb, TRUE)",
-                "agent.sandbox.archive" if archived else "agent.sandbox.restore",
-                actor_id,
-                admin_ip,
-                group["user_id"],
-                json.dumps(
-                    {
-                        "sandbox_id": sandbox_id,
-                        "host": group["host"],
-                        "generation": generation,
-                        "container_id": container_id,
-                    }
-                    | ({"stale_host_removal": True} if stale_host_removal else {})
-                ),
+            await insert_audit_row(
+                conn,
+                action="agent.sandbox.archive" if archived else "agent.sandbox.restore",
+                actor_id=actor_id,
+                admin_ip=admin_ip,
+                target_user_id=group["user_id"],
+                details={
+                    "sandbox_id": sandbox_id,
+                    "host": group["host"],
+                    "generation": generation,
+                    "container_id": container_id,
+                }
+                | ({"stale_host_removal": True} if stale_host_removal else {}),
             )
         return "accepted"
 
@@ -345,13 +349,7 @@ class AdminDeletionMixin(SandboxRepositoryBase):
                     to_state=state,
                     details={"request_id": request_id},
                 )
-                await self._audit_admin_deletion(
-                    conn,
-                    group=group,
-                    request_id=request_id,
-                    action="agent.sandbox.delete.retry_exhausted",
-                    archive_key=group["deletion_archive_key"],
-                )
+                await self._report_deletion_result(conn, request_id=request_id, outcome="failed")
 
             row = await conn.fetchrow(
                 CLAIM_DUE_DELETION_SQL,
@@ -583,16 +581,6 @@ class AdminDeletionMixin(SandboxRepositoryBase):
                 size_bytes,
                 archive_version_id,
             )
-            await self._audit_admin_deletion(
-                conn,
-                group=group,
-                request_id=request_id,
-                action="agent.sandbox.delete.archived",
-                archive_key=archive_key,
-                sha256=sha256,
-                size_bytes=size_bytes,
-                archive_version_id=archive_version_id,
-            )
         return True
 
     async def renew_admin_sandbox_deletion_claim(
@@ -751,15 +739,11 @@ class AdminDeletionMixin(SandboxRepositoryBase):
             )
             for member in members:
                 await fail_unrunnable_follow_ups(conn, thread_id=member["thread_id"])
-            await self._audit_admin_deletion(
+            await self._report_deletion_result(
                 conn,
-                group=group,
                 request_id=request_id,
-                action="agent.sandbox.delete.completed",
-                archive_key=group["deletion_archive_key"],
-                sha256=group["deletion_sha256"],
-                size_bytes=group["deletion_size_bytes"],
-                archive_version_id=group["deletion_archive_version_id"],
+                outcome="applied",
+                details={"archive_key": group["deletion_archive_key"]},
             )
         return True
 
@@ -950,12 +934,11 @@ class AdminDeletionMixin(SandboxRepositoryBase):
         )
         for member in members:
             await fail_unrunnable_follow_ups(conn, thread_id=member["thread_id"])
-        await self._audit_admin_deletion(
+        await self._report_deletion_result(
             conn,
-            group=group,
             request_id=request_id,
-            action="agent.sandbox.delete.discarded",
-            host_reclaimed=host_reclaimed,
+            outcome="applied",
+            details={"discarded": True} | ({"host_reclaimed": True} if host_reclaimed else {}),
         )
 
     async def fail_admin_sandbox_deletion(
@@ -1042,13 +1025,10 @@ class AdminDeletionMixin(SandboxRepositoryBase):
                     retry_scheduled=decision.retry_scheduled,
                     cleanup_outcome=cleanup_outcome,
                 )
-            await self._audit_admin_deletion(
-                conn,
-                group=group,
-                request_id=request_id,
-                action="agent.sandbox.delete.failed",
-                archive_key=group["deletion_archive_key"],
-            )
+            if not decision.retry_scheduled:
+                # Stopped, exhausted or not retained: nothing runs again unless
+                # an administrator resumes it.
+                await self._report_deletion_result(conn, request_id=request_id, outcome="failed")
             if updated is None:
                 raise RuntimeError("sandbox deletion failure transition lost its row")
             return DeletionFailureDecision(
@@ -1103,47 +1083,52 @@ class AdminDeletionMixin(SandboxRepositoryBase):
         group: Any,
         request_id: str,
         action: str,
-        actor_id: str = "sandbox-deletion-worker",
-        admin_ip: str = "internal",
+        actor_id: str,
+        admin_ip: str,
         archive_key: str | None = None,
-        sha256: str | None = None,
-        size_bytes: int | None = None,
-        archive_version_id: str | None = None,
         sandbox_manager_confirmed_stopped: bool = False,
         confirmed_docker_status: str | None = None,
-        host_reclaimed: bool = False,
     ) -> None:
-        """Keep each deletion transition and content-free audit atomic."""
-        await conn.execute(
-            "INSERT INTO agent_admin_audit_log "
-            "(action, actor_id, admin_ip, target_user_id, details, success) "
-            "VALUES ($1, $2, $3, $4, $5::jsonb, $6)",
-            action,
-            actor_id,
-            admin_ip,
-            group["user_id"],
-            json.dumps(
+        """Record a deletion request, or its resumption, with its transition."""
+        await insert_audit_row(
+            conn,
+            action=action,
+            actor_id=actor_id,
+            admin_ip=admin_ip,
+            target_user_id=group["user_id"],
+            details={
+                "sandbox_id": group["id"],
+                "request_id": request_id,
+                "host": group["host"],
+                "generation": group["generation"],
+                "container_id": group["container_id"],
+                "archive_key": archive_key,
+            }
+            | (
                 {
-                    "sandbox_id": group["id"],
-                    "request_id": request_id,
-                    "host": group["host"],
-                    "generation": group["generation"],
-                    "container_id": group["container_id"],
-                    "archive_key": archive_key,
-                    "archive_version_id": archive_version_id,
-                    "sha256": sha256,
-                    "size_bytes": size_bytes,
+                    "force": True,
+                    "sandbox_manager_confirmed_stopped": True,
+                    "docker_status": confirmed_docker_status,
                 }
-                | (
-                    {
-                        "force": True,
-                        "sandbox_manager_confirmed_stopped": True,
-                        "docker_status": confirmed_docker_status,
-                    }
-                    if sandbox_manager_confirmed_stopped
-                    else {}
-                )
-                | ({"host_reclaimed": True} if host_reclaimed else {})
+                if sandbox_manager_confirmed_stopped
+                else {}
             ),
-            action != "agent.sandbox.delete.failed",
+        )
+
+    @staticmethod
+    async def _report_deletion_result(
+        conn: asyncpg.Connection,
+        *,
+        request_id: str,
+        outcome: FinalOutcome,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        """The deletion request's final result; the worker's steps stay in the trajectory."""
+        await report_final_outcome(
+            conn,
+            requested_actions=_DELETION_REQUESTS,
+            correlation_id=request_id,
+            outcome=outcome,
+            reported_by=_DELETION_WORKER,
+            details=details,
         )

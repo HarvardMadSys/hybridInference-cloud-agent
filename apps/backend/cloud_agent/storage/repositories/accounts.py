@@ -546,6 +546,7 @@ class PostgresLocalAccountRepository(
                 admin_ip=admin_ip,
                 account_id=account_id,
                 details=_audit_details(current, edit, current.version + 1),
+                reason=reason,
             )
             return AdminActionResult(account=await read_account(conn, account_id), edit=edit)
 
@@ -666,10 +667,11 @@ class PostgresLocalAccountRepository(
         Then, in one transaction, its teams are settled and every row of its
         Agent data goes (:mod:`cloud_agent.storage._sql.local_erasure`), with
         its identifiers (freed for new accounts), password, sessions,
-        browsers, links, codes, sign-in events, mail recipients and earlier
-        audit rows. The account row stays, erased: it signs in nowhere and
-        cannot be resumed, and its id never names anything again. A fresh
-        audit row records the erasure.
+        browsers, links, codes, sign-in events and mail recipients. The
+        account row stays, erased: it signs in nowhere and cannot be resumed,
+        and its id never names anything again. The admin audit trail keeps
+        every row about it, with the names they were written with, and a
+        fresh row records the erasure.
 
         Raises:
             AccountTransitionRefused: The codes above.

@@ -41,7 +41,7 @@
 
 ## 5. 一致性和审计
 
-每个账号的创建和批准在**同一个事务**里完成（`PostgresLocalAccountRepository.import_account`），写一条审计 `agent.local_account.import`，操作者为 `account-import`。命令中途停下，每个账号要么不存在，要么已批准，不会卡在"已创建但待审批"。审计只记标识的种类和有没有密码，不记邮箱、手机号或哈希。
+每个账号的创建和批准在**同一个事务**里完成（`PostgresLocalAccountRepository.import_account`），写一条审计 `agent.local_account.import`，操作者为 `operator:account-import`。命令中途停下，每个账号要么不存在，要么已批准，不会卡在"已创建但待审批"。审计只记标识的种类和有没有密码，不记邮箱、手机号或哈希。
 
 ## 6. 执行步骤
 

@@ -6,7 +6,6 @@ the group's idle stop falls due.
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.domain.sandbox_group import (
@@ -14,6 +13,7 @@ from cloud_agent.domain.sandbox_group import (
     GroupState,
     sql_list,
 )
+from cloud_agent.storage._sql.admin_audit import insert_audit_row
 from cloud_agent.storage._sql.compute_admission import lock_compute_entry
 from cloud_agent.storage._sql.hosts import (
     MOVING_OUT_HOST_SQL,
@@ -117,23 +117,20 @@ class GroupStopMixin(SandboxRepositoryBase):
                 REQUEST_GROUP_STOP_SQL,
                 sandbox_id,
             )
-            # Stop and its audit receipt commit together. An unavailable audit
-            # table must never leave an unrecorded cross-owner mutation.
-            await conn.execute(
-                "INSERT INTO agent_admin_audit_log "
-                "(action, actor_id, admin_ip, target_user_id, details, success) "
-                "VALUES ('agent.sandbox.stop', $1, $2, $3, $4::jsonb, TRUE)",
-                actor_id,
-                admin_ip,
-                group["user_id"],
-                json.dumps(
-                    {
-                        "sandbox_id": sandbox_id,
-                        "host": group["host"],
-                        "generation": generation,
-                        "container_id": container_id,
-                    }
-                ),
+            # Stop and its audit receipt commit together; a receipt that cannot
+            # be written is counted, never allowed to fail the stop.
+            await insert_audit_row(
+                conn,
+                action="agent.sandbox.stop",
+                actor_id=actor_id,
+                admin_ip=admin_ip,
+                target_user_id=group["user_id"],
+                details={
+                    "sandbox_id": sandbox_id,
+                    "host": group["host"],
+                    "generation": generation,
+                    "container_id": container_id,
+                },
             )
         return "accepted"
 
