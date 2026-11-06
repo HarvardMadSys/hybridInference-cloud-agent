@@ -22,7 +22,7 @@ from types import SimpleNamespace
 import pytest
 
 from cloud_agent_host.claimed_job import ClaimedJob, claim_secret_values
-from cloud_agent_host.compat_helper import (
+from cloud_agent_host.member_setup.compat_helper import (
     HELPER_PATH,
     LAUNCHER,
     compat_token_env,
@@ -44,7 +44,7 @@ from cloud_agent_host.runtimes import (
     RuntimeConnectionUnsupportedError,
     connection_base_url,
 )
-from cloud_agent_host.runtimes.codex import NATIVE_LAUNCHER
+from cloud_agent_host.runtimes.codex.adapter import NATIVE_LAUNCHER
 from cloud_agent_shared.model_connections import ModelConnectionAccess
 from cloud_agent_shared.protocol_compat import ORIGIN_PLACEHOLDER, TOKEN_PLACEHOLDER
 from cloud_agent_shared.secret_redaction import SecretRedactor
@@ -313,7 +313,12 @@ class _Manager:
         self.commands: list[list[str]] = []
         self.backend = SimpleNamespace(docker_binary="docker")
 
-    def _require(self, spec):
+    @property
+    def exact(self):
+        """The stand-in is its own identity gate."""
+        return self
+
+    def require(self, spec):
         return SimpleNamespace(container_id="container-1")
 
     def exec_capture(self, spec, argv, **kwargs):
@@ -322,7 +327,7 @@ class _Manager:
         ok = self.probe_ok or "mv" in argv[2]
         return SimpleNamespace(returncode=0 if ok else 1)
 
-    def _run_bytes(self, argv, *, timeout, input_bytes):
+    def run_bytes(self, argv, *, timeout, input_bytes):
         self.copied.append(input_bytes)
         return SimpleNamespace(returncode=0)
 

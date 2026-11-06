@@ -46,9 +46,9 @@ from cloud_agent.ports.external.compute_provider import NodeObservation, SshConn
 from cloud_agent.ports.external.host_bootstrap import BootstrapIntent, DeploymentProfile
 from cloud_agent.providers.compute.host_bootstrap import SshHostBootstrap
 from cloud_agent.providers.compute.ssh import OpenSshTransport
-from cloud_agent_host.chat_sandbox import ChatSandboxManager
-from cloud_agent_host.chat_sandbox_models import ChatSandboxSpec
-from cloud_agent_host.sandbox import ContainerBackend
+from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
+from cloud_agent_host.container.chat_sandbox_models import ChatSandboxSpec
+from cloud_agent_host.container.sandbox import ContainerBackend
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

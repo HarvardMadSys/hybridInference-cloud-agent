@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from cloud_agent.host_pool import (
+from cloud_agent.domain.host_pool import (
     HOST_DISABLED,
     HOST_DRAINING,
     HOST_ENROLLING,

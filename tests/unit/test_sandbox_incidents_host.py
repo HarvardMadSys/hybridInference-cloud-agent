@@ -20,8 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from cloud_agent_host import incident_relay
-from cloud_agent_host.resources import Sample
+from cloud_agent_host.observe.resources import Sample
+from cloud_agent_host.observe.sandbox_resources import DockerResourceReading
 from cloud_agent_host.sandbox_incidents import (
     BROWSER_JOURNAL,
     DRAIN_SCRIPT,
@@ -33,7 +33,7 @@ from cloud_agent_host.sandbox_incidents import (
     SandboxIncidents,
     slot_journal,
 )
-from cloud_agent_host.sandbox_resources import DockerResourceReading
+from cloud_agent_host.service import incident_relay
 from cloud_agent_shared.sandbox_incidents import INCIDENTS_ACCEPTED, parse_incidents
 
 REPO = Path(__file__).resolve().parents[2]

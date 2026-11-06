@@ -10,9 +10,18 @@ from pathlib import Path
 
 import pytest
 
-from cloud_agent_host.platform_instructions import with_platform_instructions
+from cloud_agent_host.runtimes.live import member_launch
 
 REPO = Path(__file__).resolve().parents[2]
+
+
+def with_platform_instructions(
+    runtime_id: str, argv: list[str], env: dict[str, str], instructions: str
+) -> tuple[list[str], dict[str, str]]:
+    """The runtime's own placement, as the transport factory calls it."""
+    return member_launch(runtime_id).with_platform_instructions(argv, env, instructions)
+
+
 _TEXT = 'Open the PR yourself.\nUse `gh api` and "REST".'
 
 

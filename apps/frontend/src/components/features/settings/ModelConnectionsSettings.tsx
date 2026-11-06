@@ -11,7 +11,7 @@ import {
 import { ModelConnectionCard } from './ModelConnectionCard';
 import { ModelConnectionForm } from './ModelConnectionForm';
 import { ConnectionOps, type Operate, type Settlement } from './connectionOps';
-import { announceModelConnectionsChanged } from '../agents/modelConnectionEvents';
+import { announceModelConnectionsChanged } from '../agents/composer/modelConnectionEvents';
 
 export function ModelConnectionsSettings() {
   const t = useT();

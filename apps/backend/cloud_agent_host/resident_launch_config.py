@@ -12,8 +12,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.resident_transport import ResidentLaunch
-from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_shared.environment import (  # noqa: TC001 — Pydantic resolves annotations at runtime.
     BoundEnvironment,
 )

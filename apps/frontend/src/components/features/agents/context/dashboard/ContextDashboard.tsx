@@ -9,7 +9,7 @@
 // columns from 760 px (the ~850 px sidebar of the reference screenshot), the
 // top cards side by side from 600 px, one column below that.
 
-import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import { useEffect, useRef, useState, type RefObject } from 'react';
 import {
   getThreadContextTiming,
   type ThreadContextApi,
@@ -87,15 +87,6 @@ export function ContextDashboard({
   const layout = layoutFor(width || TWO_COLUMNS_PX);
   const settled = `${view.turns.length}:${view.turns.at(-1)?.state ?? ''}`;
   const { timing, loading } = useThreadTiming(jobId, conversationKey, settled);
-  const latency = useMemo(
-    () =>
-      new Map(
-        (timing?.requests ?? []).flatMap((r) =>
-          r.latency_ms !== null ? [[r.response_id, r.latency_ms] as const] : [],
-        ),
-      ),
-    [timing],
-  );
   const keys = view.category_keys ?? [];
   const point = view.requests.find((p) => p.index === selected) ?? view.requests.at(-1) ?? null;
   const top = (
@@ -112,7 +103,6 @@ export function ContextDashboard({
         conversationKey={conversationKey}
         points={view.requests}
         keys={keys}
-        latency={latency}
         selected={point?.index ?? null}
         onSelect={onSelect}
         footer={<SelectedRequest point={point} onOpenPoint={onOpenPoint} onOpenTurn={onOpenTurn} />}

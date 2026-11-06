@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cloud_agent.storage._sql.hosts import LIVE_ATTEMPT_HOST
+from cloud_agent.storage._sql.fences import RESIDENCY_CALLER_FROM, live_residency_caller_sql
 
 if TYPE_CHECKING:
     from typing import Any
@@ -29,30 +29,15 @@ class PostgresGitHubRelayRepository:
         residency is hot and serving this attempt on its own host, and the
         attempt's lease, its job's state and the host's enrolment are live. A
         GitHub request is a single forwarded call, so there is no later moment
-        that would need the fence read again.
+        that would need the fence read again. Both relays build their fence
+        from the same fragments (:mod:`cloud_agent.storage._sql.fences`).
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 f"""
                 SELECT j.id AS job_id, a.id AS attempt_id, j.thread_id, j.user_id, t.repo
-                FROM agent_thread_sandbox_memberships m
-                JOIN agent_threads t ON t.id = m.thread_id
-                JOIN agent_sandboxes g ON g.id = m.sandbox_id
-                JOIN agent_attempts a ON a.id = m.active_attempt_id
-                JOIN agent_jobs j ON j.id = a.job_id
-                WHERE m.thread_id = $1
-                  AND m.residency_generation = $2
-                  AND m.residency_status = 'hot'
-                  AND m.residency_lease_expires_at > clock_timestamp()
-                  AND t.deleted_at IS NULL
-                  AND a.host_id = g.host
-                  AND a.status = 'running'
-                  AND a.lease_expires_at > clock_timestamp()
-                  AND j.thread_id = m.thread_id
-                  AND j.current_attempt_id = a.id
-                  AND j.state = 'running'
-                  AND NOT j.cancel_requested
-                  AND {LIVE_ATTEMPT_HOST}
+                FROM {RESIDENCY_CALLER_FROM}
+                WHERE {live_residency_caller_sql("$1", "$2")}
                 """,
                 thread_id,
                 residency_generation,

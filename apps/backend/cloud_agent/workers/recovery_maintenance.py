@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from cloud_agent.application.pending_messages import QueueSweep, settle_waiting_queues
 from cloud_agent.goals.controller import run_goal_wakeups
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.settings import number_setting
 from cloud_agent.workers.attempts import REAP_INTERVAL_S
 from cloud_agent.workers.periodic import run_every, run_pass
 
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
         SkillRepository,
         SourceControlRepository,
     )
-    from cloud_agent.source_control_runtime import GitHubAppSource
+    from cloud_agent.source_control.source_control_runtime import GitHubAppSource
 
 logger = get_logger("cloud_agent.app")
 
@@ -124,7 +125,10 @@ async def run_goal_scheduling_maintenance(
     """Recover or pause goals whose scheduling obligation is missing."""
 
     async def sweep() -> None:
-        result = await store.goals.sweep_goal_scheduling()
+        result = await store.goals.sweep_goal_scheduling(
+            arm_after_seconds=number_setting("goals.arm_after_seconds"),
+            stalled_after_seconds=number_setting("goals.stalled_after_seconds"),
+        )
         if result["rearmed"] or result["stalled"]:
             logger.warning(
                 "agent_goals_recovered",

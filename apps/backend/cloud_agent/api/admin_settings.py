@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict
 
-from cloud_agent import settings, site_content
+from cloud_agent import settings
 from cloud_agent.api.deps import (
     get_client_ip,
     get_storage,
@@ -15,6 +15,7 @@ from cloud_agent.api.deps import (
     require_store,
     verify_admin_access,
 )
+from cloud_agent.deployment import site_content
 
 if TYPE_CHECKING:
     from cloud_agent.ports import AuditRepository, SettingsRepository

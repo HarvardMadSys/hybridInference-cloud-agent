@@ -13,14 +13,13 @@
 // recorded content before each request (estimate); the line on top is the
 // observed input the provider reported (exact). A request whose profile kept
 // no categories breaks the areas instead of drawing zero. Duration is the
-// Gateway's measured latency where a request joins one by its response id,
-// otherwise the event-derived step time, each drawn in its own style.
+// event-derived step time.
 
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
 import { useLocale } from '@/components/providers';
 import type { ContextPointApi } from '@/lib/api/agents';
 import { compactCount } from '@/components/features/settings/usagePresent';
-import { formatDuration } from '../../TurnFooter';
+import { formatDuration } from '../../conversation/TurnFooter';
 import { signedTokens } from '../contextPresent';
 import { DashCard, Toggle } from './DashCard';
 import { labelOf, swatchOf } from './palette';
@@ -199,7 +198,6 @@ export function ContextTrend({
   conversationKey,
   points,
   keys,
-  latency,
   selected,
   onSelect,
   footer,
@@ -208,7 +206,6 @@ export function ContextTrend({
   conversationKey: string;
   points: ContextPointApi[];
   keys: string[];
-  latency: ReadonlyMap<string, number>;
   selected: number | null;
   onSelect: (index: number) => void;
   /** The selected request's strip, drawn inside the card under the chart. */
@@ -226,9 +223,9 @@ export function ContextTrend({
   const plotRef = useRef<HTMLDivElement>(null);
   const width = useWidth(plotRef);
   const columns = useMemo(() => {
-    const base = trendColumns(points, state.granularity, latency);
+    const base = trendColumns(points, state.granularity);
     return state.mode === 'delta' ? deltaColumns(base) : base;
-  }, [points, state.granularity, latency, state.mode]);
+  }, [points, state.granularity, state.mode]);
   const n = columns.length;
   const { from, to, overview, toggleOverview, selectedAt } = useWindowView({
     columns,
@@ -506,26 +503,13 @@ function TrendPlot({
   }
   let durations: React.ReactNode = null;
   if (overlay === 'duration') {
-    const latency = lineRuns(
-      visible.map((c) => c.latencyMs),
-      x,
-      dy,
-    );
     const steps = lineRuns(
-      visible.map((c) => (c.latencyMs === null ? c.stepMs : null)),
+      visible.map((c) => c.stepMs),
       x,
       dy,
     );
     durations = (
       <>
-        {latency.map((run, i) => (
-          <polyline
-            key={`l${i}`}
-            points={run}
-            className="fill-none stroke-amber-500"
-            strokeWidth={1.5}
-          />
-        ))}
         {steps.map((run, i) => (
           <polyline
             key={`s${i}`}
@@ -617,11 +601,9 @@ function TrendTip({
       )}
       {overlay === 'duration' ? (
         <p className="text-muted">
-          {column.latencyMs !== null
-            ? t('dashboard.trend.latency', { ms: formatDuration(column.latencyMs) ?? '—' })
-            : column.stepMs !== null
-              ? t('dashboard.trend.stepTime', { ms: formatDuration(column.stepMs) ?? '—' })
-              : t('dashboard.trend.noDuration')}
+          {column.stepMs !== null
+            ? t('dashboard.trend.stepTime', { ms: formatDuration(column.stepMs) ?? '—' })
+            : t('dashboard.trend.noDuration')}
         </p>
       ) : null}
     </div>

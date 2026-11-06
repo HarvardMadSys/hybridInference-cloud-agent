@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud_agent_host.chat_sandbox import CHAT_WORKDIR
+from cloud_agent_host.container.chat_sandbox import CHAT_WORKDIR
 from cloud_agent_host.retained_workspace import (
     _READ_PROGRAM,
     _WRITE_PROGRAM,

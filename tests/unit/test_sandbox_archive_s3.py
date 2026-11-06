@@ -12,8 +12,8 @@ from typing import Any
 
 import pytest
 
-from cloud_agent_host import sandbox_archive_s3 as archive_s3
-from cloud_agent_host.sandbox_archive_s3 import (
+from cloud_agent_host.archive import sandbox_archive_s3 as archive_s3
+from cloud_agent_host.archive.sandbox_archive_s3 import (
     SandboxArchiveAlreadyExists,
     SandboxArchiveConfigError,
     SandboxArchiveDeadlineExceeded,

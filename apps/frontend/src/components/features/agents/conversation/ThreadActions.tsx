@@ -1,0 +1,353 @@
+'use client';
+
+import { useEffect, useId, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import toast from 'react-hot-toast';
+import { useT } from '@/components/providers';
+import { MENU_ACTIONS, MENU_POSITIONED, MENU_ROW, menuRowClass } from '@/components/ui/menuStyles';
+import { usePopupMenu } from '@/components/ui/usePopupMenu';
+import {
+  listAllAgentThreadEvents,
+  pinAgentJob,
+  renameAgentJob,
+  unpinAgentJob,
+} from '@/lib/api/agents';
+import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
+import { saveFile } from '@/lib/saveFile';
+import { toSessionLog } from '../trajectory/trajectory';
+import type { AgentJob } from '../types';
+
+/** Conversation actions, with Escape reserved for dismissing their own overlays. */
+export function ThreadActions({
+  job,
+  canFork,
+  forking,
+  onFork,
+  onRename,
+  onEnvironment,
+}: {
+  job: AgentJob;
+  canFork: boolean;
+  forking: boolean;
+  onFork: () => void;
+  onRename: (title: string) => void;
+  onEnvironment?: () => void;
+}) {
+  const t = useT();
+  const id = useId();
+  const trigger = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  const dialog = useRef<HTMLFormElement>(null);
+  const input = useRef<HTMLInputElement>(null);
+  const [open, setOpen] = useState(false);
+  const openRef = useRef(open);
+  openRef.current = open;
+  const [renaming, setRenaming] = useState(false);
+  const [title, setTitle] = useState(job.title);
+  const [pinned, setPinned] = useState(Boolean(job.pinnedAt));
+  const [busy, setBusy] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const mutation = useRef(false);
+  const download = useRef<AbortController | null>(null);
+
+  // Opening another conversation remounts this menu: an unfinished read for the
+  // one left behind must not save a file the reader has stopped waiting for.
+  useEffect(() => () => download.current?.abort(), []);
+
+  useEffect(() => setPinned(Boolean(job.pinnedAt)), [job.pinnedAt]);
+  useEffect(
+    () =>
+      onAgentSessionsChanged((change) => {
+        if (!change.threadIds.includes(job.threadId ?? job.id)) return;
+        if (change.pinnedAt !== undefined) setPinned(Boolean(change.pinnedAt));
+      }),
+    [job.threadId, job.id],
+  );
+
+  function close() {
+    setOpen(false);
+    setRenaming(false);
+    setError(null);
+    trigger.current?.focus();
+  }
+
+  useEffect(() => {
+    if (!renaming) return;
+    input.current?.focus();
+    input.current?.select();
+  }, [renaming]);
+
+  // Renaming is a small form of its own; Escape belongs to it while it is open.
+  useEffect(() => {
+    if (!renaming) return;
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      // Run cancellation also listens on window. Consume this before its bubble listener.
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (!mutation.current) close();
+    };
+    window.addEventListener('keydown', escape, true);
+    return () => window.removeEventListener('keydown', escape, true);
+  }, [renaming]);
+
+  const popup = usePopupMenu({
+    open,
+    onOpenChange: (nextOpen) => {
+      if (nextOpen) setError(null);
+      setOpen(nextOpen);
+    },
+    triggerRef: trigger,
+    menuRef: menu,
+    placement: { gap: 4, width: 192, maxWidth: 240, preferredHeight: 220, maxHeight: 400 },
+  });
+
+  async function saveTitle() {
+    const nextTitle = title.trim();
+    if (!nextTitle || mutation.current) return;
+    mutation.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await renameAgentJob(job.id, nextTitle);
+      onRename(result.title);
+      close();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : t('taskActions.renameFailed'));
+    } finally {
+      mutation.current = false;
+      setBusy(false);
+    }
+  }
+
+  async function togglePin() {
+    if (mutation.current) return;
+    mutation.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await (pinned ? unpinAgentJob(job.id) : pinAgentJob(job.id));
+      setPinned(result.pinned);
+      close();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : t('taskActions.pinFailed'));
+    } finally {
+      mutation.current = false;
+      setBusy(false);
+    }
+  }
+
+  /**
+   * Save every turn's stored events as the Trajectory view's session log does.
+   * Read from the server, not this page, so the file holds the whole thread
+   * whatever the page has loaded.
+   */
+  async function downloadSessionLog() {
+    if (download.current) return;
+    const controller = new AbortController();
+    download.current = controller;
+    setDownloading(true);
+    setError(null);
+    try {
+      const events = await listAllAgentThreadEvents(job.id, { signal: controller.signal });
+      saveFile(
+        new Blob([toSessionLog(events)], { type: 'application/x-ndjson' }),
+        `session-log-${job.threadId ?? job.id}.ndjson`,
+      );
+      // Dismissed while the log was read: focus stays where the owner moved it.
+      if (openRef.current) close();
+    } catch (cause) {
+      if (controller.signal.aborted) return;
+      const reason = cause instanceof Error ? cause.message : t('taskActions.downloadLogFailed');
+      // The menu shows the reason while it is open; once dismissed, it would not.
+      if (openRef.current) setError(reason);
+      else toast.error(reason);
+    } finally {
+      download.current = null;
+      if (!controller.signal.aborted) setDownloading(false);
+    }
+  }
+
+  const itemClass = (inactive: boolean) => (inactive ? menuRowClass({ disabled: true }) : MENU_ROW);
+  return (
+    <div className="relative shrink-0">
+      <button
+        ref={trigger}
+        type="button"
+        aria-label={t('taskActions.options')}
+        title={t('taskActions.options')}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? id : undefined}
+        onClick={() => {
+          setError(null);
+          setOpen(!open);
+        }}
+        onKeyDown={popup.triggerKeyDown}
+        className="ui-icon-button ui-button-ghost"
+      >
+        <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+          <circle cx="5" cy="12" r="1.75" />
+          <circle cx="12" cy="12" r="1.75" />
+          <circle cx="19" cy="12" r="1.75" />
+        </svg>
+      </button>
+      {open && (
+        <div
+          id={id}
+          ref={menu}
+          role="menu"
+          aria-label={t('taskActions.options')}
+          style={popup.style}
+          className={`${MENU_ACTIONS} ${MENU_POSITIONED} w-48`}
+          onKeyDown={popup.onKeyDown}
+        >
+          <button
+            role="menuitem"
+            tabIndex={-1}
+            disabled={busy}
+            className={itemClass(busy)}
+            onClick={() => {
+              setTitle(job.title);
+              setError(null);
+              setOpen(false);
+              setRenaming(true);
+            }}
+          >
+            {t('taskActions.rename')}
+          </button>
+          {onEnvironment && (
+            <button
+              type="button"
+              role="menuitem"
+              tabIndex={-1}
+              className={itemClass(false)}
+              onClick={() => {
+                setOpen(false);
+                onEnvironment();
+              }}
+            >
+              {t('environment.configure')}
+            </button>
+          )}
+          <button
+            role="menuitem"
+            tabIndex={-1}
+            disabled={busy}
+            className={itemClass(busy)}
+            onClick={() => void togglePin()}
+          >
+            {t(pinned ? 'taskActions.unpin' : 'taskActions.pin')}
+          </button>
+          <button
+            role="menuitem"
+            tabIndex={-1}
+            disabled={!canFork || forking || busy}
+            className={itemClass(!canFork || forking || busy)}
+            onClick={() => {
+              close();
+              onFork();
+            }}
+          >
+            {t('taskActions.fork')}
+          </button>
+          <button
+            role="menuitem"
+            tabIndex={-1}
+            disabled={downloading}
+            aria-busy={downloading}
+            className={itemClass(downloading)}
+            onClick={() => void downloadSessionLog()}
+          >
+            {t(downloading ? 'taskActions.downloadingLog' : 'taskActions.downloadLog')}
+          </button>
+          {error && (
+            <p role="alert" className="px-3 py-2 text-xs text-status-error">
+              {error}
+            </p>
+          )}
+        </div>
+      )}
+      {renaming &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-[80] flex items-center justify-center bg-black/30 p-6"
+            onPointerDown={(event) => {
+              if (event.target === event.currentTarget && !busy) close();
+            }}
+          >
+            <form
+              ref={dialog}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby={`${id}-title`}
+              aria-busy={busy}
+              className="ui-card w-full max-w-md p-6 shadow-xl"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void saveTitle();
+              }}
+              onKeyDown={(event) => {
+                if (event.key !== 'Tab') return;
+                const items = [
+                  ...dialog.current!.querySelectorAll<HTMLElement>(
+                    'input:not(:disabled), button:not(:disabled)',
+                  ),
+                ];
+                const first = items[0],
+                  last = items[items.length - 1];
+                if (event.shiftKey && document.activeElement === first) {
+                  event.preventDefault();
+                  last?.focus();
+                } else if (!event.shiftKey && document.activeElement === last) {
+                  event.preventDefault();
+                  first?.focus();
+                }
+              }}
+            >
+              <h2 id={`${id}-title`} className="mb-4 text-base font-semibold text-foreground">
+                {t('taskActions.renameTitle')}
+              </h2>
+              <label htmlFor={`${id}-input`} className="mb-2 block text-sm text-muted">
+                {t('taskActions.title')}
+              </label>
+              <input
+                ref={input}
+                id={`${id}-input`}
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                maxLength={160}
+                required
+                readOnly={busy}
+                className="ui-input w-full"
+              />
+              {error && (
+                <p role="alert" className="mt-3 text-sm text-status-error">
+                  {error}
+                </p>
+              )}
+              <div className="mt-5 flex justify-end gap-2">
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={close}
+                  className="ui-button ui-button-ghost"
+                >
+                  {t('taskActions.cancel')}
+                </button>
+                <button
+                  type="submit"
+                  disabled={busy || !title.trim()}
+                  className="ui-button ui-button-primary"
+                >
+                  {t(busy ? 'taskActions.saving' : 'taskActions.save')}
+                </button>
+              </div>
+            </form>
+          </div>,
+          document.body,
+        )}
+    </div>
+  );
+}

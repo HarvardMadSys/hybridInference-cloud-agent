@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from cloud_agent.thread_stats import normalized_runtime_input_tokens
+from cloud_agent.domain.thread_stats import normalized_runtime_input_tokens
 
 
 def _event(usage, *, attempt_id=1, seq=1, **payload):

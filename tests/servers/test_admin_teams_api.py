@@ -21,7 +21,7 @@ from cloud_agent.domain.teams import (
     ApplicantRecord,
     TeamNotFound,
 )
-from cloud_agent.user_avatar import generate_user_avatar
+from cloud_agent.profile.user_avatar import generate_user_avatar
 
 ADMIN = {"Authorization": "Bearer test-teams-admin"}
 NOW = datetime(2026, 10, 15, 12, 0, tzinfo=UTC)

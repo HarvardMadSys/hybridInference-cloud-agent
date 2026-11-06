@@ -48,7 +48,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import httpx
 
 from cloud_agent_host.logging_utils import get_logger
-from cloud_agent_host.resources import daemon_client
+from cloud_agent_host.observe.resources import daemon_client
 from cloud_agent_shared.sandbox_incidents import (
     DROPPED_KIND,
     MCP_PHASES,
@@ -60,7 +60,7 @@ from cloud_agent_shared.sandbox_incidents import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
-    from cloud_agent_host.sandbox_resources import DockerResourceReading
+    from cloud_agent_host.observe.sandbox_resources import DockerResourceReading
 
 logger = get_logger(__name__)
 

@@ -2,7 +2,7 @@
 
 import { useT } from '@/components/providers';
 import { memo, useCallback, useRef, type ComponentProps, type ReactNode } from 'react';
-import { AttemptTurnFooter } from '../AttemptTurnFooter';
+import { AttemptTurnFooter } from '../conversation/AttemptTurnFooter';
 import {
   CopyIcon,
   copyMessage,
@@ -14,12 +14,18 @@ import {
   MessageContent,
   RewindIcon,
   ThreadTurn,
-} from '../ChatMessages';
+} from '../conversation/ChatMessages';
 import { ownerRunNote } from '../conversationJob';
-import { messageBlockKey, type ConversationTurnDescription } from '../conversationTurnNavigation';
-import type { RecordedFileSelection, RecordedTurnOutputs } from '../recordedTurnOutputs';
-import type { TranscriptPresentation } from '../transcriptPresentation';
-import { TurnDeliverables } from '../TurnDeliverables';
+import {
+  messageBlockKey,
+  type ConversationTurnDescription,
+} from '../conversation/conversationTurnNavigation';
+import type {
+  RecordedFileSelection,
+  RecordedTurnOutputs,
+} from '../conversation/recordedTurnOutputs';
+import type { TranscriptPresentation } from '../conversation/transcriptPresentation';
+import { TurnDeliverables } from '../conversation/TurnDeliverables';
 import type { AgentEvent, AgentJob } from '../types';
 import { OutcomeCard } from './RunOutcome';
 import type { JobDetailPanels } from './useJobDetailPanels';

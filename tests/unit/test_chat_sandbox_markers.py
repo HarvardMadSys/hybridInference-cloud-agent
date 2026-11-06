@@ -18,10 +18,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cloud_agent_host import chat_sandbox_markers as markers
-from cloud_agent_host.chat_sandbox import ChatSandboxManager
-from cloud_agent_host.chat_sandbox_models import ChatSandboxSpec
-from cloud_agent_host.sandbox import ContainerBackend
+from cloud_agent_host.container import chat_sandbox_markers as markers
+from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
+from cloud_agent_host.container.chat_sandbox_models import ChatSandboxSpec
+from cloud_agent_host.container.sandbox import ContainerBackend
 from cloud_agent_shared.environment_snapshots import SETUP_MARKER_NAME
 
 if TYPE_CHECKING:
@@ -191,7 +191,9 @@ def test_the_manager_runs_each_program_as_guest_root_trusting_only_root(
     manager = ChatSandboxManager(ContainerBackend(image="img"))
     # The final marker's methods first check that this is the exact running container.
     monkeypatch.setattr(
-        manager, "_require", lambda _spec: SimpleNamespace(container_id=CONTAINER, running=True)
+        manager.exact,
+        "require",
+        lambda _spec: SimpleNamespace(container_id=CONTAINER, running=True),
     )
     calls: list[tuple[list[str], dict[str, object]]] = []
 

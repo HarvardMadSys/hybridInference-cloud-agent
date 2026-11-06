@@ -2,17 +2,25 @@
 
 import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { RecordedFileSelection } from '../recordedTurnOutputs';
+import type { RecordedFileSelection } from '../conversation/recordedTurnOutputs';
 import {
   normalizeStepTab,
   type InspectorSelection,
   type RunTab,
   type StepTab,
-} from '../trajectoryInspectorTabs';
-import { buildTrajectorySteps, turnContextFromJobs, type TrajectoryStep } from '../trajectorySteps';
+} from '../trajectory/trajectoryInspectorTabs';
+import {
+  buildTrajectorySteps,
+  turnContextFromJobs,
+  type TrajectoryStep,
+} from '../trajectory/trajectorySteps';
 import type { AgentEvent, AgentJob } from '../types';
 import { useResizablePane } from '../useResizablePane';
-import { useWorkspaceTabs, type SideChatTab, type WorkspaceTab } from '../useWorkspaceTabs';
+import {
+  useWorkspaceTabs,
+  type SideChatTab,
+  type WorkspaceTab,
+} from '../workspace/useWorkspaceTabs';
 import { opensContext } from '../context/contextPresent';
 import { useKeyboardShortcuts } from '@/components/features/settings/keyboardShortcutPreferences';
 import { KEYBOARD_INPUT_SELECTOR, matchesShortcut } from '@/lib/keyboardShortcuts';

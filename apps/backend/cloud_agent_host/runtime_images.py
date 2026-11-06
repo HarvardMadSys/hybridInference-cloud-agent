@@ -32,7 +32,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.chat_sandbox_models import (
+from cloud_agent_host.container.chat_sandbox_models import (
     CHAT_NAMESPACE_LABEL,
     CHAT_RUNTIME_LABEL,
     CHAT_RUNTIME_VERSION_LABEL,

@@ -12,10 +12,26 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from tests.support.archive_policy import hooked_supervisor
 from tests.unit.test_sandbox_checkpoints import BASE, NEW, _digest, _Image
 from tests.unit.test_shared_session_supervisor import _Manager, _members, _spec
 
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.archive.sandbox_archive_s3 import (
+    SandboxArchiveDownloadError,
+    SandboxArchiveS3Config,
+    SandboxArchiveS3Uploader,
+    checkpoint_object_key,
+)
+from cloud_agent_host.archive.sandbox_checkpoints import (
+    CheckpointRestore,
+    SandboxCheckpointCapture,
+    SandboxCheckpointError,
+    SandboxCheckpointStore,
+    checkpoint_image_reference,
+    export_checkpoint_archive,
+    prepare_restore_archive,
+)
+from cloud_agent_host.container.chat_sandbox import (
     CHAT_CHECKPOINT_LABEL,
     CHAT_GENERATION_LABEL,
     CHAT_NAMESPACE_LABEL,
@@ -25,24 +41,9 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxStatus,
     SandboxRestoreFailed,
 )
-from cloud_agent_host.chat_sandbox_network import ChatSandboxNetwork
-from cloud_agent_host.sandbox import ContainerBackend, SandboxError
-from cloud_agent_host.sandbox_archive_s3 import (
-    SandboxArchiveDownloadError,
-    SandboxArchiveS3Config,
-    SandboxArchiveS3Uploader,
-    checkpoint_object_key,
-)
-from cloud_agent_host.sandbox_checkpoints import (
-    CheckpointRestore,
-    SandboxCheckpointCapture,
-    SandboxCheckpointError,
-    SandboxCheckpointStore,
-    checkpoint_image_reference,
-    export_checkpoint_archive,
-    prepare_restore_archive,
-)
-from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+from cloud_agent_host.container.sandbox import ContainerBackend, SandboxError
+from cloud_agent_host.network.chat_sandbox_network import ChatSandboxNetwork
+from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 _BASE_IMAGE = "ghcr.io/harvardmadsys/cloud-agent-sandbox@sha256:" + "a" * 64
@@ -482,7 +483,7 @@ def test_identity_accepts_a_checkpoint_image_only_for_the_checkpoint_it_names():
     manager = ChatSandboxManager(ContainerBackend(image="img"))
     labelled = {**spec.docker_labels(), CHAT_CHECKPOINT_LABEL: _CHECKPOINT}
 
-    manager._verify_identity(_inspection(spec, image=_REFERENCE, labels=labelled), spec)
+    manager.exact.verify_identity(_inspection(spec, image=_REFERENCE, labels=labelled), spec)
     for image, labels in (
         # A checkpoint image without the label that says which checkpoint.
         (_REFERENCE, spec.docker_labels()),
@@ -490,7 +491,7 @@ def test_identity_accepts_a_checkpoint_image_only_for_the_checkpoint_it_names():
         (checkpoint_image_reference("asbx_shared", "d" * 32), labelled),
     ):
         with pytest.raises(SandboxError, match="outside this chat/generation"):
-            manager._verify_identity(_inspection(spec, image=image, labels=labels), spec)
+            manager.exact.verify_identity(_inspection(spec, image=image, labels=labels), spec)
 
 
 def _stopped_container(
@@ -559,7 +560,7 @@ def test_deleting_a_restored_group_removes_the_checkpoint_image_it_ran(monkeypat
     spec = _moved_spec()
     manager = ChatSandboxManager(ContainerBackend(image="img"))
     daemon = _Daemon(_stopped_container(spec, checkpoint_id=checkpoint_id))
-    monkeypatch.setattr(manager, "_run", daemon.run)
+    monkeypatch.setattr(manager.exact, "run", daemon.run)
 
     manager.remove_stopped_archived(spec, container_id="container-restored")
 
@@ -573,14 +574,14 @@ def test_a_superseded_restored_container_takes_its_checkpoint_image_with_it(monk
     manager = ChatSandboxManager(ContainerBackend(image="img"))
     older = "d" * 32
     daemon = _Daemon(_stopped_container(spec, checkpoint_id=older, generation=1))
-    monkeypatch.setattr(manager, "_run", daemon.run)
+    monkeypatch.setattr(manager.exact, "run", daemon.run)
 
     assert manager.remove_superseded(spec)
     assert daemon.removed_images() == [checkpoint_image_reference(spec.sandbox_id, older)]
 
     # The checkpoint about to be loaded again stays, so it is not downloaded twice.
     daemon = _Daemon(_stopped_container(spec, checkpoint_id=_CHECKPOINT, generation=1))
-    monkeypatch.setattr(manager, "_run", daemon.run)
+    monkeypatch.setattr(manager.exact, "run", daemon.run)
 
     assert manager.remove_superseded(spec, keep_checkpoint=_CHECKPOINT)
     assert daemon.removed_images() == []
@@ -601,7 +602,7 @@ def test_a_container_that_fails_its_checks_once_created_is_removed_with_its_volu
     volume = [{"Type": "volume", "Name": "anonymous", "Destination": "/data"}]
     built = _stopped_container(spec, checkpoint_id=_CHECKPOINT, status="created", mounts=volume)
     daemon = _Daemon(None, created=built)
-    monkeypatch.setattr(manager, "_run", daemon.run)
+    monkeypatch.setattr(manager.exact, "run", daemon.run)
 
     with pytest.raises(SandboxError, match="forbidden volume mount"):
         manager.create(spec, image=_REFERENCE, checkpoint_id=_CHECKPOINT)
@@ -609,7 +610,7 @@ def test_a_container_that_fails_its_checks_once_created_is_removed_with_its_volu
     assert daemon.container is None
 
     daemon = _Daemon(built)
-    monkeypatch.setattr(manager, "_run", daemon.run)
+    monkeypatch.setattr(manager.exact, "run", daemon.run)
 
     with pytest.raises(SandboxError, match="forbidden volume mount"):
         manager.create(spec, image=_REFERENCE, checkpoint_id=_CHECKPOINT)
@@ -661,7 +662,7 @@ def test_a_moved_group_is_recreated_from_the_image_its_checkpoint_loads():
         hooked.append((sandbox_id, checkpoint.checkpoint_id))
         return _REFERENCE
 
-    supervisor = SharedChatSessionSupervisor(manager, checkpoint_restore_hook=restore)
+    supervisor = hooked_supervisor(manager, restore_checkpoint=restore)
 
     supervisor.register_manifest(_moved_spec(), _members(), restore=_restore())
 
@@ -678,7 +679,7 @@ def test_a_failed_restore_says_so_without_losing_the_chat():
     def broken(_sandbox_id: str, _checkpoint: CheckpointRestore) -> str:
         raise SandboxCheckpointError("checkpoint blob does not match its digest")
 
-    supervisor = SharedChatSessionSupervisor(manager, checkpoint_restore_hook=broken)
+    supervisor = hooked_supervisor(manager, restore_checkpoint=broken)
 
     with pytest.raises(SandboxRestoreFailed, match="does not match its digest"):
         supervisor.register_manifest(_moved_spec(), _members(), restore=_restore())
@@ -701,7 +702,7 @@ def test_a_failed_restore_leaves_no_checkpoint_image_behind(failing):
             raise SandboxCheckpointError("sandbox checkpoint could not be loaded")
         return _REFERENCE
 
-    supervisor = SharedChatSessionSupervisor(manager, checkpoint_restore_hook=load)
+    supervisor = hooked_supervisor(manager, restore_checkpoint=load)
 
     if failing is None:
         supervisor.register_manifest(_moved_spec(), _members(), restore=_restore())
@@ -722,9 +723,9 @@ def test_a_restore_refused_once_created_leaves_neither_container_nor_image(monke
     volume = [{"Type": "volume", "Name": "anonymous", "Destination": "/data"}]
     built = _stopped_container(spec, checkpoint_id=_CHECKPOINT, status="created", mounts=volume)
     daemon = _Daemon(None, created=built)
-    monkeypatch.setattr(manager, "_run", daemon.run)
-    supervisor = SharedChatSessionSupervisor(
-        manager, checkpoint_restore_hook=lambda _sandbox_id, _checkpoint: _REFERENCE
+    monkeypatch.setattr(manager.exact, "run", daemon.run)
+    supervisor = hooked_supervisor(
+        manager, restore_checkpoint=lambda _sandbox_id, _checkpoint: _REFERENCE
     )
 
     with pytest.raises(SandboxRestoreFailed, match="forbidden volume mount"):

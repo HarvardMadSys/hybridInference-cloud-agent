@@ -28,10 +28,10 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI
 from tests.support.owners import use_session_secret
 
-from cloud_agent import github_app
-from cloud_agent.github_app import AppConfig, GitHubAppCredentials
 from cloud_agent.settings import number_setting
-from cloud_agent.source_control_runtime import (
+from cloud_agent.source_control import github_app
+from cloud_agent.source_control.github_app import AppConfig, GitHubAppCredentials
+from cloud_agent.source_control.source_control_runtime import (
     GitHubAppProvider,
     GitHubAppState,
     GitLabOAuthLoad,
@@ -376,7 +376,7 @@ def test_gitlab_unconfigured_and_ready_are_what_they_were() -> None:
 async def test_saved_provider_settings_replace_credentials_and_close_retired_pool(
     monkeypatch: pytest.MonkeyPatch, private_pem: str
 ) -> None:
-    from cloud_agent import source_control_runtime
+    from cloud_agent.source_control import source_control_runtime
 
     values: dict[str, str] = {}
     monkeypatch.setattr(source_control_runtime, "settings_environment", lambda: dict(values))
@@ -424,7 +424,7 @@ async def test_saved_provider_settings_replace_credentials_and_close_retired_poo
 async def test_unused_rotated_generations_are_collectable_but_held_ones_still_work(
     monkeypatch: pytest.MonkeyPatch, private_pem: str
 ) -> None:
-    from cloud_agent import source_control_runtime
+    from cloud_agent.source_control import source_control_runtime
 
     values = {"AGENT_GITHUB_APP_ID": "first", "AGENT_GITHUB_APP_PRIVATE_KEY": private_pem}
     monkeypatch.setattr(source_control_runtime, "settings_environment", lambda: dict(values))
@@ -463,7 +463,7 @@ async def test_unused_rotated_generations_are_collectable_but_held_ones_still_wo
 def test_failed_app_reload_uses_current_interval_setting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, private_pem: str
 ) -> None:
-    from cloud_agent import source_control_runtime
+    from cloud_agent.source_control import source_control_runtime
 
     values = {"github_reload_interval_s": 30.0}
     monkeypatch.setattr(
@@ -535,7 +535,8 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "lifespan-wiring-encryption-key")
     monkeypatch.setattr(asyncpg, "create_pool", AsyncMock(return_value=AsyncMock()))
     monkeypatch.setattr(
-        "cloud_agent.identity_namespace.ensure_local_namespace", AsyncMock(return_value=None)
+        "cloud_agent.deployment.identity_namespace.ensure_local_namespace",
+        AsyncMock(return_value=None),
     )
     monkeypatch.setattr("cloud_agent.settings.initialize_settings", AsyncMock(return_value=None))
 
@@ -566,8 +567,8 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
         # This wiring test uses a fake pool; its notification listener must
         # also stay idle instead of resolving the test-only database hostname.
         "cloud_agent.bootstrap.lifespan.listen",
-        "cloud_agent.capacity_history.prune_host_capacity_history",
-        "cloud_agent.operational_health.monitor_queue",
+        "cloud_agent.workers.capacity_history.prune_host_capacity_history",
+        "cloud_agent.deployment.operational_health.monitor_queue",
         "cloud_agent.mcp.runtime.maintain_host_sessions",
         "cloud_agent.mcp.catalog.McpCatalog.run",
         "cloud_agent.workers.profiling_control.ProfilingPolicyWorker.run",
@@ -625,7 +626,7 @@ async def test_the_lifespan_hands_the_loops_the_provider_not_a_snapshot(
         side_effect=AssertionError("the MCP relay must not initialize source control")
     )
     monkeypatch.setattr(
-        "cloud_agent.source_control_runtime.SourceControlRuntime.from_env",
+        "cloud_agent.source_control.source_control_runtime.SourceControlRuntime.from_env",
         relay_runtime_builder,
     )
     started.clear()

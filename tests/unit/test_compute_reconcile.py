@@ -21,7 +21,7 @@ from cloud_agent.application import compute_reconcile
 from cloud_agent.application.compute_reconcile import ComputeReconciler
 from cloud_agent.application.compute_setup import HostRelease
 from cloud_agent.domain.compute import autoscaling_acquire_can_cancel, fingerprint, public_operation
-from cloud_agent.host_pool import hash_secret
+from cloud_agent.domain.host_pool import hash_secret
 from cloud_agent.ports.compute_resources import ComputeSchedulingSnapshot
 from cloud_agent.ports.external.compute_provider import (
     AcquisitionResolution,
@@ -39,8 +39,8 @@ from cloud_agent.ports.external.host_bootstrap import (
     HostInventory,
     PreflightResult,
 )
-from cloud_agent.sandbox_manager_client import SandboxManagerError
-from cloud_agent.schemas_compute import RenewalPolicy
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
+from cloud_agent.schemas.compute import RenewalPolicy
 from cloud_agent.workers.compute_resources import ComputeResourceWorker
 from cloud_agent_shared.shared_protocol import shared_deployment_capability
 

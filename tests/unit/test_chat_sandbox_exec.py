@@ -17,8 +17,8 @@ from typing import Any
 
 import pytest
 
-from cloud_agent_host import chat_sandbox as chat_sandbox_mod
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container import chat_sandbox as chat_sandbox_mod
+from cloud_agent_host.container.chat_sandbox import (
     CHAT_NAMESPACE_LABEL,
     CHAT_PROBE_LABEL,
     ENVIRONMENT_TEST_LABEL,
@@ -26,9 +26,9 @@ from cloud_agent_host.chat_sandbox import (
     ChatSandboxSpec,
     RetainedChatLost,
 )
-from cloud_agent_host.chat_sandbox_exec import ProvenContainers
-from cloud_agent_host.chat_sandbox_inspect import INSPECT_BATCH
-from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
+from cloud_agent_host.container.chat_sandbox_inspect import INSPECT_BATCH
+from cloud_agent_host.container.exact_container import ProvenContainers
+from cloud_agent_host.container.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
 
 _NAMESPACE = "this-stack"
 #: ``docker exec`` options that take a value, before the container is named.
@@ -159,14 +159,14 @@ def _world(monkeypatch, *, runtime: str | None = None):
     backend = ContainerBackend(image="img", runtime=runtime, sandbox_namespace=_NAMESPACE)
     manager = ChatSandboxManager(backend)
     docker = _Docker()
-    monkeypatch.setattr(manager, "_run", docker.run)
+    monkeypatch.setattr(manager.exact, "run", docker.run)
     monkeypatch.setattr(chat_sandbox_mod.subprocess, "run", docker.capture)
     # The group network is not what these tests are about: its proof is the
     # one test_chat_group_network.py runs against a model of Docker.
     monkeypatch.setattr(
         manager._network_lifecycle,
         "_require_group_network",
-        lambda spec, _current, *_snapshot: manager._require(spec),
+        lambda spec, _current, *_snapshot: manager.exact.require(spec),
     )
     monkeypatch.setattr(manager._network_lifecycle, "_sync_kata_guest_network", lambda *_args: None)
     return manager, docker
@@ -336,6 +336,20 @@ def test_a_proof_names_one_spec_and_goes_with_its_container():
     assert proven.get(spec) is None
 
 
+def test_only_an_inspection_of_exactly_the_spec_is_recorded_as_its_proof(monkeypatch):
+    manager, _docker, spec = _proven(monkeypatch)
+    proven = manager.exact.proven_container(spec)
+    assert proven is not None
+    manager.exact.forget_proof(spec)
+    other = _spec(generation=4)
+
+    with pytest.raises(SandboxError, match="outside this chat/generation"):
+        manager.exact.record_proof(other, proven)
+    assert manager.exact.proven_container(other) is None
+    assert manager.exact.record_proof(spec, proven) is proven
+    assert manager.exact.proven_container(spec) is proven
+
+
 def test_creating_a_container_forgets_the_proof_its_name_held(monkeypatch):
     manager, docker, spec = _proven(monkeypatch)
     docker.containers.pop("container-one")
@@ -348,11 +362,11 @@ def test_creating_a_container_forgets_the_proof_its_name_held(monkeypatch):
             return subprocess.CompletedProcess(argv, 0, "container-two\n", "")
         return run(argv, **kwargs)
 
-    monkeypatch.setattr(manager, "_run", create)
+    monkeypatch.setattr(manager.exact, "run", create)
 
     manager.create(spec)
 
-    assert manager._proven.get(spec) is None
+    assert manager.exact._proven.get(spec) is None
 
 
 # ── the host listing ──────────────────────────────────────────────────
@@ -395,7 +409,7 @@ def test_the_listing_skips_a_container_gone_since_ls_but_not_a_daemon_error(monk
             docker.containers.pop("owned-1", None)
         return run(argv, **kwargs)
 
-    monkeypatch.setattr(manager, "_run", removed_after_ls)
+    monkeypatch.setattr(manager.exact, "run", removed_after_ls)
     assert [item.container_id for item in manager.list()] == ["owned-0"]
 
     error = "Cannot connect to the Docker daemon"
@@ -405,7 +419,7 @@ def test_the_listing_skips_a_container_gone_since_ls_but_not_a_daemon_error(monk
             return subprocess.CompletedProcess(argv, 1, "", error)
         return run(argv, **kwargs)
 
-    monkeypatch.setattr(manager, "_run", daemon_error)
+    monkeypatch.setattr(manager.exact, "run", daemon_error)
     with pytest.raises(SandboxError, match="Cannot connect"):
         manager.list()
     # "Not found" only means a container that went away when it names one.

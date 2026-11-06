@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from cloud_agent.github_relay_policy import (
+from cloud_agent.source_control.github_relay_policy import (
     API_HOST,
     WEB_HOST,
     Outcome,

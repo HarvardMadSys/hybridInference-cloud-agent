@@ -21,14 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from cloud_agent_host.drivers import (
-    ClaudeCodeLiveSession,
-    HttpAgentLiveSession,
-    LaunchContext,
-    PiRpcSession,
-    TurnInput,
-    driver_for,
-)
+from cloud_agent_host.drivers import LaunchContext, TurnInput
 from cloud_agent_host.resident_transport import ResidentTurn
 from cloud_agent_host.runtimes import (
     EMPTY_RUNTIME_MCP_CONFIG,
@@ -36,7 +29,11 @@ from cloud_agent_host.runtimes import (
     OpencodeRuntime,
     PiRuntime,
 )
+from cloud_agent_host.runtimes.claude.session import ClaudeCodeLiveSession
 from cloud_agent_host.runtimes.context_snapshot import MAX_SNAPSHOT_ENTRIES, bridge_snapshot
+from cloud_agent_host.runtimes.http_bridge.session import HttpAgentLiveSession
+from cloud_agent_host.runtimes.live import driver_for
+from cloud_agent_host.runtimes.pi.session import PiRpcSession
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "deploy/sandbox/http-agent-live-bridge"

@@ -11,22 +11,25 @@ from tests.servers.test_admin_runs import ADMIN, setup as run_setup  # noqa: F40
 from tests.support.owners import SESSIONS
 from tests.support.usage import END, START
 
-from cloud_agent import sandbox_manager_routing
 from cloud_agent.accounts.config import LOCAL_SESSION_COOKIE
-from cloud_agent.admin_observability import encode_cursor
-from cloud_agent.admin_sandbox_inventory import SandboxInventoryCursor, inventory_scope
-from cloud_agent.admin_sandboxes import (
+from cloud_agent.api import admin_sandboxes
+from cloud_agent.api.deps import get_storage
+from cloud_agent.app import create_app, create_mcp_app
+from cloud_agent.domain.cursors import encode_cursor
+from cloud_agent.sandbox_manager import sandbox_manager_routing
+from cloud_agent.sandbox_manager.sandbox_manager_client import (
+    SandboxManagerClient,
+    SandboxManagerError,
+)
+from cloud_agent.sandbox_manager.sandbox_manager_routing import SandboxManagerUrlRefused
+from cloud_agent.schemas.admin_sandbox_inventory import SandboxInventoryCursor, inventory_scope
+from cloud_agent.schemas.admin_sandboxes import (
     SANDBOX_CURSOR_SCOPE,
     SandboxCursor,
     SandboxTrajectoryCursor,
     sandbox_cursor_scope,
     sandbox_trajectory_cursor_scope,
 )
-from cloud_agent.api import admin_sandboxes
-from cloud_agent.api.deps import get_storage
-from cloud_agent.app import create_app, create_mcp_app
-from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
-from cloud_agent.sandbox_manager_routing import SandboxManagerUrlRefused
 
 PREFIX = "/admin/agent/sandboxes"
 
@@ -739,7 +742,7 @@ async def test_detail_and_control_require_current_admin_access(setup, method, pa
     ],
 )
 async def test_reviewed_stop_passes_authenticated_actor_to_atomic_command(setup, result, status):
-    from cloud_agent.admin_sandboxes import AdminSandboxDetail
+    from cloud_agent.schemas.admin_sandboxes import AdminSandboxDetail
 
     app, queries, _ = setup
     queries.detail = AsyncMock(
@@ -1025,7 +1028,7 @@ async def test_stop_keeps_atomic_stale_refusal_when_review_fences_do_not_match(
 async def test_inventory_controls_pass_review_and_authenticated_actor(
     setup, archived, result, status
 ):
-    from cloud_agent.admin_sandboxes import AdminSandboxDetail
+    from cloud_agent.schemas.admin_sandboxes import AdminSandboxDetail
 
     app, queries, _ = setup
     queries.detail = AsyncMock(
@@ -1138,7 +1141,7 @@ async def test_inventory_controls_reject_unreviewed_payloads(setup, action, chan
     [("accepted", 202), ("not_found", 404), ("stale", 409), ("busy", 409), ("not_stopped", 409)],
 )
 async def test_reviewed_delete_queues_authenticated_atomic_request(setup, result, status):
-    from cloud_agent.admin_sandboxes import AdminSandboxDetail
+    from cloud_agent.schemas.admin_sandboxes import AdminSandboxDetail
 
     app, queries, _ = setup
     queries.detail = AsyncMock(
@@ -1527,7 +1530,7 @@ async def test_delete_without_archive_configuration_does_not_fence_sandbox(setup
 
 
 async def test_discard_deletion_does_not_require_archive_configuration(setup):
-    from cloud_agent.admin_sandboxes import AdminSandboxDetail
+    from cloud_agent.schemas.admin_sandboxes import AdminSandboxDetail
 
     app, queries, _ = setup
     queries.detail = AsyncMock(

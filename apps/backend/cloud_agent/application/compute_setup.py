@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 from dotenv import dotenv_values
 
 from cloud_agent.domain.compute import ComputeRefusal, fingerprint
+from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.ports.external.compute_provider import SshConnection
 from cloud_agent.providers.compute.sandbox_image import find_published_sandbox_image
 from cloud_agent.providers.compute.setup_tunnels import (
@@ -33,11 +34,14 @@ from cloud_agent_shared.sandbox_manager_compat import manager_environment
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from cloud_agent.compute_config import ComputeConfiguration, ComputeSecretResolver
-    from cloud_agent.compute_secrets import ComputeSecretStore
     from cloud_agent.ports.compute_resources import ComputeResourceRepository
+    from cloud_agent.providers.compute.compute_config import (
+        ComputeConfiguration,
+        ComputeSecretResolver,
+    )
+    from cloud_agent.providers.compute.compute_secrets import ComputeSecretStore
     from cloud_agent.providers.compute.setup_tunnels import SshTunnelSetup
-    from cloud_agent.schemas_compute import AutomaticDeploymentSetup, SetupMachine
+    from cloud_agent.schemas.compute import AutomaticDeploymentSetup, SetupMachine
 
 
 @dataclass(frozen=True)
@@ -84,10 +88,17 @@ def _request_document(request: AutomaticDeploymentSetup) -> dict[str, Any]:
     return request.model_dump(mode="json")
 
 
+class IncompleteHostBundle(ValueError):
+    """A safe host archive that lacks part of the Host recipe."""
+
+    def __init__(self) -> None:
+        super().__init__("incomplete")
+
+
 def validate_host_bundle(bundle: bytes) -> None:
     """Reject an unsafe or incomplete host archive.
 
-    Raises ``ValueError('invalid')`` or ``ValueError('incomplete')``.
+    Raises ``ValueError('invalid')`` or :class:`IncompleteHostBundle`.
     """
     try:
         with tarfile.open(fileobj=io.BytesIO(bundle), mode="r:*") as archive:
@@ -107,7 +118,7 @@ def validate_host_bundle(bundle: bytes) -> None:
     except (tarfile.TarError, OSError, ValueError) as exc:
         raise ValueError("invalid") from exc
     if not names >= _HOST_BUNDLE_FILES:
-        raise ValueError("incomplete")
+        raise IncompleteHostBundle
 
 
 def load_host_release(directory: Path, *, expected_sha: str) -> HostRelease:
@@ -493,8 +504,8 @@ class AutomaticComputeSetup:
                         "profile:" + profile_id, "deployment_profile", json.dumps(assets)
                     ),
                 )
-            except ValueError as exc:
-                if str(exc) != "deployment_profile_exists":
+            except StorageConflict as exc:
+                if exc.code is not ConflictCode.DEPLOYMENT_PROFILE_EXISTS:
                     raise
                 # Another API replica reserved this route. Reuse its inputs
                 # only for the same request; another request keeps its route.

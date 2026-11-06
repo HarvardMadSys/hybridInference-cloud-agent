@@ -9,7 +9,7 @@ only what the call's input named.
 
 from __future__ import annotations
 
-from cloud_agent.command_executions import (
+from cloud_agent.context.command_executions import (
     MAX_COMMAND_CHARS,
     MAX_OUTPUT_PREVIEW,
     runtime_command_tools,
@@ -130,7 +130,7 @@ CALLS_SQL = f"""
 """
 
 #: Claude Code records a native tool's structured outcome outside the content
-#: block (``runtimes/claude.py::_from_user``): a background launch names its
+#: block (``runtimes/claude/adapter.py::_from_user``): a background launch names its
 #: shell id, an exit, or an interrupted run. Only these small scalars are
 #: projected — never the whole object, whose stdout/stderr can be megabytes and
 #: whose truncation would produce invalid JSON and lose the exit status.

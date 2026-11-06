@@ -17,7 +17,7 @@ from tests.integration.storage.test_agent_job_store import (
 )
 from tests.support.follow_ups import append_follow_up
 
-from cloud_agent.goals.models import GoalInput
+from cloud_agent.schemas.goals import GoalInput
 from cloud_agent.storage._sql.compute_admission import host_compute_admission
 from cloud_agent_shared.sandbox_archive_settings import SANDBOX_ARCHIVE_CAPABILITY
 from cloud_agent_shared.sandbox_restore import (

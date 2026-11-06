@@ -32,7 +32,7 @@ async def bind_identity_source(pool: asyncpg.Pool) -> None:
         check_local_configuration,
         refuse_retired_configuration,
     )
-    from cloud_agent.identity_namespace import ensure_local_namespace
+    from cloud_agent.deployment.identity_namespace import ensure_local_namespace
 
     refuse_retired_configuration()
     check_local_configuration()
@@ -72,7 +72,7 @@ def _check_model_connection_key() -> None:
     """
     from cloud_agent.accounts.config import LocalAuthNotConfigured
     from cloud_agent.application.model_connections import model_connection_cipher
-    from cloud_agent.credential_cipher import CredentialCipherError
+    from cloud_agent.crypto.credential_cipher import CredentialCipherError
 
     try:
         model_connection_cipher()

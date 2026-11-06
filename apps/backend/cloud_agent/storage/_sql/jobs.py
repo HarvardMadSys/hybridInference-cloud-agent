@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from cloud_agent.domain.sandbox_group import GroupState, sql_list
 from cloud_agent.storage._sql.goals import PAUSE_GOALS_SQL
 from cloud_agent.storage._sql.rows import job_row_to_dict
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
@@ -269,12 +270,12 @@ async def fail_discontinuous_follow_ups(
     itself only checks eligibility and never needs to promote a queued turn.
     """
     invalid = await conn.fetch(
-        """
+        f"""
             WITH invalid_threads AS (
                 SELECT DISTINCT child.thread_id,
                        COALESCE(
                            m.context_status = 'lost' OR m.native_state = 'lost'
-                           OR g.state IN ('stopped_dirty', 'lost'),
+                           OR g.state IN {sql_list(GroupState.STOPPED_DIRTY, GroupState.LOST)},
                            FALSE
                        ) AS sandbox_lost
                 FROM agent_jobs child
@@ -285,7 +286,7 @@ async def fail_discontinuous_follow_ups(
                   AND ($1::text IS NULL OR parent.id = $1)
                   AND (
                         m.context_status = 'lost' OR m.native_state = 'lost'
-                        OR g.state IN ('stopped_dirty', 'lost')
+                        OR g.state IN {sql_list(GroupState.STOPPED_DIRTY, GroupState.LOST)}
                         OR (parent.state = 'succeeded' AND m.thread_id IS NULL)
                   )
             )

@@ -19549,43 +19549,6 @@
         "title": "RequestRuntimeUpgradeRequest",
         "type": "object"
       },
-      "RequestTiming": {
-        "additionalProperties": false,
-        "description": "One model request the Gateway timed, by the id the CLI reported for it.",
-        "properties": {
-          "latency_ms": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Latency Ms"
-          },
-          "response_id": {
-            "title": "Response Id",
-            "type": "string"
-          },
-          "ttft_ms": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Ttft Ms"
-          }
-        },
-        "required": [
-          "response_id"
-        ],
-        "title": "RequestTiming",
-        "type": "object"
-      },
       "ResetPasswordRequest": {
         "additionalProperties": false,
         "description": "Choose a new password from a reset link.",
@@ -23719,7 +23682,7 @@
       },
       "ThreadTiming": {
         "additionalProperties": false,
-        "description": "Where the executions' time went, and how much of it could be split.",
+        "description": "Where the executions' time went.",
         "properties": {
           "active_ms": {
             "minimum": 0.0,
@@ -23739,17 +23702,13 @@
             "type": "integer"
           },
           "executions_split": {
-            "minimum": 0.0,
+            "default": 0,
             "title": "Executions Split",
             "type": "integer"
           },
           "gateway": {
-            "enum": [
-              "available",
-              "partial",
-              "unavailable",
-              "not_recorded"
-            ],
+            "const": "not_recorded",
+            "default": "not_recorded",
             "title": "Gateway",
             "type": "string"
           },
@@ -23765,7 +23724,7 @@
             "title": "Gateway Reason"
           },
           "model_requests": {
-            "minimum": 0.0,
+            "default": 0,
             "title": "Model Requests",
             "type": "integer"
           },
@@ -23782,7 +23741,8 @@
           },
           "requests": {
             "items": {
-              "$ref": "#/components/schemas/RequestTiming"
+              "additionalProperties": true,
+              "type": "object"
             },
             "title": "Requests",
             "type": "array"
@@ -23815,14 +23775,11 @@
             },
             "propertyNames": {
               "enum": [
-                "ttft",
                 "reasoning",
                 "text",
                 "toolarg",
-                "gen",
                 "tools",
-                "unsplit",
-                "other"
+                "unsplit"
               ]
             },
             "title": "Totals",
@@ -23833,11 +23790,8 @@
           "active_ms",
           "totals",
           "executions",
-          "executions_split",
-          "model_requests",
           "tool_calls",
           "tool_calls_unpaired",
-          "gateway",
           "segments"
         ],
         "title": "ThreadTiming",
@@ -23853,14 +23807,11 @@
           },
           "kind": {
             "enum": [
-              "ttft",
               "reasoning",
               "text",
               "toolarg",
-              "gen",
               "tools",
-              "unsplit",
-              "other"
+              "unsplit"
             ],
             "title": "Kind",
             "type": "string"
@@ -39328,7 +39279,7 @@
     },
     "/v1/agent/jobs/{job_id}/thread/context/timing": {
       "get": {
-        "description": "Where the caller's conversation's execution time went.\n\nRead when the dashboard asks, never at settlement: the attempts' recorded\nspans and tool windows. No request log is recorded for an owner's own\nmodel connection, so TTFT and generation stay \"not recorded\" and each\nexecution's model and harness time is reported together, not split.\nNothing is asked of a CLI.",
+        "description": "Where the caller's conversation's execution time went.\n\nRead when the dashboard asks, never at settlement: the attempts' recorded\nspans and tool windows. No request log is recorded for an owner's own\nmodel connection, so each execution's model and harness time is reported\ntogether, not split. Nothing is asked of a CLI.",
         "operationId": "get_thread_context_timing_v1_agent_jobs__job_id__thread_context_timing_get",
         "parameters": [
           {
@@ -46491,7 +46442,7 @@
     },
     "/v1/agent/usage/tokens": {
       "get": {
-        "description": "Agent-reported model usage of the owner's runs created in the range.\n\nA range larger than one bounded selection is summed in bounded batches\n(:mod:`cloud_agent.usage_batches`), never narrowed.\n\nRaises:\n    HTTPException: 422 when even a minimal batch exceeds the aggregation's\n        bounds or the response would, 503 when it cannot be read in time.\n        Neither returns a partial sum.",
+        "description": "Agent-reported model usage of the owner's runs created in the range.\n\nA range larger than one bounded selection is summed in bounded batches\n(:mod:`cloud_agent.usage.usage_batches`), never narrowed.\n\nRaises:\n    HTTPException: 422 when even a minimal batch exceeds the aggregation's\n        bounds or the response would, 503 when it cannot be read in time.\n        Neither returns a partial sum.",
         "operationId": "read_owner_tokens_v1_agent_usage_tokens_get",
         "parameters": [
           {

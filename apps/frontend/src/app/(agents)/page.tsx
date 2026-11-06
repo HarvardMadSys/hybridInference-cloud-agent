@@ -1,4 +1,4 @@
-import { TaskComposer } from '@/components/features/agents/TaskComposer';
+import { TaskComposer } from '@/components/features/agents/composer/TaskComposer';
 
 interface AgentsPageProps {
   searchParams?: Promise<{ repo?: string | string[] }>;

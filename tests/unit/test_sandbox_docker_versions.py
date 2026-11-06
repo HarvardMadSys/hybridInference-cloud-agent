@@ -14,8 +14,8 @@ from typing import Any
 
 import pytest
 
-from cloud_agent_host import sandbox as sandbox_mod
-from cloud_agent_host.sandbox import ContainerBackend, SandboxError
+from cloud_agent_host.container import sandbox as sandbox_mod
+from cloud_agent_host.container.sandbox import ContainerBackend, SandboxError
 from cloud_agent_shared.egress import network_from_env
 
 _NETWORK = network_from_env(

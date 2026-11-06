@@ -14,10 +14,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from tests.integration.storage.test_host_pool_store import db as db, store as store
 
 from cloud_agent.application.compute_resources import ComputeCommands
-from cloud_agent.compute_config import ComputeConfiguration
-from cloud_agent.compute_registry import ComputeProviderRegistry
-from cloud_agent.compute_secrets import ComputeSecretStore, StoredDeploymentResolver
-from cloud_agent.schemas_compute import AddDeploymentProfile
+from cloud_agent.providers.compute.compute_config import ComputeConfiguration
+from cloud_agent.providers.compute.compute_registry import ComputeProviderRegistry
+from cloud_agent.providers.compute.compute_secrets import (
+    ComputeSecretStore,
+    StoredDeploymentResolver,
+)
+from cloud_agent.schemas.compute import AddDeploymentProfile
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

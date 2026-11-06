@@ -18,7 +18,7 @@ place runs nothing.
 
 **The rules live on the host, not in the sandbox.** They are one table of this
 deployment's in the host's nftables, installed by a trusted helper before any
-group network exists (:mod:`cloud_agent_host.network_guard`). A drop in any
+group network exists (:mod:`cloud_agent_host.network.network_guard`). A drop in any
 base chain on a hook is final, so Docker's own accept rules cannot undo it, and
 the table never flushes or edits anyone else's. Traffic is recognised by the
 bridge interface it arrives on: every group bridge is named with this

@@ -28,7 +28,7 @@ from tests.support.ssh_keys import host_key, private_key
 
 from cloud_agent.api import ssh_servers
 from cloud_agent.application.ssh_servers import ssh_key_cipher
-from cloud_agent.sandbox_manager_client import SandboxManagerClient
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerClient
 from cloud_agent_shared.ssh_access import SSH_ACCESS_CAPABILITY, SshAccess
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]

@@ -9,7 +9,7 @@ a fabricated one.
 
 from __future__ import annotations
 
-from cloud_agent_host.resources import (
+from cloud_agent_host.observe.resources import (
     SHARED_MEMBER_ACCOUNTING_VERSION,
     sample_from_stats,
     shared_member_resource_rollup,

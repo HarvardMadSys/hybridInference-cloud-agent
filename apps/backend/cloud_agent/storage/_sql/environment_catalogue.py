@@ -10,7 +10,7 @@ from cloud_agent_shared.environment import EnvironmentScripts
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from cloud_agent.environments import EnvironmentCipher
+    from cloud_agent.environments.environments import EnvironmentCipher
 
 
 async def versions(conn: Any, rows: list[Any]) -> dict[str, dict[str, Any]]:

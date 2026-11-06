@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Any
 
 from dotenv import dotenv_values
 
-from cloud_agent.compute_secrets import ComputeSecretError
 from cloud_agent.ports.external.compute_provider import ProviderError
 from cloud_agent.ports.external.host_bootstrap import (
     BootstrapResult,
@@ -30,6 +29,7 @@ from cloud_agent.ports.external.host_bootstrap import (
     RecordedHostState,
     TransferResult,
 )
+from cloud_agent.providers.compute.compute_secrets import ComputeSecretError
 from cloud_agent.providers.compute.release_scripts import _INVENTORY, _QUIESCE
 from cloud_agent.providers.compute.ssh import known_hosts_line
 from cloud_agent.providers.compute.transfer_scripts import (
@@ -784,6 +784,45 @@ def _remote_reasons(value: object) -> tuple[str, ...]:
     return tuple(reason for reason in value if _remote_reason(reason) is not None)
 
 
+def _check_host_environment(values: dict[str, str | None]) -> None:
+    """Refuse a host environment outside the approved security boundary."""
+    if _retired_inference(values):
+        raise ProviderError(
+            "deployment_profile_invalid",
+            "Deployment profile still configures the removed Gateway inference relay "
+            "or account mode (AGENT_AUTH_MODE, AGENT_GATEWAY_*, AGENT_TUNNEL_SSH_* and "
+            "the relay's ports); remove those settings",
+        )
+    if (
+        any(not name.startswith("AGENT_") and name not in _ALLOWED_NON_AGENT_ENV for name in values)
+        or any(name in values for name in _FORBIDDEN_ENV)
+        or values.get("AGENT_SANDBOX_BACKEND", "kata") != "kata"
+    ):
+        raise ProviderError(
+            "deployment_profile_invalid",
+            "Deployment profile violates the approved host security boundary",
+        )
+    if any(not values.get(name) for name in _REQUIRED_ENV):
+        raise ProviderError(
+            "deployment_profile_invalid",
+            "Deployment profile is missing required relay, sandbox manager or network settings",
+        )
+
+
+def _check_single_line(values: dict[str, str | None]) -> None:
+    """Refuse an environment value Compose's single quotes could not hold literally."""
+    for key, environment_value in values.items():
+        if (
+            not re.fullmatch(r"[A-Z][A-Z0-9_]*", key)
+            or environment_value is None
+            or any(c in environment_value for c in ("\n", "\r", "'", "\x00"))
+        ):
+            raise ProviderError(
+                "deployment_profile_invalid",
+                "Deployment environment must contain single-line values",
+            )
+
+
 class SshHostBootstrap:
     """Install and verify the existing host deployment recipe through SSH."""
 
@@ -888,12 +927,8 @@ class SshHostBootstrap:
             "identity": identity,
         }
 
-    async def _archive(  # noqa: C901, PLR0912 complexity baseline, #771
-        self,
-        profile: DeploymentProfile,
-        intent: BootstrapIntent,
-        enrollment_token: SecretStr | None,
-    ) -> bytes:
+    async def _trusted_bundle(self, profile: DeploymentProfile) -> bytes:
+        """Read the profile's source bundle and verify its digest."""
         # The compute worker shares the API's event loop. Reading, hashing and
         # repacking a bundle of up to 64 MiB takes seconds, so it runs in a
         # thread: requests and Host heartbeats are served meanwhile.
@@ -911,6 +946,15 @@ class SshHostBootstrap:
                 "deployment_profile_invalid",
                 "Trusted deployment bundle digest differs from its profile",
             )
+        return source
+
+    async def _archive(
+        self,
+        profile: DeploymentProfile,
+        intent: BootstrapIntent,
+        enrollment_token: SecretStr | None,
+    ) -> bytes:
+        source = await self._trusted_bundle(profile)
         approved = ("deployment:", "stored-profile:")
         if not profile.environment_ref.startswith(approved) or any(
             not ref.startswith(approved) for ref in profile.files.values()
@@ -931,30 +975,7 @@ class SshHostBootstrap:
         }.items():
             template = template.replace("{" + key + "}", value)
         values = manager_environment(dotenv_values(stream=io.StringIO(template), interpolate=False))
-        if _retired_inference(values):
-            raise ProviderError(
-                "deployment_profile_invalid",
-                "Deployment profile still configures the removed Gateway inference relay "
-                "or account mode (AGENT_AUTH_MODE, AGENT_GATEWAY_*, AGENT_TUNNEL_SSH_* and "
-                "the relay's ports); remove those settings",
-            )
-        if (
-            any(
-                not name.startswith("AGENT_") and name not in _ALLOWED_NON_AGENT_ENV
-                for name in values
-            )
-            or any(name in values for name in _FORBIDDEN_ENV)
-            or values.get("AGENT_SANDBOX_BACKEND", "kata") != "kata"
-        ):
-            raise ProviderError(
-                "deployment_profile_invalid",
-                "Deployment profile violates the approved host security boundary",
-            )
-        if any(not values.get(name) for name in _REQUIRED_ENV):
-            raise ProviderError(
-                "deployment_profile_invalid",
-                "Deployment profile is missing required relay, sandbox manager or network settings",
-            )
+        _check_host_environment(values)
         values.update(
             {
                 "COMPOSE_PROJECT": intent.project,
@@ -974,16 +995,7 @@ class SshHostBootstrap:
             values["AGENT_ENROLL_TOKEN"] = enrollment_token.get_secret_value()
         else:
             values.pop("AGENT_ENROLL_TOKEN", None)
-        for key, environment_value in values.items():
-            if (
-                not re.fullmatch(r"[A-Z][A-Z0-9_]*", key)
-                or environment_value is None
-                or any(c in environment_value for c in ("\n", "\r", "'", "\x00"))
-            ):
-                raise ProviderError(
-                    "deployment_profile_invalid",
-                    "Deployment environment must contain single-line values",
-                )
+        _check_single_line(values)
         # Compose's single quotes disable interpolation; shell metacharacters
         # and dollar signs remain literal, never code or an environment lookup.
         env = "".join(f"{key}='{value}'\n" for key, value in values.items()).encode()

@@ -30,10 +30,9 @@ from httpx import ASGITransport, AsyncClient
 from tests.support.owners import connection_claim
 from tests.support.storage import AllCapabilities
 
-from cloud_agent import sandbox_manager_routing
 from cloud_agent.api import admin_hosts, hosts
 from cloud_agent.api.deps import get_storage, verify_admin_access
-from cloud_agent.host_pool import (
+from cloud_agent.domain.host_pool import (
     HOST_DISABLED,
     HOST_DRAINING,
     HOST_ENROLLING,
@@ -43,7 +42,9 @@ from cloud_agent.host_pool import (
     normalize_capabilities,
     transition_allowed,
 )
-from cloud_agent.sandbox_manager_routing import (
+from cloud_agent.ports.errors import ConflictCode, StorageConflict
+from cloud_agent.sandbox_manager import sandbox_manager_routing
+from cloud_agent.sandbox_manager.sandbox_manager_routing import (
     ENV_SANDBOX_MANAGER_HOSTS,
     PROBE_FAILED_FOR_HOST,
     SandboxManagerUrlRefused,
@@ -183,7 +184,7 @@ class FakeHostPoolStore(AllCapabilities):
     ) -> dict[str, Any]:
         existing = self.rows.get(host)
         if existing is not None and existing["drain_fence_active"]:
-            raise ValueError("host_drain_fenced")
+            raise StorageConflict(ConflictCode.HOST_DRAIN_FENCED)
         return self.seed(
             host,
             status=HOST_ENROLLING,
@@ -810,7 +811,7 @@ async def test_removal_between_token_consumption_and_registration_refuses_enroll
         "/admin/agent/runner-hosts/enroll-token", json={"host": "runner-a"}, headers=ADMIN
     )
     token = issued.json()["enroll_token"]
-    register = AsyncMock(side_effect=ValueError("enrollment_token_removed"))
+    register = AsyncMock(side_effect=StorageConflict(ConflictCode.ENROLLMENT_TOKEN_REMOVED))
     monkeypatch.setattr(store, "register_host", register)
 
     response = await async_client.post(
@@ -957,9 +958,7 @@ async def test_reenrollment_cannot_clear_an_active_deployment_fence(client):
     assert acquired[:2] == ("ok", HOST_ONLINE)
     assert acquired[2] != expected_epoch
     issued = await async_client.post(
-        "/admin/agent/runner-hosts/enroll-token",
-        json={"host": "runner-a"},
-        headers=ADMIN,
+        "/admin/agent/runner-hosts/enroll-token", json={"host": "runner-a"}, headers=ADMIN
     )
     enroll_token = issued.json()["enroll_token"]
 
@@ -1158,7 +1157,7 @@ async def test_a_host_holding_more_versions_than_a_menu_may_list_is_still_heard(
     (``test_host_report_bounds.py``).
     """
     from cloud_agent.schemas import HOST_VERSION_MENU_MAX_ITEMS, WorkerClaimAttestation
-    from cloud_agent_host.sandbox import ContainerBackend
+    from cloud_agent_host.container.sandbox import ContainerBackend
 
     async_client, store = client
     credential = await _enroll(async_client, store)
@@ -1180,7 +1179,7 @@ async def test_a_host_holding_more_versions_than_a_menu_may_list_is_still_heard(
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     with monkeypatch.context() as patched:
-        patched.setattr("cloud_agent_host.sandbox.subprocess.run", docker)
+        patched.setattr("cloud_agent_host.container.sandbox.subprocess.run", docker)
         stamp = ContainerBackend(image="img:1").version_stamp()
 
     response = await async_client.post(
@@ -1697,14 +1696,14 @@ def test_a_claim_warns_about_a_new_untrusted_group_without_a_disk_quota(
     caplog, disk_limit_mib, profile, thread_sandbox, warned
 ):
     """A warning only: the claim itself is never changed by the quota."""
-    from cloud_agent.api.worker import _warn_on_unbounded_untrusted_group
+    from cloud_agent.application.turn_claim import warn_on_unbounded_untrusted_group
     from cloud_agent.schemas import WorkerClaimAttestation
 
     claim = {"id": "ajob_1", "execution_profile": profile, "thread_sandbox": thread_sandbox}
     attestation = WorkerClaimAttestation(sandbox_disk_limit_mib=disk_limit_mib)
 
     with caplog.at_level(logging.WARNING):
-        _warn_on_unbounded_untrusted_group(claim, attestation, host="runner-a")
+        warn_on_unbounded_untrusted_group(claim, attestation, host="runner-a")
 
     events = [
         record

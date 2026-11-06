@@ -21,9 +21,9 @@ import pytest
 from fastapi import FastAPI
 from tests.support.owners import use_session_secret
 
-from cloud_agent import sandbox_manager_routing
 from cloud_agent.app import lifespan
-from cloud_agent.github_app import AppConfig, GitHubAppCredentials
+from cloud_agent.sandbox_manager import sandbox_manager_routing
+from cloud_agent.source_control.github_app import AppConfig, GitHubAppCredentials
 
 _KEY = "-----BEGIN RSA PRIVATE KEY-----\nnot-a-real-key\n-----END RSA PRIVATE KEY-----"
 
@@ -42,7 +42,8 @@ async def test_the_lifespan_owns_the_shared_pool(monkeypatch) -> None:
     # Initialization/import semantics have separate repository-backed tests.
     monkeypatch.setattr("cloud_agent.settings.initialize_settings", AsyncMock())
     monkeypatch.setattr(
-        "cloud_agent.identity_namespace.ensure_local_namespace", AsyncMock(return_value=None)
+        "cloud_agent.deployment.identity_namespace.ensure_local_namespace",
+        AsyncMock(return_value=None),
     )
     app = FastAPI()
 
@@ -65,7 +66,8 @@ async def test_the_shared_pool_keeps_no_cookies(monkeypatch) -> None:
     monkeypatch.setattr(asyncpg, "create_pool", AsyncMock(return_value=AsyncMock()))
     monkeypatch.setattr("cloud_agent.settings.initialize_settings", AsyncMock())
     monkeypatch.setattr(
-        "cloud_agent.identity_namespace.ensure_local_namespace", AsyncMock(return_value=None)
+        "cloud_agent.deployment.identity_namespace.ensure_local_namespace",
+        AsyncMock(return_value=None),
     )
     app = FastAPI()
     url = "https://api.github.example/repos"
@@ -102,7 +104,8 @@ async def test_the_lifespan_opens_its_database_pool_without_jit(monkeypatch) -> 
     monkeypatch.setattr(asyncpg, "create_pool", create_pool)
     monkeypatch.setattr("cloud_agent.settings.initialize_settings", AsyncMock())
     monkeypatch.setattr(
-        "cloud_agent.identity_namespace.ensure_local_namespace", AsyncMock(return_value=None)
+        "cloud_agent.deployment.identity_namespace.ensure_local_namespace",
+        AsyncMock(return_value=None),
     )
 
     async with lifespan(FastAPI(), background=False):

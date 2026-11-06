@@ -598,7 +598,7 @@ async def test_deleting_an_idle_shared_session_keeps_workspace_sibling_and_billi
 
 async def test_deleting_a_working_session_cancels_its_turns_and_goal(pool, store: Storage):
     """Permanent deletion need not wait for archive or idleness; it ends the work."""
-    from cloud_agent.goals.models import GoalInput
+    from cloud_agent.schemas.goals import GoalInput
 
     queued = await _create_job(store)
     running = await _create_job(store)

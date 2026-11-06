@@ -41,9 +41,11 @@ from tests.integration.storage.test_sandbox_restore_store import (
 from tests.support.follow_ups import append_follow_up
 
 from cloud_agent.storage._sql.sandbox import fence_sandbox_start
-from cloud_agent.storage.repositories import (
-    attempt_commands as attempt_module,
-    session_fork as session_fork_module,
+from cloud_agent.storage.repositories import session_fork as session_fork_module
+from cloud_agent.storage.repositories.attempt_commands import (
+    lifecycle as attempt_lifecycle,
+    reaper as attempt_reaper,
+    reports as attempt_reports,
 )
 
 if TYPE_CHECKING:
@@ -230,7 +232,7 @@ async def test_cancelling_a_turn_does_not_deadlock_with_its_streaming_reply(
     assert claim is not None
     held, release = asyncio.Event(), asyncio.Event()
     cancel_pid: list[int] = []
-    original = attempt_module.lock_conversation_by_job
+    original = attempt_lifecycle.lock_conversation_by_job
 
     async def hold_the_conversation(conn, *, job_id):
         thread_id = await original(conn, job_id=job_id)
@@ -239,9 +241,9 @@ async def test_cancelling_a_turn_does_not_deadlock_with_its_streaming_reply(
         await release.wait()
         return thread_id
 
-    monkeypatch.setattr(attempt_module, "lock_conversation_by_job", hold_the_conversation)
+    monkeypatch.setattr(attempt_lifecycle, "lock_conversation_by_job", hold_the_conversation)
     # A deadlock the append lost would otherwise be retried out of sight.
-    monkeypatch.setattr(attempt_module, "retry_deadlock_victim", _first_try_only)
+    monkeypatch.setattr(attempt_reports, "retry_deadlock_victim", _first_try_only)
     cancel = append = None
     try:
         cancel = asyncio.create_task(store.attempt_commands.request_cancel(job_id=job["id"]))
@@ -285,7 +287,7 @@ async def test_cancelling_a_first_turn_does_not_deadlock_with_its_reservation(
     assert claim is not None and claim["id"] == job["id"]
     held, release = asyncio.Event(), asyncio.Event()
     cancel_pid: list[int] = []
-    original = attempt_module.lock_conversation_by_job
+    original = attempt_lifecycle.lock_conversation_by_job
 
     async def hold_the_conversation(conn, *, job_id):
         thread_id = await original(conn, job_id=job_id)
@@ -294,7 +296,7 @@ async def test_cancelling_a_first_turn_does_not_deadlock_with_its_reservation(
         await release.wait()
         return thread_id
 
-    monkeypatch.setattr(attempt_module, "lock_conversation_by_job", hold_the_conversation)
+    monkeypatch.setattr(attempt_lifecycle, "lock_conversation_by_job", hold_the_conversation)
     cancel = reserve = None
     try:
         cancel = asyncio.create_task(store.attempt_commands.request_cancel(job_id=job["id"]))
@@ -646,14 +648,14 @@ async def test_an_attempt_the_reaper_cannot_close_does_not_undo_the_others(
         claims.append(claim)
         await _expire_attempt(pool, store, claim["attempt_id"])
     stuck = claims[1]["attempt_id"]
-    original = attempt_module.insert_event
+    original = attempt_reaper.insert_event
 
     async def deadlock_on_one(conn, **fields):
         if fields["attempt_id"] == stuck:
             raise asyncpg.exceptions.DeadlockDetectedError("deadlock detected")
         return await original(conn, **fields)
 
-    monkeypatch.setattr(attempt_module, "insert_event", deadlock_on_one)
+    monkeypatch.setattr(attempt_reaper, "insert_event", deadlock_on_one)
     actions = await store.attempt_commands.reap_expired()
     assert [action["attempt_id"] for action in actions] == [
         claims[0]["attempt_id"],
@@ -743,7 +745,7 @@ async def test_releasing_an_activation_waits_for_the_reaper_holding_its_attempt(
     )
     assert queued is not None and queued.get("error") is None
     await _expire_attempt(pool, store, claim["attempt_id"])
-    original = attempt_module.insert_event
+    original = attempt_reaper.insert_event
     reaper_pid: list[int] = []
     resume = asyncio.Event()
 
@@ -755,7 +757,7 @@ async def test_releasing_an_activation_waits_for_the_reaper_holding_its_attempt(
             await resume.wait()
         return await original(conn, **fields)
 
-    monkeypatch.setattr(attempt_module, "insert_event", pause_after_the_read)
+    monkeypatch.setattr(attempt_reaper, "insert_event", pause_after_the_read)
     reap = asyncio.create_task(store.attempt_commands.reap_expired(max_attempts=3))
     abandon = None
     try:

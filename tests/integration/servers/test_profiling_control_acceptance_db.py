@@ -63,8 +63,8 @@ from cloud_agent.accounts.config import ENV_LOCAL_SESSION_SECRET
 from cloud_agent.api.deps import get_agent_app_credentials
 from cloud_agent.app import create_app
 from cloud_agent.application.profiling_control import ProfilingControlService
-from cloud_agent.host_pool import hash_secret
-from cloud_agent.profiling_control_config import profiling_control_deployment
+from cloud_agent.domain.host_pool import hash_secret
+from cloud_agent.profiling.profiling_control_config import profiling_control_deployment
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import mint_host_token
 from cloud_agent.workers.profiling_control import ProfilingPolicyWorker
@@ -181,11 +181,12 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
     operation_profiling.reset_cache()
     operation_profiling.reset_policy()
 
-    from cloud_agent import operation_measurement, sandbox_manager_routing
-    from cloud_agent_host import runner as runner_mod
+    from cloud_agent.measurement import operation_measurement
+    from cloud_agent.sandbox_manager import sandbox_manager_routing
+    from cloud_agent_host.service import measurement_sender
 
     operation_measurement.reset()
-    runner_mod.reset_delivery_state()
+    measurement_sender.reset_delivery_state()
 
     sandbox_manager = _SandboxManager()
     monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
@@ -211,7 +212,7 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
     # The sandbox manager application, served on its own socket. It is built through its
     # own factory with the same token the runner would present, so the push
     # below is the real route with the real credential check in front of it.
-    from cloud_agent_host.sandbox import ProcessBackend
+    from cloud_agent_host.container.sandbox import ProcessBackend
     from cloud_agent_host.sandbox_manager import create_app as create_sandbox_manager_app
     from cloud_agent_host.sandbox_manager_profiling_policy import reset_applied_state
 
@@ -265,7 +266,7 @@ async def control_chain(monkeypatch, tmp_path) -> AsyncIterator[_ControlChain]:
         await asyncio.wait_for(sandbox_manager_task, timeout=10)
         server.should_exit = True
         await asyncio.wait_for(task, timeout=10)
-        from cloud_agent import measurement_writer
+        from cloud_agent.measurement import measurement_writer
 
         measurement_writer.reset_writer(None)
         await _reset(pool)
@@ -392,11 +393,11 @@ async def test_start_collects_reads_a_real_sample_and_stop_ends_it(
         # Real client, real endpoints, real credential: the control plane's
         # exchange, then the sandbox manager's own policy route. This is the wiring that
         # a sync built without a sandbox manager client silently skipped.
-        from cloud_agent_host.profiling_policy import ProfilingPolicySync
+        from cloud_agent_host.sandbox_manager_client import SandboxManagerClient
         from cloud_agent_host.sandbox_manager_profiling_policy import applied_state
-        from cloud_agent_host.session_supervisor_client import SessionSupervisorClient
+        from cloud_agent_host.service.profiling_policy import ProfilingPolicySync
 
-        sandbox_manager_client = SessionSupervisorClient(
+        sandbox_manager_client = SandboxManagerClient(
             chain.sandbox_manager_base_url, "acceptance-sandbox-manager-token", timeout=10
         )
         sync = ProfilingPolicySync(
@@ -535,7 +536,10 @@ async def test_a_measurement_open_when_the_switch_flips_still_lands(
     from tests.integration.servers.test_measurement_acceptance_db import _await_row
 
     from cloud_agent.api._operation_measurements import record_measurement
-    from cloud_agent.operation_measurement import operation as measured_operation, root_scope
+    from cloud_agent.measurement.operation_measurement import (
+        operation as measured_operation,
+        root_scope,
+    )
 
     chain = control_chain
     job = await chain.store.conversation_queries.get_job(chain.job_id)

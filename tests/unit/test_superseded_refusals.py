@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 from tests.unit.test_compute_reconcile import _left_behind, _left_behind_container, harness
 
-from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 
 
 def _two_left_behind(h, answer):

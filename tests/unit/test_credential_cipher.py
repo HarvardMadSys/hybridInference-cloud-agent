@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from cloud_agent.credential_cipher import CredentialCipher, CredentialCipherError
+from cloud_agent.crypto.credential_cipher import CredentialCipher, CredentialCipherError
 
 _SECRET = "compatibility-key"
 

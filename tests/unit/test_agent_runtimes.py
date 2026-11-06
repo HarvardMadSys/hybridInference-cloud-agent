@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from cloud_agent.thread_stats import summarize_attempt_rollup
+from cloud_agent.domain.thread_stats import summarize_attempt_rollup
 from cloud_agent_host.runtimes import (
     MAX_INIT_TOOLS,
     MERGED_MCP_SERVER_NAME,
@@ -30,7 +30,7 @@ from cloud_agent_host.runtimes import (
     RuntimeMCPUnavailableError,
     get_runtime,
 )
-from cloud_agent_host.runtimes.codex import NATIVE_LAUNCHER
+from cloud_agent_host.runtimes.codex.adapter import NATIVE_LAUNCHER
 from cloud_agent_shared.event_payloads import MAX_EVENT_PAYLOAD_BYTES, TRUNCATION_NOTICE
 from cloud_agent_shared.runtime_catalog import runtime_reasoning_efforts, runtimes_supporting_mcp
 

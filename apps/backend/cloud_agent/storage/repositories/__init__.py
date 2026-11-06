@@ -17,7 +17,7 @@ from cloud_agent.storage.repositories.audit_log import PostgresAuditLogRepositor
 from cloud_agent.storage.repositories.command_execution_queries import (
     PostgresCommandExecutionQueries,
 )
-from cloud_agent.storage.repositories.compute_resources import PostgresComputeResourceRepository
+from cloud_agent.storage.repositories.compute import PostgresComputeResourceRepository
 from cloud_agent.storage.repositories.context_queries import PostgresContextQueries
 from cloud_agent.storage.repositories.conversation_commands import PostgresConversationCommands
 from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
@@ -51,7 +51,7 @@ from cloud_agent.storage.repositories.profiling_control import (
     PostgresProfilingControlRepository,
 )
 from cloud_agent.storage.repositories.residency import PostgresResidencyRepository
-from cloud_agent.storage.repositories.sandbox import PostgresSandboxRepository
+from cloud_agent.storage.repositories.sandbox.repository import PostgresSandboxRepository
 from cloud_agent.storage.repositories.sandbox_incidents import PostgresSandboxIncidentRepository
 from cloud_agent.storage.repositories.session_fork import PostgresSessionForkRepository
 from cloud_agent.storage.repositories.settings import PostgresSettingsRepository

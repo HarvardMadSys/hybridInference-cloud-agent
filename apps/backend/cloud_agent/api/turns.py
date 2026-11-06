@@ -10,16 +10,15 @@ queue, where the owner can still edit or delete it, and the queue sends it when
 the turn in front of it has ended — see `application.pending_messages`. The
 routes that edit, delete and continue that queue live here too.
 
-Fork's own orchestration is not here: `application.session_fork` drives a
-PREPARING operation to MATERIALIZED, so its failure branches are reachable
-without an HTTP request. What stays is the anchor validation, the store's
-`prepare_session_fork`, the finalize and the response — and
-`SESSION_FORK_COORDINATOR_LEASE_S`, which bounds that flow, moved with it.
+Fork's own orchestration is not here: `application.session_fork` holds the
+anchor's eligibility rules, the store's `prepare_session_fork` and its
+refusals, the PREPARING-to-MATERIALIZED saga and the finalize, so its failure
+branches are reachable without an HTTP request. What stays is resolving the
+owner's job, mapping the retaining host's own failure, and the response.
 """
 
 from __future__ import annotations
 
-import secrets
 from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
@@ -39,6 +38,7 @@ from cloud_agent.api.deps import (
     get_storage,
     require_store,
 )
+from cloud_agent.api.workspace_errors import _sandbox_manager_http_error
 from cloud_agent.application import send_now as send_now_delivery
 from cloud_agent.application.follow_ups import (
     prepare_follow_up,
@@ -51,13 +51,13 @@ from cloud_agent.application.pending_messages import (
     settle_queue,
     settle_queue_when_possible,
 )
-from cloud_agent.application.session_fork import materialize_session_fork
-from cloud_agent.domain.execution import RUNNING, SUCCEEDED, TERMINAL_STATES
+from cloud_agent.application.session_fork import ForkHostFailed, fork_settled_turn
+from cloud_agent.domain.execution import RUNNING, TERMINAL_STATES
 from cloud_agent.domain.pending_messages import PreparedHead, SettleOutcome
 from cloud_agent.domain.requests import request_fingerprint
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.sandbox_manager_client import SandboxManagerError
-from cloud_agent.sandbox_manager_routing import sandbox_manager_for_attempt
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_routing import sandbox_manager_for_attempt
 from cloud_agent.schemas import (
     AgentJobResponse,
     AgentPendingMessageSendNow,
@@ -69,7 +69,7 @@ from cloud_agent.schemas import (
     AgentThreadQuestionsResponse,
     AgentThreadQueueResponse,
 )
-from cloud_agent.source_control_runtime import (
+from cloud_agent.source_control.source_control_runtime import (
     SourceControlRuntime,  # noqa: TC001 — FastAPI resolves it.
 )
 from cloud_agent.workers.job_event_signal import (  # noqa: TC001 — FastAPI resolves it.
@@ -77,6 +77,7 @@ from cloud_agent.workers.job_event_signal import (  # noqa: TC001 — FastAPI re
 )
 
 if TYPE_CHECKING:
+    from cloud_agent.domain.errors import Refused
     from cloud_agent.ports import (
         AttachmentRepository,
         ConversationCommands,
@@ -150,7 +151,7 @@ def _no_such_message_error() -> HTTPException:
     )
 
 
-def _message_refused(result: dict[str, Any]) -> HTTPException:
+def _message_refused(result: dict[str, Any]) -> HTTPException | Refused:
     """The owner-facing refusal for a queue write the store turned down."""
     error = result.get("error")
     if error == "not_found":
@@ -686,7 +687,7 @@ async def delete_thread_message(
     return await _queue_result(job_store, thread_id=thread_id, user=user, outcome=outcome)
 
 
-def _send_now_refused(result: dict[str, Any]) -> HTTPException:
+def _send_now_refused(result: dict[str, Any]) -> HTTPException | Refused:
     """The owner-facing refusal for a message that cannot be sent into the turn now."""
     error = result.get("error")
     if error == "not_running":
@@ -937,175 +938,14 @@ async def fork_agent_job(
     """Fork one settled native session into the same shared Docker workspace."""
     job_store = _require_store(store)
     job = await _owned_job(job_store.conversation_queries, job_id, user)
-    not_settled = HTTPException(
-        status_code=409,
-        detail={
-            "error": {
-                "type": "not_settled",
-                "message": "This turn is still active; wait for it to settle before forking it.",
-            }
-        },
-    )
-    if job["state"] not in TERMINAL_STATES:
-        raise not_settled
-    if job["state"] != SUCCEEDED:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "anchor_not_settled",
-                    "message": "Only a successfully settled turn can be used as a Fork anchor.",
-                }
-            },
-        )
-    if job.get("thread_sandbox") is None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "native_context_unavailable",
-                    "message": "This historical chat has no shared native-session sandbox.",
-                }
-            },
-        )
-
-    sandbox = job.get("thread_sandbox") or {}
-    if sandbox.get("shared_live") is not True:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "native_fork_unavailable",
-                    "message": (
-                        "This historical retained chat predates shared native-session "
-                        "forks. Start a new chat to use same-workspace Fork."
-                    ),
-                }
-            },
-        )
-
-    operation = await job_store.session_fork.prepare_session_fork(
-        source_job_id=job_id,
-        user_id=user["user_id"],
-        idempotency_key=idempotency_key or f"generated:{secrets.token_urlsafe(24)}",
-    )
-    if operation is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"type": "not_found", "message": f"No such agent job: {job_id}"}},
-        )
-    error = operation.get("error")
-    if error:
-        error_contract = {
-            "session_archived": (
-                "session_archived",
-                "This conversation is archived. Restore it before creating a side chat.",
-            ),
-            "idempotency_conflict": (
-                "idempotency_conflict",
-                "This Idempotency-Key was already used for a different fork source.",
-            ),
-            "not_settled": (
-                "not_settled",
-                "This turn is still active; stop the run before forking it.",
-            ),
-            "anchor_not_settled": (
-                "historical_snapshot_unavailable",
-                "Native Fork requires a successfully completed assistant turn.",
-            ),
-            "not_shared_live": (
-                "native_fork_unavailable",
-                "This chat does not use a shared-native sandbox.",
-            ),
-            "native_fork_unavailable": (
-                "native_fork_unavailable",
-                "This retained sandbox version cannot fork from a historical turn.",
-            ),
-            "sandbox_not_ready": (
-                "native_context_unavailable",
-                "This chat's retained native context is not safe to fork.",
-            ),
-            "host_removed": (
-                "native_context_unavailable",
-                "This chat's sandbox is on a server that has been removed.",
-            ),
-            "source_busy": (
-                "sandbox_busy",
-                "This chat is currently running a turn; retry after it settles.",
-            ),
-            "fork_in_progress": (
-                "fork_in_progress",
-                "Another native fork is already being prepared from this chat.",
-            ),
-            "resident_capacity_exhausted": (
-                "resident_capacity_exhausted",
-                "This shared sandbox has no free resident Agent CLI slot.",
-            ),
-            "native_context_unavailable": (
-                "native_context_unavailable",
-                "This chat has no settled native session to fork.",
-            ),
-            "runtime_mismatch": (
-                "native_fork_unavailable",
-                "The retained runtime no longer matches this chat.",
-            ),
-        }
-        error_type, message = error_contract.get(
-            str(error),
-            ("native_fork_unavailable", "The retained native session cannot be forked now."),
-        )
-        raise HTTPException(
-            status_code=409,
-            detail={"error": {"type": error_type, "message": message}},
-        )
-
-    operation_id = str(operation["id"])
-
-    if operation["state"] == "failed":
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "native_fork_failed",
-                    "message": str(
-                        operation.get("last_error") or "Native Fork could not complete."
-                    ),
-                }
-            },
-        )
-
-    if operation["state"] == "preparing":
-        # Resolve the host only for the state that still needs a native
-        # mutation.  READY and MATERIALIZED are durable control-plane states:
-        # a retry after a lost HTTP response must return/finalize the same
-        # child even when the retaining host has since become unreachable.
-        await materialize_session_fork(
-            operation,
+    try:
+        forked = await fork_settled_turn(
+            job_store,
+            job,
             job_id=job_id,
-            job_store=job_store,
+            user_id=user["user_id"],
+            idempotency_key=idempotency_key,
         )
-
-    forked = await job_store.session_fork.finalize_session_fork(operation_id=operation_id)
-    if forked is None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "native_fork_fence_changed",
-                    "message": "The source chat changed before native Fork finalization.",
-                }
-            },
-        )
-    logger.info(
-        "agent_job_forked",
-        extra={
-            "event": "agent_job_forked",
-            "job_id": forked["id"],
-            "thread_id": forked.get("thread_id"),
-            "source_job_id": job_id,
-            "sandbox_clone": False,
-            "workspace_shared": True,
-            "fork_operation_id": operation_id,
-        },
-    )
+    except ForkHostFailed as exc:
+        raise _sandbox_manager_http_error(exc.failure) from exc.failure
     return _job_response(forked)

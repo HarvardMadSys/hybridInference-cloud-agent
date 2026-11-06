@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 from tests.support.owners import launch_connection
 
-from cloud_agent_host.chat_sandbox import MEMBER_UID_BASE, ChatSandboxSpec
+from cloud_agent_host.container.chat_sandbox import MEMBER_UID_BASE, ChatSandboxSpec
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
 
 _PLACEHOLDER = "agh.payload.signature"

@@ -31,14 +31,15 @@ from tests.servers.test_agent_jobs_api import (
 )
 from tests.support.owners import SESSIONS, use_session_secret
 
-from cloud_agent import measurement_ingest, sandbox_manager_routing
 from cloud_agent.api.deps import get_storage
 from cloud_agent.app import create_app
-from cloud_agent.measurement_ingest import Owner
-from cloud_agent.operation_measurement import (
+from cloud_agent.measurement import measurement_ingest
+from cloud_agent.measurement.measurement_ingest import Owner
+from cloud_agent.measurement.operation_measurement import (
     INTERACTION_HEADER,
     reset as reset_selections,
 )
+from cloud_agent.sandbox_manager import sandbox_manager_routing
 from cloud_agent_host import operation_call
 from cloud_agent_shared import operation_profiling
 

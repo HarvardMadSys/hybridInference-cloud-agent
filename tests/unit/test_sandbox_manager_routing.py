@@ -14,9 +14,9 @@ from typing import Any
 import pytest
 from tests.support.storage import AllCapabilities
 
-from cloud_agent import sandbox_manager_routing
-from cloud_agent.sandbox_manager_client import SandboxManagerError
-from cloud_agent.sandbox_manager_routing import (
+from cloud_agent.sandbox_manager import sandbox_manager_routing
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_routing import (
     hydrate_shared_sandbox_manager,
     sandbox_manager_for_attempt,
     sandbox_manager_for_job,
@@ -214,21 +214,21 @@ class TestAdvertisedSandboxManagerUrl:
 
     def test_it_reports_the_url_it_uses_when_nothing_says_otherwise(self, monkeypatch) -> None:
         """The co-located shape, and the default: one address, no drift."""
-        from cloud_agent_host import runner
+        from cloud_agent_host.service import host_service
 
         monkeypatch.delenv("AGENT_SANDBOX_MANAGER_ADVERTISE_URL", raising=False)
         monkeypatch.setenv("AGENT_SANDBOX_MANAGER_URL", "http://sandbox-manager:8092")
 
-        assert runner._sandbox_manager_url_from_env() == "http://sandbox-manager:8092"
+        assert host_service._sandbox_manager_url_from_env() == "http://sandbox-manager:8092"
 
     def test_an_advertised_url_wins(self, monkeypatch) -> None:
         """The remote shape: dial locally, advertise the tunnel's far end."""
-        from cloud_agent_host import runner
+        from cloud_agent_host.service import host_service
 
         monkeypatch.setenv("AGENT_SANDBOX_MANAGER_URL", "http://sandbox-manager:8092")
         monkeypatch.setenv("AGENT_SANDBOX_MANAGER_ADVERTISE_URL", "http://172.24.0.1:18092")
 
-        assert runner._sandbox_manager_url_from_env() == "http://172.24.0.1:18092"
+        assert host_service._sandbox_manager_url_from_env() == "http://172.24.0.1:18092"
 
     def test_a_blank_advertised_url_is_not_an_override(self, monkeypatch) -> None:
         """Compose passes the empty string when the variable is unset.
@@ -237,12 +237,12 @@ class TestAdvertisedSandboxManagerUrl:
         defined, empty variable rather than an absent one. Treating that as an
         override would report no sandbox manager at all on every co-located deployment.
         """
-        from cloud_agent_host import runner
+        from cloud_agent_host.service import host_service
 
         monkeypatch.setenv("AGENT_SANDBOX_MANAGER_URL", "http://sandbox-manager:8092")
         monkeypatch.setenv("AGENT_SANDBOX_MANAGER_ADVERTISE_URL", "   ")
 
-        assert runner._sandbox_manager_url_from_env() == "http://sandbox-manager:8092"
+        assert host_service._sandbox_manager_url_from_env() == "http://sandbox-manager:8092"
 
 
 class TestSandboxManagerProbe:

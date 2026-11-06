@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-04 08:10-0500\n"
+"POT-Creation-Date: 2026-11-05 03:35-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -197,11 +197,14 @@ msgstr "工作区文件、终端或 Git 视图"
 
 #: ../developer/development.md
 msgid ""
-"`cloud_agent/api/workspace.py` and `sandbox_manager_client.py`; host "
-"handling is in `cloud_agent_host/sandbox_manager.py`."
+"`cloud_agent/api/workspace.py` and "
+"`sandbox_manager/sandbox_manager_client.py`; host handling is in "
+"`cloud_agent_host/manager_api/workspaces.py` and `terminals.py`, which "
+"`sandbox_manager.py` assembles into the app."
 msgstr ""
-"`cloud_agent/api/workspace.py` 和 `sandbox_manager_client.py`；主机端的处理在 "
-"`cloud_agent_host/sandbox_manager.py`。"
+"`cloud_agent/api/workspace.py` 和 `sandbox_manager/sandbox_manager_client.py`；主机端的处理在 "
+"`cloud_agent_host/manager_api/workspaces.py` 和 `terminals.py`，由 "
+"`sandbox_manager.py` 组装成应用。"
 
 #: ../developer/development.md
 msgid "A query or persistent field"
@@ -235,10 +238,10 @@ msgstr "主机认领任务，或 worker 的 HTTP 调用"
 #: ../developer/development.md
 msgid ""
 "`cloud_agent_host/claimed_job.py`, `control_plane_client.py`, and the "
-"orchestration in `runner.py`."
+"orchestration in `service/host_service.py` and `turn/turn_child.py`."
 msgstr ""
 "`cloud_agent_host/claimed_job.py`、`control_plane_client.py`，以及 "
-"`runner.py` 里的编排逻辑。"
+"`service/host_service.py` 和 `turn/turn_child.py` 里的编排逻辑。"
 
 #: ../developer/development.md
 msgid "Retained-container values or lifecycle"
@@ -246,11 +249,11 @@ msgstr "保留容器的数据类型或生命周期"
 
 #: ../developer/development.md
 msgid ""
-"`cloud_agent_host/chat_sandbox_models.py` for value types; "
-"`chat_sandbox.py` for Docker lifecycle."
+"`cloud_agent_host/container/chat_sandbox_models.py` for value types; "
+"`container/chat_sandbox.py` for Docker lifecycle."
 msgstr ""
-"数据类型在 `cloud_agent_host/chat_sandbox_models.py`，Docker 生命周期在 "
-"`chat_sandbox.py`。"
+"数据类型在 `cloud_agent_host/container/chat_sandbox_models.py`，Docker 生命周期在 "
+"`container/chat_sandbox.py`。"
 
 #: ../developer/development.md
 msgid "CLI behavior or version compatibility"

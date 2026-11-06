@@ -52,7 +52,10 @@ _COMPUTED = {
     ("api/admin_compute.py", "log_admin_action"),  # f"agent.compute.{action}", see _compute_actions
     ("api/admin_hosts.py", "log_admin_action"),  # _set_status(action=...), literal at its callers
     ("storage/repositories/accounts.py", "write_audit"),  # f"agent.local_account.{action}"
-    ("storage/repositories/sandbox.py", "insert_audit_row"),  # _audit_admin_deletion(action=...)
+    (
+        "storage/repositories/sandbox/admin_deletion.py",
+        "insert_audit_row",
+    ),  # _audit_admin_deletion(action=...)
     ("storage/_sql/local_accounts.py", "insert_audit_row"),  # write_audit(action=...)
     ("storage/repositories/account_policy.py", "write_audit"),  # record_account_audit(action=...)
     ("storage/repositories/audit.py", "insert_audit_row"),  # record_admin_action(action=...)

@@ -17,17 +17,19 @@ from unittest.mock import Mock
 import pytest
 from tests.support.owners import connection_access
 
-from cloud_agent_host import runner as runner_mod
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.claimed_job import ClaimedJob
+from cloud_agent_host.container.chat_sandbox import (
     MEMBER_REAPER_TARGET,
     ChatSandboxManager,
     ChatSandboxSpec,
 )
-from cloud_agent_host.chat_sandbox_inspect import container_inspection
-from cloud_agent_host.install_locks import install_lock
-from cloud_agent_host.runner import ClaimedJob, ControlPlane
+from cloud_agent_host.container.chat_sandbox_inspect import container_inspection
+from cloud_agent_host.container.sandbox import ContainerBackend, SandboxError
+from cloud_agent_host.control_plane_client import ControlPlane
+from cloud_agent_host.member_setup.install_locks import install_lock
 from cloud_agent_host.runtimes import get_runtime
-from cloud_agent_host.sandbox import ContainerBackend, SandboxError
+from cloud_agent_host.turn import group_reservation, shared_live_attempt
+from cloud_agent_shared import shared_protocol
 
 
 def _spec(generation: int = 3) -> ChatSandboxSpec:
@@ -65,7 +67,7 @@ def _manager(monkeypatch, answers: list[int] | None = None):
 def test_a_reaper_found_in_a_proven_container_is_not_probed_again(monkeypatch):
     manager, execs = _manager(monkeypatch)
     spec = _spec()
-    manager._proven.record(spec, _running("container-one"))
+    manager.exact._proven.record(spec, _running("container-one"))
 
     manager.ensure_member_process_reaper(spec)
     manager.ensure_member_process_reaper(spec)
@@ -78,7 +80,7 @@ def test_an_unproven_container_is_probed_every_time(monkeypatch):
     """Without the exact container a proof names, there is nothing to remember it by."""
     manager, execs = _manager(monkeypatch)
     spec = _spec()
-    manager._proven.record(_spec(generation=4), _running("container-other"))
+    manager.exact._proven.record(_spec(generation=4), _running("container-other"))
 
     manager.ensure_member_process_reaper(spec)
     manager.ensure_member_process_reaper(spec)
@@ -89,11 +91,11 @@ def test_an_unproven_container_is_probed_every_time(monkeypatch):
 def test_a_replacement_under_the_same_name_is_probed_again(monkeypatch):
     manager, execs = _manager(monkeypatch)
     spec = _spec()
-    manager._proven.record(spec, _running("container-one"))
+    manager.exact._proven.record(spec, _running("container-one"))
     manager.ensure_member_process_reaper(spec)
 
-    manager._proven.forget(spec)
-    manager._proven.record(spec, _running("container-two"))
+    manager.exact._proven.forget(spec)
+    manager.exact._proven.record(spec, _running("container-two"))
     manager.ensure_member_process_reaper(spec)
     manager.ensure_member_process_reaper(spec)
 
@@ -104,13 +106,13 @@ def test_forgetting_a_container_forgets_what_was_found_in_it(monkeypatch):
     manager, _execs = _manager(monkeypatch)
     spec = _spec()
     first = _running("container-one")
-    manager._proven.record(spec, first)
+    manager.exact._proven.record(spec, first)
     manager.ensure_member_process_reaper(spec)
-    assert manager._proven.holds_helper(first, MEMBER_REAPER_TARGET)
+    assert manager.exact._proven.holds_helper(first, MEMBER_REAPER_TARGET)
 
-    manager._proven.forget(spec)
+    manager.exact._proven.forget(spec)
 
-    assert not manager._proven.holds_helper(first, MEMBER_REAPER_TARGET)
+    assert not manager.exact._proven.holds_helper(first, MEMBER_REAPER_TARGET)
 
 
 @pytest.fixture
@@ -125,10 +127,10 @@ def test_an_installed_reaper_is_remembered(monkeypatch, reaper_source):
     manager, execs = _manager(monkeypatch, answers=[1, 0])
     spec = _spec()
     proven = _running("container-one")
-    manager._proven.record(spec, proven)
-    monkeypatch.setattr(manager, "_require", lambda _spec: proven)
+    manager.exact._proven.record(spec, proven)
+    monkeypatch.setattr(manager.exact, "require", lambda _spec: proven)
     monkeypatch.setattr(
-        manager, "_run", lambda argv, **_kwargs: SimpleNamespace(returncode=0, stderr="")
+        manager.exact, "run", lambda argv, **_kwargs: SimpleNamespace(returncode=0, stderr="")
     )
 
     manager.ensure_member_process_reaper(spec)
@@ -141,10 +143,10 @@ def test_a_failed_install_is_not_remembered(monkeypatch, reaper_source):
     manager, execs = _manager(monkeypatch, answers=[1, 1, 0, 0])
     spec = _spec()
     proven = _running("container-one")
-    manager._proven.record(spec, proven)
-    monkeypatch.setattr(manager, "_require", lambda _spec: proven)
+    manager.exact._proven.record(spec, proven)
+    monkeypatch.setattr(manager.exact, "require", lambda _spec: proven)
     monkeypatch.setattr(
-        manager, "_run", lambda argv, **_kwargs: SimpleNamespace(returncode=0, stderr="")
+        manager.exact, "run", lambda argv, **_kwargs: SimpleNamespace(returncode=0, stderr="")
     )
 
     with pytest.raises(SandboxError, match="activation failed"):
@@ -158,7 +160,7 @@ def test_a_known_reaper_does_not_wait_behind_an_install_into_its_container(monke
     """Runtime and MCP installs hold the container's install lock for minutes."""
     manager, _execs = _manager(monkeypatch)
     spec = _spec()
-    manager._proven.record(spec, _running("container-one"))
+    manager.exact._proven.record(spec, _running("container-one"))
     manager.ensure_member_process_reaper(spec)
 
     with install_lock(spec.container_name):
@@ -182,18 +184,18 @@ _JOB = ClaimedJob(
     model="model",
     worker_token="ajt.a.b",
     thread_id="athr_1",
-    runtime_version=runner_mod.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
+    runtime_version=shared_protocol.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
 )
 
 
 def _stamp(**_: object) -> dict[str, Any]:
     return {
         "sandbox_image_digest": "sha256:shared-image",
-        "runtime_versions": dict(runner_mod.SHARED_SANDBOX_RUNTIME_PINS),
+        "runtime_versions": dict(shared_protocol.SHARED_SANDBOX_RUNTIME_PINS),
         "runtime_versions_available": {
-            key: [value] for key, value in runner_mod.SHARED_SANDBOX_RUNTIME_PINS.items()
+            key: [value] for key, value in shared_protocol.SHARED_SANDBOX_RUNTIME_PINS.items()
         },
-        "helper_versions": dict(runner_mod.SHARED_SANDBOX_HELPER_PINS),
+        "helper_versions": dict(shared_protocol.SHARED_SANDBOX_HELPER_PINS),
     }
 
 
@@ -204,12 +206,16 @@ def _run_turn(monkeypatch, *, resident_state: str, has_binary: bool) -> tuple[Mo
     retained = Mock()
     retained.sandbox_metadata.return_value = {}
     retained.has_binary.return_value = has_binary
-    monkeypatch.setattr(runner_mod, "ChatSandboxManager", lambda _backend: Mock())
-    monkeypatch.setattr(runner_mod, "RetainedChatBackend", lambda *_args, **_kwargs: retained)
-    monkeypatch.setattr(runner_mod, "_resident_base_ready", lambda *_args: True)
+    monkeypatch.setattr(group_reservation, "ChatSandboxManager", lambda _backend: Mock())
+    monkeypatch.setattr(
+        shared_live_attempt, "RetainedChatBackend", lambda *_args, **_kwargs: retained
+    )
+    monkeypatch.setattr(shared_live_attempt, "_resident_base_ready", lambda *_args: True)
     prepared = SimpleNamespace(import_into=lambda *_args, **_kwargs: "b" * 40, discard=lambda: None)
-    monkeypatch.setattr(runner_mod, "_prefetch_retained_source", lambda **_kwargs: prepared)
-    monkeypatch.setattr(runner_mod, "runtime_version_unavailable", lambda *_args: None)
+    monkeypatch.setattr(
+        shared_live_attempt, "_prefetch_retained_source", lambda **_kwargs: prepared
+    )
+    monkeypatch.setattr(shared_live_attempt, "runtime_version_unavailable", lambda *_args: None)
     control = Mock(spec=ControlPlane)
     control.reserve_chat_sandbox.side_effect = lambda seed: {
         **seed,
@@ -239,12 +245,12 @@ def _run_turn(monkeypatch, *, resident_state: str, has_binary: bool) -> tuple[Mo
         "process_generation": 1,
     }
     supervisor.settle_shared.return_value = {"native_session_id": "native-1"}
-    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda: supervisor)
+    monkeypatch.setattr(shared_live_attempt, "sandbox_manager_from_env", lambda: supervisor)
     monkeypatch.setattr(
-        runner_mod, "_stream_shared_agent_turn", lambda **_kwargs: (0, "", [], None, None)
+        shared_live_attempt, "_stream_shared_agent_turn", lambda **_kwargs: (0, "", [], None, None)
     )
     finish = Mock()
-    runner_mod._run_shared_live_attempt(
+    shared_live_attempt._run_shared_live_attempt(
         runtime=get_runtime("claude-code"),
         job=_JOB,
         control=control,

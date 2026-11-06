@@ -356,7 +356,6 @@ export interface AgentJob {
   /** Set when the model is served on our own hardware, e.g. "H200". */
   modelLocal?: string;
   elapsedLabel?: string;
-  timeoutLabel: string;
   sandbox: string;
   attempts: AgentAttempt[];
   /** Server supports fetching a single attempt's resource detail. */

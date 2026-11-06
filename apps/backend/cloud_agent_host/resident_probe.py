@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_host.session_supervisor_client import SessionSupervisorError
+from cloud_agent_host.sandbox_manager_client import SandboxManagerError
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.sandbox_manager_compat import SANDBOX_MANAGER_PRODUCER
 
@@ -99,7 +99,7 @@ def probe_live_resident(
             launch=launch,
             profiling=operation_profiling.measurement_context(measurement, call_id),
         )
-    except SessionSupervisorError as exc:
+    except SandboxManagerError as exc:
         operation_profiling.set_attributes(
             measurement,
             resident_probe="refused",

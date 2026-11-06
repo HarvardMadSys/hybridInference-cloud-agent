@@ -3,7 +3,7 @@
 The reap of its slot, the removal of stale pidfiles and credentials, the
 provider home's preparation and Claude's hook merge were one ``docker exec``
 each. They now run, in the order they ran, as processes of one host-supplied
-runner (``cloud_agent_host.member_preparation``). The runner tests below run
+runner (``cloud_agent_host.member_setup.member_preparation``). The runner tests below run
 it for real on this host, as the exec would run it in the guest; the launch
 tests read the queue each exec carries.
 """
@@ -23,24 +23,27 @@ import pytest
 from tests.support.owners import launch_connection
 
 from cloud_agent_host import resident_transport
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     MEMBER_REAPER_TARGET,
     MEMBER_UID_BASE,
     ChatSandboxManager,
     ChatSandboxSpec,
     claude_member_config_dir,
 )
-from cloud_agent_host.chat_sandbox_inspect import container_inspection
-from cloud_agent_host.chat_sandbox_models import BROWSER_SERVICE_UID
+from cloud_agent_host.container.chat_sandbox_inspect import container_inspection
+from cloud_agent_host.container.chat_sandbox_models import BROWSER_SERVICE_UID
+from cloud_agent_host.container.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
 from cloud_agent_host.drivers import DriverError
-from cloud_agent_host.member_preparation import (
+from cloud_agent_host.member_setup.member_preparation import (
     RUNNER,
     TOOL_HOOKS_SCRIPT,
     MemberPreparation,
     MemberStep,
 )
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
-from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
+from cloud_agent_host.runtimes.claude import member as claude_member
+from cloud_agent_host.runtimes.codex import member as codex_member
+from cloud_agent_host.runtimes.pi import member as pi_member
 from cloud_agent_host.sandbox_browser import LAUNCHER
 from cloud_agent_host.sandbox_mcp import GATEWAY
 from cloud_agent_shared.environment import BoundEnvironment, EnvironmentVariable
@@ -439,13 +442,13 @@ class _Guest:
 def _manager(guest: _Guest) -> ChatSandboxManager:
     manager = ChatSandboxManager(ContainerBackend(image="img", sandbox_namespace="ns"))
     # The reaper was found in this container at an earlier census.
-    proven = manager._proven.record(
+    proven = manager.exact._proven.record(
         _SPEC,
         container_inspection(
             {"Id": "container", "Name": "/chat", "State": {"Status": "running", "Running": True}}
         ),
     )
-    manager._proven.note_helper(proven, MEMBER_REAPER_TARGET)
+    manager.exact._proven.note_helper(proven, MEMBER_REAPER_TARGET)
     manager.exec_capture = guest.exec_capture
     manager.spawn = lambda *_a, **_kw: guest.events.append(("spawn", None, None))
     for root_only in ("ensure_mcp_helpers", "ensure_kilo_mcp_runtime", "ensure_codex_mcp_policy"):
@@ -557,12 +560,12 @@ def test_plugin_installers_find_their_slot_reaped_and_home_prepared(
         guest.events.append(("install", None, None))
         return {}
 
-    for installer in (
-        "install_claude_plugins",
-        "install_codex_plugins",
-        "install_other_runtime_plugins",
+    for module, installer in (
+        (claude_member, "install_claude_plugins"),
+        (codex_member, "install_codex_plugins"),
+        (pi_member, "install_other_runtime_plugins"),
     ):
-        monkeypatch.setattr(resident_transport, installer, install)
+        monkeypatch.setattr(module, installer, install)
     plugins = (
         ({"plugin": "@owner/plugin@1.2.3"},)
         if runtime_id == "pi"
@@ -662,7 +665,7 @@ def test_claude_slot_is_reaped_before_new_member_launch_state(monkeypatch):
     )
     factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
     monkeypatch.setattr(
-        factory, "_prepare_claude_member_state", lambda *_args: events.append("prepare")
+        claude_member, "prepare_member_state", lambda *_args: events.append("prepare")
     )
 
     def launch_live(context):

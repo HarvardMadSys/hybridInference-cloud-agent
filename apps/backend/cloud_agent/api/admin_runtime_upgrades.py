@@ -4,7 +4,7 @@
 with the progress of any update in flight; ``POST`` starts one, to the latest
 release or any other the version list offers. ``GET …/{runtime}/versions``
 lists those. Rolling back is the existing ``PUT /admin/agent/runtime-versions``,
-which also replaces the update. See :mod:`cloud_agent.runtime_upgrades` for how an update completes.
+which also replaces the update. See :mod:`cloud_agent.application.runtime_upgrades` for how an update completes.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Protocol
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from cloud_agent.api.deps import get_client_ip, get_storage, log_admin_action, verify_admin_access
-from cloud_agent.runtime_upgrades import (
+from cloud_agent.application.runtime_upgrades import (
     RegistryClient,
     default_version,
     is_newer,

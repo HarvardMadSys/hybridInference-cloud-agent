@@ -55,7 +55,7 @@ Host/worker credentials, attempt lease fences and owner checks are separate
 controls.
 
 The implementation is in
-[`agent_access.py`](../../apps/backend/cloud_agent/agent_access.py),
+[`accounts/agent_access.py`](../../apps/backend/cloud_agent/accounts/agent_access.py),
 [`accounts/directory.py`](../../apps/backend/cloud_agent/accounts/directory.py),
 [`deps.py`](../../apps/backend/cloud_agent/api/deps.py) and
 [`session.py`](../../apps/backend/cloud_agent/api/session.py).

@@ -30,15 +30,17 @@ from tests.unit.test_runner_host_service import (
     service as service,
 )
 
-from cloud_agent_host import runner as runner_mod, turn_launch
-from cloud_agent_host.host_runtime import (
+from cloud_agent_host import runner
+from cloud_agent_host.container.sandbox import ProcessBackend
+from cloud_agent_host.service import host_service, runner_stop, turn_launch
+from cloud_agent_host.service.host_runtime import (
     LAUNCH_NOT_STARTED,
     LAUNCH_STARTED,
     LAUNCH_UNCERTAIN,
     LaunchResult,
     encode_turn,
 )
-from cloud_agent_host.sandbox import ProcessBackend
+from cloud_agent_host.turn import turn_child
 
 #: This host's configuration, which every child's command line carries.
 _CONFIG: dict[str, Any] = {
@@ -82,7 +84,7 @@ def _launch(
     worker_id: str = "runner-a-3",
 ) -> LaunchResult:
     """Hand a turn over through the runner's own entry point and the real handover pipe."""
-    return runner_mod._spawn_turn(payload, worker_id=worker_id, spare=spare, **_CONFIG)
+    return host_service._spawn_turn(payload, worker_id=worker_id, spare=spare, **_CONFIG)
 
 
 # ── Children, as their host sees them ──────────────────────────────────
@@ -362,11 +364,11 @@ def test_a_host_that_cannot_start_a_spare_starts_cold_children(children, caplog)
 
 
 def test_a_stopping_host_starts_no_spare(children):
-    runner_mod._STOPPING.set()
+    runner_stop.STOPPING.set()
     try:
         _spare().replenish()
     finally:
-        runner_mod._STOPPING.clear()
+        runner_stop.STOPPING.clear()
 
     assert children.started == []
 
@@ -380,7 +382,7 @@ def test_ctrl_c_during_a_spares_handover_kills_it_and_starts_no_other(children, 
         os.close(fd)
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(runner_mod, "read_handover", interrupted)
+    monkeypatch.setattr(host_service, "read_handover", interrupted)
     with pytest.raises(KeyboardInterrupt):
         _launch(_delivered_job(), spare=spare)
 
@@ -411,7 +413,7 @@ def _serve(monkeypatch, raw: str, *, spare: bool) -> tuple[int, bytes]:
     pipe = os.fstat(write_fd).st_ino
     monkeypatch.setattr("sys.stdin", io.StringIO(raw))
     try:
-        code = runner_mod._serve_turn(
+        code = turn_child._serve_turn(
             handover_fd=write_fd,
             base_url="http://control",
             worker_id="runner-a",
@@ -435,7 +437,7 @@ def test_a_spare_retired_without_a_turn_exits_without_the_probe(monkeypatch):
     warmed: list[bool] = []
     monkeypatch.setattr(turn_launch, "_warm_http_stack", lambda: warmed.append(True))
     monkeypatch.setattr(
-        runner_mod, "build_backend_from_env", lambda: pytest.fail("a retired spare probed")
+        turn_child, "build_backend_from_env", lambda: pytest.fail("a retired spare probed")
     )
 
     assert _serve(monkeypatch, "", spare=True) == (0, b"")
@@ -447,7 +449,7 @@ def test_without_spare_mode_empty_input_still_runs_the_full_probe(monkeypatch):
     probed: list[str] = []
     backend = ProcessBackend(acknowledged_unsafe=True)
     monkeypatch.setattr(backend, "preflight", lambda **_kw: probed.append("full"))
-    monkeypatch.setattr(runner_mod, "build_backend_from_env", lambda: backend)
+    monkeypatch.setattr(turn_child, "build_backend_from_env", lambda: backend)
     monkeypatch.setattr(
         turn_launch, "_warm_http_stack", lambda: pytest.fail("a cold child warmed up")
     )
@@ -465,7 +467,7 @@ def test_a_spare_handed_anything_but_end_of_file_answers_as_a_cold_child(monkeyp
     probed: list[str] = []
     backend = ProcessBackend(acknowledged_unsafe=True)
     monkeypatch.setattr(backend, "preflight", lambda **_kw: probed.append("full"))
-    monkeypatch.setattr(runner_mod, "build_backend_from_env", lambda: backend)
+    monkeypatch.setattr(turn_child, "build_backend_from_env", lambda: backend)
     monkeypatch.setattr(turn_launch, "_warm_http_stack", lambda: None)
 
     code, answer = _serve(monkeypatch, raw, spare=True)
@@ -478,10 +480,10 @@ def test_a_spare_handed_anything_but_end_of_file_answers_as_a_cold_child(monkeyp
 @pytest.mark.parametrize("spare", [False, True])
 def test_a_child_runs_its_turn_under_the_worker_id_in_the_turn(monkeypatch, spare):
     backend = ProcessBackend(acknowledged_unsafe=True)
-    monkeypatch.setattr(runner_mod, "build_backend_from_env", lambda: backend)
+    monkeypatch.setattr(turn_child, "build_backend_from_env", lambda: backend)
     monkeypatch.setattr(turn_launch, "_warm_http_stack", lambda: None)
     ran: list[dict[str, Any]] = []
-    monkeypatch.setattr(runner_mod, "run_turn", lambda _job, **kwargs: ran.append(kwargs) or 0)
+    monkeypatch.setattr(turn_child, "run_turn", lambda _job, **kwargs: ran.append(kwargs) or 0)
     payload = {**_delivered_job(), "_worker_id": "runner-a-7"}
 
     code, answer = _serve(monkeypatch, encode_turn(payload).decode(), spare=spare)
@@ -520,23 +522,23 @@ def test_the_warm_up_keeps_nothing_and_never_fails(monkeypatch):
 
 
 def test_the_cli_starts_a_spare_only_as_a_turn_process(monkeypatch):
-    parser = runner_mod.build_parser()
+    parser = runner.build_parser()
     assert parser.parse_args([]).spare is False
     assert parser.parse_args(["--turn", "--spare", "--handover-fd", "3"]).spare is True
     assert "--spare" not in parser.format_help()
 
     served: list[dict[str, Any]] = []
     monkeypatch.setenv("AGENT_CONTROL_PLANE_URL", "http://control")
-    monkeypatch.setattr(runner_mod, "configure_process_logging", lambda: None)
-    monkeypatch.setattr(runner_mod, "_serve_turn", lambda **kwargs: served.append(kwargs) or 0)
+    monkeypatch.setattr(runner, "configure_process_logging", lambda: None)
+    monkeypatch.setattr(runner, "_serve_turn", lambda **kwargs: served.append(kwargs) or 0)
     monkeypatch.setattr(
-        runner_mod, "run_forever", lambda **_kwargs: pytest.fail("a spare served the host")
+        runner, "run_forever", lambda **_kwargs: pytest.fail("a spare served the host")
     )
 
-    runner_mod.main(["--turn", "--spare", "--handover-fd", "9", "--host", "host-a"])
-    runner_mod.main(["--turn", "--handover-fd", "9", "--host", "host-a"])
+    runner.main(["--turn", "--spare", "--handover-fd", "9", "--host", "host-a"])
+    runner.main(["--turn", "--handover-fd", "9", "--host", "host-a"])
     with pytest.raises(SystemExit):
-        runner_mod.main(["--spare", "--host", "host-a"])
+        runner.main(["--spare", "--host", "host-a"])
 
     assert [kwargs["spare"] for kwargs in served] == [True, False]
 
@@ -560,7 +562,7 @@ class _RecordedSpare:
 def test_the_service_hands_its_spare_to_each_launch_and_retires_it(service, monkeypatch, stop):
     _identity, backend, _released = service
     made: list[_RecordedSpare] = []
-    monkeypatch.setattr(runner_mod, "TurnSpare", lambda **kwargs: _RecordedSpare(made, **kwargs))
+    monkeypatch.setattr(host_service, "TurnSpare", lambda **kwargs: _RecordedSpare(made, **kwargs))
     handed: list[Any] = []
 
     def spawn(_payload: dict[str, Any], **kwargs: Any) -> LaunchResult:
@@ -573,14 +575,14 @@ def test_the_service_hands_its_spare_to_each_launch_and_retires_it(service, monk
             return _job(1)
         if stop == "ctrl-c":
             raise KeyboardInterrupt
-        runner_mod._STOPPING.set()
+        runner_stop.STOPPING.set()
         return None
 
-    monkeypatch.setattr(runner_mod, "claim_payload", claim)
-    monkeypatch.setattr(runner_mod, "_spawn_turn", spawn)
+    monkeypatch.setattr(host_service, "claim_payload", claim)
+    monkeypatch.setattr(host_service, "_spawn_turn", spawn)
 
     assert (
-        runner_mod.run_forever(
+        host_service.run_forever(
             base_url="http://control",
             worker_id="runner-a",
             backend=backend,
@@ -604,7 +606,7 @@ def test_a_service_given_its_own_launcher_starts_no_spare(service, monkeypatch):
     def claim(**_kwargs: Any) -> dict[str, Any] | None:
         job = next(claims, None)
         if job is None:
-            runner_mod._STOPPING.set()
+            runner_stop.STOPPING.set()
         return job
 
     launched: list[str] = []
@@ -613,9 +615,9 @@ def test_a_service_given_its_own_launcher_starts_no_spare(service, monkeypatch):
         launched.append(payload["job_id"])
         return LaunchResult(LAUNCH_STARTED, FakeHandle())
 
-    monkeypatch.setattr(runner_mod, "claim_payload", claim)
+    monkeypatch.setattr(host_service, "claim_payload", claim)
 
-    runner_mod.run_forever(
+    host_service.run_forever(
         base_url="http://control",
         worker_id="runner-a",
         backend=backend,

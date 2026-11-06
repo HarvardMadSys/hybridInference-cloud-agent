@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from cloud_agent.work_insights import ACTIVITY_LIMIT, build_insights
+from cloud_agent.insights.work_insights import ACTIVITY_LIMIT, build_insights
 
 
 def test_english_requests_produce_focus_areas_and_suggestions():

@@ -10,10 +10,11 @@ import pytest
 from tests.unit.test_runner_host_settings import _JOB, _stamp
 from tests.unit.test_runner_source_prefetch import Source
 
-from cloud_agent_host import runner as runner_mod
+from cloud_agent_host import control_plane_client
+from cloud_agent_host.container.sandbox import ContainerBackend
 from cloud_agent_host.runtimes import get_runtime
-from cloud_agent_host.sandbox import ContainerBackend
-from cloud_agent_host.session_supervisor_client import SessionSupervisorError
+from cloud_agent_host.sandbox_manager_client import SandboxManagerError
+from cloud_agent_host.turn import group_reservation, shared_live_attempt, source_preparation
 
 _RESTORE = {
     "checkpoint_id": "c" * 32,
@@ -30,14 +31,14 @@ def _restoring_turn(
     monkeypatch, *, acquire_error: Exception, group_after_abandon: dict[str, Any]
 ) -> SimpleNamespace:
     source = Source()
-    monkeypatch.setattr(runner_mod, "prepare_worktree", source.prepare_worktree)
-    monkeypatch.setattr(runner_mod, "build_source_archive", source.build_source_archive)
+    monkeypatch.setattr(source_preparation, "prepare_worktree", source.prepare_worktree)
+    monkeypatch.setattr(source_preparation, "build_source_archive", source.build_source_archive)
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(backend, "version_stamp", _stamp)
     manager = Mock()
     manager.backend = backend
-    monkeypatch.setattr(runner_mod, "ChatSandboxManager", lambda _backend: manager)
-    control = Mock(spec=runner_mod.ControlPlane)
+    monkeypatch.setattr(group_reservation, "ChatSandboxManager", lambda _backend: manager)
+    control = Mock(spec=control_plane_client.ControlPlane)
     control.reserve_chat_sandbox.side_effect = lambda seed: {
         **seed,
         "thread_id": _JOB.thread_id,
@@ -54,11 +55,11 @@ def _restoring_turn(
     control.release_turn.return_value = True
     supervisor = Mock()
     supervisor.acquire_shared.side_effect = acquire_error
-    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda: supervisor)
+    monkeypatch.setattr(shared_live_attempt, "sandbox_manager_from_env", lambda: supervisor)
     monkeypatch.setenv("AGENT_SHARED_RESIDENT_CAPACITY", "8")
     monkeypatch.setenv("AGENT_CHAT_IDLE_TIMEOUT_S", "1800")
     finish = Mock()
-    result = runner_mod._run_shared_live_attempt(
+    result = shared_live_attempt._run_shared_live_attempt(
         runtime=get_runtime("claude-code"),
         job=_JOB,
         control=control,
@@ -77,7 +78,7 @@ def test_a_failed_restore_returns_the_group_to_its_checkpoint_and_the_turn_to_th
 ):
     turn = _restoring_turn(
         monkeypatch,
-        acquire_error=SessionSupervisorError(424, "checkpoint blob does not match its digest"),
+        acquire_error=SandboxManagerError(424, "checkpoint blob does not match its digest"),
         group_after_abandon={"state": "cold"},
     )
 
@@ -96,7 +97,7 @@ def test_a_failed_restore_returns_the_group_to_its_checkpoint_and_the_turn_to_th
 def test_a_restore_out_of_attempts_fails_the_turn(monkeypatch):
     turn = _restoring_turn(
         monkeypatch,
-        acquire_error=SessionSupervisorError(424, "sandbox image could not be pulled"),
+        acquire_error=SandboxManagerError(424, "sandbox image could not be pulled"),
         group_after_abandon={"state": "lost"},
     )
 
@@ -110,7 +111,7 @@ def test_a_restore_out_of_attempts_fails_the_turn(monkeypatch):
 def test_other_failures_of_a_restoring_turn_are_not_hand_backs(monkeypatch, status):
     turn = _restoring_turn(
         monkeypatch,
-        acquire_error=SessionSupervisorError(status, "something else"),
+        acquire_error=SandboxManagerError(status, "something else"),
         group_after_abandon={"state": "cold"},
     )
 

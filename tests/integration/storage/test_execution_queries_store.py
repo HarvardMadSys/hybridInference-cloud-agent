@@ -37,12 +37,12 @@ from tests.support.migrations import apply_migrations
 from tests.support.usage import job_usage_inputs
 
 from cloud_agent.domain.execution import JobStreamState
+from cloud_agent.domain.thread_stats import ATTEMPT_ROLLUP_VERSION
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories.execution_queries import (
     THREAD_STATS_EVENT_PAGE_SIZE,
     PostgresExecutionQueries,
 )
-from cloud_agent.thread_stats import ATTEMPT_ROLLUP_VERSION
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable

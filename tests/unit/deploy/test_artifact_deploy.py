@@ -114,9 +114,9 @@ elif "config" in a and "--format" in a:
 elif a[:1] == ["compose"]:
     if "build" in a: raise SystemExit(91)
     if "pull" in a: raise SystemExit(int(os.getenv("TEST_PULL_EXIT", "0")))
-    if "run" in a and "cloud_agent.identity_namespace" in a:
+    if "run" in a and "cloud_agent.deployment.identity_namespace" in a:
         raise SystemExit(int(os.getenv("TEST_IDENTITY_EXIT", "0")))
-    if "run" in a and "cloud_agent.deploy_readiness" in a:
+    if "run" in a and "cloud_agent.deployment.deploy_readiness" in a:
         raise SystemExit(int(os.getenv("TEST_READINESS_EXIT", "0")))
     if "ps" in a:
         if a[-1] == "runner": print("runner-1\nrunner-2\nrunner-3")
@@ -357,7 +357,7 @@ def test_packaged_deployers_run_without_source_and_preserve_state(tmp_path: Path
         assert pulls and max(pulls) < drain
     else:
         readiness = next(
-            i for i, c in enumerate(calls) if "cloud_agent.deploy_readiness" in c["args"]
+            i for i, c in enumerate(calls) if "cloud_agent.deployment.deploy_readiness" in c["args"]
         )
         replace = next(i for i, c in enumerate(calls) if "--remove-orphans" in c["args"])
         assert readiness < replace
@@ -405,7 +405,9 @@ def test_control_readiness_accepts_the_exact_draining_host(tmp_path: Path):
     result, calls = run(script, env)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    readiness = next(call for call in calls if "cloud_agent.deploy_readiness" in call["args"])
+    readiness = next(
+        call for call in calls if "cloud_agent.deployment.deploy_readiness" in call["args"]
+    )
     index = readiness["args"].index("--draining-host")
     assert readiness["args"][index + 1] == "runner-draining"
 
@@ -685,8 +687,8 @@ def test_the_control_planes_database_phase_migrates_and_stops_there(tmp_path: Pa
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert any("migrate" in c["args"] for c in calls)
-    assert any("cloud_agent.identity_namespace" in c["args"] for c in calls)
-    assert not any("cloud_agent.deploy_readiness" in c["args"] for c in calls), (
+    assert any("cloud_agent.deployment.identity_namespace" in c["args"] for c in calls)
+    assert not any("cloud_agent.deployment.deploy_readiness" in c["args"] for c in calls), (
         "the fence belongs to activation"
     )
     assert not any("--remove-orphans" in c["args"] for c in calls)
@@ -771,7 +773,7 @@ def test_a_cold_machine_has_its_listeners_before_the_host_activates(tmp_path: Pa
         "control-plane",
         "mcp-relay",
     ]
-    assert not any("cloud_agent.deploy_readiness" in c["args"] for c in calls), (
+    assert not any("cloud_agent.deployment.deploy_readiness" in c["args"] for c in calls), (
         "the fence is still activation's"
     )
 
@@ -843,7 +845,9 @@ def test_retrying_a_failed_activation_restores_what_its_cleanup_stopped(tmp_path
         call for call in second if "up" in call["args"] and "--no-deps" in call["args"]
     )
     assert "control-plane" in restarted["args"] and "mcp-relay" in restarted["args"]
-    fence = next(i for i, c in enumerate(second) if "cloud_agent.deploy_readiness" in c["args"])
+    fence = next(
+        i for i, c in enumerate(second) if "cloud_agent.deployment.deploy_readiness" in c["args"]
+    )
     started = next(
         i for i, c in enumerate(second) if "up" in c["args"] and "--no-deps" in c["args"]
     )

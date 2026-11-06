@@ -33,7 +33,7 @@ from cloud_agent.providers.compute.host_bootstrap import (
     _REQUIRED_ENV,
     SshHostBootstrap,
 )
-from cloud_agent_host.chat_sandbox_models import CHAT_NAMESPACE_LABEL
+from cloud_agent_host.container.chat_sandbox_models import CHAT_NAMESPACE_LABEL
 from cloud_agent_host.runtime_images import (
     NAMESPACE_LABEL,
     RUNTIME_LABEL,
@@ -605,7 +605,7 @@ async def test_checked_operator_example_loads_and_renders_real_bootstrap_payload
     tmp_path, monkeypatch
 ):
     """The shipped runbook profile must satisfy the actual deployment boundary."""
-    from cloud_agent.compute_config import ComputeConfiguration
+    from cloud_agent.providers.compute.compute_config import ComputeConfiguration
 
     repo = Path(__file__).resolve().parents[2]
     document = json.loads((repo / "deploy/control-plane/compute.example.json").read_text())
@@ -784,7 +784,7 @@ def _saved_checkpoint(archives: Path, sandbox_id: str = "asbx_one") -> dict:
     """Have the Host's checkpoint store keep a receipt; return what the control plane recorded."""
     from tests.unit.test_sandbox_checkpoints import _receipt
 
-    from cloud_agent_host.sandbox_checkpoints import SandboxCheckpointStore
+    from cloud_agent_host.archive.sandbox_checkpoints import SandboxCheckpointStore
 
     receipt = _receipt(sandbox_id)
     SandboxCheckpointStore(archives / "checkpoints").save(receipt)
@@ -800,15 +800,13 @@ def _discarded(
     """
     from tests.unit.test_sandbox_deletion_backup import _Manager
 
-    from cloud_agent_host.chat_sandbox import ChatSandboxSpec
-    from cloud_agent_host.sandbox_deletion_backup import (
+    from cloud_agent_host.archive.sandbox_deletion_backup import (
         ArchiveIdentity,
         SandboxDeletionBackupService,
     )
-    from cloud_agent_host.shared_session_supervisor import (
-        SharedChatSessionSupervisor,
-        SharedMemberManifest,
-    )
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxSpec
+    from cloud_agent_host.supervisor.shared_session_state import SharedMemberManifest
+    from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 
     spec = ChatSandboxSpec(
         thread_id="thread-origin", sandbox_id="sandbox-1", generation=2, runtime_id="claude-code"

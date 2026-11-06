@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.container.sandbox import SandboxError
 
 DEFAULT_CHAT_IDLE_TIMEOUT_S = 30 * 60.0
 DEFAULT_SWEEP_INTERVAL_S = 5.0

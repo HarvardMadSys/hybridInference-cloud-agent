@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from cloud_agent.model_preference import ModelPreferenceView, resolve_connection_default
+from cloud_agent.profile.model_preference import resolve_connection_default
+from cloud_agent.schemas.model_preferences import ModelPreferenceView
 
 _CONNECTION = {"id": "mconn_1", "enabled": True, "models": ["model-a", "model-b"]}
 

@@ -16,6 +16,7 @@ from uuid import UUID
 
 from pydantic import SecretStr
 
+from cloud_agent.application.compute_diagnostic_values import _safe_observed_at, _safe_uuid_fields
 from cloud_agent.application.compute_release import (
     EXPIRED_NOT_FOUND,
     NEVER_CREATED,
@@ -29,15 +30,10 @@ from cloud_agent.application.compute_rotation import (
     host_release_blocks_rotation,
     load_host_release_for_allocations,
 )
-from cloud_agent.application.compute_setup import (
-    HostRelease,
-    load_control_plane_host_release,
-)
+from cloud_agent.application.compute_setup import HostRelease, load_control_plane_host_release
 from cloud_agent.application.host_commands import HostCommands
 from cloud_agent.application.release_inventory import quiesce_and_scan
 from cloud_agent.application.superseded_removal import superseded_refusal
-from cloud_agent.compute_config import current_observation_seconds, current_registration_url
-from cloud_agent.compute_secrets import ComputeSecretError
 from cloud_agent.domain.compute import (
     MOVE_OUT_RENEWAL_LEAD_SECONDS,
     RECLAIMED_QUIET_SECONDS,
@@ -46,8 +42,9 @@ from cloud_agent.domain.compute import (
     move_out_window_seconds,
     provider_resource_absent,
 )
-from cloud_agent.host_pool import hash_secret
+from cloud_agent.domain.host_pool import hash_secret
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.ports.external.compute_provider import (
     AcquireRequest,
     ExtendRequest,
@@ -64,9 +61,11 @@ from cloud_agent.ports.external.host_bootstrap import (
     BootstrapResult,
     DeploymentProfile,
 )
-from cloud_agent.sandbox_manager_client import SandboxManagerError
-from cloud_agent.sandbox_manager_routing import sandbox_manager_for_host
-from cloud_agent.schemas_compute import ExtendComputeRequest, RenewalPolicy
+from cloud_agent.providers.compute import compute_config
+from cloud_agent.providers.compute.compute_secrets import ComputeSecretError
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_routing import sandbox_manager_for_host
+from cloud_agent.schemas.compute import ExtendComputeRequest, RenewalPolicy
 from cloud_agent_shared.shared_protocol import shared_deployment_capability
 
 if TYPE_CHECKING:
@@ -223,7 +222,7 @@ _SAFE_PROVIDER_REASONS = {
 }
 
 
-def _safe_provider_fields(source: dict[str, Any]) -> dict[str, str | int | bool]:  # noqa: PLR0912 complexity baseline, #771
+def _safe_provider_fields(source: dict[str, Any]) -> dict[str, str | int | bool]:
     """Validate provider diagnostic values as well as their field names."""
     details: dict[str, str | int | bool] = {}
     operation = source.get("provider_operation")
@@ -235,13 +234,7 @@ def _safe_provider_fields(source: dict[str, Any]) -> dict[str, str | int | bool]
     reason = source.get("provider_reason_code")
     if isinstance(reason, str) and reason in _SAFE_PROVIDER_REASONS:
         details["provider_reason_code"] = reason
-    for key in ("provider_request_id", "external_id", "submission_request_id"):
-        value = source.get(key)
-        if isinstance(value, str):
-            try:
-                details[key] = str(UUID(value))
-            except ValueError:
-                continue
+    details.update(_safe_uuid_fields(source))
     status = source.get("submission_http_status")
     if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
         details["submission_http_status"] = status
@@ -256,15 +249,9 @@ def _safe_provider_fields(source: dict[str, Any]) -> dict[str, str | int | bool]
         value = source.get(key)
         if isinstance(value, str) and _safe_diagnostic_label(value):
             details[key] = value
-    observed_at = source.get("provider_observed_at")
-    if isinstance(observed_at, str):
-        try:
-            parsed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
-        except ValueError:
-            pass
-        else:
-            if parsed.tzinfo is not None:
-                details["provider_observed_at"] = observed_at[:64]
+    observed_at = _safe_observed_at(source.get("provider_observed_at"))
+    if observed_at is not None:
+        details["provider_observed_at"] = observed_at
     return details
 
 
@@ -425,7 +412,9 @@ class ComputeReconciler:
         A released resource not yet seen gone is still read, and only read.
         """
         now = _now()
-        observation_seconds = current_observation_seconds(self.commands.configuration)
+        observation_seconds = compute_config.current_observation_seconds(
+            self.commands.configuration
+        )
         snapshot = await self.repository.scheduling_inventory()
         release = await load_host_release_for_allocations(
             snapshot.allocations, load_control_plane_host_release
@@ -705,12 +694,12 @@ class ComputeReconciler:
                 extra={"operation_id": operation["id"], "reason": code},
             )
         except ValueError as exc:
-            code = str(exc)
-            if code == "operation_lease_lost":
+            if isinstance(exc, StorageConflict) and exc.code is ConflictCode.OPERATION_LEASE_LOST:
                 return
-            if code in {"resource_identity_changed", "machine_identity_changed"} and operation.get(
-                "allocation_id"
-            ):
+            # Only the store's typed refusals have a code; a provider's identity
+            # change or missing registration URL arrives as a ProviderError above.
+            code = exc.code if isinstance(exc, StorageConflict) else None
+            if code is ConflictCode.RESOURCE_IDENTITY_CHANGED and operation.get("allocation_id"):
                 await self.repository.set_admission_hold(
                     allocation_id=operation["allocation_id"],
                     purpose="lease_deadline",
@@ -718,10 +707,7 @@ class ComputeReconciler:
                     scope="all_claims",
                     **self._fence(operation),
                 )
-            pre_submit = code in {
-                "autoscaling_connection_unverified",
-                "registration_unavailable",
-            }
+            pre_submit = code is ConflictCode.AUTOSCALING_CONNECTION_UNVERIFIED
             await self._finish(
                 operation,
                 "blocked",
@@ -735,10 +721,10 @@ class ComputeReconciler:
                     **({"external_pending": False} if pre_submit else {}),
                     "blocked_reasons": [
                         {
-                            "code": code if pre_submit else "resource_state_conflict",
+                            "code": str(code) if pre_submit else "resource_state_conflict",
                             "message": (
                                 "Revalidate autoscaling connections and retry."
-                                if code == "autoscaling_connection_unverified"
+                                if pre_submit
                                 else "Resource identity or state no longer matches this operation."
                             ),
                         }
@@ -1425,7 +1411,7 @@ class ComputeReconciler:
         Each submission gets a fresh token; only the newest one of an
         allocation can register, and only its hash is stored.
         """
-        url = current_registration_url(self.commands.configuration)
+        url = compute_config.current_registration_url(self.commands.configuration)
         if not url:
             raise ProviderError(
                 "registration_unavailable",
@@ -1548,7 +1534,7 @@ class ComputeReconciler:
                 allocation_id=allocation["id"], **self._fence(operation)
             )
         except (ProviderError, ComputeSecretError, ValueError) as exc:
-            if isinstance(exc, ValueError) and str(exc) == "operation_lease_lost":
+            if isinstance(exc, StorageConflict) and exc.code is ConflictCode.OPERATION_LEASE_LOST:
                 raise
             # Nothing has reached the provider yet, so every failure here is
             # a definite refusal and can safely release an autoscaling slot.
@@ -2130,7 +2116,7 @@ class ComputeReconciler:
     async def _allocation(self, allocation_id: str) -> dict[str, Any]:
         row = await self.repository.get_allocation(allocation_id)
         if row is None:
-            raise ValueError("allocation_not_found")
+            raise StorageConflict(ConflictCode.ALLOCATION_NOT_FOUND)
         return row
 
     @staticmethod
@@ -2189,7 +2175,7 @@ class ComputeReconciler:
         if not await self.repository.checkpoint_operation(
             **self._fence(operation), step=step, result=result
         ):
-            raise ValueError("operation_lease_lost")
+            raise StorageConflict(ConflictCode.OPERATION_LEASE_LOST)
         operation["step"] = step
         operation["result"] = {**operation.get("result", {}), **(result or {})}
 

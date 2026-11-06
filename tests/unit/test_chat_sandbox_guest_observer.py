@@ -13,15 +13,15 @@ from dataclasses import replace
 
 from tests.unit.test_chat_sandbox import _plain_group_network, _spec  # noqa: F401 - autouse fixture
 
-from cloud_agent_host.chat_sandbox import MEMBER_UID_BASE, ChatSandboxManager
-from cloud_agent_host.guest_observer import (
+from cloud_agent_host.container.chat_sandbox import MEMBER_UID_BASE, ChatSandboxManager
+from cloud_agent_host.container.sandbox import KATA_RUNTIME, ContainerBackend
+from cloud_agent_host.observe.guest_observer import (
     GUEST_OBSERVER_ROTATE_BYTES,
     GuestObservation,
     GuestObserverCursor,
     GuestObserverSnapshot,
     GuestObserverStatus,
 )
-from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend
 
 
 def test_retained_guest_journal_rotates_only_without_active_turns(monkeypatch):

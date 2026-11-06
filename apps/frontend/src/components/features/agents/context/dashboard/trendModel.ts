@@ -2,8 +2,8 @@
 // `trendChart.tsx` (`aggregateByTurn`, `deltaOf`, `trendMaxima`), `trendWindow.ts`
 // and `dna.ts` (`deltaBandsOf`) (Apache-2.0, commit
 // 32982aa6aa2c70fbda6b81281de98a72ea625001). Inputs are ours: each request's
-// recorded categories (estimate), its observed input (exact), the Gateway's
-// latency joined by response id, and the event-derived step time.
+// recorded categories (estimate), its observed input (exact), and the
+// event-derived step time.
 
 import type { ContextPointApi, DnaBandsApi } from '@/lib/api/agents';
 
@@ -19,8 +19,6 @@ export interface TrendColumn {
   /** Observed input (exact) or its change. */
   observed: number;
   afterCompaction: boolean;
-  /** Gateway-measured latency of the request, ms, when joined by id. */
-  latencyMs: number | null;
   /** Event-derived step time, ms. */
   stepMs: number | null;
   /** Requests a turn column stands for. */
@@ -28,18 +26,13 @@ export interface TrendColumn {
 }
 
 /** One column per request, or per turn (its last request; its steps summed for time). */
-export function trendColumns(
-  points: ContextPointApi[],
-  granularity: Granularity,
-  latency: ReadonlyMap<string, number>,
-): TrendColumn[] {
+export function trendColumns(points: ContextPointApi[], granularity: Granularity): TrendColumn[] {
   const step = points.map((point) => ({
     index: point.index,
     turnNo: point.turn_no,
     cats: point.categories ?? null,
     observed: point.prompt_tokens,
     afterCompaction: point.after_compaction,
-    latencyMs: point.usage_id ? (latency.get(point.usage_id) ?? null) : null,
     stepMs: point.step_ms ?? null,
     requests: 1,
   }));
@@ -51,7 +44,6 @@ export function trendColumns(
       turns[turns.length - 1] = {
         ...column,
         afterCompaction: last.afterCompaction || column.afterCompaction,
-        latencyMs: sumKnown(last.latencyMs, column.latencyMs),
         stepMs: sumKnown(last.stepMs, column.stepMs),
         requests: last.requests + 1,
       };
@@ -110,7 +102,7 @@ export function maxima(columns: TrendColumn[], from = 0, to = columns.length - 1
     m.total = Math.max(m.total, column.observed, stacked);
     m.up = Math.max(m.up, up);
     m.down = Math.max(m.down, down);
-    m.durationMs = Math.max(m.durationMs, column.latencyMs ?? 0, column.stepMs ?? 0);
+    m.durationMs = Math.max(m.durationMs, column.stepMs ?? 0);
   }
   return m;
 }

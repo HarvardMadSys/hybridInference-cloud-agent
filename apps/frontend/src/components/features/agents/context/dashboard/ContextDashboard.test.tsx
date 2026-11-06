@@ -110,32 +110,22 @@ function view(): ThreadContextApi {
 const TIMING: ThreadTimingApi = {
   active_ms: 10_000,
   totals: {
-    ttft: 1000,
     reasoning: 0,
     text: 0,
     toolarg: 0,
-    gen: 3000,
     tools: 4000,
-    unsplit: 0,
-    other: 2000,
+    unsplit: 6000,
   },
   executions: 2,
-  executions_split: 2,
-  model_requests: 4,
   tool_calls: 3,
   tool_calls_unpaired: 1,
   blocks: {},
-  output_tps: 13.3,
-  gateway: 'available',
-  gateway_reason: null,
   segments: [
-    { kind: 'ttft', start_ms: 0, end_ms: 1000 },
-    { kind: 'gen', start_ms: 1000, end_ms: 4000 },
+    { kind: 'unsplit', start_ms: 0, end_ms: 4000 },
     { kind: 'tools', start_ms: 4000, end_ms: 8000 },
-    { kind: 'other', start_ms: 8000, end_ms: 10_000 },
+    { kind: 'unsplit', start_ms: 8000, end_ms: 10_000 },
   ],
   segments_merged: false,
-  requests: [{ response_id: 'r3', ttft_ms: 200, latency_ms: 900 }],
 };
 
 function composition(eventId: number): RequestCompositionApi {
@@ -263,11 +253,10 @@ afterEach(() => {
 });
 
 describe('ContextDashboard', () => {
-  it('reads timing once, and shows its measured parts with TPS', async () => {
+  it('reads timing once, and shows its measured parts', async () => {
     show();
     const timing = card('Timing Stats');
-    expect(await within(timing).findByText('13 tok/s')).toBeInTheDocument();
-    expect(within(timing).getByText('Not attributed')).toBeInTheDocument();
+    expect(await within(timing).findByText('Tool runs')).toBeInTheDocument();
     expect(getThreadContextTiming).toHaveBeenCalledTimes(1);
   });
 
@@ -283,7 +272,7 @@ describe('ContextDashboard', () => {
       </LocaleProvider>,
     );
     await act(async () => resolveFirst(TIMING));
-    expect(screen.queryByText('13 tok/s')).not.toBeInTheDocument();
+    expect(screen.queryByText('Tool runs')).not.toBeInTheDocument();
   });
 
   it('switches the token basis between recorded estimates and reported usage', async () => {

@@ -568,7 +568,7 @@ if runs_phase prepare-database; then
   # running API and relay intact.
   log "checking that the Agent database is empty or holds Cloud Agent accounts"
   compose run --rm --no-deps control-plane \
-    python -m cloud_agent.identity_namespace --check
+    python -m cloud_agent.deployment.identity_namespace --check
   log "migrating deployment database"
   compose run --rm --no-deps migrate
 
@@ -676,7 +676,7 @@ if [[ -n "${AGENT_DEPLOY_DRAINING_HOST:-}" ]]; then
   READINESS_MODE_ARGS=(--draining-host "${AGENT_DEPLOY_DRAINING_HOST}")
 fi
 WATCH_READINESS=1 compose run --rm --no-deps ${READINESS_ARGS[@]+"${READINESS_ARGS[@]}"} control-plane \
-  python -m cloud_agent.deploy_readiness \
+  python -m cloud_agent.deployment.deploy_readiness \
     --timeout-seconds "${SHARED_READY_TIMEOUT}" \
     --expected-deployment-sha "${SHA}" \
     ${READINESS_MODE_ARGS[@]+"${READINESS_MODE_ARGS[@]}"}

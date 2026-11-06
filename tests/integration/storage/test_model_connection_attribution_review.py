@@ -7,7 +7,7 @@ from tests.integration.storage.test_agent_job_store import (
     store as store,
 )
 
-from cloud_agent.storage.admin_queries import AdminRunQueries
+from cloud_agent.storage.repositories.admin.runs import PostgresAdminRunQueries
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -17,7 +17,7 @@ async def test_admin_and_conversation_usage_queries_keep_personal_source(store, 
     job = await _create_job(
         store, runtime="opencode", model="same-model", model_connection_id=connection_id
     )
-    admin = await AdminRunQueries(pool).get_run(job["id"])
+    admin = await PostgresAdminRunQueries(pool).get_run(job["id"])
     assert admin is not None
     assert admin.get("model_connection_id") == connection_id
     owner = await store.ledger.job_usage_reads(job_id=job["id"], user_id=job["user_id"])

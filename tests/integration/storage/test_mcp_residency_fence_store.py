@@ -17,10 +17,11 @@ from tests.integration.storage.test_credential_queries_store import (
 )
 from tests.integration.storage.test_mcp_connection_store import _connect, _permission_binding
 
-from cloud_agent import memory_tool
-from cloud_agent.agent_memory import AgentMemoryTaskEnded, MemoryTask
 from cloud_agent.api import mcp_relay
 from cloud_agent.api.deps import get_storage
+from cloud_agent.domain.agent_memory import MemoryTask
+from cloud_agent.memory import memory_tool
+from cloud_agent.memory.agent_memory import AgentMemoryTaskEnded
 from cloud_agent.tokens import mint_residency_mcp_token
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]

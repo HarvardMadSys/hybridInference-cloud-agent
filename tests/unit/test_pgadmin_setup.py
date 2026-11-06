@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from cloud_agent import pgadmin_setup
+from cloud_agent.deployment import pgadmin_setup
 
 
 def test_concurrent_administrators_cannot_mix_or_replace_credentials(tmp_path):

@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useT } from '@/components/providers';
-import { AccountMenu } from '@/components/features/agents/AccountMenu';
+import { AccountMenu } from '@/components/features/agents/sidebar/AccountMenu';
 import { PaneResizer } from '@/components/features/agents/PaneResizer';
 import type { ResizablePane } from '@/components/features/agents/useResizablePane';
 import { HelpIcon } from './icons';

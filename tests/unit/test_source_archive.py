@@ -10,7 +10,7 @@ import tempfile
 
 import pytest
 
-from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_shared.git import source_archive as source_archive_module
 from cloud_agent_shared.git.source_archive import build_base_bundle, build_source_archive
 

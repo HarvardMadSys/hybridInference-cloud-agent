@@ -11,10 +11,10 @@ import pytest
 from fastapi import FastAPI
 from tests.support.owners import SESSIONS, use_session_secret
 
-from cloud_agent.admin_observability import encode_cursor
 from cloud_agent.api import context
 from cloud_agent.api.deps import get_owner_directory, get_storage
-from cloud_agent.context_insights import ContextInsightsCursor, context_cursor_scope
+from cloud_agent.context.context_insights import ContextInsightsCursor, context_cursor_scope
+from cloud_agent.domain.cursors import encode_cursor
 
 NOW = datetime(2026, 10, 15, 12, tzinfo=UTC)
 _SUMMARY = {
@@ -360,8 +360,7 @@ async def test_timing_is_the_owners_and_says_no_request_log_was_recorded(app):
     assert body["active_ms"] == 0
     assert body["segments"] == []
     # Owners' own connections are not proxied: no request is ever timed.
-    assert body["gateway"] == "not_recorded"
-    assert body["requests"] == []
+    assert set(body["totals"]) == {"reasoning", "text", "toolarg", "tools", "unsplit"}
 
 
 @pytest.mark.parametrize(

@@ -25,7 +25,9 @@ from cloud_agent.ports.sandbox import TerminalControlRoute
 
 _PORTS = pathlib.Path(__file__).resolve().parents[2] / "apps" / "backend" / "cloud_agent" / "ports"
 
-#: One name per port module, which is also the assembly's attribute name.
+#: One name per port module, which is also the assembly's attribute name. A
+#: capability whose mirror port was removed is not here: its fake is a
+#: ``create_autospec`` of the caller's Protocol (see ``tests.support.narrow_fakes``).
 CAPABILITIES = frozenset(p.stem for p in _PORTS.glob("*.py") if p.name != "__init__.py") | {
     "admin_conversations",
     "admin_runs",

@@ -7,23 +7,19 @@ from typing import TYPE_CHECKING, Protocol
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from pydantic import AwareDatetime  # noqa: TC002 — FastAPI resolves annotations at runtime.
 
-from cloud_agent.admin_conversations import (
+from cloud_agent.api.deps import get_storage, require_store, verify_admin_access
+from cloud_agent.domain.cursors import cursor_scope, decode_cursor
+from cloud_agent.schemas.admin_conversations import (
     AdminConversationDetail,
     AdminConversationList,
     ConversationCursor,
     ConversationTurnsCursor,
+    turns_scope,
 )
-from cloud_agent.admin_observability import (
-    RunFilters,
-    cursor_scope,
-    decode_cursor,
-    resolve_run_window,
-)
-from cloud_agent.api.deps import get_storage, require_store, verify_admin_access
-from cloud_agent.storage.admin_conversation_queries import turns_scope
+from cloud_agent.schemas.admin_observability import RunFilters, resolve_run_window
 
 if TYPE_CHECKING:
-    from cloud_agent.storage.admin_conversation_queries import AdminConversationQueries
+    from cloud_agent.ports.admin_queries import AdminConversationQueries
 
 
 class _Storage(Protocol):

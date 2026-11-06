@@ -1250,6 +1250,9 @@ explains it.
   cannot find, is refused. It may use the owner's credentials, as
   any command the agent runs may: keys pasted with it are sealed at rest and
   named `secret://NAME`, and `${NAME}` is filled from the chat's environment.
+  A sealed key shorter than 8 characters is refused when it is added or
+  imported, as a short environment Secret is: the runner masks only longer
+  keys in the chat's output. One stored before that rule still runs, unmasked.
   The host hands both only to the slot's runner, in a file only that runner's
   user reads (`/run/agent-mcp-slots/<slot>/secrets.json`). The admission names
   variables, never values.

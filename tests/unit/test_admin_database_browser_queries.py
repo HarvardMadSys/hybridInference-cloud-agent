@@ -9,13 +9,17 @@ from typing import Any, cast
 import asyncpg
 import pytest
 
-from cloud_agent.admin_database import (
+from cloud_agent.schemas.admin_database import (
     DatabaseQuery,
     DatabaseQueryInvalid,
     DatabaseQueryTimeout,
     DatabaseQueryUnavailable,
 )
-from cloud_agent.storage.admin_database_queries import AdminDatabaseQueries, _cell, _typed_value
+from cloud_agent.storage.repositories.admin.database import (
+    PostgresAdminDatabaseQueries,
+    _cell,
+    _typed_value,
+)
 
 
 class Context:
@@ -95,9 +99,9 @@ class Pool:
         return Context(self.connection)
 
 
-def reader() -> tuple[AdminDatabaseQueries, Connection]:
+def reader() -> tuple[PostgresAdminDatabaseQueries, Connection]:
     pool = Pool()
-    return AdminDatabaseQueries(cast("Any", pool)), pool.connection
+    return PostgresAdminDatabaseQueries(cast("Any", pool)), pool.connection
 
 
 async def test_metadata_excludes_unreviewed_columns_and_requires_complete_safe_keys():

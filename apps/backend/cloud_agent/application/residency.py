@@ -54,7 +54,7 @@ async def close_released_residencies(
     never answers delays only its own rows. What is cut off is left to that
     heartbeat.
     """
-    from cloud_agent.sandbox_manager_routing import sandbox_manager_for_host
+    from cloud_agent.sandbox_manager.sandbox_manager_routing import sandbox_manager_for_host
 
     rows = list(released)
     if not rows:

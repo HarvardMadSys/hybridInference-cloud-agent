@@ -9,7 +9,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from cloud_agent.agent_memory import (
+from cloud_agent.api._owner_auth import require_agent_owner
+from cloud_agent.api._sensitive_routes import SensitiveRoute
+from cloud_agent.api.deps import get_storage, require_store
+from cloud_agent.memory.agent_memory import (
     MEMORY_CONTENT_LIMIT,
     AgentMemoryConflict,
     AgentMemoryFull,
@@ -18,9 +21,6 @@ from cloud_agent.agent_memory import (
     AgentMemoryView,
     normalize_memory,
 )
-from cloud_agent.api._owner_auth import require_agent_owner
-from cloud_agent.api._sensitive_routes import SensitiveRoute
-from cloud_agent.api.deps import get_storage, require_store
 
 if TYPE_CHECKING:
     from cloud_agent.ports.agent_memory import AgentMemoryRepository

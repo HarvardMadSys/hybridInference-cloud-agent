@@ -12,14 +12,14 @@ from httpx import ASGITransport, AsyncClient
 from cloud_agent.api import source_control
 from cloud_agent.api._owner_auth import authenticate_agent_owner
 from cloud_agent.api.deps import get_agent_app_credentials, get_owner_directory, get_storage
-from cloud_agent.github_app import (
+from cloud_agent.source_control.github_app import (
     AppNotInstalled,
     RepositoryCreationError,
     UserAuthorizationRevoked,
 )
-from cloud_agent.github_user_token import UserTokenUnavailable
-from cloud_agent.source_control import SourceControlCipher
-from cloud_agent.source_control_runtime import (
+from cloud_agent.source_control.github_user_token import UserTokenUnavailable
+from cloud_agent.source_control.source_control import SourceControlCipher
+from cloud_agent.source_control.source_control_runtime import (
     GitHubAppProvider,
     GitLabOAuthLoad,
     SourceControlRuntime,
