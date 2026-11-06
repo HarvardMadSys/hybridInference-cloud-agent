@@ -19,8 +19,7 @@ A precondition that does not hold is a violation: it is logged as
 ``group_lifecycle_violation`` and the transition then does what the code
 before this state did, so a violation changes no behaviour. The invariants
 the A2 spec proves (:meth:`GroupLifecycleState.check_invariants`) are logged
-with the combination counts (``violation:<name>`` parts), and those it does
-not prove (:meth:`GroupLifecycleState.unproven`) as ``unproven:<name>``.
+with the combination counts (``violation:<name>`` parts).
 
 Tests switch on :func:`set_strict_checks`: a violated precondition then raises
 ``AssertionError``, and every transition asserts that its caller holds the
@@ -317,20 +316,11 @@ class GroupLifecycleState:
             broken.append("stop_under_check")
         return broken
 
-    def unproven(self) -> list[str]:
-        """The invariants the A2 spec leaves open (section 4.4) that this state breaks."""
-        broken: list[str] = []
-        start_seq, sealed_seq = self.run.start_seq, self.run.sealed_seq
-        if start_seq is not None and sealed_seq is not None and start_seq <= sealed_seq:
-            broken.append("U3")
-        return broken
-
     def checked_combination(self) -> tuple[str, ...]:
         """:meth:`combination`, followed by the invariants this state breaks."""
         return (
             *self.combination(),
             *(f"violation:{name}" for name in self.check_invariants()),
-            *(f"unproven:{name}" for name in self.unproven()),
         )
 
     # Preconditions ---------------------------------------------------------
@@ -395,11 +385,29 @@ class GroupLifecycleState:
 
     @_transition
     def join_run_locked(self, start_seq: int | None) -> None:
-        """Count a request the caller admitted with ``JOIN_RUN`` in the run's label."""
+        """Count a request the caller admitted with ``JOIN_RUN`` in the run's label.
+
+        A fence at or below the sealed one is not counted (U3): the run may
+        be one found going after a restart, sealed at the checkpoint it was
+        found with, and a request fenced before that checkpoint was taken
+        must not label the run as if the checkpoint covered it. The request
+        itself is admitted as before; only the label ignores it.
+        """
+        run = self.run
         if start_seq is None:
-            self.run = replace(self.run, unfenced=True)
-        elif self.run.start_seq is None or start_seq > self.run.start_seq:
-            self.run = replace(self.run, start_seq=start_seq)
+            self.run = replace(run, unfenced=True)
+        elif run.sealed_seq is not None and start_seq <= run.sealed_seq:
+            logger.warning(
+                "sandbox_run_join_below_sealed_checkpoint",
+                extra={
+                    "event": "sandbox_run_join_below_sealed_checkpoint",
+                    "start_seq": start_seq,
+                    "sealed_seq": run.sealed_seq,
+                    "run_start_seq": run.start_seq,
+                },
+            )
+        elif run.start_seq is None or start_seq > run.start_seq:
+            self.run = replace(run, start_seq=start_seq)
 
     @_transition
     def owe_start_completion_locked(self) -> None:

@@ -198,15 +198,6 @@ def test_preserved_initial_archive_keeps_its_snapshot_barrier_across_a_restart(
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=InvariantBroken,
-    reason=(
-        "A2 §4.4 U3 / §8 Q4: join_run_locked labels a run found going after a restart "
-        "with a request's fence without comparing it to sealed_seq. Fail-closed today: "
-        "the label is below the control plane's counter, so its checkpoint never covers"
-    ),
-)
 def test_a_group_found_running_is_never_labelled_at_or_below_its_sealed_checkpoint() -> None:
     """U3: while the group runs, ``start_seq`` is ``None`` or above ``sealed_seq``.
 
@@ -238,9 +229,10 @@ def test_a_group_found_running_is_never_labelled_at_or_below_its_sealed_checkpoi
     running_label = group.life.run.start_seq
     supervisor.operation_closed("athr_source", token)
     assert supervisor.stop_if_idle("athr_source", generation=1)
-    # Today the stop's checkpoint names 3. The control plane's counter is at
-    # least 6, and a receipt covers the group only when it names the counter,
-    # so this receipt covers nothing: the violation is fail-closed.
+    # Before the fix the stop's checkpoint named 3 (fail-closed: the control
+    # plane's counter is at least 6, and a receipt covers the group only when
+    # it names the counter). The late request is no longer counted, so the
+    # checkpoint names no fence.
     assert labels in ([3], [None])
 
     if running_label is not None and running_label <= group.life.run.sealed_seq:

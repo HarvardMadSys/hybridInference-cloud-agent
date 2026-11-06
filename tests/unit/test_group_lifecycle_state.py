@@ -594,8 +594,11 @@ def test_a_run_begins_only_inside_a_start() -> None:
         (RunLabel(start_seq=5), 3, RunLabel(start_seq=5)),
         (RunLabel(start_seq=5), 8, RunLabel(start_seq=8)),
         (RunLabel(start_seq=5), None, RunLabel(start_seq=5, unfenced=True)),
-        # U3, open in the spec: a join is not compared with the seal.
-        (RunLabel(sealed_seq=9), 2, RunLabel(start_seq=2, sealed_seq=9)),
+        # U3: a fence at or below the seal is not counted.
+        (RunLabel(sealed_seq=9), 2, RunLabel(sealed_seq=9)),
+        (RunLabel(sealed_seq=9), 9, RunLabel(sealed_seq=9)),
+        (RunLabel(start_seq=12, sealed_seq=9), 3, RunLabel(start_seq=12, sealed_seq=9)),
+        (RunLabel(sealed_seq=9), 10, RunLabel(start_seq=10, sealed_seq=9)),
     ],
 )
 def test_a_joined_request_raises_the_runs_label(
@@ -615,16 +618,6 @@ def test_a_transition_that_leaves_a_proven_invariant_broken_fails() -> None:
         life.check = None  # as no transition would: the stop outlives its check
         with pytest.raises(LifecycleInvariantError, match="stop_under_check"):
             life.advance_generation_locked()
-
-
-def test_the_open_invariants_are_named_but_not_enforced() -> None:
-    life = new_state()
-    life.run = RunLabel(start_seq=2, sealed_seq=5)
-    with life.condition:
-        life.advance_generation_locked()
-    assert life.check_invariants() == []
-    assert life.unproven() == ["U3"]
-    assert life.checked_combination()[-1:] == ("unproven:U3",)
 
 
 def test_a_preservation_without_the_initial_archives_barrier_breaks_i5() -> None:
