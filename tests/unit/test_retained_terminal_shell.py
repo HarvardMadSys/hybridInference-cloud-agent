@@ -27,8 +27,8 @@ import pytest
 from cloud_agent_host.container.chat_sandbox import (
     ChatSandboxManager,
     ChatSandboxSpec,
-    _terminal_bashrc,
 )
+from cloud_agent_host.container.chat_sandbox_terminal import _terminal_bashrc
 from cloud_agent_host.container.sandbox import ContainerBackend
 
 pytestmark = pytest.mark.skipif(

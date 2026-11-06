@@ -22,12 +22,17 @@ from cloud_agent_host.bounded_output import (
     protocol_lines,
     text_chunks,
 )
-from cloud_agent_host.container import chat_sandbox, sandbox
+from cloud_agent_host.container import (
+    chat_sandbox,
+    chat_sandbox_members,
+    retained_backend,
+    sandbox,
+)
 from cloud_agent_host.container.chat_sandbox import (
     ChatSandboxManager,
     ChatSandboxSpec,
-    RetainedChatBackend,
 )
+from cloud_agent_host.container.retained_backend import RetainedChatBackend
 from cloud_agent_host.container.sandbox import (
     ContainerBackend,
     ProcessBackend,
@@ -40,7 +45,8 @@ from cloud_agent_host.manager_api.workspace_commands import _run_sandbox
 @pytest.mark.parametrize("failure", ["timeout", "output"])
 def test_bounded_command_cleanup_preserves_a_running_sibling(monkeypatch, tmp_path, failure):
     """Run the actual fenced wrapper/reaper locally, with no Docker operation."""
-    monkeypatch.setattr(chat_sandbox, "ACTIVATION_TMPFS", str(tmp_path))
+    monkeypatch.setattr(retained_backend, "ACTIVATION_TMPFS", str(tmp_path))
+    monkeypatch.setattr(chat_sandbox_members, "ACTIVATION_TMPFS", str(tmp_path))
     spec = ChatSandboxSpec(
         thread_id="athr_test", sandbox_id="asbx_test", generation=1, runtime_id="codex"
     )
@@ -95,7 +101,7 @@ def test_newline_free_stdout_is_read_in_bounded_chunks():
 
 def _local_receipt_manager(monkeypatch, tmp_path):
     """A manager that runs the real launcher and reaper here, with no Docker operation."""
-    monkeypatch.setattr(chat_sandbox, "ACTIVATION_TMPFS", str(tmp_path))
+    monkeypatch.setattr(chat_sandbox_members, "ACTIVATION_TMPFS", str(tmp_path))
     spec = ChatSandboxSpec(
         thread_id="athr_test", sandbox_id="asbx_test", generation=1, runtime_id="codex"
     )
@@ -150,7 +156,7 @@ def test_a_resident_that_exited_on_end_of_input_closes_without_a_failed_kill(mon
 def test_a_missing_receipt_while_the_command_still_runs_is_a_failed_kill(monkeypatch, tmp_path):
     """Without a receipt nothing may be signalled, so a live command is a failure."""
     manager, spec = _local_receipt_manager(monkeypatch, tmp_path)
-    monkeypatch.setattr(chat_sandbox, "_RECEIPT_EXIT_GRACE_S", 0.2)
+    monkeypatch.setattr(chat_sandbox_members, "_RECEIPT_EXIT_GRACE_S", 0.2)
     pidfile = tmp_path / f"command-{'b' * 32}.pid"
     process = manager.spawn(
         spec,
@@ -173,13 +179,13 @@ def test_a_missing_receipt_while_the_command_still_runs_is_a_failed_kill(monkeyp
 
 
 def test_only_the_reapers_silent_exit_means_the_receipt_is_missing():
-    missing = chat_sandbox._member_kill_failure(125, "")
+    missing = chat_sandbox_members._member_kill_failure(125, "")
     assert isinstance(missing, chat_sandbox.MemberProcessReceiptMissing)
     # Docker's own failures share the code and always explain themselves.
-    explained = chat_sandbox._member_kill_failure(125, "Error response from daemon: gone")
+    explained = chat_sandbox_members._member_kill_failure(125, "Error response from daemon: gone")
     assert not isinstance(explained, chat_sandbox.MemberProcessReceiptMissing)
     assert "Error response from daemon" in str(explained)
-    stale = chat_sandbox._member_kill_failure(126, "")
+    stale = chat_sandbox_members._member_kill_failure(126, "")
     assert not isinstance(stale, chat_sandbox.MemberProcessReceiptMissing)
 
 
@@ -252,7 +258,7 @@ def test_a_live_process_stderr_is_read_without_waiting_for_its_exit(wrapper):
     process = (
         sandbox._PopenProcess(popen)
         if wrapper == "process"
-        else chat_sandbox._RetainedExecProcess(
+        else chat_sandbox_members._RetainedExecProcess(
             popen,
             manager=SimpleNamespace(),
             spec=SimpleNamespace(container_name="test"),

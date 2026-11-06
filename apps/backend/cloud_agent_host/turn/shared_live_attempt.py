@@ -25,8 +25,8 @@ from cloud_agent_host.container.chat_sandbox import (
     CHAT_UPLOADS_DIR,
     CHAT_WORKDIR,
     ChatSandboxSpec,
-    RetainedChatBackend,
 )
+from cloud_agent_host.container.retained_backend import RetainedChatBackend
 from cloud_agent_host.container.sandbox import SandboxBackend, SandboxError
 from cloud_agent_host.control_plane_client import ControlPlane, _log_control_failure
 from cloud_agent_host.drivers import DriverError

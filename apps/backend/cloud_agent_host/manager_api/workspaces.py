@@ -34,7 +34,7 @@ from cloud_agent_shared.workspace_browser import WorkspacePathError, normalize_w
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from cloud_agent_host.container.chat_sandbox import RetainedChatBackend
+    from cloud_agent_host.container.retained_backend import RetainedChatBackend
     from cloud_agent_host.manager_api.context import ManagerContext
     from cloud_agent_host.operation_call import SandboxManagerCall
 

@@ -64,6 +64,26 @@ BROWSER_SERVICE_UID = 10002
 MCP_SERVICE_UID = 10003
 MCP_RUNNER_UID_BASE = 12001
 
+#: The chat's workspace, its uploads and its shared agent state, inside every
+#: retained container.
+CHAT_WORKDIR = "/workspace"
+#: Where a task's uploaded files land. Outside the worktree on purpose: the
+#: publish path stages the workspace with ``git add -A -N``, so anything
+#: written under CHAT_WORKDIR is committed and shows up in the draft pull
+#: request. Root-owned and read-only to the sandbox — see
+#: ``build_upload_archive``, and the Dockerfile that creates the directory.
+CHAT_UPLOADS_DIR = "/uploads"
+CHAT_STATE_DIR = "/agent-state"
+CLAUDE_SHARED_PROJECTS_DIR = f"{CHAT_STATE_DIR}/claude/projects"
+
+
+def claude_member_config_dir(slot_id: int, thread_id: str) -> str:
+    """Return durable Claude launch state under this member's private home."""
+    if slot_id < 0 or not thread_id:
+        raise ValueError("resident slot and member identity are required")
+    member_key = hashlib.sha256(thread_id.encode("utf-8")).hexdigest()
+    return f"/home/agent-member-{slot_id}/.claude-members/{member_key}"
+
 
 class ChatSandboxStatus(StrEnum):
     """Docker states relevant to the restartable lifecycle."""

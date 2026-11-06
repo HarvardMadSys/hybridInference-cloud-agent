@@ -910,12 +910,12 @@ ENVIRONMENT_COPIES: dict[tuple[str, str], str] = {
         "the ssh client, minus SSH_AUTH_SOCK so no agent is forwarded"
     ),
     (
-        "apps/backend/cloud_agent_host/container/chat_sandbox.py",
-        "ChatSandboxManager.exec_client_env",
+        "apps/backend/cloud_agent_host/container/chat_sandbox_members.py",
+        "MemberExecMixin.exec_client_env",
     ): ("the Docker CLI's own configuration; sandbox values are added only by name"),
     (
-        "apps/backend/cloud_agent_host/container/chat_sandbox.py",
-        "ChatSandboxManager.export_archive",
+        "apps/backend/cloud_agent_host/container/chat_sandbox_workspace.py",
+        "WorkspaceFilesMixin.export_archive",
     ): ("docker cp, configured by the host's Docker client variables"),
     ("apps/backend/cloud_agent_host/container/exact_container.py", "ExactContainer.run_bytes"): (
         "a Docker CLI call, configured by the host's Docker client variables"

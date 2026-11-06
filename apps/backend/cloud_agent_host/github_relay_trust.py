@@ -28,7 +28,8 @@ from cloud_agent_host.member_setup.install_locks import install_lock
 from cloud_agent_shared.errors import SandboxError
 
 if TYPE_CHECKING:
-    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox_members import MemberExecMixin
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,7 @@ def trust_env() -> dict[str, str]:
 
 
 def install_github_relay_trust(
-    manager: ChatSandboxManager, spec: ChatSandboxSpec, ca_pem: str
+    manager: MemberExecMixin, spec: ChatSandboxSpec, ca_pem: str
 ) -> None:
     """Write the relay CA and the bundle into the running container, as root."""
     result = manager.exec_capture(
@@ -97,7 +98,7 @@ def install_github_relay_trust(
         )
 
 
-def ensure_github_relay_trust(manager: ChatSandboxManager, spec: ChatSandboxSpec) -> dict[str, str]:
+def ensure_github_relay_trust(manager: MemberExecMixin, spec: ChatSandboxSpec) -> dict[str, str]:
     """Have the container trust the GitHub relay, and say how a process uses it.
 
     Written once per container and CA, then remembered like a root helper

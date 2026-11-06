@@ -20,9 +20,9 @@ from cloud_agent_host.archive.archive_failure_diagnostics import (
 )
 from cloud_agent_host.container.chat_sandbox import (
     ChatSandboxSpec,
-    RetainedChatBackend,
     RetainedChatLost,
 )
+from cloud_agent_host.container.retained_backend import RetainedChatBackend
 from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.session_lifecycle import (
     SessionBusy,

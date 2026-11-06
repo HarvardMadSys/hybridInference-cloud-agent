@@ -20,7 +20,6 @@ from httpx import ASGITransport, AsyncClient
 from tests.unit.test_chat_group_network import _NAMESPACE, FakeDocker, FakeGuard, _config
 
 from cloud_agent_host.container.chat_sandbox import (
-    _GUEST_NETWORK_CHECK,
     CHAT_NAMESPACE_LABEL,
     CHAT_SANDBOX_LABEL,
     ChatSandboxManager,
@@ -28,6 +27,7 @@ from cloud_agent_host.container.chat_sandbox import (
 )
 from cloud_agent_host.container.sandbox import KATA_RUNTIME, ContainerBackend, ProcessBackend
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
+from cloud_agent_host.network.guest_network_check import _GUEST_NETWORK_CHECK
 from cloud_agent_host.sandbox_manager import create_app
 from cloud_agent_host.supervisor.shared_session_state import SharedMemberManifest
 from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor

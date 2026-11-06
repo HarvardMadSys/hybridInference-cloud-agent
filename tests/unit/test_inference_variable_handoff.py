@@ -17,11 +17,13 @@ from cloud_agent.sandbox_manager.sandbox_manager_client import (
     SandboxManagerError as ControlPlaneError,
 )
 from cloud_agent_host.container.chat_sandbox import (
-    MEMBER_REAPER_TARGET,
     MEMBER_TMPFS_ROOT,
     MEMBER_UID_BASE,
     ChatSandboxManager,
     ChatSandboxSpec,
+)
+from cloud_agent_host.container.chat_sandbox_members import (
+    MEMBER_REAPER_TARGET,
     member_inference_env_path,
 )
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory

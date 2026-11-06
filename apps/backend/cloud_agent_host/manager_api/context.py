@@ -34,7 +34,8 @@ if TYPE_CHECKING:
 
     from cloud_agent_host.archive.sandbox_archive_runtime import SandboxArchiveController
     from cloud_agent_host.archive.sandbox_archives import SandboxArchiveService
-    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, RetainedChatBackend
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
+    from cloud_agent_host.container.retained_backend import RetainedChatBackend
     from cloud_agent_host.environment_preparation import EnvironmentPreparation
     from cloud_agent_host.manager_api.calls import _CommandSlots, _EndpointLifecycleCalls
     from cloud_agent_host.manager_api.models import SharedSandboxIdentityRequest

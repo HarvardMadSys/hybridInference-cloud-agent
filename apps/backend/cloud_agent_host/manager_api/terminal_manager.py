@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import HTTPException
 
 from cloud_agent_host.action_receipts import ActionReceipts
-from cloud_agent_host.container.chat_sandbox import RetainedChatBackend
+from cloud_agent_host.container.retained_backend import RetainedChatBackend
 from cloud_agent_host.container.sandbox import SandboxError, SandboxSpec, TerminalNotSupportedError
 from cloud_agent_host.environment_process import tool_environment
 from cloud_agent_host.logging_utils import get_logger

@@ -22,10 +22,10 @@ from cloud_agent_host.container import (
     chat_sandbox as chat_sandbox_mod,
     chat_sandbox_markers,
     chat_sandbox_writers as writers,
+    retained_backend,
 )
 from cloud_agent_host.container.chat_sandbox import (
     ACTIVATION_TMPFS,
-    ARCHIVE_IMPORT_TIMEOUT_PER_GIB_S,
     CHAT_BOOTSTRAP_NETWORK,
     CHAT_DISK_LIMIT_LABEL,
     CHAT_IMAGE_DIGEST_LABEL,
@@ -36,20 +36,20 @@ from cloud_agent_host.container.chat_sandbox import (
     CHAT_STATE_DIR,
     CHAT_THREAD_LABEL,
     CHAT_WORKDIR,
-    MEMBER_REAPER_TARGET,
     MEMBER_TMPFS_ROOT,
     MEMBER_UID_BASE,
-    TURN_NETWORK_PROOF_S,
     ChatSandboxInspection,
     ChatSandboxManager,
     ChatSandboxSpec,
     ChatSandboxStatus,
-    RetainedChatBackend,
     RetainedChatLost,
     SandboxActionFacts,
-    _RetainedTerminalProcess,
     claude_member_config_dir,
 )
+from cloud_agent_host.container.chat_sandbox_members import MEMBER_REAPER_TARGET
+from cloud_agent_host.container.chat_sandbox_terminal import _RetainedTerminalProcess
+from cloud_agent_host.container.chat_sandbox_workspace import ARCHIVE_IMPORT_TIMEOUT_PER_GIB_S
+from cloud_agent_host.container.retained_backend import TURN_NETWORK_PROOF_S, RetainedChatBackend
 from cloud_agent_host.container.sandbox import (
     KATA_RUNTIME,
     ContainerBackend,
@@ -2945,7 +2945,7 @@ def test_a_backend_without_a_proof_checks_the_bridge_before_every_command(monkey
 def test_a_turn_relies_on_its_activation_proof_for_a_minute(monkeypatch):
     """The sandbox manager proved the bridge when it acquired the turn; repeating it adds nothing."""
     clock = {"now": 1000.0}
-    monkeypatch.setattr(chat_sandbox_mod, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
+    monkeypatch.setattr(retained_backend, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
     backend, checks = _proving_backend(monkeypatch, proved_at=1000.0)
 
     clock["now"] = 1000.0 + TURN_NETWORK_PROOF_S - 1
@@ -2970,7 +2970,7 @@ def test_a_turn_relies_on_its_activation_proof_for_a_minute(monkeypatch):
 def test_a_failed_check_is_no_proof(monkeypatch):
     """Fail closed: nothing runs, and the next command checks again."""
     clock = {"now": 1000.0 + TURN_NETWORK_PROOF_S}
-    monkeypatch.setattr(chat_sandbox_mod, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
+    monkeypatch.setattr(retained_backend, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
     backend, checks = _proving_backend(
         monkeypatch,
         proved_at=1000.0,

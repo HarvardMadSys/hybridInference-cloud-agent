@@ -31,14 +31,14 @@ from cloud_agent_host import sandbox_manager as sandbox_manager_mod
 from cloud_agent_host.container.chat_sandbox import (
     ACTIVATION_TMPFS,
     ChatSandboxManager,
-    RetainedChatBackend,
-    _RetainedExecProcess,
 )
+from cloud_agent_host.container.chat_sandbox_members import _RetainedExecProcess
 from cloud_agent_host.container.chat_sandbox_models import (
     ENVIRONMENT_TEST_LABEL,
     ChatSandboxInspection,
     ChatSandboxStatus,
 )
+from cloud_agent_host.container.retained_backend import RetainedChatBackend
 from cloud_agent_host.container.sandbox import (
     ContainerBackend,
     ProcessBackend,
