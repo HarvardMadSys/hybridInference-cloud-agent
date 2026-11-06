@@ -4,6 +4,7 @@ import subprocess
 from types import SimpleNamespace
 
 import pytest
+from tests.support.member_loopback import HELPER_IN_PLACE
 from tests.support.owners import launch_connection
 
 from cloud_agent_host.container.chat_sandbox import ChatSandboxSpec
@@ -70,6 +71,7 @@ def test_retained_http_launch_refreshes_the_trusted_bridge_without_mcp(
         ensure_kilo_mcp_runtime=lambda spec, version: events.append(("kilo", spec, version)),
         ensure_codex_mcp_policy=lambda spec, base_url: events.append(("policy", spec, base_url)),
         spawn=spawn,
+        exact=HELPER_IN_PLACE,
     )
     spec = ChatSandboxSpec(
         thread_id="athr_retained",

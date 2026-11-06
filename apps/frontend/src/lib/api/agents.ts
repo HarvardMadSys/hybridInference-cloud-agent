@@ -96,6 +96,7 @@ export type {
   ContextEventKind,
   ContextPointApi,
   LatestContextApi,
+  MeasuredPrefixApi,
   EventCapabilityApi,
   DnaBandsApi,
   SessionTokensApi,

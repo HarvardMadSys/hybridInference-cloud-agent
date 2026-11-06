@@ -1,10 +1,12 @@
-"""The model protocol compatibility helper, as a member's sandbox runs it.
+"""The member's loopback service, as a member's sandbox runs it.
 
 A translated plan starts the member's CLI behind the launcher in
-``cloud_agent_host.protocol_translator``. The sandbox image has no copy of it;
-the host builds a zipapp of exactly that module and the pure package it uses
-(``cloud_agent_shared.protocol_compat``), from the very files it imports
-itself, and installs it root-owned before every translated launch, so a
+``cloud_agent_host.protocol_translator``, and so does a metered direct plan,
+in passthrough (``cloud_agent_host.model_passthrough``). The sandbox image has
+no copy of it; the host builds a zipapp of exactly those modules and the pure
+ones they use (``cloud_agent_shared.protocol_compat``, the request meter and
+the token estimate's counts), from the very files it imports itself, and
+installs it root-owned before the first such launch in each container, so a
 container retained from an older image runs exactly this host's code. The
 archive is deterministic -- fixed member order, timestamps and modes -- so an
 unchanged helper is recognized by its digest and not copied again.
@@ -13,16 +15,20 @@ unchanged helper is recognized by its digest and not copied again.
 from __future__ import annotations
 
 import functools
+import hashlib
 import io
 import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import cloud_agent_host
+import cloud_agent_host.model_passthrough as model_passthrough
 import cloud_agent_host.protocol_translator as protocol_translator
 import cloud_agent_shared
 import cloud_agent_shared.protocol_compat as protocol_compat
-from cloud_agent_host.member_setup.install_locks import install_lock
+import cloud_agent_shared.request_prefix as request_prefix
+import cloud_agent_shared.text_tokens as text_tokens
+from cloud_agent_host.container.chat_sandbox_exec import install_once
 from cloud_agent_host.member_setup.trusted_files import install_trusted_file
 from cloud_agent_host.runtimes.base import COMPAT_LAUNCHER
 from cloud_agent_shared.protocol_compat import ENV_TOKEN
@@ -56,7 +62,8 @@ def _sources() -> list[tuple[str, Path]]:
 
     The two packages' ``__init__`` files come along so their imports resolve;
     neither imports anything. The pure package comes whole, with its license
-    and notice; of the host package, only the translator.
+    and notice; of the host package, only the translator and the passthrough;
+    of the shared one besides, the request meter and the counts it is made of.
     """
     shared = Path(protocol_compat.__file__).resolve().parent
     package = sorted(
@@ -66,9 +73,12 @@ def _sources() -> list[tuple[str, Path]]:
     )
     return [
         ("cloud_agent_host/__init__.py", Path(cloud_agent_host.__file__)),
+        ("cloud_agent_host/model_passthrough.py", Path(model_passthrough.__file__)),
         ("cloud_agent_host/protocol_translator.py", Path(protocol_translator.__file__)),
         ("cloud_agent_shared/__init__.py", Path(cloud_agent_shared.__file__)),
         *((f"cloud_agent_shared/protocol_compat/{path.name}", path) for path in package),
+        ("cloud_agent_shared/request_prefix.py", Path(request_prefix.__file__)),
+        ("cloud_agent_shared/text_tokens.py", Path(text_tokens.__file__)),
     ]
 
 
@@ -83,6 +93,12 @@ def helper_archive() -> bytes:
     return buffer.getvalue()
 
 
+@functools.cache
+def helper_key() -> str:
+    """What a container is remembered to hold once this host's helper is found in it."""
+    return f"{HELPER_PATH}@{hashlib.sha256(helper_archive()).hexdigest()}"
+
+
 def compat_token_env(token: str) -> dict[str, str]:
     """A translated launch's token, for its launcher alone; nothing for a direct one.
 
@@ -93,14 +109,24 @@ def compat_token_env(token: str) -> dict[str, str]:
 
 
 def install_compat_helper(manager: ChatSandboxManager, spec: ChatSandboxSpec) -> None:
-    """Make the container's helper this host's, before a translated member starts."""
-    with install_lock(spec.container_name):
-        install_trusted_file(
+    """Make the container's helper this host's, before a member starts behind it.
+
+    Once per container (``install_once``): the helper is root's, in the
+    image's root-owned ``/usr/local``, and no member can change it, so a
+    direct plan's launch pays nothing for it after the container's first.
+    """
+    content = helper_archive()
+    install_once(
+        manager,
+        spec,
+        helper_key(),
+        lambda: install_trusted_file(
             manager,
             spec,
             directory=HELPER_DIRECTORY,
             name=HELPER_NAME,
-            content=helper_archive(),
+            content=content,
             mode=0o444,
-            what="model protocol compatibility helper",
-        )
+            what="member loopback service",
+        ),
+    )

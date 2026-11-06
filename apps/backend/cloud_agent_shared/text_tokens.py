@@ -19,7 +19,6 @@ import re
 
 #: CJK ideographs, kana, Hangul, and full-width forms.
 _CJK = re.compile(r"[぀-ヿ㐀-䶿一-鿿가-힯豈-﫿＀-￯]")
-_ASCII = re.compile(r"[\x00-\x7f]")
 CHARS_PER_TOKEN = 4
 
 ESTIMATE_BASIS = "chars_cjk_v1"
@@ -28,7 +27,9 @@ ESTIMATE_BASIS = "chars_cjk_v1"
 def split_counts(text: str) -> tuple[int, int, int]:
     """(ASCII characters, CJK characters, other characters) of ``text``."""
     cjk = len(_CJK.findall(text))
-    ascii_chars = len(_ASCII.findall(text))
+    # U+0000-U+007F, counted without a match object per character: a request
+    # meter counts every tool schema a CLI sends.
+    ascii_chars = len(text.encode("ascii", "ignore"))
     return ascii_chars, cjk, max(0, len(text) - ascii_chars - cjk)
 
 

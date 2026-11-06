@@ -364,6 +364,19 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   every gate accepts, the same per-model paths. A claim and its residency must
   agree on both the credential revision and the plan. See the
   [protocol compatibility design](docs/agents/specs/2026-10-28-model-protocol-compatibility.zh-CN.md).
+  A direct plan's CLI starts behind the same launcher, its loopback service
+  in *passthrough* (2026-11-05): bound to the connection's one upstream origin,
+  it forwards the CLI's own requests and credentials unchanged, holds no key
+  and issues no token, and adds only a size record per model request on the
+  CLI's stderr -- the system prompt's and tool schemas' characters, never their
+  text -- which the host reports as a `request_prefix` lifecycle event. It is
+  not a network proxy: the member's egress, and the network rules, are the
+  same. A sibling that reaches its port can do nothing through it that the
+  public egress does not already allow. A CLI pointed at its vendor's own host
+  (Claude Code on `api.anthropic.com`) is not metered, so no CLI sees another
+  host than it would; a meter that cannot start leaves its CLI pointed at the
+  provider directly. See the
+  [request meter design](docs/agents/specs/2026-11-05-request-prefix-meter.zh-CN.md).
   Listing a provider's model ids to fill in the form writes nothing and
   proves nothing; it uses the key just entered, or a saved key only at the
   exact Base URL it was saved with, and spends one hourly check.

@@ -17336,6 +17336,116 @@
         "title": "McpIntegrationResponse",
         "type": "object"
       },
+      "MeasuredPrefix": {
+        "additionalProperties": false,
+        "description": "What the request's attempt sent ahead of the conversation, as its meter measured it.",
+        "properties": {
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode"
+          },
+          "other_prefixes": {
+            "minimum": 0.0,
+            "title": "Other Prefixes",
+            "type": "integer"
+          },
+          "protocol": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Protocol"
+          },
+          "source": {
+            "const": "member_request_meter",
+            "default": "member_request_meter",
+            "title": "Source",
+            "type": "string"
+          },
+          "system_chars": {
+            "minimum": 0.0,
+            "title": "System Chars",
+            "type": "integer"
+          },
+          "system_parts": {
+            "minimum": 0.0,
+            "title": "System Parts",
+            "type": "integer"
+          },
+          "system_tokens": {
+            "minimum": 0.0,
+            "title": "System Tokens",
+            "type": "integer"
+          },
+          "token_basis": {
+            "default": "chars_cjk_v1",
+            "title": "Token Basis",
+            "type": "string"
+          },
+          "tool_chars": {
+            "minimum": 0.0,
+            "title": "Tool Chars",
+            "type": "integer"
+          },
+          "tool_count": {
+            "minimum": 0.0,
+            "title": "Tool Count",
+            "type": "integer"
+          },
+          "tool_tokens": {
+            "minimum": 0.0,
+            "title": "Tool Tokens",
+            "type": "integer"
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/PrefixTool"
+            },
+            "title": "Tools",
+            "type": "array"
+          },
+          "tools_omitted": {
+            "minimum": 0.0,
+            "title": "Tools Omitted",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "system_chars",
+          "system_tokens",
+          "system_parts",
+          "tool_count",
+          "tool_chars",
+          "tool_tokens",
+          "tools",
+          "tools_omitted",
+          "other_prefixes"
+        ],
+        "title": "MeasuredPrefix",
+        "type": "object"
+      },
       "MemoryProjects": {
         "description": "Repositories that can have project memory.",
         "properties": {
@@ -18701,6 +18811,33 @@
         "title": "PhoneVerifyRequest",
         "type": "object"
       },
+      "PrefixTool": {
+        "additionalProperties": false,
+        "description": "One tool schema a request sent, by its name.",
+        "properties": {
+          "chars": {
+            "minimum": 0.0,
+            "title": "Chars",
+            "type": "integer"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "tokens": {
+            "minimum": 0.0,
+            "title": "Tokens",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "label",
+          "chars",
+          "tokens"
+        ],
+        "title": "PrefixTool",
+        "type": "object"
+      },
       "ProcessObservation": {
         "description": "One process created during a turn, observed by the Kata guest kernel.",
         "properties": {
@@ -19493,6 +19630,16 @@
           "native_status": {
             "title": "Native Status",
             "type": "string"
+          },
+          "prefix": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MeasuredPrefix"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "reconstructed": {
             "$ref": "#/components/schemas/ReconstructedComposition"

@@ -24,6 +24,7 @@ from cloud_agent_host.launch.mcp_relay import McpRelayFacet
 from cloud_agent_host.launch.plugins import PluginsFacet
 from cloud_agent_host.launch.runtime import RuntimeFacet
 from cloud_agent_host.launch.sandbox_mcp import SandboxMcpFacet
+from cloud_agent_host.runtimes import meters_direct_plan
 
 if TYPE_CHECKING:
     from cloud_agent_host.launch.facet import LaunchFacet
@@ -49,6 +50,11 @@ def launch_facets(launch: ResidentLaunch) -> tuple[LaunchFacet, ...]:
             source=launch.inference_source,
             client_protocol=launch.inference_client_protocol,
             local_token=launch.inference_local_token,
+            # A translated plan's helper measures every request already; a
+            # direct one is metered unless its CLI treats the provider's host
+            # as its vendor's own.
+            metered=not launch.inference_client_protocol
+            and meters_direct_plan(launch.runtime_id, launch.inference_base_url),
         ),
         McpRelayFacet(
             server_ids=launch.mcp_server_ids,
