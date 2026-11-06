@@ -33,6 +33,7 @@ from cloud_agent_host.session_lifecycle import (
     SessionLeaseLost,
 )
 from cloud_agent_host.supervisor.group_lifecycle import Operation
+from cloud_agent_host.supervisor.group_lifecycle_state import StopHolder
 from cloud_agent_host.supervisor.shared_session_recovery import SharedSessionRecovery
 from cloud_agent_host.supervisor.shared_session_state import (
     SharedMemberManifest,
@@ -52,6 +53,7 @@ if TYPE_CHECKING:
         ResidentTransport,
     )
     from cloud_agent_host.supervisor.group_lifecycle_controller import GroupLifecycleController
+    from cloud_agent_host.supervisor.group_lifecycle_state import Hold
 
 # The supervisor's operational log names are stable: this component logs
 # under the supervisor's logger, as it did before it was split out.
@@ -112,7 +114,9 @@ class GroupReconciler:
                     group = _Group(
                         spec=spec,
                         inspection=inspection,
-                        sealed_seq=self._archive.checkpoint_seq(spec, inspection),
+                        life=self._state.new_lifecycle(
+                            sealed_seq=self._archive.checkpoint_seq(spec, inspection)
+                        ),
                     )
                     origin = _Member(thread_id=spec.thread_id, resident_slot_id=0)
                     group.members[origin.thread_id] = origin
@@ -212,6 +216,7 @@ class GroupReconciler:
         invalidate_unknown = False
         marker_unreadable = False
         members: tuple[SharedMemberManifest, ...] = ()
+        stop: Hold | None = None
         with self._state.lock:
             self._state.require_lifecycle_check_locked(check)
             if discovered:
@@ -223,8 +228,7 @@ class GroupReconciler:
                     # sandbox-manager-private lifecycle record is unreadable, but do
                     # not let one damaged orphan prevent healthy groups from
                     # reconciling and receiving the network guard.
-                    group.orphan_finalization_pending = True
-                    group.orphan_marker_unreadable = True
+                    group.life.owe_orphan_locked(marker_unreadable=True)
                     marker_unreadable = True
                     logger.exception(
                         "sandbox final archive marker could not be classified",
@@ -250,10 +254,9 @@ class GroupReconciler:
                     )
                     if unknown_unflushed:
                         members = self._state.archive_members_locked(group)
-                        group.stop_archive_pending = True
-                        group.stop_archive_blocked = True
-                        group.stop_archive_members = members
-                        group.stopping = inspection.running
+                        group.life.owe_final_locked(members, blocked=True)
+                        if inspection.running:
+                            stop = group.life.begin_stop_locked(StopHolder.FINALIZE, check=check)
                         blocked = True
                         if inspection.running:
                             invalidate_unknown = True
@@ -266,8 +269,8 @@ class GroupReconciler:
                             and (inspection.running or owned_bridge in inspection.networks)
                         )
                     if finalize:
-                        group.orphan_finalization_pending = True
-                        group.stopping = True
+                        group.life.owe_orphan_locked()
+                        stop = group.life.begin_stop_locked(StopHolder.FINALIZE, check=check)
                         members = self._state.archive_members_locked(group)
             else:
                 if group.spec != spec:
@@ -287,7 +290,7 @@ class GroupReconciler:
                             },
                         )
                     else:
-                        group.orphan_marker_unreadable = False
+                        group.life.marker_read_locked()
                         marker_present = marker_payload is not None
                         if (
                             not marker_present
@@ -303,31 +306,33 @@ class GroupReconciler:
                         )
                         if unknown_unflushed:
                             members = self._state.archive_members_locked(group)
-                            group.stop_archive_pending = True
-                            group.stop_archive_blocked = True
-                            group.stop_archive_members = members
-                            group.orphan_finalization_pending = False
-                            group.stopping = inspection.running
+                            group.life.owe_final_locked(members, blocked=True)
+                            group.life.settle_orphan_locked()
+                            if inspection.running:
+                                stop = group.life.begin_stop_locked(
+                                    StopHolder.FINALIZE, check=check
+                                )
                             blocked = True
                             if inspection.running:
                                 invalidate_unknown = True
                         elif marker_present:
-                            group.stopping = True
+                            stop = group.life.begin_stop_locked(StopHolder.FINALIZE, check=check)
                             finalize = True
                             members = self._state.archive_members_locked(group)
                         else:
-                            group.orphan_finalization_pending = False
+                            group.life.settle_orphan_locked()
                 elif group.stop_archive_blocked:
-                    group.stopping = inspection.running
+                    if inspection.running:
+                        stop = group.life.begin_stop_locked(StopHolder.FINALIZE, check=check)
                     blocked = True
                 elif group.orphan_finalization_pending:
                     group.lifecycle.admit(Operation.ORPHAN_FINALIZATION)
-                    group.stopping = True
+                    stop = group.life.begin_stop_locked(StopHolder.FINALIZE, check=check)
                     finalize = True
                     members = self._state.archive_members_locked(group)
                 elif group.stop_archive_pending:
                     group.lifecycle.admit(Operation.TAKE_STOP)
-                    group.stopping = True
+                    stop = group.life.begin_stop_locked(StopHolder.FINALIZE, check=check)
                     retry = True
                 elif (
                     not inspection.running
@@ -342,8 +347,7 @@ class GroupReconciler:
                     try:
                         marker_payload = self._lifecycle.marker_result(marker_payload, marker_error)
                     except BaseException:
-                        group.orphan_finalization_pending = True
-                        group.orphan_marker_unreadable = True
+                        group.life.owe_orphan_locked(marker_unreadable=True)
                         marker_unreadable = True
                         logger.exception(
                             "stopped sandbox final archive marker is unreadable",
@@ -359,13 +363,11 @@ class GroupReconciler:
                         if not marker_present:
                             marker_present = marker_prepared
                         if not marker_present and self._archives_finals:
-                            group.stop_archive_pending = True
-                            group.stop_archive_blocked = True
-                            group.stop_archive_members = members
+                            group.life.owe_final_locked(members, blocked=True)
                             blocked = True
                         else:
                             group.lifecycle.admit(Operation.TAKE_STOP)
-                            group.stopping = True
+                            stop = group.life.begin_stop_locked(StopHolder.FINALIZE, check=check)
                             finalize = True
 
         if marker_unreadable:
@@ -419,8 +421,7 @@ class GroupReconciler:
                 )
             finally:
                 with self._state.lock:
-                    group.stopping = False
-                    self._state.condition.notify_all()
+                    group.life.end_stop_locked(stop)
                     found.extend(self._state.descriptors(group))
             return found
 
@@ -441,13 +442,11 @@ class GroupReconciler:
                     )
                     inspection = self._lifecycle.persist_stopped_archive(group, inspection, members)
                     with self._state.lock:
-                        group.orphan_finalization_pending = False
+                        group.life.settle_orphan_locked()
             except SandboxArchiveBlocked:
                 with self._state.lock:
-                    group.stop_archive_pending = True
-                    group.stop_archive_blocked = True
-                    group.stop_archive_members = members
-                    group.orphan_finalization_pending = False
+                    group.life.owe_final_locked(members, blocked=True)
+                    group.life.settle_orphan_locked()
                 try:
                     if inspection.running:
                         inspection = self._manager.stop(
@@ -473,8 +472,7 @@ class GroupReconciler:
                 # reconciliation, but it must not prevent later groups from
                 # receiving their own lifecycle and network-guard work.
                 with self._state.lock:
-                    group.orphan_finalization_pending = True
-                    group.orphan_marker_unreadable = self._archives_finals
+                    group.life.owe_orphan_locked(marker_unreadable=self._archives_finals)
                 if inspection.running:
                     try:
                         inspection = self._manager.stop(
@@ -505,8 +503,7 @@ class GroupReconciler:
                 )
             finally:
                 with self._state.lock:
-                    group.stopping = False
-                    self._state.condition.notify_all()
+                    group.life.end_stop_locked(stop)
         with self._state.lock:
             found.extend(self._state.descriptors(group))
         return found

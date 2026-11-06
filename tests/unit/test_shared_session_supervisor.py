@@ -1656,7 +1656,7 @@ def test_targeted_listing_rejects_a_changed_fence_during_inspection(monkeypatch,
             elif changed_fence == "member":
                 group.members["athr_source"] = replace(group.members["athr_source"])
             elif changed_fence == "lifecycle":
-                group.lifecycle_generation += 1
+                group.life.generation += 1
             elif changed_fence == "spec":
                 group.spec = replace(group.spec, generation=2)
             else:
@@ -3518,7 +3518,7 @@ def _waits_without_sleeping(monkeypatch, supervisor) -> list[float]:
     ],
 )
 def test_a_prompt_waits_out_a_group_transition_and_names_it_at_the_deadline(
-    monkeypatch, transitions, message
+    monkeypatch, lifecycle_flags, transitions, message
 ):
     """A prompt waits up to 30 s, in half-second slices, for the group to settle."""
     manager = _Manager()
@@ -3528,8 +3528,7 @@ def test_a_prompt_waits_out_a_group_transition_and_names_it_at_the_deadline(
     def register_then_transition(*args, **kwargs):
         registered = register(*args, **kwargs)
         group = supervisor.state.groups[_spec().sandbox_id]
-        for transition in transitions:
-            setattr(group, transition, True)
+        lifecycle_flags(group, **dict.fromkeys(transitions, True))
         return registered
 
     monkeypatch.setattr(supervisor._registration, "register_manifest", register_then_transition)
@@ -3582,7 +3581,7 @@ def test_a_reference_names_its_kind_when_the_lifecycle_changes_during_admission(
 
     def ensure_running_then_restart(group, **kwargs):
         ensure_running(group, **kwargs)
-        group.lifecycle_generation += 1
+        group.life.generation += 1
 
     monkeypatch.setattr(supervisor._lifecycle, "ensure_running", ensure_running_then_restart)
 
@@ -3626,7 +3625,7 @@ def test_the_initial_archive_waits_out_a_lifecycle_check_and_names_it_at_the_dea
         has_settled_context=False,
         manifest=_members(),
     )
-    supervisor.state.groups[_spec().sandbox_id].lifecycle_check = object()
+    supervisor.state.groups[_spec().sandbox_id].life.check = object()
     supervisor.initial_archive_wait_s = 2.0
     waits = _waits_without_sleeping(monkeypatch, supervisor)
 
@@ -3652,7 +3651,7 @@ def test_the_initial_archive_waits_out_a_lifecycle_check_begun_under_its_barrier
 
     def admit_then_begin_a_check(*args, **kwargs):
         admit(*args, **kwargs)
-        group.lifecycle_check = object()
+        group.life.check = object()
 
     monkeypatch.setattr(
         supervisor._initial_archive, "_require_initial_archive_admission", admit_then_begin_a_check

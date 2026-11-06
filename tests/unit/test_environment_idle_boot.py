@@ -162,7 +162,7 @@ def test_a_lease_lost_during_an_unfrozen_preparation_is_still_refused(tmp_path):
 
     def prepare(_backend, _environment, *, cancel: threading.Event):
         with supervisor.state.lock:
-            supervisor.state.members["athr_source"].lifecycle_generation += 1
+            supervisor.state.members["athr_source"].life.generation += 1
         assert cancel.wait(5), "the lease monitor did not revoke the preparation"
         return {"steps": []}
 

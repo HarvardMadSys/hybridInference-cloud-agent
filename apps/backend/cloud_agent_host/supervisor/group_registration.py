@@ -137,8 +137,10 @@ class GroupRegistration:
                 group = _Group(
                     spec=spec,
                     inspection=created,
+                    life=self._state.new_lifecycle(
+                        sealed_seq=self._archive.checkpoint_seq(spec, created)
+                    ),
                     environment_snapshot_failure=snapshot_failure,
-                    sealed_seq=self._archive.checkpoint_seq(spec, created),
                 )
                 self._state.groups[spec.sandbox_id] = group
             return self._install_manifest_locked(

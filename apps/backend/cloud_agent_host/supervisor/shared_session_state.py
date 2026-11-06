@@ -30,6 +30,7 @@ from cloud_agent_host.session_lifecycle import (
     SessionLeaseLost,
 )
 from cloud_agent_host.supervisor.group_lifecycle import GroupLifecycle, Operation
+from cloud_agent_host.supervisor.group_lifecycle_state import GroupLifecycleState, RunLabel
 
 if TYPE_CHECKING:
     import builtins
@@ -215,59 +216,102 @@ class _Member:
 class _Group:
     spec: ChatSandboxSpec
     inspection: ChatSandboxInspection
+    #: The group's lifecycle: operations in progress, records, barriers, and
+    #: the run label. Only its own ``*_locked`` transitions change it.
+    life: GroupLifecycleState
     members: dict[str, _Member] = field(default_factory=dict)
     terminal_tokens: dict[str, str] = field(default_factory=dict)
     operation_tokens: dict[str, str] = field(default_factory=dict)
-    snapshotting: bool = False
     #: Why the installation snapshot handed at creation was not used.
     environment_snapshot_failure: str | None = None
     environment_cancel: threading.Event | None = field(default=None, repr=False)
     environment_owner: str | None = field(default=None, repr=False)
-    # A failed initial archive observed (or could not rule out) its durable
-    # preparation marker, but the exact container could not yet be stopped.
-    # Only a later accepted STOPPED inspection may release this snapshot fence.
-    initial_archive_preservation_pending: bool = False
-    starting: bool = False
-    start_failed: bool = False
-    stopping: bool = False
-    archive_request_id: str | None = None
-    stop_archive_pending: bool = False
-    stop_archive_blocked: bool = False
-    stop_archive_members: tuple[SharedMemberManifest, ...] | None = None
-    orphan_finalization_pending: bool = False
-    orphan_marker_unreadable: bool = False
-    start_archive_completion_pending: bool = False
-    container_lost: bool = False
-    lifecycle_generation: int = 0
     #: The lifecycle generation an admission last proved the network in, and
     #: when that proof began (``shared_admission_proof``).
     network_proof: tuple[int, float] | None = None
-    lifecycle_check: _LifecycleCheck | None = field(default=None, repr=False)
     idle_deadline: float | None = None
     fork_mutex: threading.Lock = field(default_factory=threading.Lock, repr=False)
-    # The control plane's start fences. Every request that may start the
-    # container names the fence it took, and a run is labelled with the
-    # highest fence of the requests it actually admitted (``start_seq``), so
-    # the checkpoint of its stop names only requests whose work it holds. A
-    # request that is fenced but not yet here cannot lend its fence to another
-    # request's run. ``None`` until a fenced request is admitted, as for a run
-    # this host found already going after a restart.
-    start_seq: int | None = None
-    # A request without a fence was admitted to this run, as from an older
-    # control plane. It counted no start, so the run's checkpoint names no
-    # fence and never covers the group.
-    run_unfenced: bool = False
-    # The highest label of a run that ended (``start_seq`` as it stopped), or
-    # of the last checkpoint receipt this host kept when it found the group
-    # after a restart. That checkpoint may be the one the group moves with,
-    # so no request under a fence at or below it may start the group again:
-    # it changes the group after its checkpoint was taken.
-    sealed_seq: int | None = None
 
     @property
     def lifecycle(self) -> GroupLifecycle:
-        """The admission decisions over this group's lifecycle fields."""
+        """The admission decisions over this group's lifecycle state."""
         return GroupLifecycle(self)
+
+    # Read-only views of the lifecycle under its old field names, while the
+    # readers move to ``life``.
+
+    @property
+    def starting(self) -> bool:
+        return self.life.start is not None
+
+    @property
+    def stopping(self) -> bool:
+        return self.life.stop is not None
+
+    @property
+    def snapshotting(self) -> bool:
+        return self.life.exclusive is not None
+
+    @property
+    def lifecycle_check(self) -> _LifecycleCheck | None:
+        return self.life.check
+
+    @property
+    def start_failed(self) -> bool:
+        return self.life.last_start_failed
+
+    @property
+    def container_lost(self) -> bool:
+        return self.life.container_lost
+
+    @property
+    def initial_archive_preservation_pending(self) -> bool:
+        return self.life.initial_preservation
+
+    @property
+    def archive_request_id(self) -> str | None:
+        return self.life.archive_request_id
+
+    @property
+    def stop_archive_pending(self) -> bool:
+        return self.life.final_archive_pending
+
+    @property
+    def stop_archive_blocked(self) -> bool:
+        return self.life.final_archive_blocked
+
+    @property
+    def stop_archive_members(self) -> tuple[SharedMemberManifest, ...] | None:
+        owed = self.life.final_archive
+        return None if owed is None else owed.members
+
+    @property
+    def orphan_finalization_pending(self) -> bool:
+        return self.life.orphan is not None
+
+    @property
+    def orphan_marker_unreadable(self) -> bool:
+        return self.life.orphan_marker_unreadable
+
+    @property
+    def start_archive_completion_pending(self) -> bool:
+        return self.life.start_completion_pending
+
+    @property
+    def lifecycle_generation(self) -> int:
+        return self.life.generation
+
+    @property
+    def start_seq(self) -> int | None:
+        return self.life.run.start_seq
+
+    @property
+    def run_unfenced(self) -> bool:
+        return self.life.run.unfenced
+
+    @property
+    def sealed_seq(self) -> int | None:
+        return self.life.run.sealed_seq
 
 
 @dataclass(frozen=True, eq=False)
@@ -317,6 +361,14 @@ class SharedSessionState:
         self.lock = threading.RLock()
         self.condition = threading.Condition(self.lock)
 
+    def new_lifecycle(self, *, sealed_seq: int | None) -> GroupLifecycleState:
+        """The lifecycle of a group this supervisor starts tracking, sealed at ``sealed_seq``."""
+        return GroupLifecycleState(
+            self.condition,
+            archives_finals=self.archives_finals,
+            run=RunLabel(sealed_seq=sealed_seq),
+        )
+
     @staticmethod
     def archive_members_locked(group: _Group) -> tuple[SharedMemberManifest, ...]:
         """Snapshot final-archive membership while the supervisor lock is held."""
@@ -338,9 +390,7 @@ class SharedSessionState:
     @staticmethod
     def mark_container_lost_locked(group: _Group) -> None:
         """Make a same-name replacement permanently inadmissible to this group."""
-        if not group.container_lost:
-            group.lifecycle_generation += 1
-        group.container_lost = True
+        group.life.mark_lost_locked()
         group.idle_deadline = None
         for member in group.members.values():
             member.context_status = "lost"
@@ -365,24 +415,21 @@ class SharedSessionState:
         if group.container_lost:
             raise RetainedChatLost("shared sandbox container identity was lost")
         group.inspection = inspection
-        if group.initial_archive_preservation_pending and not inspection.running:
-            group.initial_archive_preservation_pending = False
-            group.snapshotting = False
-            self.condition.notify_all()
+        if not inspection.running:
+            group.life.accepted_stopped_locked()
         return inspection
 
     def begin_lifecycle_check_locked(self, group: _Group) -> _LifecycleCheck:
         """Reserve this group, leaving the metadata lock free during external I/O."""
         group.lifecycle.admit(Operation.LIFECYCLE_CHECK)
-        group.lifecycle_generation += 1
         check = _LifecycleCheck(
             group,
             group.spec,
             group.inspection.container_id,
-            group.lifecycle_generation,
+            group.life.advance_generation_locked(),
             tuple(group.members.items()),
         )
-        group.lifecycle_check = check
+        group.life.begin_check_locked(check)
         group.lifecycle.record_combination(site="begin_lifecycle_check")
         return check
 
@@ -406,11 +453,8 @@ class SharedSessionState:
 
     def end_lifecycle_check_locked(self, check: _LifecycleCheck) -> None:
         """Release only this operation's reservation, including on failure."""
-        if check.group.lifecycle_check is check:
-            check.group.lifecycle_check = None
-            check.group.lifecycle_generation += 1
+        if check.group.life.end_check_locked(check):
             check.group.lifecycle.record_combination(site="end_lifecycle_check")
-            self.condition.notify_all()
 
     def require_current_inspection(self, group: _Group) -> ChatSandboxInspection:
         """Inspect and accept only the exact Docker object owned by ``group``."""
@@ -464,10 +508,7 @@ class SharedSessionState:
         if start_seq is _SAME_RUN:
             return
         group.lifecycle.admit(Operation.JOIN_RUN)
-        if start_seq is None:
-            group.run_unfenced = True
-        elif group.start_seq is None or start_seq > group.start_seq:
-            group.start_seq = start_seq
+        group.life.join_run_locked(start_seq)
 
     def arm_idle_if_quiescent(
         self,

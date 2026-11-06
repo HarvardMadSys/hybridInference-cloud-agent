@@ -12,6 +12,7 @@ import logging
 from typing import Any
 
 import pytest
+from tests.support.group_lifecycle import FLAGS, new_state, set_flags
 
 from cloud_agent_host.container.chat_sandbox import (
     ChatSandboxInspection,
@@ -23,10 +24,10 @@ from cloud_agent_host.session_lifecycle import SessionBusy
 from cloud_agent_host.supervisor.group_lifecycle import (
     ADMISSION,
     Blocker,
-    CombinationCounts,
     GroupLifecycle,
     Operation,
 )
+from cloud_agent_host.supervisor.group_lifecycle_state import CombinationCounts
 from cloud_agent_host.supervisor.shared_session_state import _Group, _Member
 
 CHECK = "shared sandbox lifecycle check is in progress"
@@ -67,10 +68,12 @@ def _group(running: bool = True, **fields: Any) -> _Group:
         mounts=(),
         networks=("agent-net",),
     )
-    group = _Group(spec=spec, inspection=inspection)
+    group = _Group(spec=spec, inspection=inspection, life=new_state())
     group.members["athr_source"] = _Member(thread_id="athr_source")
+    set_flags(group, **{name: value for name, value in fields.items() if name in FLAGS})
     for name, value in fields.items():
-        setattr(group, name, value)
+        if name not in FLAGS:
+            setattr(group, name, value)
     return group
 
 
@@ -155,7 +158,6 @@ _CASES: list[tuple[Operation, dict[str, Any], bool, type[Exception] | None, str 
     ),
     (Operation.DELETION, {"stopping": True}, False, None, None),
     (Operation.DELETION, {"lifecycle_check": HELD_CHECK}, False, None, None),
-    (Operation.DELETION, {"orphan_marker_unreadable": True}, False, None, None),
     (Operation.DELETION, {"operation_tokens": {"t": "athr_source"}}, False, None, None),
     # ARCHIVE and IDLE_DELETION: deletion fences, then mutation's, then idle.
     (Operation.ARCHIVE, {"starting": True}, False, SessionBusy, BEFORE_DELETION),
@@ -398,7 +400,7 @@ def test_the_view_reads_the_groups_fields_in_place() -> None:
     group = _group()
     lifecycle = GroupLifecycle(group)
     lifecycle.admit(Operation.MUTATION)
-    group.starting = True
+    set_flags(group, starting=True)
     with pytest.raises(SessionBusy, match=START):
         lifecycle.admit(Operation.MUTATION)
 
@@ -413,7 +415,7 @@ def test_a_combination_lists_what_holds_in_a_fixed_order() -> None:
         start_failed=True,
     )
     assert group.lifecycle.combination() == (
-        "stop:check",
+        "stop:shutdown",
         "exclusive:initial_archive",
         "check",
         "start_failed",

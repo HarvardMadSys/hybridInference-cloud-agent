@@ -7,6 +7,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 from tests.support.archive_policy import hooked_supervisor
+from tests.support.group_lifecycle import set_flags
 from tests.unit.test_chat_group_network import _world
 from tests.unit.test_shared_session_supervisor import _Manager, _members, _spec
 
@@ -234,7 +235,7 @@ def test_unavailable_inventory_and_failed_rule_check_stops_starting_group() -> N
     supervisor.register_manifest(_spec(), _members())
     group = supervisor.state.groups[_spec().sandbox_id]
     group.inspection = replace(group.inspection, running=False)
-    group.starting = True
+    set_flags(group, starting=True)
     manager.exact.run = lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout="")  # type: ignore[method-assign]
     manager.host_rule_failures = 2
 

@@ -6,6 +6,7 @@ import asyncio
 import json
 
 from tests.support.archive_policy import hooked_supervisor
+from tests.support.group_lifecycle import set_flags
 from tests.unit.test_shared_session_supervisor import (
     _HELD_S,
     _UNBLOCKED_S,
@@ -345,7 +346,7 @@ def test_lifecycle_check_rejects_superseded_observations(monkeypatch, caplog, op
             if fence == "index":
                 supervisor.state.groups.pop(spec.sandbox_id)
             elif fence == "lifecycle":
-                group.lifecycle_generation += 1
+                group.life.generation += 1
             elif fence == "spec":
                 group.spec = replace(spec, generation=spec.generation + 1)
             else:
@@ -358,7 +359,7 @@ def test_lifecycle_check_rejects_superseded_observations(monkeypatch, caplog, op
         def call():
             return supervisor.stop_if_idle(spec.thread_id, generation=spec.generation)
     elif operation == "reconcile_marker":
-        group.orphan_marker_unreadable = True
+        set_flags(group, orphan_marker_unreadable=True)
         monkeypatch.setattr(manager, "read_running_final_archive_marker", changed)
         call = supervisor.reconcile
     else:
@@ -1760,7 +1761,7 @@ def test_abandon_drops_the_window_when_normal_turn_cleanup_fails(monkeypatch):
 def test_a_stopping_group_is_included_in_the_exact_host_rule_check():
     """It remains guarded through archive preparation and Docker stop."""
     manager, supervisor = _running_group()
-    supervisor.state.members["athr_source"].stopping = True
+    set_flags(supervisor.state.members["athr_source"], stopping=True)
 
     assert supervisor.guard_network() == []
 

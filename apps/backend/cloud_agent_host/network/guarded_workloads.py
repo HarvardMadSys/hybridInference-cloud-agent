@@ -87,10 +87,17 @@ class GuardedInventory:
 class KnownGuardedGroup(Protocol):
     """Supervisor state needed to conservatively retain an exact identity."""
 
-    spec: ChatSandboxSpec
-    inspection: ChatSandboxInspection
-    starting: bool
-    stopping: bool
+    @property
+    def spec(self) -> ChatSandboxSpec: ...
+
+    @property
+    def inspection(self) -> ChatSandboxInspection: ...
+
+    @property
+    def starting(self) -> bool: ...
+
+    @property
+    def stopping(self) -> bool: ...
 
 
 def sandbox_spec_from_inspection(inspection: ChatSandboxInspection) -> ChatSandboxSpec:

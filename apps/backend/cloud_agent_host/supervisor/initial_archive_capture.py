@@ -29,11 +29,13 @@ from cloud_agent_host.session_lifecycle import (
     SessionLeaseLost,
 )
 from cloud_agent_host.supervisor.group_lifecycle import Operation
+from cloud_agent_host.supervisor.group_lifecycle_state import ExclusiveHolder
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from cloud_agent_host.supervisor.group_lifecycle_controller import GroupLifecycleController
+    from cloud_agent_host.supervisor.group_lifecycle_state import Hold
     from cloud_agent_host.supervisor.shared_session_state import (
         SharedMemberManifest,
         SharedSessionState,
@@ -69,21 +71,17 @@ class InitialArchiveCapture:
         *,
         expected_spec: ChatSandboxSpec | None,
         expected_container_id: str | None,
-        own_barrier: bool = False,
+        own_barrier: Hold | None = None,
     ) -> None:
         """Check, under the lock, everything the pre-prompt archive must exclude.
 
         ``own_barrier`` rechecks after this capture raised its snapshot barrier,
         which is then the one capture expected to be in progress.
         """
-        if own_barrier:
+        if own_barrier is not None:
             # This capture's barrier is the one snapshot expected; every other
             # writer and lifecycle fence is checked as usual.
-            group.snapshotting = False
-            try:
-                group.lifecycle.admit(Operation.MUTATION)
-            finally:
-                group.snapshotting = True
+            group.lifecycle.admit_as(own_barrier, Operation.MUTATION)
         else:
             group.lifecycle.admit(Operation.MUTATION)
         if expected_spec is not None and group.spec != expected_spec:
@@ -151,7 +149,7 @@ class InitialArchiveCapture:
             # The barrier goes up first: no new workspace request is admitted,
             # and the ones already running (reads, Git inspection, commands)
             # are given the same bounded time to finish.
-            group.snapshotting = True
+            barrier = group.life.begin_exclusive_locked(ExclusiveHolder.INITIAL_ARCHIVE)
             group.idle_deadline = None
             try:
                 # A request admitted before the barrier may still begin its
@@ -178,12 +176,11 @@ class InitialArchiveCapture:
                     member,
                     expected_spec=expected_spec,
                     expected_container_id=expected_container_id,
-                    own_barrier=True,
+                    own_barrier=barrier,
                 )
             except BaseException:
-                group.snapshotting = False
+                group.life.end_exclusive_locked(barrier)
                 self._state.arm_idle_if_quiescent(group)
-                self._state.condition.notify_all()
                 raise
             observed = group.inspection
             lifecycle_generation = group.lifecycle_generation
@@ -205,9 +202,8 @@ class InitialArchiveCapture:
                     group.inspection = current
         except BaseException:
             with self._state.lock:
-                group.snapshotting = False
+                group.life.end_exclusive_locked(barrier)
                 self._state.arm_idle_if_quiescent(group)
-                self._state.condition.notify_all()
             raise
 
         manifest: str | None = None
@@ -248,7 +244,7 @@ class InitialArchiveCapture:
                 preserve_frozen_writers = initial_marker is not None
             if preserve_frozen_writers:
                 with self._state.lock:
-                    group.initial_archive_preservation_pending = True
+                    group.life.preserve_initial_locked()
                 try:
                     stopped = self._lifecycle.stop_if_idle(
                         thread_id,
@@ -325,11 +321,10 @@ class InitialArchiveCapture:
             ):
                 release_snapshot_barrier = True
             if release_snapshot_barrier:
-                group.initial_archive_preservation_pending = False
-                group.snapshotting = False
+                group.life.release_initial_locked(barrier)
                 self._state.arm_idle_if_quiescent(group)
             elif preserve_frozen_writers:
-                group.initial_archive_preservation_pending = True
+                group.life.preserve_initial_locked()
             self._state.condition.notify_all()
         if preservation_error is not None:
             assert capture_error is not None

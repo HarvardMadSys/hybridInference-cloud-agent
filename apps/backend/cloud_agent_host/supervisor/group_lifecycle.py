@@ -16,10 +16,6 @@ check the same state in a different order are two rows.
 
 from __future__ import annotations
 
-import logging
-import threading
-import time
-from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -27,12 +23,12 @@ from typing import TYPE_CHECKING, Final
 
 from cloud_agent_host.container.chat_sandbox_models import RetainedChatLost
 from cloud_agent_host.session_lifecycle import SessionBusy
+from cloud_agent_host.supervisor.group_lifecycle_state import COMBINATIONS
 
 if TYPE_CHECKING:
     from cloud_agent_host.container.sandbox import SandboxError
+    from cloud_agent_host.supervisor.group_lifecycle_state import Hold
     from cloud_agent_host.supervisor.shared_session_state import _Group
-
-logger = logging.getLogger(__name__)
 
 
 class Operation(Enum):
@@ -215,95 +211,23 @@ ADMISSION: Final[dict[Operation, tuple[Refusal, ...]]] = {
 _Holds = Callable[["GroupLifecycle", bool], bool]
 
 _HOLDS: Final[dict[Blocker, _Holds]] = {
-    Blocker.LIFECYCLE_CHECK: lambda life, allow: (
-        life.group.lifecycle_check is not None and not allow
-    ),
+    Blocker.LIFECYCLE_CHECK: lambda life, allow: life.group.life.check is not None and not allow,
     Blocker.LIFECYCLE_CHECK_OUTSIDE_STOP: lambda life, allow: (
-        life.group.lifecycle_check is not None and not allow and not life.group.stopping
+        life.group.life.check is not None and not allow and life.group.life.stop is None
     ),
-    Blocker.SNAPSHOTTING: lambda life, _: life.group.snapshotting,
-    Blocker.STARTING: lambda life, _: life.group.starting,
-    Blocker.STOPPING: lambda life, _: life.group.stopping,
-    Blocker.CONTAINER_LOST: lambda life, _: life.group.container_lost,
-    Blocker.INITIAL_ARCHIVE_PRESERVATION: lambda life, _: (
-        life.group.initial_archive_preservation_pending
-    ),
-    Blocker.STOP_ARCHIVE_PENDING: lambda life, _: life.group.stop_archive_pending,
-    Blocker.STOP_ARCHIVE_BLOCKED: lambda life, _: life.group.stop_archive_blocked,
-    Blocker.ORPHAN_FINALIZATION: lambda life, _: life.group.orphan_finalization_pending,
-    Blocker.START_ARCHIVE_COMPLETION: lambda life, _: life.group.start_archive_completion_pending,
-    Blocker.ARCHIVE_REQUEST: lambda life, _: life.group.archive_request_id is not None,
+    Blocker.SNAPSHOTTING: lambda life, _: life.group.life.exclusive is not None,
+    Blocker.STARTING: lambda life, _: life.group.life.start is not None,
+    Blocker.STOPPING: lambda life, _: life.group.life.stop is not None,
+    Blocker.CONTAINER_LOST: lambda life, _: life.group.life.container_lost,
+    Blocker.INITIAL_ARCHIVE_PRESERVATION: lambda life, _: life.group.life.initial_preservation,
+    Blocker.STOP_ARCHIVE_PENDING: lambda life, _: life.group.life.final_archive_pending,
+    Blocker.STOP_ARCHIVE_BLOCKED: lambda life, _: life.group.life.final_archive_blocked,
+    Blocker.ORPHAN_FINALIZATION: lambda life, _: life.group.life.orphan is not None,
+    Blocker.START_ARCHIVE_COMPLETION: lambda life, _: life.group.life.start_completion_pending,
+    Blocker.ARCHIVE_REQUEST: lambda life, _: life.group.life.archive_request_id is not None,
     Blocker.NOT_RUNNING: lambda life, _: not life.group.inspection.running,
     Blocker.NOT_QUIESCENT: lambda life, allow: not life.is_quiescent(allow_lifecycle_check=allow),
 }
-
-
-#: How often the per-process combination counts are logged.
-COMBINATION_COUNT_INTERVAL_S: Final = 3600.0
-
-
-class CombinationCounts:
-    """Which lifecycle combinations this process has seen, and how often.
-
-    The first time a combination appears it is logged as
-    ``group_lifecycle_combination``; the counts of every combination observed
-    since the last report are logged as ``group_lifecycle_combination_counts``
-    once :data:`COMBINATION_COUNT_INTERVAL_S` has passed. They corroborate the
-    reachable combinations in the A2 spec, and decide nothing.
-    """
-
-    def __init__(
-        self,
-        *,
-        clock: Callable[[], float] = time.monotonic,
-        interval_s: float = COMBINATION_COUNT_INTERVAL_S,
-    ) -> None:
-        self._clock = clock
-        self._interval_s = interval_s
-        self._lock = threading.Lock()
-        self._seen: set[tuple[str, ...]] = set()
-        self._counts: Counter[tuple[str, ...]] = Counter()
-        self._since = clock()
-
-    def observe(self, combination: tuple[str, ...], *, site: str) -> None:
-        """Count one observation of ``combination`` at ``site``, logging what is due."""
-        with self._lock:
-            first = combination not in self._seen
-            self._seen.add(combination)
-            self._counts[combination] += 1
-            now = self._clock()
-            due = now - self._since >= self._interval_s
-            if due:
-                counts = {render_combination(key): count for key, count in self._counts.items()}
-                self._counts.clear()
-                self._since = now
-        if first:
-            logger.info(
-                "group_lifecycle_combination",
-                extra={
-                    "event": "group_lifecycle_combination",
-                    "combination": render_combination(combination),
-                    "site": site,
-                },
-            )
-        if due:
-            logger.info(
-                "group_lifecycle_combination_counts",
-                extra={
-                    "event": "group_lifecycle_combination_counts",
-                    "counts": counts,
-                    "interval_s": self._interval_s,
-                },
-            )
-
-
-def render_combination(combination: tuple[str, ...]) -> str:
-    """A combination as one log value: its parts joined by ``+``, or ``idle``."""
-    return "+".join(combination) or "idle"
-
-
-#: This process's combination counts.
-COMBINATIONS: Final = CombinationCounts()
 
 
 @dataclass(frozen=True)
@@ -319,11 +243,12 @@ class GroupLifecycle:
     def is_quiescent(self, *, allow_lifecycle_check: bool = False) -> bool:
         """Whether no operation in progress and no holder is using the group."""
         group = self.group
+        life = group.life
         return (
-            (allow_lifecycle_check or group.lifecycle_check is None)
-            and not group.snapshotting
-            and not group.starting
-            and not group.stopping
+            (allow_lifecycle_check or life.check is None)
+            and life.exclusive is None
+            and life.start is None
+            and life.stop is None
             and not group.operation_tokens
             and not group.terminal_tokens
             and all(
@@ -333,43 +258,8 @@ class GroupLifecycle:
         )
 
     def combination(self) -> tuple[str, ...]:
-        """The group's operations in progress, with their holders, its records and its barriers.
-
-        Each part is present only while it holds, in a fixed order, so equal
-        states give equal tuples.
-        """
-        group = self.group
-        parts: list[str] = []
-        if group.starting:
-            parts.append("start")
-        if group.stopping:
-            parts.append(f"stop:{self._stop_holder()}")
-        if group.snapshotting:
-            holder = "environment" if group.environment_cancel is not None else "initial_archive"
-            parts.append(f"exclusive:{holder}")
-        if group.lifecycle_check is not None:
-            parts.append("check")
-        for name, held in (
-            ("start_failed", group.start_failed),
-            ("container_lost", group.container_lost),
-            ("initial_preservation", group.initial_archive_preservation_pending),
-            ("final_archive", group.stop_archive_pending),
-            ("final_archive_blocked", group.stop_archive_blocked),
-            ("orphan", group.orphan_finalization_pending),
-            ("orphan_marker_unreadable", group.orphan_marker_unreadable),
-            ("start_completion", group.start_archive_completion_pending),
-        ):
-            if held:
-                parts.append(name)
-        return tuple(parts)
-
-    def _stop_holder(self) -> str:
-        """Who holds the group's stop, as far as its fields tell."""
-        if self.group.archive_request_id is not None:
-            return "archive_hold"
-        if self.group.lifecycle_check is not None:
-            return "check"
-        return "shutdown"
+        """The group's operations in progress with their holders, its records and its barriers."""
+        return self.group.life.combination()
 
     def record_combination(self, *, site: str) -> None:
         """Count the group's current :meth:`combination` in this process's counts."""
@@ -379,10 +269,16 @@ class GroupLifecycle:
         """Whether the group's state is ``blocker`` now."""
         return _HOLDS[blocker](self, allow_lifecycle_check)
 
-    def _refusing(self, operation: Operation, allow_lifecycle_check: bool) -> Refusal | None:
+    def _refusing(
+        self,
+        operation: Operation,
+        allow_lifecycle_check: bool,
+        ignored: Blocker | None = None,
+    ) -> Refusal | None:
         for refusal in ADMISSION[operation]:
             if any(
-                self.holds(blocker, allow_lifecycle_check=allow_lifecycle_check)
+                blocker is not ignored
+                and self.holds(blocker, allow_lifecycle_check=allow_lifecycle_check)
                 for blocker in refusal.blockers
             ):
                 return refusal
@@ -405,3 +301,15 @@ class GroupLifecycle:
         refused = self.refusal(operation, allow_lifecycle_check=allow_lifecycle_check)
         if refused is not None:
             raise refused
+
+    def admit_as(self, hold: Hold, operation: Operation) -> None:
+        """As :meth:`admit`, for the caller holding the exclusive workspace as ``hold``.
+
+        That hold is the one exclusive workspace the caller expects, so it
+        does not count as :attr:`Blocker.SNAPSHOTTING`; everything else is
+        checked as usual.
+        """
+        self.group.life.expect_exclusive_locked(hold)
+        refusal = self._refusing(operation, False, ignored=Blocker.SNAPSHOTTING)
+        if refusal is not None:
+            raise refusal.error(refusal.message)

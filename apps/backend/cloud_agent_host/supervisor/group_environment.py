@@ -25,6 +25,7 @@ from cloud_agent_host.session_lifecycle import (
 )
 from cloud_agent_host.supervisor.environment_ready_boot import ready_boot
 from cloud_agent_host.supervisor.group_lifecycle import Operation
+from cloud_agent_host.supervisor.group_lifecycle_state import ExclusiveHolder
 from cloud_agent_host.supervisor.shared_session_state import (
     _SAME_RUN,
     SharedSessionState,
@@ -35,6 +36,7 @@ from cloud_agent_host.supervisor.shared_session_state import (
 
 if TYPE_CHECKING:
     from cloud_agent_host.supervisor.group_lifecycle_controller import GroupLifecycleController
+    from cloud_agent_host.supervisor.group_lifecycle_state import Hold
 
 # The supervisor's operational log names are stable: this component logs
 # under the supervisor's logger, as it did before it was split out.
@@ -90,7 +92,7 @@ class GroupEnvironmentPreparation:
             self._accept_observation_locked(group, observed, lifecycle_generation, current)
             if receipt.get("ready") and prepared_in(receipt, group.inspection):
                 return receipt
-            cancelled, generation, expected, slots = self._reserve_preparation_locked(
+            hold, cancelled, generation, expected, slots = self._reserve_preparation_locked(
                 group, activation_owner=activation_owner, start_seq=start_seq
             )
         monitor_stop = threading.Event()
@@ -136,11 +138,10 @@ class GroupEnvironmentPreparation:
                     )
             finally:
                 with self._state.lock:
-                    group.snapshotting = False
+                    group.life.end_exclusive_locked(hold)
                     group.environment_cancel = None
                     group.environment_owner = None
                     self._state.arm_idle_if_quiescent(group)
-                    self._state.condition.notify_all()
 
     def _accept_observation_locked(
         self,
@@ -167,12 +168,12 @@ class GroupEnvironmentPreparation:
         *,
         activation_owner: str | None,
         start_seq: int | _SameRun | None,
-    ) -> tuple[threading.Event, int, str, list[int]]:
+    ) -> tuple[Hold, threading.Event, int, str, list[int]]:
         """Take the group's exclusive-workspace barrier for this preparation.
 
-        The caller holds the lock. Returns the preparation's cancel event, the
-        lifecycle generation and container it is fenced to, and the member
-        slots whose writers it may freeze.
+        The caller holds the lock. Returns the barrier's hold, the preparation's
+        cancel event, the lifecycle generation and container it is fenced to,
+        and the member slots whose writers it may freeze.
         """
         group.lifecycle.admit(Operation.MUTATION)
         if group.operation_tokens or any(
@@ -185,11 +186,11 @@ class GroupEnvironmentPreparation:
         cancelled = threading.Event()
         group.environment_cancel = cancelled
         group.environment_owner = activation_owner
-        group.snapshotting = True
+        hold = group.life.begin_exclusive_locked(ExclusiveHolder.ENVIRONMENT)
         generation = group.lifecycle_generation
         expected = group.inspection.container_id
         slots = [m.resident_slot_id for m in group.members.values()]
-        return cancelled, generation, expected, slots
+        return hold, cancelled, generation, expected, slots
 
     def _start_lease_fence(
         self,

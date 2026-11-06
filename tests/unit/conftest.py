@@ -8,13 +8,14 @@ from typing import TYPE_CHECKING
 
 import httpx
 import pytest
+from tests.support.group_lifecycle import set_flags
 
 from cloud_agent.mcp import package_pins
 from cloud_agent_host import sandbox_mcp
 from cloud_agent_host.network import network_guard_helper
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 
 @pytest.fixture(autouse=True)
@@ -64,3 +65,9 @@ def _no_package_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     unreachable = httpx.MockTransport(lambda _request: httpx.Response(503))
     monkeypatch.setattr(package_pins, "releases", package_pins.Releases(transport=unreachable))
+
+
+@pytest.fixture
+def lifecycle_flags() -> Callable[..., None]:
+    """Set a group's lifecycle by its flag names (``tests.support.group_lifecycle``)."""
+    return set_flags
