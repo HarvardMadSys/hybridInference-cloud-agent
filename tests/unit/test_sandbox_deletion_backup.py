@@ -510,19 +510,21 @@ def test_prepare_rejects_running_or_stale_identity(archive_setup, change):
         "start_archive_completion_pending",
     ],
 )
-def test_deletion_preserves_lifecycle_archive_fences(archive_setup, monkeypatch, flag):
+def test_deletion_preserves_lifecycle_archive_fences(
+    archive_setup, monkeypatch, lifecycle_flags, flag
+):
     manager, supervisor, service, identity, spec, _members = archive_setup
     group = supervisor.state.groups[spec.sandbox_id]
-    setattr(group, flag, True)
+    lifecycle_flags(group, **{flag: True})
     with pytest.raises(SessionBusy, match="lifecycle archive"):
         service.prepare(identity)
     assert manager.exports == 0
-    setattr(group, flag, False)
+    lifecycle_flags(group, **{flag: False})
     receipt = service.prepare(identity)
     _upload(service, identity, receipt, monkeypatch)
     # The lifecycle barrier is rechecked on receipt replay and commit, even
     # though the matching admin request already holds its own admission fence.
-    setattr(group, flag, True)
+    lifecycle_flags(group, **{flag: True})
     with pytest.raises(SessionBusy, match="lifecycle archive"):
         service.prepare(identity)
     with pytest.raises(SessionBusy, match="lifecycle archive"):

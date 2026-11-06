@@ -456,8 +456,8 @@ def test_a_finished_stop_stops_requeueing_recovery_and_admits_discard(monkeypatc
 
     assert finals == [SANDBOX], "a retained record re-ran final recovery"
     assert _record(docker, name) is None
-    assert group.lifecycle_check is None and not group.stopping
-    assert not (group.stop_archive_pending or group.orphan_finalization_pending)
+    assert group.life.check is None and group.life.stop is None
+    assert not (group.life.final_archive_pending or group.life.orphan is not None)
     _admit_discard(supervisor, spec)
     assert docker.container(SANDBOX) is None
     assert spec.sandbox_id not in supervisor.state.groups

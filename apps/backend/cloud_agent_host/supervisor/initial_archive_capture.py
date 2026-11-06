@@ -29,11 +29,13 @@ from cloud_agent_host.session_lifecycle import (
     SessionLeaseLost,
 )
 from cloud_agent_host.supervisor.group_lifecycle import Operation
+from cloud_agent_host.supervisor.group_lifecycle_state import ExclusiveHolder
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from cloud_agent_host.supervisor.group_lifecycle_controller import GroupLifecycleController
+    from cloud_agent_host.supervisor.group_lifecycle_state import Hold
     from cloud_agent_host.supervisor.shared_session_state import (
         SharedMemberManifest,
         SharedSessionState,
@@ -69,21 +71,17 @@ class InitialArchiveCapture:
         *,
         expected_spec: ChatSandboxSpec | None,
         expected_container_id: str | None,
-        own_barrier: bool = False,
+        own_barrier: Hold | None = None,
     ) -> None:
         """Check, under the lock, everything the pre-prompt archive must exclude.
 
         ``own_barrier`` rechecks after this capture raised its snapshot barrier,
         which is then the one capture expected to be in progress.
         """
-        if own_barrier:
+        if own_barrier is not None:
             # This capture's barrier is the one snapshot expected; every other
             # writer and lifecycle fence is checked as usual.
-            group.snapshotting = False
-            try:
-                group.lifecycle.admit(Operation.MUTATION)
-            finally:
-                group.snapshotting = True
+            group.lifecycle.admit_as(own_barrier, Operation.MUTATION)
         else:
             group.lifecycle.admit(Operation.MUTATION)
         if expected_spec is not None and group.spec != expected_spec:
@@ -92,7 +90,7 @@ class InitialArchiveCapture:
             expected_container_id
         ):
             raise RetainedChatLost("shared sandbox container identity changed")
-        if group.container_lost:
+        if group.life.container_lost:
             raise RetainedChatLost("shared sandbox container identity was lost")
         if member.current_turn is not None or member.transport is not None:
             raise SessionBusy("initial archive must precede resident process creation")
@@ -132,13 +130,7 @@ class InitialArchiveCapture:
             # fence, and the chat page reads the workspace while a new chat
             # prepares. Wait for that check as a prompt does, not fail on it.
             self._state.wait_while_locked(
-                lambda: (
-                    "shared workspace start is in progress"
-                    if group.starting
-                    else "shared sandbox lifecycle check is in progress"
-                    if group.lifecycle_check is not None
-                    else None
-                ),
+                lambda: group.lifecycle.busy_reason(Operation.INITIAL_ARCHIVE_WAIT),
                 deadline=deadline,
             )
             group, member = self._state.leased_member(thread_id, token)
@@ -151,22 +143,14 @@ class InitialArchiveCapture:
             # The barrier goes up first: no new workspace request is admitted,
             # and the ones already running (reads, Git inspection, commands)
             # are given the same bounded time to finish.
-            group.snapshotting = True
+            barrier = group.life.begin_exclusive_locked(ExclusiveHolder.INITIAL_ARCHIVE)
             group.idle_deadline = None
             try:
                 # A request admitted before the barrier may still begin its
                 # bridge revalidation under it (``_start_group`` does not read
                 # the barrier), so its start fence is waited out here too.
                 self._state.wait_while_locked(
-                    lambda: (
-                        "shared workspace start is in progress"
-                        if group.starting
-                        else "shared sandbox lifecycle check is in progress"
-                        if group.lifecycle_check is not None
-                        else "shared workspace still has active mutations"
-                        if group.operation_tokens or group.terminal_tokens
-                        else None
-                    ),
+                    lambda: group.lifecycle.busy_reason(Operation.INITIAL_ARCHIVE_DRAIN),
                     deadline=deadline,
                 )
                 # The wait released the lock; the lease and group may have moved.
@@ -178,15 +162,14 @@ class InitialArchiveCapture:
                     member,
                     expected_spec=expected_spec,
                     expected_container_id=expected_container_id,
-                    own_barrier=True,
+                    own_barrier=barrier,
                 )
             except BaseException:
-                group.snapshotting = False
+                group.life.end_exclusive_locked(barrier)
                 self._state.arm_idle_if_quiescent(group)
-                self._state.condition.notify_all()
                 raise
             observed = group.inspection
-            lifecycle_generation = group.lifecycle_generation
+            lifecycle_generation = group.life.generation
             authoritative_spec = group.spec
             authoritative_members = self._state.archive_members_locked(group)
             expected_container_id = group.inspection.container_id
@@ -205,9 +188,8 @@ class InitialArchiveCapture:
                     group.inspection = current
         except BaseException:
             with self._state.lock:
-                group.snapshotting = False
+                group.life.end_exclusive_locked(barrier)
                 self._state.arm_idle_if_quiescent(group)
-                self._state.condition.notify_all()
             raise
 
         manifest: str | None = None
@@ -248,7 +230,7 @@ class InitialArchiveCapture:
                 preserve_frozen_writers = initial_marker is not None
             if preserve_frozen_writers:
                 with self._state.lock:
-                    group.initial_archive_preservation_pending = True
+                    group.life.preserve_initial_locked()
                 try:
                     stopped = self._lifecycle.stop_if_idle(
                         thread_id,
@@ -265,7 +247,7 @@ class InitialArchiveCapture:
                     # notifies this condition; retain the frozen-writer barrier
                     # until the owning transition has a stable result to inspect.
                     with self._state.condition:
-                        while group.stopping:
+                        while group.life.stop is not None:
                             self._state.condition.wait(timeout=0.5)
                     try:
                         current = self._state.require_current_inspection(group)
@@ -310,8 +292,8 @@ class InitialArchiveCapture:
             lease_is_current = (
                 current_group is group
                 and current_member is member
-                and not group.stopping
-                and group.lifecycle_generation == lifecycle_generation
+                and group.life.stop is None
+                and group.life.generation == lifecycle_generation
                 and member.lease_token == token
             )
             # A concurrent exact stop can land after the inspection above but
@@ -325,11 +307,10 @@ class InitialArchiveCapture:
             ):
                 release_snapshot_barrier = True
             if release_snapshot_barrier:
-                group.initial_archive_preservation_pending = False
-                group.snapshotting = False
+                group.life.release_initial_locked(barrier)
                 self._state.arm_idle_if_quiescent(group)
             elif preserve_frozen_writers:
-                group.initial_archive_preservation_pending = True
+                group.life.preserve_initial_locked()
             self._state.condition.notify_all()
         if preservation_error is not None:
             assert capture_error is not None
