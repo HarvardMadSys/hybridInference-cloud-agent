@@ -357,12 +357,12 @@ msgstr "确认事件能实时推送到浏览器，至少有一次模型或工具
 msgid ""
 "Confirm the turn succeeds with the expected file change. Then ask the"
 "     agent in the conversation to open a pull request, and open the real"
-"     **draft pull request** it links. Check that you are the author of "
-"the     pull request and its commits, the target branch and the diff; "
-"record its     URL. Execution success alone is insufficient."
+"     **pull request** it links. Check that you are the author of the     "
+"pull request and its commits, the target branch and the diff; record its"
+"     URL. Execution success alone is insufficient."
 msgstr ""
-"确认这一轮成功了，文件改动符合预期。然后在对话里让 agent 开一个 pull request，打开它给出链接的那个真实的 **draft "
-"pull request**。检查 pull request 和其中 commit 的作者都是你，再检查目标分支和 diff，记下它的 "
+"确认这一轮成功了，文件改动符合预期。然后在对话里让 agent 开一个 pull request，打开它给出链接的那个真实的 **pull "
+"request**。检查 pull request 和其中 commit 的作者都是你，再检查目标分支和 diff，记下它的 "
 "URL。光是执行成功是不够的。"
 
 #: ../developer/smoke.md:149

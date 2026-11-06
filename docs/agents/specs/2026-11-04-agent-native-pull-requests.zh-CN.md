@@ -114,11 +114,13 @@ GraphQL（`api.github.com/graphql`）：**第一版拒绝**，返回 403 并提�
 
 - 这个工作区的 `origin` 是什么仓库，`git push`、`gh api` 以用户本人的身份生效，只能写这个仓库。
 - commit 作者已经设好，不要改；commit message 末尾加 `Co-Authored-By` 那一行。
-- 用户要求开 PR 时就开，不要反问，也不要让用户去点按钮；先读仓库自己的 AGENTS.md / CLAUDE.md / CONTRIBUTING.md 并跑它们要求的检查，在 PR 描述里写清改动、原因、跑了什么、哪些没跑成。
-- 新建分支，不要直接推默认分支；PR 默认开成 draft。
+- ~~用户要求开 PR 时就开，不要反问，也不要让用户去点按钮；先读仓库自己的 AGENTS.md / CLAUDE.md / CONTRIBUTING.md 并跑它们要求的检查，在 PR 描述里写清改动、原因、跑了什么、哪些没跑成。~~
+- ~~新建分支，不要直接推默认分支；PR 默认开成 draft。~~
+
+  *2026-11-05 删除：* 这两条是平台替用户定的工作方式，不是 agent 发现不了的事实。怎么做、PR 怎么开，由用户和仓库自己说了算，和同一个 CLI 在用户本机上一样。代价是下面说的：仓库的 CLAUDE.md 不会自动加载，agent 不一定会自己去读。
 - `gh` 的 GraphQL 子命令不可用，附上开 PR、看 PR、看检查、合并分别用的 `gh api` REST 调用。
 
-**仓库自己的设置不会自动生效。** Claude 运行时是用 `--setting-sources user` 启动的：共享工作区里仓库的 project/local 设置被当作不可信的启动输入，所以仓库的 `.claude/settings.json` hook（比如本仓库的 pre-PR 检查）和仓库 CLAUDE.md 都不会自动加载。这正是平台说明要明确叫 agent 自己去读并照做的原因。
+**仓库自己的设置不会自动生效。** Claude 运行时是用 `--setting-sources user` 启动的：共享工作区里仓库的 project/local 设置被当作不可信的启动输入，所以仓库的 `.claude/settings.json` hook（比如本仓库的 pre-PR 检查）和仓库 CLAUDE.md 都不会自动加载。这原本是平台说明要明确叫 agent 自己去读并照做的原因；2026-11-05 起平台不再这样要求，接受 agent 不一定会去读。
 
 **五个运行时都拿到平台说明。** 注入方式各不相同，由 `with_platform_instructions` 统一处理：
 
