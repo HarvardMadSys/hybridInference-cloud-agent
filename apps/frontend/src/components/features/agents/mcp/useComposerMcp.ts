@@ -110,12 +110,17 @@ export function useComposerMcp(t: Translator) {
             .filter((capability) => capability.kind === 'tool')
             .map((capability) => [capability.name, 'confirm' as const]),
         );
+        let binding: McpBindingInputApi = { connection_id: id, tools, enabled: true };
         if (Object.keys(tools).length === 0) {
-          // Binding a server with nothing to call would arrive disabled, which
-          // reads as a toggle that did not take.
-          throw new Error(t('attach.mcpNoTools'));
+          // A program lists its tools only once a chat has started it, so it
+          // is turned on with every tool asking first. A service lists them
+          // when it is tested; binding one with nothing to call would arrive
+          // disabled, which reads as a toggle that did not take.
+          const program = connections.find((row) => row.id === id)?.location === 'sandbox';
+          if (!program) throw new Error(t('attach.mcpNoTools'));
+          binding = { connection_id: id, tools: {}, enabled: true, use_defaults: true };
         }
-        setChosen((old) => new Map(old).set(id, { connection_id: id, tools, enabled: true }));
+        setChosen((old) => new Map(old).set(id, binding));
       } catch (cause) {
         setFailures((old) => new Map(old).set(id, getErrorMessage(cause)));
       } finally {
@@ -126,7 +131,7 @@ export function useComposerMcp(t: Translator) {
         });
       }
     },
-    [t],
+    [connections, t],
   );
 
   const clear = useCallback(() => setChosen(new Map()), []);
