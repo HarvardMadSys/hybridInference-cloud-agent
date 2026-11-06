@@ -75,9 +75,9 @@ if TYPE_CHECKING:
     from cloud_agent_host.container.chat_sandbox import (
         ChatSandboxManager,
         ChatSandboxSpec,
-        RetainedChatBackend,
         SandboxActionFacts,
     )
+    from cloud_agent_host.container.retained_backend import RetainedChatBackend
     from cloud_agent_host.drivers import DialectRuntime, InputOutcome
     from cloud_agent_host.supervisor.member_sessions import SharedTurnTelemetry
     from cloud_agent_host.supervisor.native_session_fork import NativeSessionForkResult

@@ -13,9 +13,9 @@ import httpx
 from cloud_agent_host.container.chat_sandbox import (
     ChatSandboxManager,
     ChatSandboxSpec,
-    RetainedChatBackend,
 )
 from cloud_agent_host.container.chat_sandbox_models import ENVIRONMENT_TEST_LABEL
+from cloud_agent_host.container.retained_backend import RetainedChatBackend
 from cloud_agent_host.environment_preparation import (
     RUNNING_PROGRESS_INTERVAL_S,
     EnvironmentPreparation,

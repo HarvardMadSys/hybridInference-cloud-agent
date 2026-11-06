@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_host.container.chat_sandbox import RetainedChatBackend
+from cloud_agent_host.container.retained_backend import RetainedChatBackend
 from cloud_agent_host.environment_preparation import prepared_in
 from cloud_agent_host.session_lifecycle import SessionBusy
 from cloud_agent_host.supervisor.group_lifecycle import Operation

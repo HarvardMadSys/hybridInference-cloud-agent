@@ -15,9 +15,9 @@ from typing import TYPE_CHECKING, Any
 
 from cloud_agent_host.container.chat_sandbox import (
     ChatSandboxInspection,
-    RetainedChatBackend,
     RetainedChatLost,
 )
+from cloud_agent_host.container.retained_backend import RetainedChatBackend
 from cloud_agent_host.environment_preparation import prepared_in, runs_no_script
 from cloud_agent_host.session_lifecycle import (
     SessionBusy,

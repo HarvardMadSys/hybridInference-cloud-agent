@@ -32,8 +32,9 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.container.chat_sandbox import TURN_NETWORK_PROOF_S, RetainedChatLost
+from cloud_agent_host.container.chat_sandbox import RetainedChatLost
 from cloud_agent_host.container.chat_sandbox_exec import standing_network_proof
+from cloud_agent_host.container.retained_backend import TURN_NETWORK_PROOF_S
 from cloud_agent_host.supervisor.group_lifecycle import Operation
 
 if TYPE_CHECKING:

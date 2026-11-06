@@ -10,10 +10,11 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_host.container.chat_sandbox import CHAT_WORKDIR, RetainedChatBackend
+from cloud_agent_host.container.chat_sandbox import CHAT_WORKDIR
 from cloud_agent_host.container.sandbox import SandboxError
 
 if TYPE_CHECKING:
+    from cloud_agent_host.container.retained_backend import RetainedChatBackend
     from cloud_agent_shared.operation_profiling import StageObserver
 
 

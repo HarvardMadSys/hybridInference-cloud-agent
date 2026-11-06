@@ -19,11 +19,11 @@ from tests.support.owners import connection_access
 
 from cloud_agent_host.claimed_job import ClaimedJob
 from cloud_agent_host.container.chat_sandbox import (
-    MEMBER_REAPER_TARGET,
     ChatSandboxManager,
     ChatSandboxSpec,
 )
 from cloud_agent_host.container.chat_sandbox_inspect import container_inspection
+from cloud_agent_host.container.chat_sandbox_members import MEMBER_REAPER_TARGET
 from cloud_agent_host.container.sandbox import ContainerBackend, SandboxError
 from cloud_agent_host.control_plane_client import ControlPlane
 from cloud_agent_host.member_setup.install_locks import install_lock

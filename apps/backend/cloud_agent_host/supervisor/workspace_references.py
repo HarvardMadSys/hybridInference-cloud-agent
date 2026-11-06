@@ -12,9 +12,7 @@ import math
 import secrets
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.container.chat_sandbox import (
-    RetainedChatBackend,
-)
+from cloud_agent_host.container.retained_backend import RetainedChatBackend
 from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.session_lifecycle import (
     SessionLeaseLost,

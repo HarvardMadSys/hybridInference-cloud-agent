@@ -24,13 +24,13 @@ from tests.support.owners import launch_connection
 
 from cloud_agent_host import resident_transport
 from cloud_agent_host.container.chat_sandbox import (
-    MEMBER_REAPER_TARGET,
     MEMBER_UID_BASE,
     ChatSandboxManager,
     ChatSandboxSpec,
     claude_member_config_dir,
 )
 from cloud_agent_host.container.chat_sandbox_inspect import container_inspection
+from cloud_agent_host.container.chat_sandbox_members import MEMBER_REAPER_TARGET
 from cloud_agent_host.container.chat_sandbox_models import BROWSER_SERVICE_UID
 from cloud_agent_host.container.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
 from cloud_agent_host.drivers import DriverError

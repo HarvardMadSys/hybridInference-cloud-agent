@@ -12,14 +12,16 @@ import pytest
 from cloud_agent_host.container import chat_sandbox
 from cloud_agent_host.container.chat_sandbox import (
     CHAT_PROBE_LABEL,
-    GUEST_OBSERVER_PROBE_ATTEMPTS,
-    MEMBER_REAPER_TARGET,
     MEMBER_UID_BASE,
-    PROBE_ABANDONED_AFTER_S,
     ChatSandboxInspection,
     ChatSandboxManager,
     ChatSandboxSpec,
     ChatSandboxStatus,
+)
+from cloud_agent_host.container.chat_sandbox_members import MEMBER_REAPER_TARGET
+from cloud_agent_host.container.chat_sandbox_observation import (
+    GUEST_OBSERVER_PROBE_ATTEMPTS,
+    PROBE_ABANDONED_AFTER_S,
 )
 from cloud_agent_host.container.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
 from cloud_agent_host.observe.guest_observer import GUEST_OBSERVER_BINARY
