@@ -143,7 +143,8 @@ class GroupLifecycleController:
                 retry_pending = group.life.final_archive_pending
                 blocked = group.life.final_archive_blocked
                 if retry_pending:
-                    if (refused := group.lifecycle.refusal(Operation.TAKE_STOP)) is not None:
+                    refused = group.lifecycle.refusal(Operation.SHUTDOWN_TAKE_STOP)
+                    if refused is not None:
                         failures.append(refused)
                         continue
                     hold = group.life.begin_stop_locked(StopHolder.SHUTDOWN_RETRY)

@@ -63,8 +63,12 @@ class Operation(Enum):
     STOP = "stop"
     #: Stop the group because it is idle.
     IDLE_STOP = "idle_stop"
-    #: Take the group's stop for a final archive retry or finalization.
+    #: Take the group's stop for a final archive retry or finalization, under
+    #: the caller's own lifecycle check.
     TAKE_STOP = "take_stop"
+    #: Take the group's stop for the shutdown's final archive retry, which
+    #: holds no lifecycle check: a start or a check in progress refuses it.
+    SHUTDOWN_TAKE_STOP = "shutdown_take_stop"
     #: Take the group's stop to finish an orphaned group's final archive.
     ORPHAN_FINALIZATION = "orphan_finalization"
     #: Reserve the group for a lifecycle check, or release an archive barrier.
@@ -210,6 +214,10 @@ ADMISSION: Final[dict[Operation, tuple[Refusal, ...]]] = {
         _busy(Blocker.NOT_QUIESCENT, message="shared sandbox group still has active members"),
     ),
     Operation.TAKE_STOP: _TAKE_STOP,
+    Operation.SHUTDOWN_TAKE_STOP: (
+        *_STOP,
+        _busy(Blocker.LIFECYCLE_CHECK, message=_CHECK_IN_PROGRESS),
+    ),
     Operation.ORPHAN_FINALIZATION: (
         _busy(
             Blocker.STOPPING,

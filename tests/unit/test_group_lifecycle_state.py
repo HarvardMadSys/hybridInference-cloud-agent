@@ -50,6 +50,12 @@ _ROWS: list[tuple[str, dict[str, Any], Callable[[GroupLifecycleState], object], 
         AssertionError,
     ),
     (
+        "begin_start/stopping",
+        {"stopping": True},
+        lambda life: life.begin_start_locked(),
+        AssertionError,
+    ),
+    (
         "begin_start/retry_after_failure",
         {"start_failed": True},
         lambda life: life.begin_start_locked(),
@@ -133,6 +139,24 @@ _ROWS: list[tuple[str, dict[str, Any], Callable[[GroupLifecycleState], object], 
         {"stop_archive_pending": True},
         lambda life: life.begin_stop_locked(StopHolder.SHUTDOWN_RETRY),
         ("stop:shutdown", "final_archive"),
+    ),
+    (
+        "begin_stop/shutdown_retry_during_a_start",
+        {"starting": True, "stop_archive_pending": True},
+        lambda life: life.begin_stop_locked(StopHolder.SHUTDOWN_RETRY),
+        AssertionError,
+    ),
+    (
+        "begin_stop/shutdown_retry_under_a_check",
+        {"lifecycle_check": CHECK, "stop_archive_pending": True},
+        lambda life: life.begin_stop_locked(StopHolder.SHUTDOWN_RETRY),
+        AssertionError,
+    ),
+    (
+        "hold_archive/starting",
+        {"starting": True},
+        lambda life: life.hold_archive_locked("req"),
+        AssertionError,
     ),
     (
         "begin_stop/stopping",
@@ -562,10 +586,15 @@ def test_a_transition_that_leaves_a_proven_invariant_broken_fails() -> None:
 
 
 def test_the_open_invariants_are_named_but_not_enforced() -> None:
-    life = new_state(starting=True, initial_archive_preservation_pending=True)
+    life = new_state(initial_archive_preservation_pending=True)
     life.run = RunLabel(start_seq=2, sealed_seq=5)
     with life.condition:
-        life.begin_stop_locked(StopHolder.SHUTDOWN_RETRY)
+        life.advance_generation_locked()
     assert life.check_invariants() == []
-    assert life.unproven() == ["U1", "I5", "U3"]
-    assert life.checked_combination()[-3:] == ("unproven:U1", "unproven:I5", "unproven:U3")
+    assert life.unproven() == ["I5", "U3"]
+    assert life.checked_combination()[-2:] == ("unproven:I5", "unproven:U3")
+
+
+def test_a_start_and_a_stop_in_progress_at_once_break_u1() -> None:
+    life = new_state(starting=True, stopping=True)
+    assert life.check_invariants() == ["U1"]

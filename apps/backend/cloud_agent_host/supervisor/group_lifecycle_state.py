@@ -301,6 +301,9 @@ class GroupLifecycleState:
         if self.archives_finals and owed is not None and owed.blocked and owed.members is None:
             # I1: with final archives, a blocked final archive is still owed.
             broken.append("I1")
+        if self.start is not None and self.stop is not None:
+            # U1: admission keeps a start and a stop apart (step 4 of the spec).
+            broken.append("U1")
         stop = self.stop
         under_check = (StopHolder.STOP, StopHolder.FINALIZE)
         if stop is not None and stop.kind in under_check and self.check is None:
@@ -311,8 +314,6 @@ class GroupLifecycleState:
     def unproven(self) -> list[str]:
         """The invariants the A2 spec leaves open (section 4.4) that this state breaks."""
         broken: list[str] = []
-        if self.start is not None and self.stop is not None:
-            broken.append("U1")
         if self.initial_preservation and self.exclusive is None:
             broken.append("I5")
         start_seq, sealed_seq = self.run.start_seq, self.run.sealed_seq
@@ -355,6 +356,7 @@ class GroupLifecycleState:
     def begin_start_locked(self) -> Hold:
         """Mark a start in progress; the caller waited out ``START_WAIT`` and admitted ``START``."""
         self._expect(self.start is None, "a start began while another was in progress")
+        self._expect(self.stop is None, "a start began while the group was stopping")
         hold = Hold(START)
         self.start = hold
         return hold
@@ -417,6 +419,9 @@ class GroupLifecycleState:
         :meth:`hold_archive_locked` instead.
         """
         self._expect(self.stop is None, f"a {kind.value} stop began while the group was stopping")
+        self._expect(self.start is None, f"a {kind.value} stop began while a start was in progress")
+        if kind is StopHolder.SHUTDOWN_RETRY:
+            self._expect(self.check is None, "a shutdown retry stop began under a lifecycle check")
         if kind in (StopHolder.STOP, StopHolder.FINALIZE):
             self._expect(
                 check is not None and self.check is check,
@@ -444,6 +449,7 @@ class GroupLifecycleState:
         ):
             return False
         self._expect(held is None, "an archive request held a group that was stopping")
+        self._expect(self.start is None, "an archive request held a group that was starting")
         self.stop = Hold(StopHolder.ARCHIVE_HOLD, request_id)
         return True
 

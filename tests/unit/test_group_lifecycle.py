@@ -311,6 +311,23 @@ _CASES: list[tuple[Operation, dict[str, Any], bool, type[Exception] | None, str 
     (Operation.IDLE_STOP, {}, False, None, None),
     (Operation.TAKE_STOP, {"stopping": True}, False, SessionBusy, GROUP_STOP),
     (Operation.TAKE_STOP, {"starting": True}, False, None, None),
+    (Operation.TAKE_STOP, {"lifecycle_check": HELD_CHECK}, False, None, None),
+    (
+        Operation.SHUTDOWN_TAKE_STOP,
+        {"stopping": True, "starting": True},
+        False,
+        SessionBusy,
+        GROUP_STOP,
+    ),
+    (
+        Operation.SHUTDOWN_TAKE_STOP,
+        {"starting": True, "lifecycle_check": HELD_CHECK},
+        False,
+        SessionBusy,
+        GROUP_START,
+    ),
+    (Operation.SHUTDOWN_TAKE_STOP, {"lifecycle_check": HELD_CHECK}, False, SessionBusy, CHECK),
+    (Operation.SHUTDOWN_TAKE_STOP, {"snapshotting": True}, False, None, None),
     (
         Operation.ORPHAN_FINALIZATION,
         {"stopping": True},

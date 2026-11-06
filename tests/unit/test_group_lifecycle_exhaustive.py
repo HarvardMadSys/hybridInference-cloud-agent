@@ -421,8 +421,9 @@ def test_no_transition_from_a_valid_state_breaks_a_proven_invariant() -> None:
                 except (AssertionError, StaleStartFence):
                     pass
     assert broken == []
-    # 23,040 less those breaking I1 (2,880) or with a check-less stop (4,608), 576 both.
-    assert valid == 16_128
+    # 23,040 less those breaking I1, with a stop of a stop or reconciliation but
+    # no check, or with a start and a stop in progress (U1).
+    assert valid == 10_080
 
 
 # Reachable combinations (A2 spec section 7.2, check 3). Starting from an idle
@@ -587,7 +588,7 @@ def _steps(group: _Group) -> Iterator[Callable[[], object]]:
 
 
 #: The admission the shutdown's final archive retry makes.
-_SHUTDOWN_TAKE_STOP: Final = Operation.TAKE_STOP
+_SHUTDOWN_TAKE_STOP: Final = Operation.SHUTDOWN_TAKE_STOP
 
 
 def _in_progress(key: _Key) -> str:
@@ -644,14 +645,14 @@ _ALWAYS: Final = dict.fromkeys(("idle", "S", "T", "N", "C", "S+N", "N+C", "T+C",
 #: Reached only once the container identity is lost: an archive commit then
 #: checks the group without an admission that refuses a start.
 _LOST: Final = dict.fromkeys(("S+C", "S+N+C"), True)
-#: Reached only through the shutdown's final archive retry, whose admission
-#: refuses neither a start nor a check (section 4.1). With no final archives
-#: configured, nothing is owed for it to retry. Step 4 closes the starts.
-_SHUTDOWN_RETRY: Final = {"T+N": False, "S+T": False, "S+T+N": False}
-_SHUTDOWN_RETRY_LOST: Final = dict.fromkeys(("S+T+C", "S+T+N+C"), True)
+#: Reached only through the shutdown's final archive retry, the one stop held
+#: without a lifecycle check: with no final archives configured nothing is
+#: owed for it to retry. Its admission refuses a start and a check (step 4),
+#: so no start and stop are ever in progress at once.
+_SHUTDOWN_RETRY: Final = {"T+N": False}
 
 REACHABLE: Final = {
-    True: {**_ALWAYS, **_LOST, **_SHUTDOWN_RETRY, **_SHUTDOWN_RETRY_LOST},
+    True: {**_ALWAYS, **_LOST, **_SHUTDOWN_RETRY},
     False: {**_ALWAYS, **_LOST},
 }
 
@@ -663,9 +664,6 @@ PAIRS: Final = {
     "N+C": False,
     "T+C": False,
     "S+C": True,
-    # Only through the shutdown's retry; section 4.1 rules it out by the
-    # shutdown order, which step 4 replaces with the admission.
-    "S+T": False,
 }
 
 

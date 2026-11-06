@@ -1765,3 +1765,56 @@ def test_a_stopping_group_is_included_in_the_exact_host_rule_check():
     assert manager.host_rule_running == [[_spec()]]
     assert manager.host_rule_renewals == 0
     assert manager.stop_count == 0
+
+
+class _UncertainStartManager(_Manager):
+    """Its start fails after the durable start fence, with an unclassified error."""
+
+    def start(self, spec, *, before_stopped_start=None, **_kwargs):
+        self.starts.append(spec.container_name)
+        before_stopped_start(self.items[spec.container_name])
+        raise RuntimeError("guest network proof failed after the start")
+
+
+def test_shutdown_leaves_a_start_in_progress_its_own_final_archive():
+    """A start fail-stopping at shutdown is a failure there, not a second archive.
+
+    The shutdown's final archive retry holds no lifecycle check, so its
+    admission refuses a start in progress (A2 spec, step 4). Before, the retry
+    took the group's stop beside the start and archived the group again while
+    the start's own fail-stop archive was still uploading.
+    """
+    manager = _UncertainStartManager()
+    spec = _spec()
+    manager.items[spec.container_name] = manager._inspection(spec, running=False)
+    uploading, release = threading.Event(), threading.Event()
+    uploads: list[str] = []
+
+    def stopped(spec, *_args):
+        uploads.append(spec.sandbox_id)
+        uploading.set()
+        assert release.wait(_HELD_S)
+
+    supervisor = hooked_supervisor(manager, prepare_start=lambda *_args: None, stopped=stopped)
+    supervisor.register_manifest(spec, _members())
+    group = supervisor.state.groups[spec.sandbox_id]
+    starting, outcome = _in_thread(lambda: supervisor._lifecycle.start_group(group, start_seq=7))
+    try:
+        assert uploading.wait(_UNBLOCKED_S)
+        with pytest.raises(SandboxError, match=r"^1 shared sandbox shutdown") as raised:
+            supervisor.stop_all_for_shutdown(include_running=False)
+        refused = raised.value.__cause__
+        assert type(refused) is SessionBusy
+        assert str(refused) == "shared sandbox group start is in progress"
+        with supervisor.state.lock:
+            assert group.life.start is not None
+            assert group.life.stop is None
+            assert group.life.final_archive_pending
+    finally:
+        release.set()
+        starting.join(_HELD_S)
+    assert isinstance(outcome.get("error"), RuntimeError)
+    assert uploads == [spec.sandbox_id]
+    with supervisor.state.lock:
+        assert group.life.start is None
+        assert not group.life.final_archive_pending
