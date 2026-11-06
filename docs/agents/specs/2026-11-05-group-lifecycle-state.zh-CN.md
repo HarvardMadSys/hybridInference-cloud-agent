@@ -1,6 +1,6 @@
 # A2：用显式状态替换 host 上 sandbox group 的生命周期 flag
 
-日期：2026-11-05。状态：提议，待评审。实现前不改任何行为。
+日期：2026-11-05。状态：已在分支 `murphy/refactor/r2-a2` 实现，第 0–5 步都已完成（基于 `dev` 的 `a4b4ef436`）。第 4 步是唯一的行为改动。实现和本文不一致的地方记在第 9 节。
 
 设计核对基线：分支 `murphy/refactor/structural`（PR #1111），提交 `6c930f118`。supervisor 在这个分支上已经拆开，A1 的外观层 `group_lifecycle.py` 已经存在。文中代码路径都相对 `apps/backend/cloud_agent_host/`，行号都是基线上的。
 
@@ -353,3 +353,40 @@ Q1–Q4 的决定可以插在第 3 步之后任何时候做，每个单独一个
 - **Q5：`start_failed` 该不该随停止清除？** 现在一个启动失败后又被停掉的 group 会一直带着 `start_failed`，直到下一次启动成功，这期间 `environment_ready_boot.py:78` 和 `shared_admission_proof.py:60` 都会因此拒绝。这可能是有意的（"上一次启动失败"本来就是要求重新证明网络的理由），但没有任何地方写下这个决定。
 - **Q6：`MUTATION` 要不要直接拒 `CONTAINER_LOST`？** 现在靠调用方随后调 `accept_inspection_locked` 抛错。加一行 `Refusal` 能让准入表自己说清楚，但错误类型会从 `SessionBusy` 之后的 `RetainedChatLost`，变成准入时直接抛 `RetainedChatLost`，要核对调用方的处理是否一致。
 - **Q7：锁外的准入。** `shared_admission_proof.py:100–101` 的 `ensure_running` 在不持锁的情况下调 `admit(Operation.RUN)`，并写 `group.inspection`。这不属于本文的字段，但 A2 第 1 步加了持锁断言之后，这里会立刻失败，所以要在第 1 步之前先修：把这两行放进 `with lifecycle.state.lock`。
+
+## 9. 实现记录
+
+第 0–5 步在分支 `murphy/refactor/r2-a2` 上各自一个提交，Q7 在第 1 步之前单独一个提交。实现基线是 `dev` 的 `a4b4ef436`（已含 #1111、#1110 和 #1019），文中的行号是 `6c930f118` 的，基线上大多平移了几十行。
+
+### 9.1 和本文不一致的地方
+
+- **赋值清单。** 在 `a4b4ef436` 上按第 3 节的 AST 扫描重数，仍是 6 个文件里 122 处，每个字段的次数和第 3 节的表一样；`setattr` 有 8 处，都不是这些字段。实现之后，这两个生命周期模块之外的赋值是 0 处，改成 73 处转移调用；所有赋值语句都在 `group_lifecycle_state.py` 里，共 36 处。
+- **模块。** `GroupLifecycleState`、`Hold`、各个持有者枚举和转移 API 放在同目录的新模块 `supervisor/group_lifecycle_state.py`，`group_lifecycle.py` 只保留准入表和视图。组合计数（`CombinationCounts`）也搬了过去。棘轮测试把这两个模块都算作"生命周期模块"。
+- **`archive_request_id` 不是独立字段。** 它由 `stop` 推出：`stop.kind is ARCHIVE_HOLD` 时就是 `stop.request_id`。§4.1 证明的"`archive_request_id` 非空 ⇔ `ARCHIVE_HOLD`"因此由表示本身保证。`ARCHIVE_HOLD` 用 `hold_archive_locked(request_id)` 取得，同一请求重入时返回 `False`、什么都不改；`release_archive_locked(request_id)` 释放它并推进 generation（`abort_archive`）。
+- **`owe_final_locked` 的前置条件是错的。** §5.2 写的是"`stop` 或 `start` 不为空"，但 reconcile 的三处（基线 253–255、306–308、362–364）和 `_stop_checked_group` 的 654–660 都是在只持有 lifecycle check、还没有（或根本不）设置 T 的时候欠下 final archive 的。实际的前置条件是"`start`、`stop`、`check` 至少一个不为空"，`settle_archive_locked` 同样如此。另外加了一条：启用 final archive 时，欠下的 final archive 必须带成员（`members` 为 `None` 只出现在不启用的时候）。这一条是不变量封闭检查发现缺的。
+- **没有单独的 `block_final_locked`。** 782 行（不启用 final archive 时只置 blocked）就是 `owe_final_locked(None, blocked=True)`。
+- **`preserve_initial_locked` 不要求 `exclusive is hold`。** 332 行的重新置真正是 I5 的反例路径：这时 N 可能已经被 `accept_inspection_locked` 清掉。I5 还没有证明，按 §5.3 只记日志，所以这里不能断言，否则候选反例会变成 `AssertionError`。251 行在正常路径上确实持有 N，但同样不断言。
+- **`release_initial_locked(hold)` 接受 `exclusive is None`。** 冻结后捕获失败、停止成功的正常路径上，`accept_inspection_locked` 已经替初始 archive 把 N 清掉了，328–329 行再清一次。只有 N 属于别人时才算违反。
+- **`admit_as_locked` 放在视图上**，叫 `GroupLifecycle.admit_as(hold, operation)`：准入时跳过 `SNAPSHOTTING`，其余照常。如果 hold 已经被别人释放，它和旧代码一样把 N 放回去（旧代码在 `finally` 里总是把 `snapshotting` 置真），同时记一次违反。
+- **`end_check_locked` 多了一条前置条件：** check 自己的停止（`STOP`、`FINALIZE`）必须先结束。这就是 §4.1 已证明的"T 的持有者同时持有 C，并且在结束 C 之前清掉 T"，封闭检查需要它。
+- **违反前置条件时的生产行为。** §5.2 只说调试构建里抛 `AssertionError`。生产里每次违反记一条 `group_lifecycle_violation`，然后照旧代码的写法继续（例如 `end_stop_locked` 交回的不是当前的 hold 时，仍然把 stop 清掉），所以第 0–3 步在任何状态下都不改行为。
+- **调试开关。** 用模块级的 `set_strict_checks(True)`，由 `tests/unit/conftest.py` 在整个测试会话里打开。没有用环境变量（要登记进 `tests/support/env_inventory.py` 并写进 `ENVIRONMENT.md`），也没有用 `__debug__`（生产不带 `-O`，等于一直打开）。打开后：前置条件违反抛 `AssertionError`；每次转移先断言调用方持有锁；转移结束后断言已证明的不变量，违反时抛 `LifecycleInvariantError`。
+- **持锁断言用 `Condition.notify(0)`，不用 `RLock._is_owned()`。** 前者是公开 API，不持锁时抛 `RuntimeError`，`n=0` 时不唤醒任何人；后者是私有属性，会让 host 的私有属性访问棘轮（`test_host_private_access.py`）升高。
+- **不变量。** `check_invariants()` 检查 I1、"`STOP`/`FINALIZE` 的 T ⇒ C"，第 4 步之后再加 U1。I2、I3 由 `FinalArchive`、`OrphanFinalization` 的形状保证，没法单独违反；I6、I7 由 `begin_run_locked`、`join_run_locked` 的写法保证；"`start_completion_pending` 只在 S 下置真"是 `owe_start_completion_locked` 的前置条件。`unproven()` 返回 I5 和 U3（第 4 步之前还有 U1）。生产里这些都作为 `violation:<名字>`、`unproven:<名字>` 加进第 0 步的组合里，所以第一次出现时会记一条 `group_lifecycle_combination`。
+- **第 2 步。** network guard 的 `KnownGuardedGroup` 原来是读 `starting`、`stopping` 的 Protocol，改成控制器构造的值（`transitioning` 表示有启动或停止在进行），因为 network 模块不应该认识 supervisor 的状态。`SharedSessionDescriptor.snapshotting`、`lifecycle_pending` 和删除诊断里的屏障名（`GroupLifecycleState.flags()`）都和原来一样。
+- **测试的改动。** 测试原来直接给旧字段赋值来布置状态，现在改用 `tests/support/group_lifecycle.py` 按旧名字写新状态（单元测试里还有一个 `lifecycle_flags` fixture，这样 `test_shared_session_supervisor.py` 不用多一行 import，它的行数预算降到 5146）。读旧字段的断言改成读 `group.life` 上等价的值，断言的事实不变，例如 `group.stopping is False` 改成 `group.life.stop is None`。`test_group_lifecycle.py` 里有一条用例只设 `orphan_marker_unreadable`、断言 `DELETION` 放行；这个状态按 I3 在新表示里写不出来，所以这条用例搬到穷举测试里，对着冻结的旧 `_HOLDS` 断言同一件事。
+
+### 9.2 穷举和可达集合
+
+- 准入一致：92,160 个状态 × 每个 `Operation` × `allow_lifecycle_check` 两种取值，对冻结的旧 `_HOLDS` 一个不差。§7.2 说"每个状态只算一次 refusal，一秒以内跑完"，实际要算三百多万次，约 4 秒。初始 archive 的两张新表行另外在全部状态和四种 token 组合上，对照原来的两段手写等待。
+- 不变量封闭：在去掉占用者和 inspection 之后的 23,040 个生命周期状态里，满足已证明不变量的有 10,080 个（第 4 步之前是 16,128 个），从每个出发调用 37 个转移（每种参数各算一个），约 1 秒。
+- 可达集合：启用 final archive 时可达 5,994 个抽象状态，不启用时 3,330 个，合计不到 1 秒。得到的进行中操作组合（S、T、N、C 的子集）是：空、S、T、N、C、S+N、N+C、T+C、T+N+C；只在 `container_lost` 时可达的 S+C、S+N+C；以及只在启用 final archive 时可达的 T+N（没有 C 的 N + T 只能来自关机重试）。按两两组合看，正好是 §4.2 的表。第 4 步之前还能到 S+T、S+T+N，以及 `container_lost` 时的 S+T+C、S+T+N+C，全都来自关机重试；§4.1 只提到了 S+T。
+
+### 9.3 第 4 步
+
+`stop_all_for_shutdown` 改用 `SHUTDOWN_TAKE_STOP`，它在 `TAKE_STOP` 之外还拒 S 和 C；被拒的 group 照旧记进 `failures`。新用例 `test_shutdown_leaves_a_start_in_progress_its_own_final_archive` 让一个启动在 start fence 之后失败、在上传 fail-stop archive 时挂住，再调用关机：group 进了 `failures`，没有拿到 `stopping`。在旧代码上，这个用例里关机会拿到 `stopping`，把同一个 group 再归档一次。U1 从此是已证明的不变量：S 在 T 期间不能开始，T（包括 `ARCHIVE_HOLD`）在 S 期间也不能开始。
+
+### 9.4 没有做的
+
+Q2、Q3（I5）和 Q4（U3）的行为没有改。新表示能表示这些状态：没有 N 的 `initial_preservation`、`start_seq ≤ sealed_seq` 的运行标签都写得出来，只记 `unproven:I5`、`unproven:U3`，不断言。§7.3 要求的 staging 验收不在这个分支里做。
+
