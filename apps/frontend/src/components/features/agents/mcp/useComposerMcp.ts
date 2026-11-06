@@ -43,7 +43,11 @@ export interface McpChoice {
 /** A connection that cannot serve a task, and why, in the owner's terms. */
 function unusable(connection: McpConnectionApi, t: Translator): string | null {
   if (connection.enabled === false) return t('attach.mcpDisabled');
-  if (connection.status === 'draft') return t('attach.mcpDraft');
+  // A program cannot be tested from here: it starts with a chat. One saved
+  // before testing marked it ready is still one a chat can turn on.
+  if (connection.status === 'draft' && connection.location !== 'sandbox') {
+    return t('attach.mcpDraft');
+  }
   if (connection.status === 'error' || connection.error_kind !== 'none') {
     return connection.error_kind === 'needs_authorization'
       ? t('attach.mcpNeedsSignIn')
