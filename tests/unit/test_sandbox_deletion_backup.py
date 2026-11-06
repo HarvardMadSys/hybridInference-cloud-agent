@@ -27,6 +27,8 @@ from cloud_agent_host.container.chat_sandbox import (
 from cloud_agent_host.container.sandbox import ProcessBackend, SandboxError
 from cloud_agent_host.sandbox_manager import create_app
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
+from cloud_agent_host.supervisor import group_lifecycle
+from cloud_agent_host.supervisor.group_lifecycle import Blocker
 from cloud_agent_host.supervisor.shared_session_state import SharedMemberManifest
 from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 
@@ -515,6 +517,11 @@ def test_deletion_preserves_lifecycle_archive_fences(
 ):
     manager, supervisor, service, identity, spec, _members = archive_setup
     group = supervisor.state.groups[spec.sandbox_id]
+    if flag == "initial_archive_preservation_pending":
+        # A preserved initial archive also holds the snapshot barrier (I5),
+        # which refuses with the same message: blind it, so the preservation
+        # row itself is what refuses here.
+        monkeypatch.setitem(group_lifecycle._HOLDS, Blocker.SNAPSHOTTING, lambda *_args: False)
     lifecycle_flags(group, **{flag: True})
     with pytest.raises(SessionBusy, match="lifecycle archive"):
         service.prepare(identity)

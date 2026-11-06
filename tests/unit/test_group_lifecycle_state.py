@@ -639,3 +639,32 @@ def test_the_state_keeps_the_flag_names_the_wire_and_the_logs_use() -> None:
         "orphan_finalization_pending",
         "orphan_marker_unreadable",
     ]
+
+
+def test_in_production_a_violation_is_logged_and_the_transition_goes_on(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Strict checks off: nothing raises, the old write happens, and both are visible."""
+    life = new_state(lifecycle_check=CHECK)
+    set_strict_checks(False)
+    try:
+        with life.condition, caplog.at_level(logging.WARNING):
+            # Not this caller's stop: the old code cleared ``stopping`` anyway.
+            life.begin_stop_locked(StopHolder.STOP, check=CHECK)
+            life.end_stop_locked(Hold(StopHolder.STOP))
+            # Breaks I1; under strict checks a LifecycleInvariantError.
+            life.owe_final_locked(None, blocked=True)
+    finally:
+        set_strict_checks(True)
+    assert life.stop is None
+    assert life.final_archive == FinalArchive(None, blocked=True)
+    violations = [
+        getattr(record, "violation", None)
+        for record in caplog.records
+        if getattr(record, "event", None) == "group_lifecycle_violation"
+    ]
+    assert violations == [
+        "a stop ended that is not the one in progress",
+        "a final archive was owed without its members while final archives are configured",
+    ]
+    assert life.checked_combination()[-1] == "violation:I1"

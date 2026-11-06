@@ -140,8 +140,9 @@ _CASES: list[tuple[Operation, dict[str, Any], bool, type[Exception] | None, str 
     (Operation.DELETION, {"snapshotting": True}, False, SessionBusy, BEFORE_DELETION),
     (Operation.DELETION, {"starting": True}, False, SessionBusy, BEFORE_DELETION),
     (
+        # Without the snapshot barrier I5 gives it, so this row alone refuses.
         Operation.DELETION,
-        {"initial_archive_preservation_pending": True},
+        {"initial_archive_preservation_pending": True, "snapshotting": False},
         False,
         SessionBusy,
         BEFORE_DELETION,
