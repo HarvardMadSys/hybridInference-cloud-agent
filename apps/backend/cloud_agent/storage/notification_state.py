@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.notification_state import (
+from cloud_agent.schemas.notification_state import (
     NotificationStateCursor,
     decode_notification_cursor,
     encode_cursor,

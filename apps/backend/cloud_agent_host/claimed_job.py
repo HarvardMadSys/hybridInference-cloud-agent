@@ -7,8 +7,8 @@ process, or heartbeat orchestration.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass, field, fields
+from typing import Any, Protocol, runtime_checkable
 
 from cloud_agent_shared.environment import BoundEnvironment
 from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef
@@ -94,7 +94,8 @@ class ClaimedJob:
     # rather than directly.
     mcp_bindings: list[str] = field(default_factory=list)
     # MCP servers the user chose to run inside the sandbox, with their launch
-    # (cloud_agent_shared.sandbox_mcp). No secret: those stay remote.
+    # (cloud_agent_shared.sandbox_mcp). Their own keys ride in ``secret_env``
+    # for the slot's runner, and are masked like every marked claim field.
     sandbox_mcp_servers: tuple[SandboxMcpServer, ...] = ()
     # The CLI version the control plane stamped on this attempt, resolved from
     # the thread's pin, the deployment's selection, or this host's default.
@@ -193,14 +194,30 @@ def _context_injections(value: Any) -> tuple[dict[str, Any], ...]:
     return tuple(records)
 
 
+@runtime_checkable
+class _HoldsSecrets(Protocol):
+    """A claim value that names the credentials it puts into the sandbox."""
+
+    def secrets(self) -> dict[str, str]:
+        """Each credential by the name its ``[secret:NAME]`` marker shows."""
+        ...
+
+
 def claim_secret_values(job: ClaimedJob) -> dict[str, str]:
-    """Every value the claim put in the sandbox that output must never show."""
-    values = job.environment.secrets() if job.environment else {}
-    if job.ssh_access is not None:
-        values = {**values, **job.ssh_access.secrets()}
-    if job.model_connection is not None:
-        # With the token this member's CLI holds on a translated plan.
-        values = {**values, **job.model_connection.secrets()}
+    """Every value the claim put in the sandbox that output must never show.
+
+    Derived, not listed: every claim field holding secrets names its own, in
+    field order, which is the order the redactor picks a value's name in.
+    What each must name is its fields marked
+    :class:`~cloud_agent_shared.secret_redaction.Masked`, and
+    ``tests/unit/test_claim_secret_masking.py`` walks the claim to prove it does.
+    """
+    values: dict[str, str] = {}
+    for item in fields(job):
+        value = getattr(job, item.name)
+        for holder in value if isinstance(value, tuple | list) else (value,):
+            if isinstance(holder, _HoldsSecrets):
+                values.update(holder.secrets())
     return values
 
 

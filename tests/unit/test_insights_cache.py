@@ -2,7 +2,7 @@
 
 from unittest.mock import Mock
 
-from cloud_agent import insights_cache
+from cloud_agent.insights import insights_cache
 
 
 def test_cache_reuses_content_but_invalidates_nonlatest_deletion(monkeypatch):

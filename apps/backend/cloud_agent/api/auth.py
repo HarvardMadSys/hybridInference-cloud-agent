@@ -59,6 +59,7 @@ from cloud_agent.application.accounts import (
     normalize_login_name,
     require_strong_password,
 )
+from cloud_agent.deployment.site_content import site_content, terms_text_for
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.ports.accounts import BrowserFull
 from cloud_agent.schemas.accounts import (
@@ -76,7 +77,6 @@ from cloud_agent.schemas.accounts import (
 )
 from cloud_agent.schemas.session import SessionUserResponse
 from cloud_agent.settings import boolean_setting, integer_setting, text_setting
-from cloud_agent.site_content import site_content, terms_text_for
 
 if TYPE_CHECKING:
     from cloud_agent.api._local_auth import RateRule

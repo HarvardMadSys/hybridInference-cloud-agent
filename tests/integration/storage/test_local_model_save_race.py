@@ -20,8 +20,8 @@ from tests.unit.test_model_connection_anthropic_check import _KEY as ROTATED_PRO
 from tests.unit.test_model_connection_compat_check import _KEY as PROVIDER_KEY
 
 from cloud_agent.application.model_connections import model_connection_cipher
+from cloud_agent.deployment.identity_namespace import ensure_local_namespace
 from cloud_agent.domain.model_connections import ModelConnectionAccessEnded
-from cloud_agent.identity_namespace import ensure_local_namespace
 from cloud_agent.storage.assembly import Storage
 
 if TYPE_CHECKING:

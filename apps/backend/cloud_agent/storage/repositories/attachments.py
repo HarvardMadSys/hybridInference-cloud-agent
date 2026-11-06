@@ -14,6 +14,7 @@ from cloud_agent.attachments.models import (
     attachment_size_label,
     current_uploads,
 )
+from cloud_agent.storage._sql.fences import leased_attempt_sql
 
 if TYPE_CHECKING:
     import asyncpg
@@ -36,10 +37,9 @@ _WORKER_FENCE = """
     JOIN agent_runner_hosts h ON h.host = a.host_id
     LEFT JOIN agent_job_attachments u ON u.thread_id = j.thread_id
 """
-_WORKER_AUTHORIZATION = """
-    WHERE j.id = $1 AND a.id = $2 AND a.lease_generation = $3
-      AND j.state = 'running' AND a.status = 'running'
-      AND a.lease_expires_at > clock_timestamp()
+_WORKER_AUTHORIZATION = f"""
+    WHERE j.id = $1 AND {leased_attempt_sql("$2", "$3")}
+      AND j.state = 'running'
       AND h.credential_hash IS NOT NULL AND h.status <> 'disabled'
 """
 

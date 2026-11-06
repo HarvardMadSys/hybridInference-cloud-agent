@@ -16,12 +16,10 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.command_executions import (
+from cloud_agent.context.command_executions import (
     DEFAULT_COMMAND_PAGE,
     MAX_COMMAND_EXECUTIONS,
-    CommandFilter,
     CommandReadTimeout,
-    CommandSort,
     assemble_command_executions,
     command_executions_page,
     poll_tool_names,
@@ -36,6 +34,8 @@ from cloud_agent.storage._sql.command_executions import (
 
 if TYPE_CHECKING:
     import asyncpg
+
+    from cloud_agent.domain.command_executions import CommandFilter, CommandSort
 
 #: Identities one results statement looks for. A batch is sized so its own
 #: results (a launch acknowledgement and the polls after it) fit the same

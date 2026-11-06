@@ -27,6 +27,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from tests.support.archive_policy import hooked_supervisor
 from tests.unit.test_chat_group_network import (
     _NAMESPACE,
     FakeDocker,
@@ -38,11 +39,10 @@ from tests.unit.test_chat_group_network import (
 )
 from tests.unit.test_shared_session_supervisor import _Manager, _spec as _shared_spec
 
-from cloud_agent_host.chat_sandbox import ChatSandboxManager, RetainedChatLost
-from cloud_agent_host.chat_sandbox_models import CHAT_GENERATION_LABEL
-from cloud_agent_host.sandbox import ContainerBackend, SandboxError
+from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, RetainedChatLost
+from cloud_agent_host.container.chat_sandbox_models import CHAT_GENERATION_LABEL
+from cloud_agent_host.container.sandbox import ContainerBackend, SandboxError
 from cloud_agent_host.session_lifecycle import SessionBusy
-from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
 
 SANDBOX = "sandbox-container"
 
@@ -108,7 +108,7 @@ def _world(monkeypatch, spec):
     backend._network_guard = FakeGuard()  # type: ignore[assignment]
     manager = ChatSandboxManager(backend)
     docker = _StoppedDocker(config)
-    monkeypatch.setattr(manager, "_run", docker)
+    monkeypatch.setattr(manager.exact, "run", docker)
     docker.add_sandbox(spec, running=True)
     name = manager._network_lifecycle._ensure_group_network(spec)
     network = docker.network(name)
@@ -158,7 +158,7 @@ def _after_first_missing_read(monkeypatch, manager, docker, name, mutate):
             mutate()
         return result
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
 
 
 # ── the manager's release ─────────────────────────────────────────────
@@ -176,7 +176,7 @@ def test_release_clears_the_stopped_record_and_converges(monkeypatch, bridge_rem
     released = manager.release_stopped_networks(spec, expected_container_id=SANDBOX)
 
     assert released.networks == ()
-    assert manager._require_exact(spec, SANDBOX).networks == ()
+    assert manager.exact.require_exact(spec, SANDBOX).networks == ()
     assert docker.network(name) is None
     if bridge_removed:
         # Only the name addresses the record; the old id would exit 1.
@@ -233,7 +233,7 @@ def test_an_unreadable_network_refuses_without_touching_the_record(monkeypatch, 
                     return subprocess.CompletedProcess(argv, 1, "", "input/output error")
             return docker(argv, **kwargs)
 
-        monkeypatch.setattr(manager, "_run", run)
+        monkeypatch.setattr(manager.exact, "run", run)
     docker.calls.clear()
 
     with pytest.raises(SandboxError, match="network inspect failed"):
@@ -343,7 +343,7 @@ def test_a_changed_record_on_an_existing_bridge_refuses_before_disconnect(monkey
             mutate(docker, spec, manager)
         return result
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
     with pytest.raises(SandboxError):
         manager.release_stopped_networks(spec, expected_container_id=SANDBOX)
     assert docker.network(name)["Id"] == old_id
@@ -433,7 +433,7 @@ def _supervised(monkeypatch, *, archive=None):
         if archive is not None:
             archive()
 
-    supervisor = SharedChatSessionSupervisor(manager, stopped_archive_hook=completed_final)
+    supervisor = hooked_supervisor(manager, stopped=completed_final)
     return supervisor, docker, spec, name, old_id, finals
 
 
@@ -452,7 +452,7 @@ def test_a_finished_stop_stops_requeueing_recovery_and_admits_discard(monkeypatc
 
     for _ in range(4):
         supervisor.reconcile()
-    group = supervisor._groups[spec.sandbox_id]
+    group = supervisor.state.groups[spec.sandbox_id]
 
     assert finals == [SANDBOX], "a retained record re-ran final recovery"
     assert _record(docker, name) is None
@@ -460,7 +460,7 @@ def test_a_finished_stop_stops_requeueing_recovery_and_admits_discard(monkeypatc
     assert not (group.stop_archive_pending or group.orphan_finalization_pending)
     _admit_discard(supervisor, spec)
     assert docker.container(SANDBOX) is None
-    assert spec.sandbox_id not in supervisor._groups
+    assert spec.sandbox_id not in supervisor.state.groups
 
 
 @pytest.mark.parametrize("failure", ["archive", "network"])

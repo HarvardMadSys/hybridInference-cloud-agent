@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-from cloud_agent.agent_access import (
+from cloud_agent.accounts.agent_access import (
     AgentAccess,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
 from cloud_agent.schemas.accounts import (

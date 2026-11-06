@@ -22,7 +22,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from guest_serializer import _compiler, _function_body
 
-from cloud_agent_host.guest_observer import GUEST_OBSERVER_ROTATE_BYTES
+from cloud_agent_host.observe.guest_observer import GUEST_OBSERVER_ROTATE_BYTES
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SANDBOX = REPO_ROOT / "deploy" / "sandbox"

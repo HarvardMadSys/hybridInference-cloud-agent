@@ -77,7 +77,7 @@ from cloud_agent.mcp.protocol import (
     request_headers,
     request_meta,
 )
-from cloud_agent.mcp.sse import SseDecoder, SseError
+from cloud_agent.mcp.sse import SseDecoder, SseError, SseEvent
 from cloud_agent.settings import number_setting
 
 #: The header carrying the negotiated protocol revision.
@@ -393,7 +393,45 @@ class _HttpCore:
             )
         return encode_result(message.raw_id, result)
 
-    async def _drain_sse(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+    async def _route_sse_message(
+        self,
+        message: Any,
+        *,
+        expect_key: str | None,
+        results: list[Any],
+        poster: Callable[[bytes], Any] | None,
+    ) -> bool:
+        """Route one decoded SSE message; True when it is the expected response."""
+        if message.is_response:
+            if expect_key is not None and message.key == expect_key:
+                return True
+            results.append(message)
+            return False
+        if self.stateless:
+            # The revision forbids a server from sending requests
+            # of its own; it answers with ``InputRequiredResult``
+            # instead. Answering here would be inventing a
+            # mechanism this server does not have, so the message
+            # is passed to the caller as-is.
+            results.append(message)
+            return False
+        reply = await self._answer_server_request(message)
+        if reply is not None and poster is not None:
+            # The answer is a request of its own, so its reply is
+            # one more body that has to be read and released.
+            # Dropping it hands a streaming response back to the
+            # pool while it still holds its connection, which a
+            # server that asks a question per call turns into a
+            # leak of one connection per call.
+            answered = await poster(reply)
+            if answered is not None:
+                try:
+                    await read_bounded(answered)
+                finally:
+                    await answered.aclose()
+        return False
+
+    async def _drain_sse(
         self,
         response: httpx.Response,
         *,
@@ -425,34 +463,10 @@ class _HttpCore:
                         if not isinstance(raw, Mapping):
                             continue
                         message = decode(json.dumps(raw))[0]
-                        if message.is_response:
-                            if expect_key is not None and message.key == expect_key:
-                                found = message
-                            else:
-                                results.append(message)
-                            continue
-                        if self.stateless:
-                            # The revision forbids a server from sending requests
-                            # of its own; it answers with ``InputRequiredResult``
-                            # instead. Answering here would be inventing a
-                            # mechanism this server does not have, so the message
-                            # is passed to the caller as-is.
-                            results.append(message)
-                            continue
-                        reply = await self._answer_server_request(message)
-                        if reply is not None and poster is not None:
-                            # The answer is a request of its own, so its reply is
-                            # one more body that has to be read and released.
-                            # Dropping it hands a streaming response back to the
-                            # pool while it still holds its connection, which a
-                            # server that asks a question per call turns into a
-                            # leak of one connection per call.
-                            answered = await poster(reply)
-                            if answered is not None:
-                                try:
-                                    await read_bounded(answered)
-                                finally:
-                                    await answered.aclose()
+                        if await self._route_sse_message(
+                            message, expect_key=expect_key, results=results, poster=poster
+                        ):
+                            found = message
                     if found is not None:
                         # The answer is in, and nothing after it changes it. A
                         # server that holds the stream open afterwards -- with
@@ -460,21 +474,7 @@ class _HttpCore:
                         # call, its socket and its session for as long as it
                         # liked. The caller closes the response.
                         return [found]
-            for event in decoder.close():
-                if event.data:
-                    try:
-                        payload = event.json()
-                    except SseError:
-                        continue
-                    for raw in payload if isinstance(payload, list) else [payload]:
-                        if isinstance(raw, Mapping):
-                            message = decode(json.dumps(raw))[0]
-                            if (
-                                message.is_response
-                                and expect_key is not None
-                                and message.key == expect_key
-                            ):
-                                found = message
+            found = _expected_in_tail(decoder.close(), expect_key)
         except SseError as exc:
             raise TransportError(
                 "the server sent an invalid or oversized SSE event",
@@ -492,6 +492,23 @@ class _HttpCore:
         if found is not None:
             return [found]
         return results
+
+
+def _expected_in_tail(events: list[SseEvent], expect_key: str | None) -> Any:
+    """The last response for ``expect_key`` among the events a closed stream flushed."""
+    found: Any = None
+    for event in events:
+        if event.data:
+            try:
+                payload = event.json()
+            except SseError:
+                continue
+            for raw in payload if isinstance(payload, list) else [payload]:
+                if isinstance(raw, Mapping):
+                    message = decode(json.dumps(raw))[0]
+                    if message.is_response and expect_key is not None and message.key == expect_key:
+                        found = message
+    return found
 
 
 async def guard_target(
@@ -1144,7 +1161,30 @@ class _PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
         await self._inner.sleep(seconds)
 
 
-async def connect_streamable(  # noqa: PLR0912 complexity baseline, #771
+async def _discover_modern(transport: StreamableHttpTransport) -> Handshake:
+    """Discover a modern server, retrying once with a revision it advertises."""
+    try:
+        handshake = await discover_server(transport)
+    except UnsupportedProtocolVersion as exc:
+        if not exc.supported:
+            raise
+        transport.set_protocol_version(negotiate_version(exc.supported))
+        handshake = await discover_server(transport)
+    except TransportError as exc:
+        # Over HTTP an unsupported version arrives as a 400 whose *body*
+        # carries the code, so the status check has already turned it into a
+        # transport error by the time it could be recognised. Read the body
+        # back: the retry is the whole reason the server is told which
+        # revisions it does implement.
+        error = exc.modern_error()
+        if not isinstance(error, UnsupportedProtocolVersion) or not error.supported:
+            raise
+        transport.set_protocol_version(negotiate_version(error.supported))
+        handshake = await discover_server(transport)
+    return handshake
+
+
+async def connect_streamable(
     config: RemoteTransportConfig,
     *,
     client: httpx.AsyncClient | None = None,
@@ -1173,24 +1213,7 @@ async def connect_streamable(  # noqa: PLR0912 complexity baseline, #771
     transport.set_era("modern")
     transport.set_protocol_version(config.protocol_version or PREFERRED_PROTOCOL_VERSION)
     try:
-        try:
-            handshake = await discover_server(transport)
-        except UnsupportedProtocolVersion as exc:
-            if not exc.supported:
-                raise
-            transport.set_protocol_version(negotiate_version(exc.supported))
-            handshake = await discover_server(transport)
-        except TransportError as exc:
-            # Over HTTP an unsupported version arrives as a 400 whose *body*
-            # carries the code, so the status check has already turned it into a
-            # transport error by the time it could be recognised. Read the body
-            # back: the retry is the whole reason the server is told which
-            # revisions it does implement.
-            error = exc.modern_error()
-            if not isinstance(error, UnsupportedProtocolVersion) or not error.supported:
-                raise
-            transport.set_protocol_version(negotiate_version(error.supported))
-            handshake = await discover_server(transport)
+        handshake = await _discover_modern(transport)
         transport.set_protocol_version(handshake.protocol_version)
         return transport, handshake
     except TransportError as exc:

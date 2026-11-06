@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from cloud_agent.git_identity import git_identity, residency_github_fields
+from cloud_agent.source_control.git_identity import git_identity, residency_github_fields
 from cloud_agent.tokens import parse_residency_github_token
 from cloud_agent_shared.egress import RelayEndpoint, network_from_env
 

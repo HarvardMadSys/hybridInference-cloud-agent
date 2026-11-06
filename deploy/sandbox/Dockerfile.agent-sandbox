@@ -216,7 +216,7 @@ RUN --mount=type=cache,id=cloud-agent-sandbox-apt,target=/var/cache/apt,sharing=
 # this file reserves for Agent CLI pins.
 #
 # Every binary is linked into /usr/local/bin. The runner launches the agent with
-# a fixed PATH (`SANDBOX_PATH` in cloud_agent_host/sandbox.py), and a login
+# a fixed PATH (`SANDBOX_PATH` in cloud_agent_host/container/sandbox.py), and a login
 # shell resets PATH from /etc/profile, so an `ENV PATH` here would reach
 # neither. Go and uv stay root-owned; caches, modules and `cargo install` go
 # to each member's own home.
@@ -417,7 +417,7 @@ RUN chmod 0644 /etc/codex/requirements.toml
 # a much better bug when it starts unprivileged.
 #
 # The uid is PINNED, and must match SANDBOX_UID in
-# cloud_agent_host/sandbox.py and the base retained-container user. If the two
+# cloud_agent_host/container/sandbox.py and the base retained-container user. If the two
 # drift, the agent cannot write its workspace and git refuses to run at all
 # ("dubious ownership") — a failure that looks nothing like its cause.
 #

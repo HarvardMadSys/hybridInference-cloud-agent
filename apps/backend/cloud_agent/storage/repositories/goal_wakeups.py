@@ -19,8 +19,6 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.settings import number_setting
-
 if TYPE_CHECKING:
     import asyncpg
 
@@ -131,7 +129,9 @@ class PostgresGoalWakeupRepository:
         will clear ``waiting_job_id``. ``retry_in_seconds`` is for the other
         case — a temporary scheduling failure — and it defers the row's
         ``not_before`` rather than its lease, so a backoff and a dead worker's
-        expiry never look alike. ``lease_owner`` fences a consumer's write.
+        expiry never look alike. The caller bounds it by the
+        ``goals.wakeup_backoff_max_seconds`` setting. ``lease_owner`` fences a
+        consumer's write.
 
         Only a backoff keeps the attempt its claim spent. A release without
         ``retry_in_seconds`` gives it back, so a goal that waited behind its
@@ -224,14 +224,6 @@ async def _release_on(
     restore_attempt: bool,
 ) -> None:
     """Release, back off and optionally restore the claim attempt in one fenced write."""
-    delay = (
-        min(
-            retry_in_seconds,
-            number_setting("goals.wakeup_backoff_max_seconds"),
-        )
-        if retry_in_seconds is not None
-        else None
-    )
     # ``attempts`` is what ``is_exhausted`` reads, and it counts failures: a
     # claim spends one, and every release that is not a backoff — a park
     # behind a turn, a yield, or a hand-back to be judged again — gives it back.
@@ -254,7 +246,7 @@ async def _release_on(
         wakeup_id,
         waiting_job_id,
         detail,
-        delay,
+        retry_in_seconds,
         lease_owner,
         restore,
     )

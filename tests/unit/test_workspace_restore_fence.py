@@ -11,9 +11,9 @@ from typing import Any
 import pytest
 from fastapi import HTTPException
 
-from cloud_agent import sandbox_manager_routing
 from cloud_agent.api._workspace_access import _terminal_control_manager, fence_workspace_start
 from cloud_agent.ports.sandbox import TerminalControlRoute
+from cloud_agent.sandbox_manager import sandbox_manager_routing
 
 
 class _Sandbox:

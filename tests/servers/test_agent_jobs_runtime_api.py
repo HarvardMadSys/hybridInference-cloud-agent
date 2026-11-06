@@ -36,12 +36,12 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fi
     pytest,
     sandbox_manager_routing,
     store,
-    worker,
 )
 from tests.servers.test_agent_jobs_mcp_api import _binding, _job_body
 from tests.support.owners import connection_claim, on_connection
 
 from cloud_agent.application.follow_ups import PreparedFollowUp
+from cloud_agent.memory import memory_tool
 
 pytestmark = pytest.mark.asyncio
 
@@ -1739,7 +1739,7 @@ async def test_claim_loads_current_default_servers_and_skips_unavailable_ones(
     assert claimed.status_code == 200, claimed.text
     assert claimed.json()["mcp_bindings"] == [
         f"mcp{working['id']}",
-        worker.memory_tool.RUNTIME_SERVER_ID,
+        memory_tool.RUNTIME_SERVER_ID,
     ]
     assert claimed.json()["mcp_token"]
 

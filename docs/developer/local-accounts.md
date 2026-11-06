@@ -51,7 +51,7 @@ issuer, or one that holds owner data without a binding, as every Gateway-era
 database does, and names the cutover runbook. Both checks take the same table
 lock, so two listeners starting together cannot each bind the database. No
 setting skips these checks, and nothing adopts, maps or migrates Gateway
-owners. `python -m cloud_agent.identity_namespace --check` answers the same
+owners. `python -m cloud_agent.deployment.identity_namespace --check` answers the same
 question read-only, on any schema revision.
 
 Startup also refuses any configuration left from the Gateway integration

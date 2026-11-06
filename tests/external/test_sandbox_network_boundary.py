@@ -52,13 +52,13 @@ from pathlib import Path
 
 import pytest
 
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     CHAT_NAMESPACE_LABEL,
     ChatSandboxManager,
     ChatSandboxSpec,
 )
-from cloud_agent_host.network_guard import NetworkGuardError
-from cloud_agent_host.sandbox import ContainerBackend
+from cloud_agent_host.container.sandbox import ContainerBackend
+from cloud_agent_host.network.network_guard import NetworkGuardError
 from cloud_agent_shared.egress import SandboxNetwork, network_from_env
 
 pytestmark = [

@@ -13,8 +13,8 @@ from typing import Any
 
 import pytest
 
-from cloud_agent import measurement_writer
-from cloud_agent.measurement_writer import MeasurementWriter, record_size
+from cloud_agent.measurement import measurement_writer
+from cloud_agent.measurement.measurement_writer import MeasurementWriter, record_size
 
 
 def _payload(size: int = 10) -> dict[str, Any]:

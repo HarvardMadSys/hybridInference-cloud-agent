@@ -18,7 +18,7 @@ from tests.unit.test_shared_session_supervisor import (
     _spec,
 )
 
-from cloud_agent_host.chat_sandbox import ChatSandboxStatus
+from cloud_agent_host.container.chat_sandbox import ChatSandboxStatus
 from cloud_agent_host.environment_preparation import prepared_in
 from cloud_agent_shared.environment import BoundEnvironment
 
@@ -152,7 +152,7 @@ def test_environment_preparation_reads_docker_outside_the_supervisor_lock(monkey
     locked_inspections: list[str] = []
 
     def observed_inspect(name):
-        if supervisor._lock._is_owned():
+        if supervisor.state.lock._is_owned():
             locked_inspections.append(name)
         return inspect(name)
 

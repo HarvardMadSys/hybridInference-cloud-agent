@@ -29,13 +29,10 @@ from tests.integration.storage.test_agent_job_store import (  # noqa: F401
 )
 from tests.support.follow_ups import append_follow_up
 
-from cloud_agent.goals.decision import GoalAction
-from cloud_agent.goals.models import (
-    GoalConflict,
-    GoalInput,
-)
-from cloud_agent.goals.report import GoalReportEnvelope
+from cloud_agent.domain.goals import GoalAction, GoalReportEnvelope
+from cloud_agent.goals.models import GoalConflict
 from cloud_agent.goals.retry_policy import is_exhausted, wakeup_backoff
+from cloud_agent.schemas.goals import GoalInput
 from cloud_agent.settings import integer_setting, number_setting
 from cloud_agent.storage._sql.goals import arm_finish_wakeup
 from cloud_agent.storage.repositories.goal_wakeups import _WAKEUP_COLUMNS
@@ -49,6 +46,9 @@ MAX_WAKEUP_ATTEMPTS = integer_setting("goals.max_wakeup_attempts")
 STALLED_AFTER_S = number_setting("goals.stalled_after_seconds")
 WAKEUP_BACKOFF_S = number_setting("goals.wakeup_backoff_seconds")
 WAKEUP_BACKOFF_MAX_S = number_setting("goals.wakeup_backoff_max_seconds")
+ARM_AFTER_S = number_setting("goals.arm_after_seconds")
+#: What the recovery worker reads from them and hands the goal sweep.
+SWEEP = {"arm_after_seconds": ARM_AFTER_S, "stalled_after_seconds": STALLED_AFTER_S}
 
 #: The host the live-goal helper reserves its group on. A re-claim has to name
 #: the same one: a retained chat is hard-pinned to the machine that owns its
@@ -89,7 +89,7 @@ async def _create_job_with_goal(store, *, objective: str = "ship it", **override
     ``set_goal``: that is the path where the thread is created already owning a
     goal, and it is the one whose counters have to line up.
     """
-    from cloud_agent.goals.models import GoalInput
+    from cloud_agent.schemas.goals import GoalInput
 
     return await _create_job(store, goal=GoalInput(objective=objective, max_rounds=5), **overrides)
 
@@ -1245,7 +1245,7 @@ async def test_a_round_stopped_while_its_claim_was_handed_back_pauses_the_goal(
     assert (await store.conversation_queries.get_job(round_job["id"]))["state"] == "cancelled"
     after = await store.goals.get_goal(thread_id=job["thread_id"])
     assert (after["state"], after["pause_reason"]) == ("paused", "cancelled")
-    assert job["thread_id"] not in (await store.goals.sweep_goal_scheduling())["rearmed"]
+    assert job["thread_id"] not in (await store.goals.sweep_goal_scheduling(**SWEEP))["rearmed"]
     await run_goal_wakeups(store=store, owners=_GATEWAY)
     rounds = [
         (turn["turn_no"], turn["state"])
@@ -1349,7 +1349,7 @@ async def test_sweep_cancels_a_stale_round_and_rearms_its_live_goal(store, pool)
             stale["id"],
         )
 
-    swept = await store.goals.sweep_goal_scheduling()
+    swept = await store.goals.sweep_goal_scheduling(**SWEEP)
 
     assert job["thread_id"] in swept["rearmed"]
     assert (await store.conversation_queries.get_job(stale["id"]))["state"] == "cancelled"
@@ -1383,7 +1383,7 @@ async def test_sweep_pauses_a_goal_it_cannot_explain(store, pool):
             job["thread_id"],
         )
 
-    swept = await store.goals.sweep_goal_scheduling()
+    swept = await store.goals.sweep_goal_scheduling(**SWEEP)
 
     assert swept["stalled"] == [job["thread_id"]]
     goal = await store.goals.get_goal(thread_id=job["thread_id"])
@@ -1545,7 +1545,7 @@ async def test_an_unloaded_github_app_leaves_the_goal_waiting_on_its_rows(
     becomes the next round once the App loads.
     """
     from cloud_agent.goals.controller import consume_wakeup, continue_after_finish, run_goal_wakeups
-    from cloud_agent.source_control_runtime import SourceControlUnavailable
+    from cloud_agent.source_control.source_control_runtime import SourceControlUnavailable
 
     class RecoveringApp:
         loaded = False
@@ -1592,7 +1592,7 @@ async def test_an_unloaded_github_app_leaves_the_goal_waiting_on_its_rows(
             "UPDATE agent_threads SET goal_updated_at = NOW() - INTERVAL '1 day' WHERE id = $1",
             thread_id,
         )
-    swept = await store.goals.sweep_goal_scheduling()
+    swept = await store.goals.sweep_goal_scheduling(**SWEEP)
 
     waiting = await _pending_wakeup(pool, thread_id)
     assert waiting is not None and waiting["id"] == due["id"]
@@ -2072,8 +2072,8 @@ async def test_repository_lookup_outages_do_not_exhaust_real_goal_wakeups(
     """Temporary access-service failures stay pending until the provider recovers."""
     from unittest.mock import AsyncMock
 
-    from cloud_agent.entitlement import RepoAccessUnavailable
     from cloud_agent.goals.controller import run_goal_wakeups
+    from cloud_agent.source_control.entitlement import RepoAccessUnavailable
 
     job, first, _ = await _live_goal_job(store)
     await _finish(pool, first)

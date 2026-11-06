@@ -7,13 +7,13 @@ import re
 import shlex
 from collections.abc import Mapping
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from dotenv.parser import parse_stream
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from cloud_agent_shared.environment_snapshots import ENVIRONMENT_SNAPSHOT_CAPABILITY
-from cloud_agent_shared.secret_redaction import MIN_SECRET_CHARS
+from cloud_agent_shared.secret_redaction import MASKED, MIN_SECRET_CHARS, Masked
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -128,7 +128,7 @@ class EnvironmentVariable(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
     name: str
-    value: str = Field(repr=False)
+    value: Annotated[str, Masked(when="secret")] = Field(repr=False)
     secret: bool = True
     phase: Phase = "both"
     source: Literal["global", "environment", "override"] | None = None
@@ -240,7 +240,9 @@ class BoundEnvironment(EnvironmentScripts):
     runtime_variables: list[EnvironmentVariable] | None = Field(
         default=None, repr=False, max_length=150
     )
-    previous_secrets: dict[str, str] = Field(default_factory=dict, repr=False, max_length=512)
+    previous_secrets: Annotated[dict[str, str], MASKED] = Field(
+        default_factory=dict, repr=False, max_length=512
+    )
     skip_start: bool = False
     #: The control plane's HMAC of the setup script and setup-time variables.
     #: Equal fingerprints install the same thing, so a container marked done

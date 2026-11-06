@@ -20,7 +20,8 @@ from cloud_agent.application.compute_resources import (
     ComputeCommands,  # noqa: TC001 - FastAPI resolves annotations.
 )
 from cloud_agent.domain.compute import ComputeRefusal
-from cloud_agent.schemas_compute import (  # noqa: TC001 - FastAPI request models.
+from cloud_agent.ports.errors import ConflictCode
+from cloud_agent.schemas.compute import (  # noqa: TC001 - FastAPI request models.
     AddComputeConnection,
     AddDeploymentProfile,
     AddServerRequest,
@@ -454,7 +455,8 @@ async def confirm_absent(
     view = await _operation(commands, operation_id)
     if "confirm_absent" not in view["allowed_actions"]:
         raise ComputeRefusal(
-            "absence_not_confirmable", compute_storage_error_message("absence_not_confirmable")
+            "absence_not_confirmable",
+            compute_storage_error_message(ConflictCode.ABSENCE_NOT_CONFIRMABLE),
         )
     # The repository repeats this check under the operation and allocation locks.
     result = await commands.operation_view(

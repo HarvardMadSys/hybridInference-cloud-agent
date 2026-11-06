@@ -6,6 +6,7 @@ cases independently schedulable without extracting their fixture machinery.
 
 from __future__ import annotations
 
+from tests.support.archive_policy import hooked_supervisor
 from tests.unit.test_shared_session_supervisor import (
     ChatSandboxInspection,
     ChatSandboxSpec,
@@ -32,11 +33,11 @@ from tests.unit.test_shared_session_supervisor import (
     time,
 )
 
-from cloud_agent_host.guest_observer import GUEST_OBSERVER_SOURCE
+from cloud_agent_host.container.sandbox import KATA_RUNTIME
+from cloud_agent_host.observe.guest_observer import GUEST_OBSERVER_SOURCE
+from cloud_agent_host.observe.tool_windows import ToolMark
 from cloud_agent_host.resident_transport import ResidentTransport
-from cloud_agent_host.sandbox import KATA_RUNTIME
-from cloud_agent_host.shared_session_supervisor import archive_failure_http_detail
-from cloud_agent_host.tool_windows import ToolMark
+from cloud_agent_host.supervisor.shared_session_supervisor import archive_failure_http_detail
 
 
 class _HeldStartManager(_Manager):
@@ -68,7 +69,7 @@ def test_initial_archive_waits_out_a_start_that_begins_under_its_barrier(monkeyp
         manifest=_members(),
     )
     running, _ = supervisor.operation_opened("athr_peer")
-    group = supervisor._members["athr_source"]
+    group = supervisor.state.members["athr_source"]
     # A second read passes its first admission, then is held before its check.
     entered, release = _gated_inspect(manager, monkeypatch, _spec().container_name)
     manager.hold_start = True
@@ -127,7 +128,7 @@ def test_initial_archive_reports_busy_once_a_request_outlasts_its_wait() -> None
             "athr_source", lease.token, capture=lambda *_args: captured.append(True) or {}
         )
 
-    group = supervisor._members["athr_source"]
+    group = supervisor.state.members["athr_source"]
     assert captured == []
     assert group.snapshotting is False
     # The barrier is gone: the request finishes, and the next attempt captures.
@@ -142,10 +143,10 @@ def test_failed_marked_initial_archive_stops_and_completes_the_final_archive() -
     manager = _Manager()
     prepared: list[bool] = []
     archived: list[tuple[bool, tuple[str, ...]]] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=lambda _spec, inspection: prepared.append(inspection.running),
-        stopped_archive_hook=lambda _spec, inspection, _members: archived.append(
+        prepare_final=lambda _spec, inspection: prepared.append(inspection.running),
+        stopped=lambda _spec, inspection, _members: archived.append(
             (inspection.running, inspection.networks)
         ),
     )
@@ -197,10 +198,10 @@ def test_failed_marked_initial_archive_waits_for_concurrent_guard_stop() -> None
             return super().stop(spec, **kwargs)
 
     manager = BlockingStopManager()
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=lambda *_args: None,
-        stopped_archive_hook=lambda *_args: None,
+        prepare_final=lambda *_args: None,
+        stopped=lambda *_args: None,
     )
     fresh_members = [
         SharedMemberManifest(
@@ -222,7 +223,7 @@ def test_failed_marked_initial_archive_waits_for_concurrent_guard_stop() -> None
     capture_finished = threading.Event()
     capture_errors: list[BaseException] = []
     guard_errors: list[BaseException] = []
-    stop_if_idle = supervisor.stop_if_idle
+    stop_if_idle = supervisor._lifecycle.stop_if_idle
 
     def observed_stop_if_idle(*args, **kwargs):
         try:
@@ -232,7 +233,7 @@ def test_failed_marked_initial_archive_waits_for_concurrent_guard_stop() -> None
                 preservation_collided.set()
             raise
 
-    supervisor.stop_if_idle = observed_stop_if_idle  # type: ignore[method-assign]
+    supervisor._lifecycle.stop_if_idle = observed_stop_if_idle  # type: ignore[method-assign]
 
     def capture(*_args):
         manager.initial_archive_marker = b"prepared-initial-marker"
@@ -319,10 +320,10 @@ def test_failed_final_upload_keeps_the_stopped_bridge_and_never_thaws(
     def archive(*_args) -> None:
         raise final_failure
 
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=lambda _spec, inspection: prepared.append(inspection.running),
-        stopped_archive_hook=archive,
+        prepare_final=lambda _spec, inspection: prepared.append(inspection.running),
+        stopped=archive,
     )
     lease = supervisor.acquire(
         _spec(),
@@ -396,10 +397,10 @@ def test_failed_initial_preservation_stop_releases_barrier_after_exact_retry() -
 
     manager = StopFailureManager()
     archive_calls: list[object] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=lambda *_args: None,
-        stopped_archive_hook=lambda *args: archive_calls.append(args),
+        prepare_final=lambda *_args: None,
+        stopped=lambda *args: archive_calls.append(args),
     )
     fresh_members = [
         SharedMemberManifest(
@@ -473,10 +474,10 @@ def test_failed_initial_archive_before_marker_thaws_without_stopping() -> None:
     manager = _Manager()
     prepared: list[bool] = []
     archived: list[object] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=lambda _spec, inspection: prepared.append(inspection.running),
-        stopped_archive_hook=lambda *args: archived.append(args),
+        prepare_final=lambda _spec, inspection: prepared.append(inspection.running),
+        stopped=lambda *args: archived.append(args),
     )
     lease = supervisor.acquire(
         _spec(),
@@ -520,12 +521,12 @@ def test_failed_start_marker_completion_is_retried_by_same_mutation_entrypoint(
         if completions == 1:
             raise RuntimeError("marker clear failed")
 
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        starting_archive_prepare_hook=lambda _spec, inspection: (
+        prepare_start=lambda _spec, inspection: (
             None if not inspection.running else pytest.fail("start fence requires stopped state")
         ),
-        started_archive_hook=complete,
+        started=complete,
     )
     supervisor.register_manifest(_spec(), _members())
     manager.stop(_spec(), release_networks=False)
@@ -558,10 +559,10 @@ def test_pending_final_archive_retries_after_external_bridge_removal() -> None:
         if archive_calls == 1:
             raise RuntimeError("upload response lost")
 
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=lambda *_args: None,
-        stopped_archive_hook=archive,
+        prepare_final=lambda *_args: None,
+        stopped=archive,
     )
     supervisor.register_manifest(_spec(), _members())
 
@@ -605,7 +606,7 @@ def test_direct_orphan_archive_retry_clears_the_admission_fence() -> None:
         if archive_calls == 1:
             raise RuntimeError("upload failed")
 
-    supervisor = SharedChatSessionSupervisor(manager, stopped_archive_hook=archive)
+    supervisor = hooked_supervisor(manager, stopped=archive)
 
     descriptors = supervisor.reconcile()
 
@@ -652,12 +653,12 @@ def test_ambiguous_post_start_failure_remains_pending_until_exact_stop_retry() -
 
     manager = UncertainStartManager()
     archived: list[tuple] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        starting_archive_prepare_hook=lambda *_args: None,
-        started_archive_hook=lambda *_args: None,
-        stopped_archive_prepare_hook=lambda *_args: None,
-        stopped_archive_hook=lambda *args: archived.append(args),
+        prepare_start=lambda *_args: None,
+        started=lambda *_args: None,
+        prepare_final=lambda *_args: None,
+        stopped=lambda *args: archived.append(args),
     )
     supervisor.register_manifest(_spec(), _members())
     manager.items[_spec().container_name] = manager._inspection(_spec(), running=False)
@@ -694,9 +695,9 @@ def test_ambiguous_post_start_failure_remains_pending_until_exact_stop_retry() -
 def test_external_stopped_group_with_missing_final_marker_keeps_its_bridge() -> None:
     manager = _Manager()
     spec = _spec()
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_hook=lambda *_args: (_ for _ in ()).throw(
+        stopped=lambda *_args: (_ for _ in ()).throw(
             SandboxError("final archive marker is missing")
         ),
     )
@@ -1457,7 +1458,7 @@ def test_a_reaped_activation_ends_with_its_residency_so_its_group_can_idle(turn)
     with pytest.raises(SessionLeaseLost):
         supervisor.settle("athr_source", dead.token, job_id="ajob_dead", context_status="live")
     # No activation, turn or workspace request is left holding the group.
-    assert supervisor._is_quiescent(supervisor._groups[_spec().sandbox_id])
+    assert supervisor.state.groups[_spec().sandbox_id].lifecycle.is_quiescent()
     now[0] += 60
     assert [stopped.running for stopped in supervisor.sweep()] == [False]
     assert manager.items[_spec().container_name].running is False
@@ -1629,7 +1630,7 @@ def test_a_loss_during_its_turn_ends_the_activation_once_its_stream_closes_the_t
     with pytest.raises(SessionLeaseLost):
         supervisor.settle("athr_source", hung.token, job_id="ajob_hung", context_status="live")
     # No activation, turn or workspace request is left holding the group.
-    assert supervisor._is_quiescent(supervisor._groups[_spec().sandbox_id])
+    assert supervisor.state.groups[_spec().sandbox_id].lifecycle.is_quiescent()
 
 
 def test_a_lost_turn_whose_stream_never_closes_it_is_closed_by_the_sweep():
@@ -1642,7 +1643,7 @@ def test_a_lost_turn_whose_stream_never_closes_it_is_closed_by_the_sweep():
     """
     now = [1000.0]
     manager, supervisor, hung, turn = _hung_turn_with_a_live_sibling(now)
-    member = supervisor._members["athr_source"].members["athr_source"]
+    member = supervisor.state.members["athr_source"].members["athr_source"]
     supervisor.residency_lost("athr_source", generation=1)
 
     supervisor.sweep()
@@ -1687,7 +1688,7 @@ def test_supervisor_close_releases_an_active_turn_observation_and_member_lock():
         model="glm-5.1",
         reasoning_effort=None,
     )
-    member = supervisor._members["athr_source"].members["athr_source"]
+    member = supervisor.state.members["athr_source"].members["athr_source"]
 
     supervisor.close()
 
@@ -1707,7 +1708,7 @@ def test_supervisor_close_does_not_steal_an_initialization_lock():
         has_settled_context=False,
         manifest=_members(),
     )
-    member = supervisor._members["athr_source"].members["athr_source"]
+    member = supervisor.state.members["athr_source"].members["athr_source"]
     member.turn_lock.acquire()
 
     supervisor.close()
@@ -1744,7 +1745,7 @@ def test_abandon_releases_observation_when_normal_turn_cleanup_fails(monkeypatch
     def fail_cleanup(*_args, **_kwargs):
         raise RuntimeError("cleanup failed")
 
-    monkeypatch.setattr(supervisor, "complete_turn", fail_cleanup)
+    monkeypatch.setattr(supervisor._sessions, "complete_turn", fail_cleanup)
     supervisor.abandon("athr_source", lease.token, lost=True)
 
     assert manager.events[-1] == ("observe-finish", 11001)
@@ -1766,13 +1767,13 @@ def test_abandon_releases_the_member_lock_of_the_turn_it_detaches(monkeypatch):
     supervisor.start_turn(
         "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
     )
-    member = supervisor._members["athr_source"].members["athr_source"]
+    member = supervisor.state.members["athr_source"].members["athr_source"]
     assert member.turn_lock.locked() is True
 
     def fail_cleanup(*_args, **_kwargs):
         raise RuntimeError("cleanup failed")
 
-    monkeypatch.setattr(supervisor, "complete_turn", fail_cleanup)
+    monkeypatch.setattr(supervisor._sessions, "complete_turn", fail_cleanup)
     supervisor.abandon("athr_source", lease.token, lost=False)
 
     assert member.turn_lock.locked() is False
@@ -1831,7 +1832,7 @@ def test_a_turn_detached_by_complete_turn_releases_its_lock_even_if_it_then_fail
     turn = supervisor.start_turn(
         "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
     )
-    member = supervisor._members["athr_source"].members["athr_source"]
+    member = supervisor.state.members["athr_source"].members["athr_source"]
     factory.transports[0].failing = True
 
     with pytest.raises(RuntimeError, match="process table"):
@@ -1868,7 +1869,7 @@ def test_abandon_leaves_a_resident_start_its_own_member_lock():
         has_settled_context=True,
         manifest=_members(),
     )
-    member = supervisor._members["athr_source"].members["athr_source"]
+    member = supervisor.state.members["athr_source"].members["athr_source"]
     errors: list[BaseException] = []
 
     def start() -> None:
@@ -1925,7 +1926,7 @@ def test_abandon_leaves_a_turn_in_admission_its_own_member_lock():
         lease.token,
         _launch("athr_source", native_session_id="native-source", slot=0),
     )
-    member = supervisor._members["athr_source"].members["athr_source"]
+    member = supervisor.state.members["athr_source"].members["athr_source"]
     errors: list[BaseException] = []
 
     def admit() -> None:

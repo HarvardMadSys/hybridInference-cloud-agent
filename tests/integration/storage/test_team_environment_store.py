@@ -22,7 +22,7 @@ from tests.integration.storage.test_environment_snapshot_store import (
 )
 from tests.integration.storage.test_team_store import join, new_team
 
-from cloud_agent.environments import (
+from cloud_agent.environments.environments import (
     EnvironmentAccessRevoked,
     EnvironmentForbidden,
     EnvironmentNotFound,

@@ -176,7 +176,10 @@ async def test_goal_recovery_and_retries_follow_saved_settings(saved_settings):
     assert not is_exhausted(2)
     assert is_exhausted(3)
     pool, conn = _database()
-    assert await PostgresGoalRepository(pool).sweep_goal_scheduling() == {
+    assert await PostgresGoalRepository(pool).sweep_goal_scheduling(
+        arm_after_seconds=settings.number_setting("goals.arm_after_seconds"),
+        stalled_after_seconds=settings.number_setting("goals.stalled_after_seconds"),
+    ) == {
         "rearmed": [],
         "stalled": [],
     }

@@ -10,13 +10,13 @@ import pytest
 from pydantic import SecretStr
 from tests.integration.storage.test_host_pool_store import db as db, store as store
 
-from cloud_agent.compute_secrets import ComputeSecretStore
 from cloud_agent.ports.external.compute_provider import (
     AcquireRequest,
     NodeRegistration,
     OperationIntent,
 )
 from cloud_agent.providers.compute.cloudlab import CloudLabProvider
+from cloud_agent.providers.compute.compute_secrets import ComputeSecretStore
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

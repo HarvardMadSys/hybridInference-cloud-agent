@@ -597,7 +597,7 @@ class _FixedResponse:
 
 def _sync_with_sandbox_manager(monkeypatch, sandbox_manager) -> Any:
     """A real sync, pointed at a fixed control-plane answer and one sandbox manager."""
-    from cloud_agent_host.profiling_policy import ProfilingPolicySync
+    from cloud_agent_host.service.profiling_policy import ProfilingPolicySync
 
     run = _run(run_id=RUN_A, operations=("terminal.open",))
     answer = {
@@ -812,8 +812,8 @@ def test_a_malformed_inherited_manifest_fails_softly(monkeypatch, change):
 def test_every_producer_policy_adapter_rejects_the_same_invalid_values(change):
     """Control, host, and sandbox-manager adapters cannot normalize drift apart."""
     from cloud_agent.workers.profiling_control import _descriptor_for_run
-    from cloud_agent_host.profiling_policy import _parse_policy_run
     from cloud_agent_host.sandbox_manager_profiling_policy import _parse_run_payload
+    from cloud_agent_host.service.profiling_policy import _parse_policy_run
 
     descriptor = {
         "run_id": RUN_A,

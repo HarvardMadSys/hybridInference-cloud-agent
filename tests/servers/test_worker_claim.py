@@ -29,6 +29,8 @@ from cloud_agent.api.deps import (
     get_owner_directory,
     get_storage,
 )
+from cloud_agent.api.errors import install_domain_errors
+from cloud_agent.application import turn_claim
 
 pytestmark = pytest.mark.asyncio
 
@@ -144,6 +146,7 @@ class _Owners:
 def _app(store: _ClaimStore, owners: _Owners | None = None) -> FastAPI:
     app = FastAPI()
     app.include_router(agent_jobs_router.router)
+    install_domain_errors(app)
     app.dependency_overrides[get_storage] = lambda: store
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     # Every claim asks the directory again whether the owner may use Agent.
@@ -244,7 +247,7 @@ async def test_a_host_that_cannot_launch_on_a_connection_gets_the_claim_back(mon
 
 async def test_a_deployment_that_cannot_read_the_key_hands_the_claim_back(claim, monkeypatch):
     """The key's cipher is the operator's problem, never a verdict on the owner's turn."""
-    from cloud_agent.credential_cipher import CredentialCipherError
+    from cloud_agent.crypto.credential_cipher import CredentialCipherError
 
     store = _ClaimStore()
 
@@ -290,12 +293,12 @@ async def test_claim_delivers_the_threads_plugins(claim, monkeypatch):
 
 
 async def test_an_unavailable_repository_lookup_delays_the_claim(claim, monkeypatch):
-    from cloud_agent.entitlement import RepoAccessUnavailable
+    from cloud_agent.source_control.entitlement import RepoAccessUnavailable
 
     async def unavailable(*args: Any, **kwargs: Any) -> None:
         raise RepoAccessUnavailable("GitHub is temporarily unavailable")
 
-    monkeypatch.setattr(agent_worker, "require_entitled_repo", unavailable)
+    monkeypatch.setattr(turn_claim, "require_entitled_repo", unavailable)
     store = _ClaimStore()
     response = await claim(store)
     assert response.status_code == 503
@@ -361,14 +364,14 @@ async def test_an_unconfirmed_agent_access_hands_the_job_back(claim, owners):
 @pytest.mark.parametrize("refusal", ["not_allowed", "unavailable"])
 async def test_a_repository_refusal_is_decided_before_any_credential(claim, monkeypatch, refusal):
     """A job that cannot run reads no key: ended or delayed, no credential is in play."""
-    from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed
+    from cloud_agent.source_control.entitlement import RepoAccessUnavailable, RepoNotAllowed
 
     async def refused(*args: Any, **kwargs: Any) -> None:
         if refusal == "not_allowed":
             raise RepoNotAllowed("owner/name is no longer reachable by its owner")
         raise RepoAccessUnavailable("GitHub is temporarily unavailable")
 
-    monkeypatch.setattr(agent_worker, "require_entitled_repo", refused)
+    monkeypatch.setattr(turn_claim, "require_entitled_repo", refused)
     store = _ClaimStore()
 
     response = await claim(store)
@@ -402,7 +405,7 @@ async def test_an_unexpected_failure_after_the_claim_hands_the_job_back(
         raise RuntimeError("the store dropped the connection")
 
     if failing_step == "mcp_bindings":
-        monkeypatch.setattr(agent_worker, "resolve_for_thread", broken_read)
+        monkeypatch.setattr(turn_claim, "resolve_for_thread", broken_read)
     elif failing_step == "attachment_count":
         monkeypatch.setattr(store, "count_thread_attachments", broken_read)
     else:
@@ -431,7 +434,7 @@ async def test_environment_claim_requires_both_actual_runner_and_broker(monkeypa
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
-    from cloud_agent.sandbox_manager_client import SandboxManagerError
+    from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
     from cloud_agent_shared.environment import BoundEnvironment, EnvironmentVariable
 
     store = _ClaimStore()
@@ -454,7 +457,9 @@ async def test_environment_claim_requires_both_actual_runner_and_broker(monkeypa
             503, "Broker upgrade required"
         )
     route = AsyncMock(return_value=None if compatibility == "missing-broker" else broker)
-    monkeypatch.setattr("cloud_agent.sandbox_manager_routing.sandbox_manager_for_job", route)
+    monkeypatch.setattr(
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.sandbox_manager_for_job", route
+    )
     body = {
         "worker_id": "w1",
         "attestation": {
@@ -487,7 +492,7 @@ async def test_a_team_environment_its_owner_lost_fails_the_turn_before_any_crede
     """Leaving the team ends the chat's use of its Secrets; no host change helps."""
     from unittest.mock import AsyncMock
 
-    from cloud_agent.environments import EnvironmentAccessRevoked
+    from cloud_agent.environments.environments import EnvironmentAccessRevoked
 
     store = _ClaimStore()
     original_claim = store.claim_job
@@ -547,7 +552,7 @@ async def test_snapshot_fields_and_a_snapshot_go_only_to_a_runner_that_reads_the
     )
     broker = SimpleNamespace(require_environment_capability=AsyncMock(return_value=[]))
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_job",
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.sandbox_manager_for_job",
         AsyncMock(return_value=broker),
     )
     capabilities = ["environment-v1"] + (["environment-snapshot-v1"] if snapshot_capable else [])
@@ -681,7 +686,9 @@ async def test_owner_inference_credentials_wait_for_a_runner_that_keeps_them_fro
     store.environment_for_claim = AsyncMock(return_value=bound)
     broker = SimpleNamespace(require_environment_capability=AsyncMock())
     route = AsyncMock(return_value=broker)
-    monkeypatch.setattr("cloud_agent.sandbox_manager_routing.sandbox_manager_for_job", route)
+    monkeypatch.setattr(
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.sandbox_manager_for_job", route
+    )
     capabilities = ["environment-v1"] + (["environment-inference-v1"] if inference_capable else [])
     body = {"worker_id": "w1", "attestation": {"runner_capabilities": capabilities}}
     async with AsyncClient(

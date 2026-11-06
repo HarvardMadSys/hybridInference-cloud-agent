@@ -24,12 +24,12 @@ from tests.support.follow_ups import append_follow_up
 from tests.support.owners import CONNECTION_ID, use_session_secret
 from tests.unit.test_codex_usage import _completed, _run, _session, _spawn, _usage
 
-from cloud_agent.admin_usage import MAX_USAGE_ATTEMPTS, MAX_USAGE_RUNS
 from cloud_agent.api import admin_usage, owner_usage
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage
-from cloud_agent.storage import admin_usage_queries
+from cloud_agent.ports import admin_queries
 from cloud_agent.storage.assembly import Storage
+from cloud_agent.usage.admin_usage import MAX_USAGE_ATTEMPTS, MAX_USAGE_RUNS
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -529,7 +529,7 @@ async def test_batches_partition_exactly_the_runs_the_cohort_selects(db, store):
     only = await batches(thread_ids=[others[0]["thread_id"]])
     assert [row["id"] for cohort, _ in only for row in cohort] == [others[0]["id"]]
     # Too many attempts in even the smallest batch is refused, never trimmed.
-    with pytest.raises(admin_usage_queries.UsageQueryTooLarge):
+    with pytest.raises(admin_queries.UsageQueryTooLarge):
         await batches(max_attempts=0)
-    with pytest.raises(admin_usage_queries.UsageQueryUnavailable):
+    with pytest.raises(admin_queries.UsageQueryUnavailable):
         await batches(deadline=time.monotonic() - 1)

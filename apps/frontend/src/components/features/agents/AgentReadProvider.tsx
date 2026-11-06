@@ -11,7 +11,7 @@ import {
 import { listThreadQuestions } from '@/lib/api/questions';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { onAgentRecordsChanged, type AgentRecordsChange } from './agentPush';
-import { clearWorkspaceGitCache } from './workspaceGitCache';
+import { clearWorkspaceGitCache } from './workspace/workspaceGitCache';
 
 const AgentReadContext = createContext<AgentReadScope>({
   getAgentJob: (jobId) => getAgentJob(jobId),

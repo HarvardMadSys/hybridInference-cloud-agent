@@ -34,11 +34,11 @@ import pytest
 from tests.support.owners import on_connection
 
 from cloud_agent_host import runtime_probe
+from cloud_agent_host.container.sandbox import RUNTIME_BIN_ROOT, SANDBOX_GID
 from cloud_agent_host.drivers import TurnResult
 from cloud_agent_host.runtime_probe import PROBE_MODEL_PORT, ProbeResult, probe_runtime
 from cloud_agent_host.runtime_probe_model import MODEL, REPLY
 from cloud_agent_host.runtimes.events import MESSAGE, RAW, NormalizedEvent
-from cloud_agent_host.sandbox import RUNTIME_BIN_ROOT, SANDBOX_GID
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

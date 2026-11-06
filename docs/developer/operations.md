@@ -1032,7 +1032,7 @@ What the owner added decides where it runs: an address is a `remote` service
 behind this relay, and a command is a `sandbox` program
 ([sandbox MCP servers](#sandbox-mcp-servers)). Nothing else runs one: there is
 no connector on the owner's machine and no managed worker, and the API refuses
-both locations. `0113_mcp_retire_dead_locations` moved every connection stored
+both locations. `0114_mcp_retire_dead_locations` moved every connection stored
 at `managed-worker` or `user-connector` to `sandbox`, with its command as
 stored ([upgrade notes](upgrade-notes.md#mcp-servers-run-in-two-places)). The
 connector tables and `agent_mcp_connections.connector_id` are unused, and a
@@ -1227,6 +1227,9 @@ explains it.
   cannot find, is refused. It may use the owner's credentials, as
   any command the agent runs may: keys pasted with it are sealed at rest and
   named `secret://NAME`, and `${NAME}` is filled from the chat's environment.
+  A sealed key shorter than 8 characters is refused when it is added or
+  imported, as a short environment Secret is: the runner masks only longer
+  keys in the chat's output. One stored before that rule still runs, unmasked.
   The host hands both only to the slot's runner, in a file only that runner's
   user reads (`/run/agent-mcp-slots/<slot>/secrets.json`). The admission names
   variables, never values.
@@ -1251,6 +1254,36 @@ explains it.
   starts and stops in `/run/agent-mcp-slots/<slot>/runner.log`, and each
   server's own output is in `/run/agent-mcp-slots/<slot>/<alias>.log`, readable
   as `agent-mcp-<slot>`. Admissions are in `/run/agent-mcp-admissions`.
+
+## Sandbox incidents
+
+A host records what goes wrong in each retained sandbox as **incidents**, in
+the sandbox's event list on the admin sandbox page; the sandbox list shows the
+newest one within a day under the sandbox's name. The
+[design](../agents/specs/2026-11-04-sandbox-incidents.md) explains it.
+
+- **What is recorded.** `out_of_memory` (Docker's `oom`: the OOM killer killed
+  some process in the container), `container_exited` (a `die` with no `kill`
+  before it, so nobody asked for it), `memory_high` and `pids_high` (a reading
+  at 90% of the limit), `browser_crashed` (Chromium exited with no stop
+  requested), and `mcp_server_failed` (a program could not start, or exited
+  on its own; it names the chat and the server). A stop, idle stop or deletion
+  the platform made is not an incident.
+- **Repeats.** The first of a kind goes out at once; repeats within the next
+  minute become one `.repeated` row with a count. A sandbox records at most 60
+  rows an hour, and one `dropped` row counts the rest.
+- **What people see.** A chat shows one line in a running turn for
+  `out_of_memory`, `container_exited` and its own `mcp_server_failed`. The
+  agent's next prompt lists what happened since it was last told, and a chat's
+  first prompt says the sandbox has a browser.
+- **What it carries.** Kinds, times, exit codes, limits and MCP aliases only:
+  no stderr, URL, command line or environment.
+- **Where to look.** The browser service journals to
+  `/run/agent-browser/events.jsonl`, each slot's MCP runner to
+  `/run/agent-mcp-slots/<slot>/events.jsonl`. The sandbox manager reads them
+  every minute and holds the rows until a heartbeat answer says
+  `incidents: "accepted"`; a control plane older than this release never
+  does, and the rows wait.
 
 ## Before a job can run for real
 

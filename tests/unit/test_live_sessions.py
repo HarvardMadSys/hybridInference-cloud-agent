@@ -19,15 +19,9 @@ from cloud_agent_host.drivers import (
     TURN_COMPLETED,
     TURN_FAILED,
     TURN_STARTED,
-    ClaudeCodeLiveSession,
-    CodexAppServerSession,
     DriverError,
-    HttpAgentLiveSession,
     LaunchContext,
-    PiRpcSession,
     TurnInput,
-    driver_for,
-    get_driver,
 )
 from cloud_agent_host.runtimes import (
     EMPTY_RUNTIME_MCP_CONFIG,
@@ -38,6 +32,11 @@ from cloud_agent_host.runtimes import (
     PiRuntime,
     registered_runtimes,
 )
+from cloud_agent_host.runtimes.claude.session import ClaudeCodeLiveSession
+from cloud_agent_host.runtimes.codex.session import CodexAppServerSession
+from cloud_agent_host.runtimes.http_bridge.session import HttpAgentLiveSession
+from cloud_agent_host.runtimes.live import driver_for, get_driver
+from cloud_agent_host.runtimes.pi.session import PiRpcSession
 
 _ANSWER = {
     "type": "assistant",
@@ -441,7 +440,9 @@ def test_close_ends_the_residency(tmp_path, monkeypatch):
     session.start_turn(TurnInput(prompt="p", model="m")).wait()
 
     clock = iter([0.0, 3.0])
-    monkeypatch.setattr("cloud_agent_host.drivers.time.monotonic", lambda: next(clock))
+    monkeypatch.setattr(
+        "cloud_agent_host.runtimes.claude.session.time.monotonic", lambda: next(clock)
+    )
     session.close()
 
     assert process.stdin_closed and process.killed
@@ -463,7 +464,7 @@ def test_settled_claude_close_allows_pending_native_history_to_flush(tmp_path, m
         flushed = True
 
     monkeypatch.setattr(process, "poll", lambda: 0 if flushed else None)
-    monkeypatch.setattr("cloud_agent_host.drivers.time.sleep", flush)
+    monkeypatch.setattr("cloud_agent_host.runtimes.claude.session.time.sleep", flush)
     session.close()
     session.close()
 

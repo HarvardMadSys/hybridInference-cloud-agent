@@ -4,9 +4,9 @@ import Link from 'next/link';
 import { useEffect } from 'react';
 import { useAuth } from '@/components/providers';
 import { useT } from '@/components/providers/LocaleProvider';
-import { markConversationRead } from '@/components/features/agents/useConversationReadState';
+import { markConversationRead } from '@/components/features/agents/sidebar/useConversationReadState';
 import { usePathname } from 'next/navigation';
-import { ThreadHistoryButton } from '@/components/features/agents/ThreadHistoryButton';
+import { ThreadHistoryButton } from '@/components/features/agents/conversation/ThreadHistoryButton';
 import { JobDetail } from '@/components/features/agents/JobDetail';
 import { useAgentJob } from '@/components/features/agents/useAgentJobs';
 

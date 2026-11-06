@@ -12,19 +12,20 @@ from typing import Any
 
 import httpx
 import pytest
+from tests.support.archive_policy import archive_hooks
 from tests.unit.test_repository_environments import _Backend
 from tests.unit.test_sandbox_restore import _inspection
 from tests.unit.test_shared_session_supervisor import _Manager, _members, _spec
 
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.archive.sandbox_checkpoints import CheckpointArchiveInvalid
+from cloud_agent_host.container.chat_sandbox import (
     CHAT_ENVIRONMENT_SNAPSHOT_LABEL,
     ENVIRONMENT_TEST_LABEL,
     ChatSandboxManager,
 )
+from cloud_agent_host.container.sandbox import ContainerBackend, SandboxError
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
-from cloud_agent_host.sandbox import ContainerBackend, SandboxError
-from cloud_agent_host.sandbox_checkpoints import CheckpointArchiveInvalid
-from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_shared.environment import (
     BoundEnvironment,
     EnvironmentVariable,
@@ -103,7 +104,7 @@ def test_an_older_host_gets_the_binding_without_snapshot_fields():
 
 
 def test_the_setup_fingerprint_follows_only_what_installation_sees(monkeypatch):
-    from cloud_agent.storage.repositories.environments import (
+    from cloud_agent.storage.repositories.environments.installations import (
         optional_setup_fingerprint,
         setup_fingerprint,
     )
@@ -150,14 +151,14 @@ def test_a_snapshot_container_runs_its_image_and_is_never_taken_for_a_test():
             spec, image=reference, checkpoint_id="c" * 32, environment_snapshot=(OWNER, SNAPSHOT)
         )
     labelled = {**spec.docker_labels(), CHAT_ENVIRONMENT_SNAPSHOT_LABEL: f"{OWNER}:{SNAPSHOT}"}
-    manager._verify_identity(_inspection(spec, image=reference, labels=labelled), spec)
+    manager.exact.verify_identity(_inspection(spec, image=reference, labels=labelled), spec)
     with pytest.raises(SandboxError, match="outside this chat/generation"):
-        manager._verify_identity(
+        manager.exact.verify_identity(
             _inspection(spec, image=reference, labels=spec.docker_labels()), spec
         )
     with pytest.raises(SandboxError, match="outside this chat/generation"):
         other = snapshot_image_reference(OWNER, "6" * 32)
-        manager._verify_identity(_inspection(spec, image=other, labels=labelled), spec)
+        manager.exact.verify_identity(_inspection(spec, image=other, labels=labelled), spec)
 
 
 class _SnapshotManager(_Manager):
@@ -181,14 +182,15 @@ class _SnapshotManager(_Manager):
 )
 def test_a_new_group_falls_back_to_the_image_whatever_the_snapshot_does(hook, failure, image):
     manager = _SnapshotManager()
-    supervisor = SharedChatSessionSupervisor(manager)
-    supervisor.environment_snapshot_hook = hook
+    supervisor = SharedChatSessionSupervisor(
+        manager, archive_policy=archive_hooks(environment_snapshot=hook)
+    )
 
     supervisor.register_manifest(_spec(), _members(), environment_snapshot=_ref())
 
     assert manager.created[-1]["image"] == image
     assert (manager.created[-1]["environment_snapshot"] is not None) == (failure is None)
-    assert supervisor._groups[_spec().sandbox_id].environment_snapshot_failure == failure
+    assert supervisor.state.groups[_spec().sandbox_id].environment_snapshot_failure == failure
 
 
 # -- preparation in a container from a snapshot -----------------------------------
@@ -296,7 +298,7 @@ def _job(snapshot=None):
 def test_a_new_workspace_starts_from_a_snapshot_only_when_everything_matches(
     snapshot, image, lockfiles, new_group, expected
 ):
-    from cloud_agent_host.runner import _choose_environment_snapshot
+    from cloud_agent_host.turn.source_preparation import _choose_environment_snapshot
 
     chosen, outcome = _choose_environment_snapshot(
         _job(snapshot),
@@ -308,7 +310,7 @@ def test_a_new_workspace_starts_from_a_snapshot_only_when_everything_matches(
 
 
 def test_lockfiles_are_fingerprinted_by_git_object(tmp_path):
-    from cloud_agent_host.runner import tracked_lockfiles
+    from cloud_agent_host.turn.source_preparation import tracked_lockfiles
 
     git = ["git", "-C", str(tmp_path), "-c", "user.email=a@b", "-c", "user.name=t"]
     subprocess.run([*git, "init", "-q"], check=True)
@@ -331,7 +333,7 @@ def test_lockfiles_are_fingerprinted_by_git_object(tmp_path):
 
 @pytest.mark.skipif(sys.platform != "linux", reason="other filesystems refuse non-UTF-8 names")
 def test_lockfiles_are_found_beside_names_that_are_not_utf8(tmp_path):
-    from cloud_agent_host.runner import tracked_lockfiles
+    from cloud_agent_host.turn.source_preparation import tracked_lockfiles
 
     git = ["git", "-C", str(tmp_path), "-c", "user.email=a@b", "-c", "user.name=t"]
     subprocess.run([*git, "init", "-q"], check=True)
@@ -383,7 +385,8 @@ def test_a_snapshot_is_marked_emptied_of_the_repository_stopped_then_uploaded(mo
             return {"snapshot_id": SNAPSHOT, "object_key": "key", "base_image": IMAGE}
 
     monkeypatch.setattr(
-        "cloud_agent_host.runner._session_supervisor_from_env", lambda **_: _Supervisor()
+        "cloud_agent_host.sandbox_manager_client.sandbox_manager_from_env",
+        lambda **_: _Supervisor(),
     )
     receipt = environment_tests._save_snapshot(
         manager,
@@ -477,7 +480,7 @@ def _execute(monkeypatch, tmp_path, **run_fields: Any) -> tuple[list[str], dict[
     monkeypatch.setattr(environment_tests, "RetainedChatBackend", lambda manager, spec: None)
     monkeypatch.setattr(environment_tests, "EnvironmentPreparation", _Preparation)
     monkeypatch.setattr(environment_tests, "_save_snapshot", save)
-    monkeypatch.setattr("cloud_agent_host.runner._SourcePrefetch", _Source)
+    monkeypatch.setattr("cloud_agent_host.turn.source_preparation.GitSourcePrefetch", _Source)
     environment_tests.execute_test(
         client=SimpleNamespace(post=post),
         run={
@@ -545,10 +548,10 @@ class _RetiringSupervisor:
         return [item["snapshot_id"] for item in items if item["object_key"]]
 
     def environment_snapshot_images(self):
-        from cloud_agent_host.session_supervisor_client import SessionSupervisorError
+        from cloud_agent_host.sandbox_manager_client import SandboxManagerError
 
         if self.held is None:
-            raise SessionSupervisorError(404, "sandbox manager refused")
+            raise SandboxManagerError(404, "sandbox manager refused")
         return self.held
 
 
@@ -556,7 +559,8 @@ def _retire(monkeypatch, supervisor, *, retired_status: int = 200) -> list[list[
     from cloud_agent_host import environment_tests
 
     monkeypatch.setattr(
-        "cloud_agent_host.runner._session_supervisor_from_env", lambda **_: supervisor
+        "cloud_agent_host.sandbox_manager_client.sandbox_manager_from_env",
+        lambda **_: supervisor,
     )
     asked: list[list[str]] = []
 
@@ -606,7 +610,7 @@ def test_a_host_without_a_sandbox_manager_has_no_snapshots_to_drop(monkeypatch):
     def missing(**_):
         raise SandboxError("restartable chat execution needs AGENT_SANDBOX_MANAGER_URL")
 
-    monkeypatch.setattr("cloud_agent_host.runner._session_supervisor_from_env", missing)
+    monkeypatch.setattr("cloud_agent_host.sandbox_manager_client.sandbox_manager_from_env", missing)
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -619,7 +623,7 @@ def test_a_host_without_a_sandbox_manager_has_no_snapshots_to_drop(monkeypatch):
 
 
 def test_snapshot_images_are_named_by_their_ids(tmp_path):
-    from cloud_agent_host.sandbox_checkpoints import (
+    from cloud_agent_host.archive.sandbox_checkpoints import (
         SandboxCheckpointCapture,
         SandboxCheckpointStore,
     )

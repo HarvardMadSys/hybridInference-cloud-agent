@@ -52,8 +52,8 @@ import pytest
 import uvicorn
 from tests.support.migrations import apply_migrations
 
-from cloud_agent import memory_tool
 from cloud_agent.mcp.registry import mcp_cipher
+from cloud_agent.memory import memory_tool
 from cloud_agent.settings import initialize_settings
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import SCOPE_MCP, mint_worker_token

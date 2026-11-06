@@ -21,7 +21,7 @@ from typing import Any
 import pytest
 
 from cloud_agent_host import host_capacity
-from cloud_agent_host.chat_sandbox import CHAT_SANDBOX_LABEL
+from cloud_agent_host.container.chat_sandbox import CHAT_SANDBOX_LABEL
 from cloud_agent_host.host_capacity import (
     CPU_MISSING_COUNTER_RESET,
     CPU_MISSING_INVALID_SAMPLE,

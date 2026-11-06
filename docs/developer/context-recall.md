@@ -167,9 +167,9 @@ deployment or CLI pins change. Finite samples test the reported failure without
 guaranteeing that a model never makes another incorrect claim.
 
 Implementation and checks:
-[`runner.py`](../../apps/backend/cloud_agent_host/runner.py),
-[`drivers.py`](../../apps/backend/cloud_agent_host/drivers.py),
-[`shared_session_supervisor.py`](../../apps/backend/cloud_agent_host/shared_session_supervisor.py),
+[`shared_live_attempt.py`](../../apps/backend/cloud_agent_host/turn/shared_live_attempt.py),
+[`runtimes/claude/session.py`](../../apps/backend/cloud_agent_host/runtimes/claude/session.py),
+[`shared_session_supervisor.py`](../../apps/backend/cloud_agent_host/supervisor/shared_session_supervisor.py),
 [`shared_protocol.py`](../../apps/backend/cloud_agent_shared/shared_protocol.py),
 [`check_model_context.py`](../../deploy/preflight/check_model_context.py) and
 [`test_claude_driver_context.py`](../../tests/external/test_claude_driver_context.py).

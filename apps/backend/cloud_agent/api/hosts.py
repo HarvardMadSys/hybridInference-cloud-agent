@@ -26,12 +26,15 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 
 from cloud_agent.api._body_limits import HostBodyLimitRoute
 from cloud_agent.api.deps import get_storage
-from cloud_agent.host_pool import (
+from cloud_agent.api.errors import typed_error
+from cloud_agent.application.runtime_upgrades import configured_registry_url
+from cloud_agent.application.sandbox_incidents import record_heartbeat_incidents
+from cloud_agent.domain.host_pool import (
     HEARTBEAT_INTERVAL_S,
     hash_secret,
 )
-from cloud_agent.runtime_upgrades import configured_registry_url
-from cloud_agent.sandbox_manager_routing import (
+from cloud_agent.ports.errors import ConflictCode, StorageConflict
+from cloud_agent.sandbox_manager.sandbox_manager_routing import (
     SandboxManagerUrlRefused,
     probe_error_for_host,
     probe_sandbox_manager,
@@ -54,6 +57,7 @@ from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_ARCHIVE_S3_URI,
     SANDBOX_CHECKPOINT_CAPABILITY,
 )
+from cloud_agent_shared.sandbox_incidents import INCIDENTS_ACCEPTED
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -61,6 +65,7 @@ if TYPE_CHECKING:
         ResidencyRepository,
         SandboxRepository,
     )
+    from cloud_agent.ports.sandbox_incidents import SandboxIncidentRepository
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +80,7 @@ class _HostsStorage(Protocol):
     host_pool: HostPoolRepository
     residency: ResidencyRepository
     sandbox: SandboxRepository
+    sandbox_incidents: SandboxIncidentRepository
 
 
 # Host traffic arrives through the tunnel, past the edge's body limits.
@@ -98,10 +104,7 @@ def _unauthorized(message: str) -> HTTPException:
     a disabled row, because distinguishing them tells an attacker which of
     those they achieved.
     """
-    return HTTPException(
-        status_code=401,
-        detail={"error": {"type": "unauthorized", "message": message}},
-    )
+    return typed_error(401, "unauthorized", message)
 
 
 async def authenticate_host(
@@ -158,10 +161,7 @@ def _checked_sandbox_manager_url(url: str | None) -> str | None:
     try:
         return validate_sandbox_manager_url(url)
     except SandboxManagerUrlRefused as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": {"type": "invalid_sandbox_manager_url", "message": str(exc)}},
-        ) from exc
+        raise typed_error(400, "invalid_sandbox_manager_url", str(exc)) from exc
 
 
 @router.post("/register", response_model=HostRegisterResponse)
@@ -201,16 +201,10 @@ async def register_host(
         # One answer for expired, already-spent, never-issued and issued-for-
         # another-host: they are the same fact from the presenter's side — this
         # token is not usable here — and separating them says which happened.
-        raise HTTPException(
-            status_code=401,
-            detail={
-                "error": {
-                    "type": "unauthorized",
-                    "message": (
-                        "This enrollment token is not valid for this host name. Issue a new one."
-                    ),
-                }
-            },
+        raise typed_error(
+            401,
+            "unauthorized",
+            "This enrollment token is not valid for this host name. Issue a new one.",
         )
     credential = mint_host_token(host=body.name)
     try:
@@ -224,42 +218,23 @@ async def register_host(
             runner_version=body.runner_version,
             labels=dict(body.labels),
         )
-    except ValueError as exc:
-        error_type = str(exc)
-        if error_type == "enrollment_token_removed":
-            raise HTTPException(
-                status_code=401,
-                detail={
-                    "error": {
-                        "type": "unauthorized",
-                        "message": "This enrollment token is no longer valid. Issue a new one.",
-                    }
-                },
+    except StorageConflict as exc:
+        if exc.code is ConflictCode.ENROLLMENT_TOKEN_REMOVED:
+            raise typed_error(
+                401, "unauthorized", "This enrollment token is no longer valid. Issue a new one."
             ) from exc
-        if error_type == "host_drain_fenced":
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": {
-                        "type": "host_drain_fenced",
-                        "message": (
-                            "This host is held by an automated deployment drain. "
-                            "The enrollment token was consumed; release the drain "
-                            "and issue a new token before retrying."
-                        ),
-                    }
-                },
+        if exc.code is ConflictCode.HOST_DRAIN_FENCED:
+            raise typed_error(
+                409,
+                "host_drain_fenced",
+                "This host is held by an automated deployment drain. "
+                "The enrollment token was consumed; release the drain "
+                "and issue a new token before retrying.",
             ) from exc
-        if error_type != "resource_retiring":
+        if exc.code is not ConflictCode.RESOURCE_RETIRING:
             raise
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "resource_retiring",
-                    "message": "This resource is retiring; registration is closed.",
-                }
-            },
+        raise typed_error(
+            409, "resource_retiring", "This resource is retiring; registration is closed."
         ) from exc
     return HostRegisterResponse(
         host=host["host"],
@@ -344,6 +319,9 @@ async def heartbeat_host(
         observations=[_sandbox_observation(retained) for retained in retained_rows],
     )
     await _record_checkpoints(job_store, updated["host"], retained_rows)
+    incidents_stored = await record_heartbeat_incidents(
+        job_store.sandbox_incidents, updated["host"], retained_rows
+    )
     await _release_stopped_residencies(job_store, updated["host"], retained_rows)
     # Starting/restarting is a bounded launch window. Renew only a process that
     # has proved itself LIVE.
@@ -404,6 +382,7 @@ async def heartbeat_host(
         sandbox_manager_error=await _probed_sandbox_manager_error(
             updated["host"], body.sandbox_manager_url
         ),
+        incidents=INCIDENTS_ACCEPTED if incidents_stored else None,
     )
 
 
@@ -662,7 +641,7 @@ async def _probed_sandbox_manager_error(
     reason. The response is what the runner prints on the machine being
     deployed — which `sandbox_host.sh up` tails, so a misconfigured deploy says
     so while somebody is still watching it. It gets only
-    :func:`~cloud_agent.sandbox_manager_routing.probe_error_for_host`: the host chose
+    :func:`~cloud_agent.sandbox_manager.sandbox_manager_routing.probe_error_for_host`: the host chose
     the address being dialled, so the dial's own error would tell it what this
     control plane can reach.
 

@@ -22,10 +22,12 @@ import ipaddress
 import json
 import re
 import struct
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from cloud_agent_shared.egress import PROTECTED_IPV4
+from cloud_agent_shared.secret_redaction import MASKED
 
 SSH_ACCESS_CAPABILITY = "ssh-access-v1"
 
@@ -136,7 +138,7 @@ class SshServerAccess(BaseModel):
     username: str
     host_key_type: str
     host_key: str
-    private_key: str = Field(repr=False, max_length=_MAX_PRIVATE_KEY_CHARS)
+    private_key: Annotated[str, MASKED] = Field(repr=False, max_length=_MAX_PRIVATE_KEY_CHARS)
 
     @field_validator("name")
     @classmethod

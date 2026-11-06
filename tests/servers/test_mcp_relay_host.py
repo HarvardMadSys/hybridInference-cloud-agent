@@ -31,7 +31,6 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from tests.support.storage import AllCapabilities, OneFake
 
-from cloud_agent import memory_tool
 from cloud_agent.api import mcp_relay as agent_mcp_router
 from cloud_agent.api.deps import get_storage
 from cloud_agent.mcp import protocol, runtime as mcp_runtime
@@ -39,6 +38,7 @@ from cloud_agent.mcp.host import ContentBlock, Session, ToolResult
 from cloud_agent.mcp.net_policy import EgressPolicy
 from cloud_agent.mcp.protocol import Handshake
 from cloud_agent.mcp.registry import mcp_cipher
+from cloud_agent.memory import memory_tool
 from cloud_agent.ports.web_search import WebSearchAdmission
 from cloud_agent.tokens import SCOPE_MCP, mint_residency_mcp_token, mint_worker_token
 

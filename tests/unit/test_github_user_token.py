@@ -16,17 +16,17 @@ from typing import Any
 import httpx
 import pytest
 
-import cloud_agent.github_app as github_app
-import cloud_agent.github_user_token as github_user_token
-from cloud_agent.github_app import (
+import cloud_agent.source_control.github_app as github_app
+import cloud_agent.source_control.github_user_token as github_user_token
+from cloud_agent.settings import number_setting
+from cloud_agent.source_control.github_app import (
     AppConfig,
     GitHubAppCredentials,
     UserAuthorizationRevoked,
     UserTokens,
 )
-from cloud_agent.github_user_token import UserTokenUnavailable, user_access_token
-from cloud_agent.settings import number_setting
-from cloud_agent.source_control import SourceControlCipher
+from cloud_agent.source_control.github_user_token import UserTokenUnavailable, user_access_token
+from cloud_agent.source_control.source_control import SourceControlCipher
 
 _USER = "user-owner"
 

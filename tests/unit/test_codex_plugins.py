@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cloud_agent_host import codex_plugins
+from cloud_agent_host.runtimes.codex import plugins as codex_plugins
 
 if TYPE_CHECKING:
     from pathlib import Path

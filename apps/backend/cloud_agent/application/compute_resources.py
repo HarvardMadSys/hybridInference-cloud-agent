@@ -19,7 +19,6 @@ from cloud_agent.application.cloudlab_inventory import (
     CloudLabNodeInventory,
 )
 from cloud_agent.application.server_queries import ServerQueries
-from cloud_agent.compute_config import current_observation_seconds
 from cloud_agent.domain.compute import (
     ComputeRefusal,
     acquisition_absence_confirmable,
@@ -31,17 +30,22 @@ from cloud_agent.domain.compute import (
     public_connection,
     public_operation,
 )
-from cloud_agent.host_pool import hash_secret
+from cloud_agent.domain.host_pool import hash_secret
+from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
-from cloud_agent.schemas_compute import CloudLabAutoscalingPolicy, CloudLabDefaults, RenewalPolicy
+from cloud_agent.providers.compute.compute_config import current_observation_seconds
+from cloud_agent.schemas.compute import CloudLabAutoscalingPolicy, CloudLabDefaults, RenewalPolicy
 
 if TYPE_CHECKING:
     from cloud_agent.application.compute_setup import AutomaticComputeSetup
-    from cloud_agent.compute_config import ComputeConfiguration
-    from cloud_agent.compute_registry import ComputeProviderRegistration, ComputeProviderRegistry
-    from cloud_agent.compute_secrets import ComputeSecretStore
     from cloud_agent.ports.compute_resources import ComputeResourceRepository
-    from cloud_agent.schemas_compute import (
+    from cloud_agent.providers.compute.compute_config import ComputeConfiguration
+    from cloud_agent.providers.compute.compute_registry import (
+        ComputeProviderRegistration,
+        ComputeProviderRegistry,
+    )
+    from cloud_agent.providers.compute.compute_secrets import ComputeSecretStore
+    from cloud_agent.schemas.compute import (
         AddComputeConnection,
         AddDeploymentProfile,
         AddServerRequest,
@@ -190,17 +194,20 @@ class ComputeCommands:
     @staticmethod
     def _validate_bundle(bundle: bytes) -> None:
         """Reject unsafe or incomplete archives before they become selectable."""
-        from cloud_agent.application.compute_setup import validate_host_bundle
+        from cloud_agent.application.compute_setup import (
+            IncompleteHostBundle,
+            validate_host_bundle,
+        )
 
         try:
             validate_host_bundle(bundle)
-        except ValueError as exc:
-            if str(exc) == "incomplete":
-                raise ComputeRefusal(
-                    "invalid_configuration",
-                    "The release bundle is missing the Host recipe.",
-                    status=422,
-                ) from None
+        except IncompleteHostBundle:
+            raise ComputeRefusal(
+                "invalid_configuration",
+                "The release bundle is missing the Host recipe.",
+                status=422,
+            ) from None
+        except ValueError:
             raise ComputeRefusal(
                 "invalid_configuration", "The release bundle is invalid or unsafe.", status=422
             ) from None
@@ -429,8 +436,11 @@ class ComputeCommands:
                         allocation,
                         request_key=f"connection:{connection_id}:{row['revision']}:{allocation['id']}",
                     )
-                except ValueError as exc:
-                    if str(exc) not in {"release_committed", "allocation_not_found"}:
+                except StorageConflict as exc:
+                    if exc.code not in {
+                        ConflictCode.RELEASE_COMMITTED,
+                        ConflictCode.ALLOCATION_NOT_FOUND,
+                    }:
                         raise
         return public_connection(row)
 
@@ -663,8 +673,8 @@ class ComputeCommands:
                 parameters=parameters,
                 requested_by=actor,
             )
-        except ValueError as exc:
-            if str(exc) == "rotation_in_progress":
+        except StorageConflict as exc:
+            if exc.code is ConflictCode.ROTATION_IN_PROGRESS:
                 raise ComputeRefusal(
                     "rotation_in_progress", "This server is already moving to a replacement node."
                 ) from None

@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from cloud_agent.sandbox_archive_credentials import seal_archive_storage
+from cloud_agent.sandbox_archive.sandbox_archive_credentials import seal_archive_storage
 from cloud_agent.storage.repositories.host_pool import PostgresHostPoolRepository
 from cloud_agent_shared.sandbox_archive_settings import (
     SANDBOX_ARCHIVE_CAPABILITY,

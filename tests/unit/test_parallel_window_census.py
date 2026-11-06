@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import threading
 
-from cloud_agent_host.member_resources import MemberWindowHandle
-from cloud_agent_host.parallel_window_census import MAX_PARALLEL_CENSUS_CONTAINERS, take_censuses
+from cloud_agent_host.observe.member_resources import MemberWindowHandle
+from cloud_agent_host.observe.parallel_window_census import (
+    MAX_PARALLEL_CENSUS_CONTAINERS,
+    take_censuses,
+)
 
 
 class _Guest:

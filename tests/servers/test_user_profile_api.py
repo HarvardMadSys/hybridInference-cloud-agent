@@ -15,8 +15,9 @@ from cloud_agent.accounts.directory import OwnerDirectoryError
 from cloud_agent.api import user_profile
 from cloud_agent.api.deps import get_owner_directory, get_storage
 from cloud_agent.app import create_app, create_mcp_app, install_admin_no_store
-from cloud_agent.user_avatar import generate_user_avatar
-from cloud_agent.user_profile import MAX_PROFILE_REQUEST_BYTES, ProfileConflict, ProfileView
+from cloud_agent.profile.user_avatar import generate_user_avatar
+from cloud_agent.profile.user_profile import MAX_PROFILE_REQUEST_BYTES, ProfileConflict
+from cloud_agent.schemas.user_profile import ProfileView
 
 PATH = "/v1/agent/profile"
 

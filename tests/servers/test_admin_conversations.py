@@ -10,11 +10,15 @@ from tests.support.owners import SESSIONS
 from tests.support.usage import END, START
 
 from cloud_agent.accounts.config import LOCAL_SESSION_COOKIE
-from cloud_agent.admin_conversations import ConversationCursor, ConversationTurnsCursor
-from cloud_agent.admin_observability import RunFilters, cursor_scope, encode_cursor
 from cloud_agent.api import admin_conversations
 from cloud_agent.app import create_app, create_mcp_app
-from cloud_agent.storage.admin_conversation_queries import turns_scope
+from cloud_agent.domain.cursors import cursor_scope, encode_cursor
+from cloud_agent.schemas.admin_conversations import (
+    ConversationCursor,
+    ConversationTurnsCursor,
+    turns_scope,
+)
+from cloud_agent.schemas.admin_observability import RunFilters
 
 PREFIX = "/admin/agent/conversations"
 

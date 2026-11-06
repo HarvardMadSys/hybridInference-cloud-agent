@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from cloud_agent.goals.report import GoalReportEnvelope
+    from cloud_agent.domain.goals import GoalReportEnvelope
 
 #: Every outcome of :meth:`AttemptCommands.record_attempt_turn_summary`.
 #: ``stored`` and ``duplicate`` are success -- a retried post is the same

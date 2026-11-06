@@ -43,7 +43,8 @@ async def test_one_failing_fork_cleanup_does_not_strand_the_ones_after_it(monkey
         return sandbox_manager
 
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_job", sandbox_manager_for_job
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.sandbox_manager_for_job",
+        sandbox_manager_for_job,
     )
     handed_out = [
         {"id": "afork_1", "recovery_action": "finalize"},
@@ -88,7 +89,8 @@ async def test_a_fork_whose_host_never_answers_is_abandoned_promptly(monkeypatch
         return sandbox_manager
 
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_job", sandbox_manager_for_job
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.sandbox_manager_for_job",
+        sandbox_manager_for_job,
     )
     operation = _failed_fork(4)
     operation["cleanup_residencies"].append({"thread_id": "athr_5", "generation": 5})

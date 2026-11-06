@@ -6,13 +6,14 @@ import threading
 from dataclasses import replace
 from types import SimpleNamespace
 
+from tests.support.archive_policy import hooked_supervisor
 from tests.unit.test_chat_group_network import _world
 from tests.unit.test_shared_session_supervisor import _Manager, _members, _spec
 
-from cloud_agent_host.chat_sandbox_models import CHAT_PROBE_LABEL
+from cloud_agent_host.container.chat_sandbox_models import CHAT_PROBE_LABEL
 from cloud_agent_host.environment_tests import environment_run_spec
-from cloud_agent_host.guarded_workloads import running_guarded_workloads
-from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+from cloud_agent_host.network.guarded_workloads import running_guarded_workloads
+from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_shared.errors import SandboxError
 
 
@@ -44,7 +45,7 @@ def test_guard_discovery_includes_an_environment_run(monkeypatch) -> None:
             )
         return docker(argv, **kwargs)
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
     inventory = running_guarded_workloads(manager)
 
     assert inventory.complete is True
@@ -55,7 +56,7 @@ def test_guard_discovery_includes_an_environment_run(monkeypatch) -> None:
 def test_guard_discovery_ignores_a_networkless_qualification_probe() -> None:
     manager = _RecordingManager()
     probe = replace(_spec(), labels={CHAT_PROBE_LABEL: "1"})
-    manager._run = lambda *_args, **_kwargs: SimpleNamespace(  # type: ignore[method-assign]
+    manager.exact.run = lambda *_args, **_kwargs: SimpleNamespace(  # type: ignore[method-assign]
         returncode=0, stdout=f"{probe.container_name}\t1"
     )
 
@@ -73,7 +74,7 @@ def test_malformed_owned_workload_is_stopped_without_hiding_valid_workloads() ->
     manager = _RecordingManager()
     good = _spec()
     manager.items[good.container_name] = manager._inspection(good)
-    listed = manager._run
+    listed = manager.exact.run
     inspect = manager.inspect
     raw_stops: list[str] = []
     malformed_running = True
@@ -98,7 +99,7 @@ def test_malformed_owned_workload_is_stopped_without_hiding_valid_workloads() ->
             raise SandboxError("Docker returned an invalid inspection")
         return inspect(container_id)
 
-    manager._run = list_with_malformed  # type: ignore[method-assign]
+    manager.exact.run = list_with_malformed  # type: ignore[method-assign]
     manager.inspect = inspect_one  # type: ignore[method-assign]
     manager.host_rule_failures = 2
 
@@ -182,7 +183,7 @@ def test_failed_structured_stop_falls_back_to_the_raw_exact_id() -> None:
         container_id="environment-container",
     )
     manager.items[spec.container_name] = inspection
-    listed = manager._run
+    listed = manager.exact.run
     raw_stops: list[str] = []
 
     def run(argv, **kwargs):
@@ -203,7 +204,7 @@ def test_failed_structured_stop_falls_back_to_the_raw_exact_id() -> None:
         )
         raise AttributeError("Docker inspection has no State")
 
-    manager._run = run  # type: ignore[method-assign]
+    manager.exact.run = run  # type: ignore[method-assign]
     manager.stop = invalid_structured_stop  # type: ignore[method-assign]
     manager.host_rule_failures = 2
 
@@ -217,7 +218,7 @@ def test_failed_structured_stop_falls_back_to_the_raw_exact_id() -> None:
 def test_unavailable_workload_inventory_requires_fresh_rule_check() -> None:
     manager = _RecordingManager()
 
-    manager._run = lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout="")  # type: ignore[method-assign]
+    manager.exact.run = lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout="")  # type: ignore[method-assign]
     supervisor = SharedChatSessionSupervisor(manager)
 
     assert supervisor.guard_network() == []
@@ -231,10 +232,10 @@ def test_unavailable_inventory_and_failed_rule_check_stops_starting_group() -> N
     manager = _RecordingManager()
     supervisor = SharedChatSessionSupervisor(manager)
     supervisor.register_manifest(_spec(), _members())
-    group = supervisor._groups[_spec().sandbox_id]
+    group = supervisor.state.groups[_spec().sandbox_id]
     group.inspection = replace(group.inspection, running=False)
     group.starting = True
-    manager._run = lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout="")  # type: ignore[method-assign]
+    manager.exact.run = lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stdout="")  # type: ignore[method-assign]
     manager.host_rule_failures = 2
 
     assert supervisor.guard_network() == []
@@ -249,7 +250,7 @@ def test_failed_malformed_stop_and_rule_check_exact_stops_known_id() -> None:
     manager = _RecordingManager()
     supervisor = SharedChatSessionSupervisor(manager)
     supervisor.register_manifest(_spec(), _members())
-    listed = manager._run
+    listed = manager.exact.run
     raw_stops: list[str] = []
 
     def run(argv, **kwargs):
@@ -268,7 +269,7 @@ def test_failed_malformed_stop_and_rule_check_exact_stops_known_id() -> None:
     def invalid_inspection(_container_id):
         raise AttributeError("Docker inspection has no State")
 
-    manager._run = run  # type: ignore[method-assign]
+    manager.exact.run = run  # type: ignore[method-assign]
     manager.inspect = invalid_inspection  # type: ignore[method-assign]
 
     def invalid_exact_stop(spec, *, expected_container_id=None, release_networks=True):
@@ -379,10 +380,10 @@ def test_guard_exact_stops_a_stopping_group_then_its_archive_finishes() -> None:
         prepare_entered.set()
         assert finish_prepare.wait(timeout=5)
 
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=prepare,
-        stopped_archive_hook=lambda _spec, inspection, _members: archived.append(
+        prepare_final=prepare,
+        stopped=lambda _spec, inspection, _members: archived.append(
             (inspection.running, inspection.networks)
         ),
     )
@@ -411,7 +412,7 @@ def test_guard_exact_stops_a_stopping_group_then_its_archive_finishes() -> None:
     stopping = threading.Thread(target=stop_group)
     stopping.start()
     assert prepare_entered.wait(timeout=2)
-    assert supervisor._members["athr_source"].stopping is True
+    assert supervisor.state.members["athr_source"].stopping is True
 
     manager.host_rule_failures = 2
     try:

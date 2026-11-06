@@ -61,7 +61,7 @@ from cloud_agent.application.model_connections import (
     model_connections_enabled,
     new_connection_id,
 )
-from cloud_agent.credential_cipher import CredentialCipherError
+from cloud_agent.crypto.credential_cipher import CredentialCipherError
 from cloud_agent.domain.model_connections import (
     ModelConnectionAccessEnded,
     ModelConnectionConflict,

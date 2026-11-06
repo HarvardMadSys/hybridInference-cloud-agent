@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from cloud_agent.goals.models import GoalInput
+    from cloud_agent.schemas.goals import GoalInput
 
 
 class ConversationCommands(Protocol):

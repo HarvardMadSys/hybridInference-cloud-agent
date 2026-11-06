@@ -14,20 +14,18 @@ from typing import TYPE_CHECKING, Any, Protocol
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from cloud_agent.admin_observability import decode_cursor, encode_cursor
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage, require_store
+from cloud_agent.api.errors import typed_error
 from cloud_agent.api.owner_usage import resolve_period, usage_unavailable
-from cloud_agent.command_executions import (
+from cloud_agent.context.command_executions import (
     DEFAULT_COMMAND_PAGE,
     MAX_COMMAND_PAGE,
     MAX_COMMAND_SEARCH,
     CommandExecutions,
-    CommandFilter,
-    CommandSort,
 )
-from cloud_agent.context_dna import MAX_DNA_REQUESTS, DnaBands
-from cloud_agent.context_insights import (
+from cloud_agent.context.context_dna import MAX_DNA_REQUESTS, DnaBands
+from cloud_agent.context.context_insights import (
     DEFAULT_CONTEXT_PAGE,
     MAX_CONTEXT_PAGE,
     MAX_SEARCH_CHARS,
@@ -47,17 +45,22 @@ from cloud_agent.context_insights import (
     compose,
     context_cursor_scope,
 )
-from cloud_agent.context_request import RequestComposition
-from cloud_agent.context_timing import ThreadTiming, assemble_timing
-from cloud_agent.context_view import ThreadContextView, assemble_thread_context
+from cloud_agent.context.context_request import RequestComposition
+from cloud_agent.context.context_timing import ThreadTiming, assemble_timing
+from cloud_agent.context.context_view import ThreadContextView, assemble_thread_context
+from cloud_agent.domain.command_executions import (  # noqa: TC001 — FastAPI resolves annotations at runtime.
+    CommandFilter,
+    CommandSort,
+)
+from cloud_agent.domain.cursors import decode_cursor, encode_cursor
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.storage.admin_usage_queries import UsageQueryTooLarge, UsageQueryUnavailable
-from cloud_agent.usage_batches import owner_usage
-from cloud_agent.usage_range import RangePreset  # noqa: TC001 — FastAPI resolves it.
+from cloud_agent.ports.admin_queries import UsageQueryTooLarge, UsageQueryUnavailable
+from cloud_agent.usage.usage_batches import owner_usage
+from cloud_agent.usage.usage_range import RangePreset  # noqa: TC001 — FastAPI resolves it.
 
 if TYPE_CHECKING:
     from cloud_agent.ports import CommandExecutionQueries, ContextQueries, OwnerUsageQueries
-    from cloud_agent.storage.admin_usage_queries import AdminUsageQueries
+    from cloud_agent.ports.admin_queries import AdminUsageQueries
 
 logger = get_logger(__name__)
 
@@ -91,10 +94,7 @@ async def get_thread_context(
         job_id=job_id, user_id=user["user_id"]
     )
     if result is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"type": "not_found", "message": f"No thread for {job_id}"}},
-        )
+        raise typed_error(404, "not_found", f"No thread for {job_id}")
     return assemble_thread_context(
         thread_id=result["thread_id"],
         generated_at=datetime.now(UTC),
@@ -113,9 +113,8 @@ async def get_thread_context_timing(
 
     Read when the dashboard asks, never at settlement: the attempts' recorded
     spans and tool windows. No request log is recorded for an owner's own
-    model connection, so TTFT and generation stay "not recorded" and each
-    execution's model and harness time is reported together, not split.
-    Nothing is asked of a CLI.
+    model connection, so each execution's model and harness time is reported
+    together, not split. Nothing is asked of a CLI.
     """
     context_store: _ContextStorage = require_store(store)
     result = await context_store.context_queries.thread_context(
@@ -123,7 +122,7 @@ async def get_thread_context_timing(
     )
     if result is None:
         raise _not_found(job_id)
-    return assemble_timing(result["attempts"], [], gateway_gap=None, gateway_started=0)
+    return assemble_timing(result["attempts"])
 
 
 @router.get("/jobs/{job_id}/thread/context/dna", response_model=DnaBands)
@@ -140,14 +139,8 @@ async def get_thread_context_dna(
     bars it shows, never the whole history.
     """
     if last < first or last - first + 1 > MAX_DNA_REQUESTS:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": {
-                    "type": "invalid_range",
-                    "message": f"Ask for 1 to {MAX_DNA_REQUESTS} requests at a time.",
-                }
-            },
+        raise typed_error(
+            422, "invalid_range", f"Ask for 1 to {MAX_DNA_REQUESTS} requests at a time."
         )
     context_store: _ContextStorage = require_store(store)
     bands = await context_store.context_queries.dna_bands(
@@ -207,10 +200,7 @@ async def get_thread_context_commands(
             limit=limit,
         )
     except ValueError as error:
-        raise HTTPException(
-            status_code=422,
-            detail={"error": {"type": "invalid_cursor", "message": str(error)}},
-        ) from None
+        raise typed_error(422, "invalid_cursor", str(error)) from None
     if page is None:
         raise _not_found(job_id)
     return CommandExecutions.model_validate(page)
@@ -237,10 +227,7 @@ class EventContent(BaseModel):
 
 
 def _not_found(job_id: str) -> HTTPException:
-    return HTTPException(
-        status_code=404,
-        detail={"error": {"type": "not_found", "message": f"No such request for {job_id}"}},
-    )
+    return typed_error(404, "not_found", f"No such request for {job_id}")
 
 
 @router.get("/jobs/{job_id}/thread/context/requests/{event_id}", response_model=RequestComposition)
@@ -321,9 +308,7 @@ def _conversation(row: dict[str, Any]) -> ConversationContext:
 
 
 def _invalid(message: str) -> HTTPException:
-    return HTTPException(
-        status_code=422, detail={"error": {"type": "invalid_filter", "message": message}}
-    )
+    return typed_error(422, "invalid_filter", message)
 
 
 def _filters(q: str | None, repo: str | None, temporary: bool, day: date | None) -> InsightsFilters:

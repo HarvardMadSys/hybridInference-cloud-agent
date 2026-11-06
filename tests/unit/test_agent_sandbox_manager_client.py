@@ -7,8 +7,8 @@ import asyncio
 import httpx
 import pytest
 
-from cloud_agent import sandbox_manager_client
-from cloud_agent.sandbox_manager_client import (
+from cloud_agent.sandbox_manager import sandbox_manager_client
+from cloud_agent.sandbox_manager.sandbox_manager_client import (
     SandboxManagerClient,
     SandboxManagerError,
     identity_from_row,

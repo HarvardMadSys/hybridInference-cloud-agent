@@ -32,6 +32,7 @@ from tests.unit.test_shared_session_supervisor import _launch, _Manager, _spec
 
 from cloud_agent_host import resident_transport
 from cloud_agent_host.resident_transport import ResidentTransportFactory
+from cloud_agent_host.runtimes.claude import member as claude_member
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 HOST = REPO / "apps/backend/cloud_agent_host"
@@ -180,10 +181,9 @@ def test_the_claude_fork_helper_loads_nothing_from_the_member_home(monkeypatch):
         )
 
     monkeypatch.setattr(manager, "exec_capture", capture, raising=False)
-    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
     launch = _launch("athr_source", native_session_id="source", slot=1)
 
-    assert factory._fork_claude(_spec(), "source", launch, 2) == "child"
+    assert claude_member.fork_session(manager, _spec(), "source", launch, 2) == "child"
     assert calls[0]["env"]["PYTHONNOUSERSITE"] == "1"  # type: ignore[index]
 
 

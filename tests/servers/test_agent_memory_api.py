@@ -10,10 +10,14 @@ import pytest
 from fastapi import FastAPI
 from tests.support.owners import SESSIONS, use_session_secret
 
-from cloud_agent.agent_memory import AgentMemoryConflict, AgentMemoryFull, AgentMemoryNotFound
 from cloud_agent.api import agent_memory
 from cloud_agent.api.deps import get_owner_directory, get_storage
 from cloud_agent.app import install_admin_no_store
+from cloud_agent.memory.agent_memory import (
+    AgentMemoryConflict,
+    AgentMemoryFull,
+    AgentMemoryNotFound,
+)
 
 PATH = "/v1/agent/memories"
 

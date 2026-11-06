@@ -28,12 +28,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 from tests.support.owners import SESSIONS, FakeOwners, use_session_secret
+from tests.support.refusals import raises_http
 from tests.support.storage import AllCapabilities, OneFake
 
 from cloud_agent.accounts.config import LOCAL_SESSION_COOKIE
 from cloud_agent.api import mcp_connections
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage
+from cloud_agent.mcp import oauth_authorization
 from cloud_agent.mcp.errors import McpCredentialWriteRejected
 from cloud_agent.mcp.models import CapabilityKind, ToolPolicy
 from cloud_agent.mcp.registry import mcp_cipher
@@ -680,7 +682,7 @@ class TestConnectionManagement:
                         "args": ["server@1.0.0"],
                         "env": {"API_KEY": "secret://API_KEY"},
                     },
-                    "env_secrets": {"API_KEY": "literal"},
+                    "env_secrets": {"API_KEY": "literal-value"},
                 },
             )
         assert response.status_code == 409
@@ -1245,7 +1247,7 @@ class TestAuthorization:
         )
         register = AsyncMock()
         monkeypatch.setattr(mcp_connections, "_post_form", exchange)
-        monkeypatch.setattr(mcp_connections, "_register_client", register)
+        monkeypatch.setattr(oauth_authorization, "_register_client", register)
         store = FakeStore()
         connection_id = _seed(
             store,
@@ -1348,7 +1350,7 @@ class TestAuthorization:
                 "expires_in": 3600,
             }
         )
-        monkeypatch.setattr(mcp_connections, "_post_json", register)
+        monkeypatch.setattr(oauth_authorization, "post_json", register)
         monkeypatch.setattr(mcp_connections, "_post_form", exchange)
         store = FakeStore()
         connection_id = _seed(
@@ -1801,7 +1803,7 @@ class TestImport:
                                 "wiki": {
                                     "command": "npx",
                                     "args": ["-y", "@scope/wiki@1.0.0"],
-                                    "env": {"API_KEY": "literal"},
+                                    "env": {"API_KEY": "literal-key"},
                                 }
                             }
                         }
@@ -1813,7 +1815,7 @@ class TestImport:
         assert store.created == []
         draft = response.json()["drafts"][0]
         assert draft["argv"][0] == "npx"
-        assert draft["secrets"][0]["value"] != "literal"
+        assert draft["secrets"][0]["value"] != "literal-key"
 
     def test_saving_imports_the_command_and_keeps_the_secret_out_of_the_spec(self) -> None:
         """The launch spec carries a reference; the value is encrypted."""
@@ -1828,7 +1830,7 @@ class TestImport:
                                 "wiki": {
                                     "command": "npx",
                                     "args": ["-y", "@scope/wiki@1.0.0"],
-                                    "env": {"API_KEY": "literal"},
+                                    "env": {"API_KEY": "literal-key"},
                                 }
                             }
                         }
@@ -1841,7 +1843,7 @@ class TestImport:
         assert len(store.created) == 1
         stored = store.connections[1]
         assert stored["launch_spec"]["env"]["API_KEY"] == "secret://API_KEY"
-        assert "literal" not in json.dumps(stored["launch_spec"])
+        assert "literal-key" not in json.dumps(stored["launch_spec"])
 
     def test_later_credential_rejection_rolls_back_the_whole_import(self) -> None:
         """An import reports no success while an earlier draft remains committed."""
@@ -2757,8 +2759,6 @@ class TestTheOAuthPostsAreBounded:
     async def test_a_registration_reply_is_refused_while_it_is_still_arriving(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        from fastapi import HTTPException
-
         from cloud_agent.mcp import transports as transports_module
         from cloud_agent.mcp.net_policy import EgressPolicy
 
@@ -2766,8 +2766,8 @@ class TestTheOAuthPostsAreBounded:
         stream = _CountingBody(b"x" * 256, 64)
         _answer_with(monkeypatch, stream)
 
-        with pytest.raises(HTTPException):
-            await mcp_connections._post_json(
+        with raises_http():
+            await oauth_authorization.post_json(
                 None,
                 "https://127.0.0.1:9/register",
                 {"client_name": "cloud-agent"},
