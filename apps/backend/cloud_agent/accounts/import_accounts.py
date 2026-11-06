@@ -197,7 +197,8 @@ async def import_accounts(
         if row is None:
             report.skipped.append((number, "not a JSON object"))
             continue
-        prepared = prepare(number, row, report.dropped)
+        dropped: Counter[str] = Counter()
+        prepared = prepare(number, row, dropped)
         if isinstance(prepared, str):
             report.skipped.append((number, prepared))
             continue
@@ -220,6 +221,7 @@ async def import_accounts(
             )
         if created:
             report.imported += 1
+            report.dropped.update(dropped)
         else:
             report.skipped.append((number, "identifier already has an account"))
     return report

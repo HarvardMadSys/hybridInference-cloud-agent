@@ -100,20 +100,22 @@ async def test_a_dry_run_reports_without_writing():
         json.dumps({"email": "old@example.edu", "phone": "+12025550123", "phone_verified": True}),
         json.dumps({"email": "NEW@example.edu"}),
         json.dumps({"login_name": "ops"}),
+        json.dumps({"email": "bad", "phone": "+12025550199", "phone_verified": True}),
     ]
     report = await import_accounts(
         _Taken({("phone", "+12025550123")}),  # type: ignore[arg-type]
         lines,
         apply=False,
     )
-    assert report.imported == 1
+    assert report.imported == 2
     assert report.skipped == [
         (3, "not a JSON object"),
         (4, "identifier already has an account"),
         (5, "identifier repeated in the input"),
         (6, "no usable sign-in identifier"),
     ]
-    assert report.dropped == Counter({"login name (no password)": 1})
+    # What imported accounts were left without; line 6's login name is not counted.
+    assert report.dropped == Counter({"email (invalid)": 1})
 
 
 def test_the_summary_names_no_identifier():
