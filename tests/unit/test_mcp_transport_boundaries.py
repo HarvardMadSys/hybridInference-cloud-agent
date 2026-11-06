@@ -12,7 +12,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 
-from cloud_agent.api import mcp_connections, mcp_relay
+from cloud_agent.api import mcp_authorization, mcp_connections, mcp_relay
 from cloud_agent.domain.errors import Refused
 from cloud_agent.mcp import (
     catalog,
@@ -547,7 +547,7 @@ async def test_oauth_posts_negotiate_identity_and_refuse_compression(monkeypatch
         if operation == "registration":
             await oauth_authorization.post_json(None, token_request.url, {}, policy=policy)
         elif operation == "token":
-            await mcp_connections._post_form(token_request, policy=policy)
+            await mcp_authorization._post_form(token_request, policy=policy)
         else:
             await refresh._post(token_request, policy=policy, fetcher=None)
     assert seen[0].headers["accept-encoding"] == "identity"

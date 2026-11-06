@@ -22,7 +22,6 @@ TEST_LIMIT = 2000
 
 #: Line counts of the modules over the limit when it arrived.
 BASELINE = {
-    "apps/backend/cloud_agent/api/mcp_connections.py": 1960,
 }
 
 #: Exact line counts of test modules over their calibrated limit after #894's

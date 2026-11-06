@@ -28,11 +28,12 @@ import hashlib
 import json
 import re
 import shlex
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
 from cloud_agent.mcp.models import ExecutionLocation, LaunchSpec, Mount
 from cloud_agent_shared.sandbox_mcp import SANDBOX_MCP_COMMANDS
@@ -463,6 +464,38 @@ def declared_secret_names(env: Mapping[str, str], headers: Mapping[str, str]) ->
     return sorted(names)
 
 
+def edited_secret_env(
+    row: Mapping[str, Any], rendered: Mapping[str, Any] | None, keys: Mapping[str, str]
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """The launch an edit stores, with the keys it keeps, and the keys the edit sets.
+
+    A program's keys are its ``secret://NAME`` values, stored sealed under
+    ``env_secrets`` in the connection's ``launch_spec``. ``rendered`` is the
+    submitted launch as validated, or ``None`` when the edit changes only keys
+    and the stored launch stays. Either way no sealed value comes from the
+    request: each name the launch references keeps its stored ciphertext
+    unless ``keys`` sets it, and a blank value sets nothing, as every
+    write-only editor treats one. A name the launch no longer references is
+    removed with the reference. The keys set are returned for the caller to
+    judge and seal; a stored key is not judged again.
+    """
+    stored = row.get("launch_spec")
+    stored = stored if isinstance(stored, Mapping) else {}
+    if rendered is None and not stored.get("command"):
+        raise LaunchPlanError("a stdio connection needs a command")
+    source = stored if rendered is None else rendered
+    edited = {key: value for key, value in source.items() if key != "env_secrets"}
+    env = {str(key): str(value) for key, value in (edited.get("env") or {}).items()}
+    wanted = declared_secret_names(env, {})
+    sealed = stored.get("env_secrets")
+    sealed = sealed if isinstance(sealed, Mapping) else {}
+    setting = {name: keys[name] for name in wanted if keys.get(name)}
+    kept = {name: str(sealed[name]) for name in wanted if name in sealed and name not in setting}
+    if kept:
+        edited["env_secrets"] = kept
+    return edited, setting
+
+
 __all__ = [
     "MANAGED_ALLOWED_COMMANDS",
     "PACKAGE_RUNNERS",
@@ -473,6 +506,7 @@ __all__ = [
     "ManagedLaunchPolicy",
     "build_launch_plan",
     "declared_secret_names",
+    "edited_secret_env",
     "is_exact_release",
     "resolve_env",
     "split_package_reference",

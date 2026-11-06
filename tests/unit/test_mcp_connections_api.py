@@ -32,7 +32,7 @@ from tests.support.refusals import raises_http
 from tests.support.storage import AllCapabilities, OneFake
 
 from cloud_agent.accounts.config import LOCAL_SESSION_COOKIE
-from cloud_agent.api import mcp_connections
+from cloud_agent.api import mcp_authorization, mcp_connections, mcp_invocations
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage
 from cloud_agent.mcp import oauth_authorization
@@ -509,7 +509,7 @@ def _client(store: FakeStore, *, user_id: str = _OWNER) -> TestClient:
     app.include_router(mcp_connections.router)
     app.dependency_overrides[get_storage] = lambda: OneFake(store)
     app.dependency_overrides[require_agent_owner] = lambda: {"user_id": user_id}
-    app.dependency_overrides[mcp_connections._callback_session_user] = lambda: user_id
+    app.dependency_overrides[mcp_authorization._callback_session_user] = lambda: user_id
     return TestClient(app)
 
 
@@ -1202,7 +1202,7 @@ class TestAuthorization:
         persist = AsyncMock()
         monkeypatch.setattr(store, "create_mcp_oauth_flow", persist, raising=False)
         with pytest.raises(HTTPException) as raised:
-            await mcp_connections.authorize_connection(
+            await mcp_authorization.authorize_connection(
                 connection_id=connection_id,
                 user={"user_id": _OWNER},
                 store=store,
@@ -1238,7 +1238,7 @@ class TestAuthorization:
         monkeypatch.setattr(store, "create_mcp_oauth_flow", persist, raising=False)
 
         with pytest.raises(HTTPException) as raised:
-            await mcp_connections.authorize_connection(
+            await mcp_authorization.authorize_connection(
                 connection_id=connection_id,
                 user={"user_id": _OWNER},
                 store=store,
@@ -1347,7 +1347,7 @@ class TestAuthorization:
             }
         )
         register = AsyncMock()
-        monkeypatch.setattr(mcp_connections, "_post_form", exchange)
+        monkeypatch.setattr(mcp_authorization, "_post_form", exchange)
         monkeypatch.setattr(oauth_authorization, "_register_client", register)
         store = FakeStore()
         connection_id = _seed(
@@ -1452,7 +1452,7 @@ class TestAuthorization:
             }
         )
         monkeypatch.setattr(oauth_authorization, "post_json", register)
-        monkeypatch.setattr(mcp_connections, "_post_form", exchange)
+        monkeypatch.setattr(mcp_authorization, "_post_form", exchange)
         store = FakeStore()
         connection_id = _seed(
             store, url="https://mcp.notion.com/mcp", auth_kind="oauth", auth_config={}
@@ -1506,7 +1506,7 @@ class TestAuthorization:
     def test_a_missing_or_unusable_public_address_is_not_guessed_at(self, monkeypatch, address):
         monkeypatch.delenv("AGENT_MCP_PUBLIC_BASE_URL", raising=False)
         monkeypatch.setenv("AGENT_PUBLIC_API_URL", address)
-        assert mcp_connections._public_base_url() == ""
+        assert mcp_authorization._public_base_url() == ""
 
     def test_a_client_id_can_be_supplied_before_the_flow(self) -> None:
         """Some servers expect the user to bring one, and it has to persist.
@@ -1562,7 +1562,7 @@ class TestAuthorization:
             oauth, "discover_authorization_server", AsyncMock(return_value=(None, metadata))
         )
         exchange = AsyncMock(return_value={"access_token": "owner-token"})
-        monkeypatch.setattr(mcp_connections, "_post_form", exchange)
+        monkeypatch.setattr(mcp_authorization, "_post_form", exchange)
         store = FakeStore()
         connection_id = _seed(
             store, auth_kind="oauth", auth_config={"client_id": "registered-client"}
@@ -1578,7 +1578,7 @@ class TestAuthorization:
         monkeypatch.setattr(store, "create_mcp_oauth_flow", save_flow, raising=False)
         with _client(store) as client:
             # Started as the owner; finished by whatever session the browser has.
-            del client.app.dependency_overrides[mcp_connections._callback_session_user]
+            del client.app.dependency_overrides[mcp_authorization._callback_session_user]
             owners = FakeOwners()
             client.app.state.owners = owners
             started = client.post(f"/v1/agent/mcp/connections/{connection_id}/authorize")
@@ -1660,7 +1660,7 @@ class TestTheDynamicClientIdentity:
         monkeypatch.setenv("AGENT_WEB_BASE_URL", web_base)
         monkeypatch.setenv("AGENT_MCP_PUBLIC_BASE_URL", "https://api.example.com/agents/api")
         message = "authorization denied & retry allowed" if not ok else ""
-        response = mcp_connections._callback_redirect("3", ok=ok, message=message)
+        response = mcp_authorization._callback_redirect("3", ok=ok, message=message)
         target = response.headers["location"]
         assert target.split("?")[0] == f"{web_base.rstrip('/')}/integrations"
         query = parse_qs(urlsplit(target).query)
@@ -1715,8 +1715,8 @@ class TestTheDynamicClientIdentity:
                 "expires_in": 3600,
             }
 
-        monkeypatch.setattr(mcp_connections, "_post_form", token_exchange)
-        response = await mcp_connections.oauth_callback(
+        monkeypatch.setattr(mcp_authorization, "_post_form", token_exchange)
+        response = await mcp_authorization.oauth_callback(
             str(connection_id),
             Request({"type": "http"}),
             state=self._STATE,
@@ -2552,7 +2552,7 @@ class TestInvocationDecisions:
             id=2,
             job_id="other-job",
             thread_id="other-thread",
-            arguments_ciphertext=mcp_connections.mcp_invocation_cipher().encrypt(
+            arguments_ciphertext=mcp_invocations.mcp_invocation_cipher().encrypt(
                 json.dumps({"private": "another owner's document"})
             ),
         )
@@ -2961,7 +2961,7 @@ class TestTheOAuthPostsAreBounded:
                 return {"content-type": "application/x-www-form-urlencoded"}
 
         with pytest.raises(TransportError):
-            await mcp_connections._post_form(_Request(), policy=EgressPolicy(allow_private=True))
+            await mcp_authorization._post_form(_Request(), policy=EgressPolicy(allow_private=True))
         assert stream.pulled < 64, "the whole token reply was read before the limit applied"
 
 
