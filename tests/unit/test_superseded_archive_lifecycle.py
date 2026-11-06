@@ -1,7 +1,7 @@
 """A left-behind container's removal, through the archive lifecycle that stopped it.
 
 Release asks a Host's Sandbox Manager for its containers, then discards the
-stopped ones the control plane proved superseded (``_remove_superseded``).
+stopped ones the control plane proved superseded (``ComputeRetirement.remove_superseded``).
 These tests run that exchange against the real Sandbox Manager app, the real
 shared supervisor, archive controller and service, checkpoint capture, and
 deletion receipts. Only Docker and S3 are stand-ins: the supervisor fakes'

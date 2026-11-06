@@ -29,7 +29,7 @@ async def resume_blocked_retirement(conn: Any, allocation_id: str) -> None:
     A release blocked by what the Host still held waits for an
     administrator, but the provider ending the machine settles it: the
     next run finds the resource terminal and commits the release
-    (``_settle_terminal_retirement``). Without this the operation stayed
+    (``ComputeRetirement.settle_terminal_retirement``). Without this the operation stayed
     blocked, and the allocation unreleased, after the machine was gone.
     A pool member's terminal release settles through its reservation.
     """
