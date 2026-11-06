@@ -15,8 +15,10 @@ import pytest
 
 from cloud_agent_host.container.chat_sandbox import CHAT_WORKDIR
 from cloud_agent_host.retained_workspace import (
+    _IMAGES_PROGRAM,
     _READ_PROGRAM,
     _WRITE_PROGRAM,
+    ARTIFACTS_RELATIVE,
     _error_from_result,
     read_retained_file,
 )
@@ -385,3 +387,145 @@ def test_retained_writer_refuses_a_fifo_without_blocking_on_it(tmp_path, swapped
     )
 
     assert refused.returncode == 49, refused.stderr
+
+
+def _read_image(root, relative: str, *, max_bytes: int = 1024):
+    result = subprocess.run(
+        [sys.executable, "-c", _READ_PROGRAM, str(root), relative, str(max_bytes), "1", "images"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result, json.loads(result.stdout) if result.stdout else None
+
+
+def test_the_image_read_answers_an_image_past_the_preview_bound(tmp_path):
+    raw = b"\x89PNG\r\n\x1a\n" + b"\x00" * 4000
+    (tmp_path / "page.png").write_bytes(raw)
+
+    _preview, preview = _read(tmp_path, "page.png", max_bytes=1024)
+    result, image = _read_image(tmp_path, "page.png", max_bytes=8192)
+
+    assert preview["omitted_reason"] == "too_large"
+    assert result.returncode == 0
+    assert image["media_type"] == "image/png"
+    assert base64.b64decode(image["content_base64"], validate=True) == raw
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [b"\x00\xffbinary", b"plain text", b'<svg onload="alert(1)"/>'],
+    ids=["bin", "txt", "svg"],
+)
+def test_the_image_read_answers_nothing_for_a_file_that_is_not_an_image(tmp_path, raw):
+    # The name says image; the bytes decide, and the larger bound buys nothing else.
+    (tmp_path / "fake.png").write_bytes(raw)
+
+    result, payload = _read_image(tmp_path, "fake.png")
+
+    assert result.returncode == 0
+    assert payload["omitted_reason"] == "not_an_image"
+    assert payload["content"] is None
+    assert payload.get("content_base64") is None
+
+
+def test_the_image_read_refuses_a_directory(tmp_path):
+    (tmp_path / "shots").mkdir()
+
+    result, payload = _read_image(tmp_path, "shots")
+
+    assert result.returncode == 49
+    assert payload == {"error": "workspace path is not an image"}
+
+
+def _images(root, *, since: float = 0.0, max_images: int = 200, max_scan: int = 5000):
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _IMAGES_PROGRAM,
+            str(root),
+            ARTIFACTS_RELATIVE,
+            repr(since),
+            str(max_images),
+            str(max_scan),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return json.loads(result.stdout)
+
+
+def _shot(path, mtime: float) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    os.utime(path, (mtime, mtime))
+
+
+def test_the_artifacts_images_since_a_time_are_listed_newest_first(tmp_path):
+    artifacts = tmp_path / ARTIFACTS_RELATIVE
+    _shot(artifacts / "old.png", 1_000.0)
+    _shot(artifacts / "playwright-mcp" / "page-1.png", 2_000.0)
+    _shot(artifacts / "playwright-mcp" / "page-2.JPEG", 3_000.0)
+    (artifacts / "trace.zip").write_bytes(b"PK")
+    _shot(tmp_path / "outside.png", 4_000.0)
+
+    listed = _images(tmp_path, since=1_500.0)
+
+    assert listed == {
+        "images": [
+            {
+                "path": f"{ARTIFACTS_RELATIVE}/playwright-mcp/page-2.JPEG",
+                "size": 8,
+                "modified_at": 3_000.0,
+            },
+            {
+                "path": f"{ARTIFACTS_RELATIVE}/playwright-mcp/page-1.png",
+                "size": 8,
+                "modified_at": 2_000.0,
+            },
+        ],
+        "truncated": False,
+    }
+
+
+def test_a_workspace_without_artifacts_has_no_images(tmp_path):
+    assert _images(tmp_path) == {"images": [], "truncated": False}
+
+
+def test_the_listing_never_follows_a_symlink(tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    _shot(elsewhere / "secret.png", 2_000.0)
+    artifacts = tmp_path / ARTIFACTS_RELATIVE
+    artifacts.mkdir()
+    os.symlink(elsewhere, artifacts / "linked-dir")
+    os.symlink(elsewhere / "secret.png", artifacts / "linked.png")
+
+    assert _images(tmp_path) == {"images": [], "truncated": False}
+    # Nor a symlinked artifacts directory itself.
+    (tmp_path / "other").mkdir()
+    _shot(tmp_path / "other" / "x.png", 2_000.0)
+    for child in artifacts.iterdir():
+        child.unlink()
+    artifacts.rmdir()
+    os.symlink(tmp_path / "other", artifacts)
+    assert _images(tmp_path) == {"images": [], "truncated": False}
+
+
+def test_the_listing_says_when_it_left_images_out(tmp_path):
+    artifacts = tmp_path / ARTIFACTS_RELATIVE
+    for index in range(5):
+        _shot(artifacts / f"s{index}.png", 1_000.0 + index)
+
+    newest = _images(tmp_path, max_images=2)
+    scanned = _images(tmp_path, max_scan=3)
+
+    assert [image["path"] for image in newest["images"]] == [
+        f"{ARTIFACTS_RELATIVE}/s4.png",
+        f"{ARTIFACTS_RELATIVE}/s3.png",
+    ]
+    assert newest["truncated"] is True
+    assert len(scanned["images"]) == 3
+    assert scanned["truncated"] is True

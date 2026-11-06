@@ -17,6 +17,8 @@ instead: one read, and no start fence, since none of them can start the containe
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import re
 from typing import TYPE_CHECKING, Any, Protocol
 from urllib.parse import quote
@@ -78,6 +80,7 @@ from cloud_agent.schemas import (
     AgentTerminalSessionListResponse,
     AgentTerminalSessionResizeRequest,
     AgentTerminalSessionResponse,
+    AgentWorkspaceImagesResponse,
     AgentWorkspaceResponse,
     AgentWorkspaceWriteRequest,
 )
@@ -461,6 +464,105 @@ async def download_agent_job_workspace(
             await stream.aclose()
 
     return StreamingResponse(body(), media_type="application/gzip", headers=headers)
+
+
+#: The passive raster formats the workspace reader recognizes by their bytes.
+_IMAGE_MEDIA_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+
+
+def _image_response(body: dict[str, Any]) -> Response:
+    """An image read's bytes as themselves, or why there are none."""
+    if body.get("omitted_reason") == "too_large":
+        raise typed_error(413, "image_too_large", "This image is larger than the image limit.")
+    media_type = body.get("media_type")
+    encoded = body.get("content_base64")
+    if media_type not in _IMAGE_MEDIA_TYPES or not isinstance(encoded, str):
+        raise typed_error(415, "not_an_image", "This file is not a PNG, JPEG, GIF or WebP image.")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise typed_error(
+            502, "invalid_image", "The workspace returned an unreadable image."
+        ) from exc
+    return Response(
+        raw,
+        media_type=str(media_type),
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+            # An image is shown, never run: nothing it names may load.
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+        },
+    )
+
+
+async def _workspace_sandbox_manager(
+    job_store: Any, job: dict[str, Any], user: dict[str, Any], app_credentials: Any
+) -> Any:
+    """The owning sandbox manager of a chat the caller may read the workspace of."""
+    await _require_workspace_entitlement(
+        job=job, user=user, store=job_store, app_credentials=app_credentials
+    )
+    sandbox_manager = await _sandbox_manager_for_job(job_store, job)
+    if sandbox_manager is None:
+        raise typed_error(409, "workspace_unavailable", "This chat has no owning sandbox manager.")
+    return sandbox_manager
+
+
+def _workspace_read_error(exc: SandboxManagerError) -> HTTPException:
+    if _workspace_not_materialized(exc):
+        return typed_error(409, "workspace_unavailable", "This chat has no retained workspace.")
+    return _sandbox_manager_http_error(exc)
+
+
+@router.get("/jobs/{job_id}/files/image")
+async def get_agent_job_workspace_image(
+    job_id: str,
+    path: str = Query(..., min_length=1, max_length=4096),
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _WorkspaceStorage | None = Depends(get_storage),
+    app_credentials: Any | None = Depends(get_agent_app_credentials),
+) -> Response:
+    """One PNG, JPEG, GIF or WebP file from the chat's workspace, as its own bytes.
+
+    A file preview is bounded for text; a full-page screenshot is usually past
+    that bound, so an image has its own, larger one.
+    """
+    job_store = _require_store(store)
+    job = await _owned_job(job_store.conversation_queries, job_id, user)
+    try:
+        safe_path = normalize_workspace_path(path)
+    except WorkspacePathError as exc:
+        raise typed_error(400, "invalid_path", str(exc)) from exc
+    sandbox_manager = await _workspace_sandbox_manager(job_store, job, user, app_credentials)
+    try:
+        body = await sandbox_manager.file_image(_workspace_id(job), safe_path)
+    except SandboxManagerError as exc:
+        raise _workspace_read_error(exc) from exc
+    return _image_response(body)
+
+
+@router.get("/jobs/{job_id}/artifacts/images", response_model=AgentWorkspaceImagesResponse)
+async def list_agent_job_artifact_images(
+    job_id: str,
+    since: float = Query(0.0, ge=0.0),
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _WorkspaceStorage | None = Depends(get_storage),
+    app_credentials: Any | None = Depends(get_agent_app_credentials),
+) -> AgentWorkspaceImagesResponse:
+    """The images saved under the workspace's artifacts directory since ``since``.
+
+    ``since`` is a Unix time; the newest images come first. This is how a turn
+    shows the screenshots its tools saved without the agent having to say so.
+    """
+    job_store = _require_store(store)
+    job = await _owned_job(job_store.conversation_queries, job_id, user)
+    sandbox_manager = await _workspace_sandbox_manager(job_store, job, user, app_credentials)
+    try:
+        body = await sandbox_manager.artifact_images(_workspace_id(job), since)
+    except SandboxManagerError as exc:
+        raise _workspace_read_error(exc) from exc
+    return AgentWorkspaceImagesResponse.model_validate(body)
 
 
 @router.put("/jobs/{job_id}/files", response_model=AgentWorkspaceResponse)

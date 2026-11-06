@@ -26,6 +26,7 @@ import type {
 } from '../conversation/recordedTurnOutputs';
 import type { TranscriptPresentation } from '../conversation/transcriptPresentation';
 import { TurnDeliverables } from '../conversation/TurnDeliverables';
+import { TurnScreenshots } from '../conversation/TurnScreenshots';
 import type { AgentEvent, AgentJob } from '../types';
 import { OutcomeCard } from './RunOutcome';
 import type { JobDetailPanels } from './useJobDetailPanels';
@@ -324,11 +325,14 @@ export function JobTranscript({
 
         <AttemptTurnFooter job={job} attemptNo={attemptNo} />
         {selectedAttemptIsCurrent ? (
-          <TurnDeliverables
-            job={job}
-            outputs={recordedOutputs.get(job.id)}
-            onOpenFile={openRecordedFile}
-          />
+          <>
+            <TurnDeliverables
+              job={job}
+              outputs={recordedOutputs.get(job.id)}
+              onOpenFile={openRecordedFile}
+            />
+            <TurnScreenshots job={job} />
+          </>
         ) : null}
 
         {/* The inspector's Run details open on the turn the reader

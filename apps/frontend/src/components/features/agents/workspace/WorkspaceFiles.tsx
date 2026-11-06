@@ -9,6 +9,7 @@ import { highlightCode, TOKEN_CLASS, type CodeToken } from '@/lib/codeHighlight'
 import type { AgentJob } from '../types';
 import { useWorkspaceFiles, type WorkspaceDirectory } from '../useAgentJobs';
 import { PANE_RESIZE_EVENT } from '../useResizablePane';
+import { LargeFilePreview } from './WorkspaceImage';
 import { deletedWorkspacePaths } from './workspaceGitMetadata';
 
 /** Rows rendered at once; the API already caps a preview at 512 KB. */
@@ -1094,7 +1095,11 @@ export function WorkspaceFiles({
                 ) : null}
               </div>
               {file.truncated && file.content == null ? (
-                <PaneMessage>{t('workspaceFiles.tooLarge')}</PaneMessage>
+                <LargeFilePreview
+                  jobId={job.id}
+                  path={file.path}
+                  fallback={<PaneMessage>{t('workspaceFiles.tooLarge')}</PaneMessage>}
+                />
               ) : assets?.preview ? (
                 <ImagePreview key={assets.preview} path={file.path} url={assets.preview} />
               ) : file.binary ? (
