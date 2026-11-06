@@ -285,7 +285,9 @@ def test_a_new_release_keeps_the_keys_with_every_other_argument_unchanged() -> N
     with _client(store) as client:
         connection = _create(client, launch=launch)
         bumped = _patch(
-            client, connection, launch={**launch, "args": ["-y", "@scope/search-mcp@1.1.0", "--verbose"]}
+            client,
+            connection,
+            launch={**launch, "args": ["-y", "@scope/search-mcp@1.1.0", "--verbose"]},
         )
 
     assert bumped.status_code == 200, bumped.text
