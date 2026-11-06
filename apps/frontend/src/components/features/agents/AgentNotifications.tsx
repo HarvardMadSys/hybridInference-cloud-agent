@@ -18,7 +18,7 @@ import {
   type NotificationPreferences,
 } from './notificationPreferences';
 import { isActiveJobState } from './conversationJob';
-import { QUESTION_BACKGROUND_POLL_MS } from './useNativeQuestions';
+import { QUESTION_BACKGROUND_POLL_MS } from './conversation/useNativeQuestions';
 import { APIError } from '@/lib/utils/errors';
 
 /**

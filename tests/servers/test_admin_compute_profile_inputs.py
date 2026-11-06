@@ -10,7 +10,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from tests.servers.test_admin_compute import ADMIN, compute_api as compute_api, deployment_bundle
 
-from cloud_agent.compute_secrets import StoredDeploymentResolver
+from cloud_agent.providers.compute.compute_secrets import StoredDeploymentResolver
 
 if TYPE_CHECKING:
     from fastapi import FastAPI

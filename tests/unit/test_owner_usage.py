@@ -4,7 +4,7 @@ from datetime import UTC, date, datetime, timedelta, timezone
 
 import pytest
 
-from cloud_agent.owner_usage import (
+from cloud_agent.usage.owner_usage import (
     MAX_SAMPLE_GAP_SECONDS,
     container_state,
     cpu_limit_cores,

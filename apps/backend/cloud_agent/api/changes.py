@@ -27,7 +27,7 @@ import asyncio
 import json
 from typing import TYPE_CHECKING, Any, Protocol
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
 from cloud_agent.api._job_views import _iso
@@ -38,6 +38,7 @@ from cloud_agent.api._owner_auth import (
 )
 from cloud_agent.api._stream_slots import STREAM_SLOTS
 from cloud_agent.api.deps import get_owner_change_signal, get_storage, require_store
+from cloud_agent.api.errors import typed_error
 from cloud_agent.api.usage import job_usage_response
 from cloud_agent.workers.owner_change_signal import (
     HINT_KINDS,
@@ -144,14 +145,8 @@ async def stream_owner_changes(
     """
     job_store = require_store(store)
     if signal is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": {
-                    "type": "not_found",
-                    "message": "This listener does not push changes; read on a clock instead.",
-                }
-            },
+        raise typed_error(
+            404, "not_found", "This listener does not push changes; read on a clock instead."
         )
     user_id = str(user["user_id"])
     slot = STREAM_SLOTS.acquire(user_id)

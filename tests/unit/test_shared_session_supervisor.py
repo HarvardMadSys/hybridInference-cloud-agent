@@ -19,9 +19,11 @@ from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from tests.support.archive_policy import hooked_supervisor
 from tests.support.owners import launch_connection
 
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.archive.sandbox_archive_runtime import SandboxArchiveController
+from cloud_agent_host.container.chat_sandbox import (
     MEMBER_UID_BASE,
     ChatSandboxInspection,
     ChatSandboxManager,
@@ -31,28 +33,26 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatLost,
     claude_member_config_dir,
 )
-from cloud_agent_host.chat_sandbox_markers import (
+from cloud_agent_host.container.chat_sandbox_markers import (
     FINAL_ARCHIVE_MARKER_NAME,
     INITIAL_ARCHIVE_MARKER_ROOT,
 )
+from cloud_agent_host.container.sandbox import ProcessBackend, SandboxError
 from cloud_agent_host.drivers import DriverError, InputOutcome
-from cloud_agent_host.guest_observer import (
-    GuestObservation,
-    GuestObserverCursor,
-)
-from cloud_agent_host.resident_transport import (
-    ResidentLaunch,
-    ResidentTransportFactory,
-)
-from cloud_agent_host.sandbox import ProcessBackend, SandboxError
-from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
-from cloud_agent_host.sandbox_manager import SharedSandboxIdentityRequest, create_app
+from cloud_agent_host.manager_api.models import SharedSandboxIdentityRequest
+from cloud_agent_host.member_setup.member_homes import legacy_member_state_dir, member_state_dir
+from cloud_agent_host.observe.guest_observer import GuestObservation, GuestObserverCursor
+from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
+from cloud_agent_host.runtimes.claude import member as claude_member
+from cloud_agent_host.runtimes.codex import member as codex_member
+from cloud_agent_host.runtimes.http_bridge import member as http_member
+from cloud_agent_host.sandbox_manager import create_app
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
-from cloud_agent_host.shared_session_supervisor import (
-    SharedChatSessionSupervisor,
+from cloud_agent_host.supervisor.shared_session_state import (
     SharedMemberManifest,
     SharedSessionDescriptor,
 )
+from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.errors import SandboxArchiveBlocked
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
@@ -90,6 +90,7 @@ class _Manager:
         self.pruned_observed: list[ChatSandboxInspection] | None = None
         self.process_baseline: tuple[tuple[int, int], ...] = ((41, 400),)
         self.initial_archive_marker: bytes | None = None
+        self.exact = self  # The stand-in is its own identity gate.
 
     @staticmethod
     def _inspection(spec: ChatSandboxSpec, *, running: bool = True) -> ChatSandboxInspection:
@@ -131,10 +132,9 @@ class _Manager:
     def list(self) -> list[ChatSandboxInspection]:
         return list(self.items.values())
 
-    def _run(self, *_args, **_kwargs):
-        return SimpleNamespace(
-            returncode=0, stdout="\n".join(f"{x.name}\t" for x in self.items.values() if x.running)
-        )
+    def run(self, *_args, **_kwargs):
+        running = "\n".join(f"{x.name}\t" for x in self.items.values() if x.running)
+        return SimpleNamespace(returncode=0, stdout=running)
 
     def ensure_downloaded_runtime(self, _spec: ChatSandboxSpec, runtime: str, version: str) -> None:
         """The image already holds every version these tests launch."""
@@ -520,7 +520,7 @@ def test_native_questions_require_the_active_owner_and_running_turn():
         assert supervisor.answer_question(
             thread_id, owner=owner, request_id="native-request", answers=answers
         ) == InputOutcome(False, "turn_ended")
-    assert supervisor._held_inputs == {}
+    assert supervisor.state.held_inputs == {}
 
     turn = supervisor.start_turn(
         "athr_source", lease.token, prompt="work", model="glm-5.1", reasoning_effort=None
@@ -538,7 +538,7 @@ def test_native_questions_require_the_active_owner_and_running_turn():
     assert turn.question_answers == [("native-request", answers, False)]
     assert turn.question_answers[0][1] is answers
     assert supervisor.pending_questions("athr_source", owner="attempt:1") == []
-    assert supervisor._held_inputs == {}
+    assert supervisor.state.held_inputs == {}
 
     supervisor.complete_turn("athr_source", lease.token, turn)
     assert supervisor.answer_question(
@@ -583,7 +583,7 @@ def test_native_answers_and_rejections_never_reach_a_replacement_attempt():
         "athr_source", owner="attempt:1", request_id="native-request", answers={}, reject=True
     ) == InputOutcome(False, "turn_ended")
     assert next_turn.question_answers == []
-    assert supervisor._held_inputs == {}
+    assert supervisor.state.held_inputs == {}
 
 
 def test_native_answer_delivery_holds_the_owner_fence_against_expiry(monkeypatch):
@@ -653,12 +653,12 @@ def test_sandbox_manager_reconcile_blocks_an_unmarked_running_orphan_before_acce
     manager.items[spec.container_name] = manager._inspection(spec, running=True)
     archived: list[tuple] = []
     markerless_checks: list[bool] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        markerless_final_prepare_hook=lambda _spec, inspection: (
+        markerless_final=lambda _spec, inspection: (
             markerless_checks.append(inspection.running) or False
         ),
-        stopped_archive_hook=lambda *args: archived.append(args),
+        stopped=lambda *args: archived.append(args),
     )
 
     descriptors = supervisor.reconcile()
@@ -783,14 +783,14 @@ def test_reconcile_finishes_a_markerless_orphan_without_upload(
         _enabled_archive_policy() if enabled else SandboxArchivePolicy(enabled=False, revision=1)
     )
     controller.apply(policy.as_dict())
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=controller.prepare_final,
-        stopped_archive_invalidate_hook=controller.invalidate_final,
-        starting_archive_prepare_hook=controller.prepare_start,
-        started_archive_hook=controller.complete_start,
-        markerless_final_prepare_hook=controller.prepare_markerless_final,
-        stopped_archive_hook=controller.queue_final,
+        prepare_final=controller.prepare_final,
+        invalidate_final=controller.invalidate_final,
+        prepare_start=controller.prepare_start,
+        started=controller.complete_start,
+        markerless_final=controller.prepare_markerless_final,
+        stopped=controller.queue_final,
     )
 
     descriptors = supervisor.reconcile()
@@ -803,7 +803,7 @@ def test_reconcile_finishes_a_markerless_orphan_without_upload(
     assert manager.marker is not None
     expected_state = b'"state":"skipped"' if enabled else b'"state":"pending"'
     assert expected_state in manager.marker
-    group = supervisor._members[spec.thread_id]
+    group = supervisor.state.members[spec.thread_id]
     assert group.stop_archive_pending is False
     assert group.stop_archive_blocked is False
 
@@ -832,9 +832,9 @@ def test_reconcile_does_not_finalize_a_registered_never_started_container() -> N
         status=ChatSandboxStatus.CREATED,
     )
     archive_calls: list[tuple] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_hook=lambda *args: archive_calls.append(args),
+        stopped=lambda *args: archive_calls.append(args),
     )
     supervisor.register_manifest(spec, _members())
 
@@ -875,9 +875,9 @@ def test_unreadable_orphan_marker_isolated_while_healthy_groups_reconcile() -> N
         status=ChatSandboxStatus.CREATED,
     )
     archived: list[str] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_hook=lambda spec, *_args: archived.append(spec.sandbox_id),
+        stopped=lambda spec, *_args: archived.append(spec.sandbox_id),
     )
 
     descriptors = supervisor.reconcile()
@@ -925,10 +925,10 @@ def test_unreadable_running_orphan_stop_failure_cannot_become_a_clean_archive() 
     manager.items[spec.container_name] = manager._inspection(spec, running=True)
     prepared: list[str] = []
     archived: list[str] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=lambda spec, _inspection: prepared.append(spec.sandbox_id),
-        stopped_archive_hook=lambda spec, *_args: archived.append(spec.sandbox_id),
+        prepare_final=lambda spec, _inspection: prepared.append(spec.sandbox_id),
+        stopped=lambda spec, *_args: archived.append(spec.sandbox_id),
     )
 
     descriptors = supervisor.reconcile()
@@ -981,11 +981,7 @@ def test_malformed_orphan_marker_isolated_while_healthy_groups_reconcile() -> No
         archive_attempts.append(spec.sandbox_id)
         raise SandboxError("invalid sandbox final archive marker")
 
-    supervisor = SharedChatSessionSupervisor(
-        manager,
-        stopped_archive_prepare_hook=prepare,
-        stopped_archive_hook=archive,
-    )
+    supervisor = hooked_supervisor(manager, prepare_final=prepare, stopped=archive)
 
     descriptors = supervisor.reconcile()
     retried = supervisor.reconcile()
@@ -1029,10 +1025,10 @@ def test_durably_blocked_orphan_stop_failure_isolated_from_healthy_groups() -> N
         if spec.sandbox_id == bad.sandbox_id:
             raise SandboxArchiveBlocked("durable marker forbids final archive")
 
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=prepare,
-        stopped_archive_hook=lambda spec, *_args: archived.append(spec.sandbox_id),
+        prepare_final=prepare,
+        stopped=lambda spec, *_args: archived.append(spec.sandbox_id),
     )
 
     descriptors = supervisor.reconcile()
@@ -1073,7 +1069,7 @@ def test_committed_retry_clears_a_transient_unreadable_marker_fence() -> None:
     def archive(*_args) -> None:
         manager.marker = None
 
-    supervisor = SharedChatSessionSupervisor(manager, stopped_archive_hook=archive)
+    supervisor = hooked_supervisor(manager, stopped=archive)
     supervisor.reconcile()
     manager.fail_marker = False
 
@@ -1102,9 +1098,9 @@ def test_created_cleanup_clears_a_transient_unreadable_marker_fence() -> None:
         manager._inspection(spec, running=False),
         status=ChatSandboxStatus.CREATED,
     )
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_hook=lambda *_args: pytest.fail("CREATED sandbox must not upload"),
+        stopped=lambda *_args: pytest.fail("CREATED sandbox must not upload"),
     )
     supervisor.register_manifest(
         spec,
@@ -1131,9 +1127,9 @@ def test_explicit_stop_cleans_up_a_registered_never_started_container_without_ar
         status=ChatSandboxStatus.CREATED,
     )
     archive_calls: list[tuple] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_hook=lambda *args: archive_calls.append(args),
+        stopped=lambda *args: archive_calls.append(args),
     )
     supervisor.register_manifest(spec, _members())
 
@@ -1264,11 +1260,7 @@ def test_lost_archive_restart_replay_does_not_reopen_or_repeat_destructive_work(
         final_uploads.append(members)
         manager.final_marker = b"uploaded-final-receipt"
 
-    supervisor = SharedChatSessionSupervisor(
-        manager,
-        stopped_archive_prepare_hook=prepare,
-        stopped_archive_hook=archive,
-    )
+    supervisor = hooked_supervisor(manager, prepare_final=prepare, stopped=archive)
     supervisor.register_manifest(spec, [lost_member], expected_container_id="container-shared")
     issued_stop = {
         "thread_id": "athr_source",
@@ -1293,11 +1285,7 @@ def test_lost_archive_restart_replay_does_not_reopen_or_repeat_destructive_work(
     # The broker died after Docker stop and final upload, before the control
     # plane received its stopped observation. A replacement probes the durable
     # upload marker and completes cleanup without another Docker stop/upload.
-    replacement = SharedChatSessionSupervisor(
-        manager,
-        stopped_archive_prepare_hook=prepare,
-        stopped_archive_hook=archive,
-    )
+    replacement = hooked_supervisor(manager, prepare_final=prepare, stopped=archive)
     descriptors = replacement.reconcile()
     assert len(descriptors) == 1 and descriptors[0].running is False
     replacement.register_manifest(spec, [lost_member], expected_container_id="container-shared")
@@ -1342,9 +1330,9 @@ def test_restart_reconcile_does_not_rearchive_an_already_released_stopped_group(
         networks=released_networks,
     )
     archived: list[tuple] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_hook=lambda *args: archived.append(args),
+        stopped=lambda *args: archived.append(args),
     )
 
     descriptors = supervisor.reconcile()
@@ -1366,7 +1354,7 @@ def test_blocking_reconcile_archive_does_not_hold_global_lock_for_other_group_st
             archived_entered.set()
             assert allow_archive.wait(timeout=_HELD_S)
 
-    supervisor = SharedChatSessionSupervisor(manager, stopped_archive_hook=archive)
+    supervisor = hooked_supervisor(manager, stopped=archive)
     supervisor.register_manifest(_spec(), _members())
     manager.items[other.container_name] = manager._inspection(other, running=True)
     manager.read_running_final_archive_marker = (  # type: ignore[method-assign]
@@ -1521,7 +1509,7 @@ def test_targeted_listing_marks_missing_or_replaced_container_lost(missing):
     with pytest.raises(RetainedChatLost, match="missing" if missing else "identity changed"):
         supervisor.list_for_thread("athr_peer")
 
-    group = supervisor._members["athr_source"]
+    group = supervisor.state.members["athr_source"]
     assert group.inspection == original
     assert group.container_lost is True
     assert {member.context_status for member in group.members.values()} == {"lost"}
@@ -1543,7 +1531,7 @@ def test_targeted_listing_rejects_changed_immutable_labels_without_accepting_ins
     with pytest.raises(SandboxError, match="immutable labels changed"):
         supervisor.list_for_thread("athr_source")
 
-    assert supervisor._members["athr_source"].inspection == original
+    assert supervisor.state.members["athr_source"].inspection == original
     assert manager.stop_count == 0
 
 
@@ -1607,7 +1595,7 @@ def test_targeted_listing_rejects_a_stopped_observation_after_concurrent_start(m
     manager.items[spec.container_name] = manager._inspection(spec, running=False)
     supervisor = SharedChatSessionSupervisor(manager)
     supervisor.register_manifest(spec, _members())
-    group = supervisor._members[spec.thread_id]
+    group = supervisor.state.members[spec.thread_id]
     original_generation = group.lifecycle_generation
     inspect_entered = threading.Event()
     allow_inspect = threading.Event()
@@ -1655,16 +1643,16 @@ def test_targeted_listing_rejects_a_changed_fence_during_inspection(monkeypatch,
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
     supervisor.register_manifest(_spec(), _members())
-    group = supervisor._members["athr_source"]
+    group = supervisor.state.members["athr_source"]
     original = group.inspection
     stale = replace(original, running=False, status=ChatSandboxStatus.STOPPED)
 
     def inspect(_container_name):
-        with supervisor._lock:
+        with supervisor.state.lock:
             if changed_fence == "group_index":
-                supervisor._groups.pop(_spec().sandbox_id)
+                supervisor.state.groups.pop(_spec().sandbox_id)
             elif changed_fence == "member_index":
-                supervisor._members.pop("athr_source")
+                supervisor.state.members.pop("athr_source")
             elif changed_fence == "member":
                 group.members["athr_source"] = replace(group.members["athr_source"])
             elif changed_fence == "lifecycle":
@@ -1784,7 +1772,7 @@ def test_retiring_a_cli_at_settlement_does_not_hold_the_supervisor_lock():
     process still waits for the close, so it never resumes unflushed history.
     """
     _manager, supervisor, lease = _question_activation()
-    factory = supervisor._transport_factory
+    factory = supervisor._sessions._transport_factory
     other = replace(_spec(), thread_id="athr_other", sandbox_id="asbx_other")
     supervisor.register_manifest(other, [replace(_members()[0], thread_id=other.thread_id)])
     retiring = factory.transports[0]
@@ -1855,7 +1843,7 @@ def test_a_retiring_cli_that_fails_to_close_still_settles_its_member():
     process of the member reaps its slot before it starts.
     """
     _manager, supervisor, lease = _question_activation()
-    retiring = supervisor._transport_factory.transports[0]
+    retiring = supervisor._sessions._transport_factory.transports[0]
     retiring.retire_after_turn = True
 
     def failing_close() -> None:
@@ -1890,7 +1878,7 @@ def test_a_capture_that_finds_its_container_missing_lifts_its_barrier():
         has_settled_context=False,
         manifest=_members(),
     )
-    group = supervisor._members["athr_source"]
+    group = supervisor.state.members["athr_source"]
     del manager.items[_spec().container_name]
 
     with pytest.raises(RetainedChatLost, match="missing"):
@@ -1907,7 +1895,7 @@ def test_status_keeps_a_concurrent_starts_newer_observation(monkeypatch):
     manager.items[spec.container_name] = manager._inspection(spec, running=False)
     supervisor = SharedChatSessionSupervisor(manager)
     supervisor.register_manifest(spec, _members())
-    group = supervisor._members[spec.thread_id]
+    group = supervisor.state.members[spec.thread_id]
     entered, release = _gated_inspect(manager, monkeypatch, spec.container_name)
 
     status_thread, outcome = _in_thread(lambda: supervisor.status(spec.thread_id))
@@ -1923,7 +1911,7 @@ def test_status_keeps_a_concurrent_starts_newer_observation(monkeypatch):
     assert "error" not in outcome
     assert outcome["value"].running is True
     assert group.inspection.running is True
-    supervisor._arm_idle_if_quiescent(group)
+    supervisor.state.arm_idle_if_quiescent(group)
     supervisor.terminal_closed("athr_peer", token)
     assert group.idle_deadline is not None
 
@@ -1979,7 +1967,7 @@ def test_creating_a_group_does_not_hold_the_supervisor_lock():
     assert manager.create_calls == 2  # the other group, and this one once
     assert manager.stop_count == 0
     assert supervisor.owns("athr_source") and supervisor.owns("athr_peer")
-    assert supervisor._creating == set()
+    assert supervisor.state.creating == set()
 
 
 def test_a_failed_group_creation_lets_the_next_registration_try_again():
@@ -1996,7 +1984,7 @@ def test_a_failed_group_creation_lets_the_next_registration_try_again():
 
     with pytest.raises(SandboxError, match="docker create failed"):
         supervisor.register_manifest(_spec(), _members())
-    assert supervisor._creating == set()
+    assert supervisor.state.creating == set()
     supervisor.register_manifest(_spec(), _members())
 
     assert attempts == [_spec().sandbox_id, _spec().sandbox_id]
@@ -2044,7 +2032,7 @@ def test_status_marks_a_same_name_running_replacement_lost_without_adopting_it()
     with pytest.raises(RetainedChatLost, match="identity changed"):
         supervisor.status("athr_source")
 
-    group = supervisor._members["athr_source"]
+    group = supervisor.state.members["athr_source"]
     assert group.inspection.container_id == "container-shared"
     assert group.container_lost is True
     assert {member.context_status for member in group.members.values()} == {"lost"}
@@ -2054,9 +2042,9 @@ def test_status_marks_a_same_name_running_replacement_lost_without_adopting_it()
 def test_reconcile_refuses_an_externally_stopped_replacement_without_archiving_it():
     manager = _Manager()
     archived: list[tuple] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_hook=lambda *args: archived.append(args),
+        stopped=lambda *args: archived.append(args),
     )
     supervisor.register_manifest(_spec(), _members())
     original = manager.items[_spec().container_name]
@@ -2072,7 +2060,7 @@ def test_reconcile_refuses_an_externally_stopped_replacement_without_archiving_i
     assert {(row.container_id, row.context_status) for row in descriptors} == {
         ("container-shared", "lost")
     }
-    group = supervisor._members["athr_source"]
+    group = supervisor.state.members["athr_source"]
     assert group.inspection.container_id == "container-shared"
     assert group.container_lost is True
     assert manager.stop_count == 0
@@ -2100,7 +2088,7 @@ async def test_a_lost_group_does_not_fail_the_host_listing_of_the_others():
             "athr_other": "live",
         }
         assert rows["athr_source"].container_id == "container-shared"
-    assert supervisor._members["athr_source"].container_lost is True
+    assert supervisor.state.members["athr_source"].container_lost is True
     assert manager.pruned_specs == [_spec(), other]
 
     app = create_app(
@@ -2176,7 +2164,7 @@ async def test_a_group_changed_while_it_is_reconciled_does_not_fail_the_host_lis
     assert {member["context_status"] for member in groups["asbx_shared"]["members"]} == {"lost"}
     assert groups["asbx_other"]["running"] is True
     assert manager.pruned_specs == [_spec(), other]
-    assert supervisor._members["athr_source"].container_lost is True
+    assert supervisor.state.members["athr_source"].container_lost is True
     rows = {row.thread_id: row.context_status for row in supervisor.list()}
     assert rows == {"athr_source": "lost", "athr_peer": "lost", "athr_other": "live"}
     assert supervisor.stop_if_idle(other.thread_id, generation=other.generation).running is False
@@ -2187,9 +2175,9 @@ def test_status_blocks_an_externally_stopped_group_without_a_final_marker():
     spec = _spec()
     manager.items[spec.container_name] = manager._inspection(spec, running=True)
     archived: list[tuple] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_hook=lambda *args: archived.append(args),
+        stopped=lambda *args: archived.append(args),
     )
     supervisor.register_manifest(
         spec,
@@ -2220,14 +2208,14 @@ def test_externally_stopped_group_under_enabled_archives_skips_and_continues():
     )
     controller.start()
     controller.apply(_enabled_archive_policy().as_dict())
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=controller.prepare_final,
-        stopped_archive_invalidate_hook=controller.invalidate_final,
-        starting_archive_prepare_hook=controller.prepare_start,
-        started_archive_hook=controller.complete_start,
-        markerless_final_prepare_hook=controller.prepare_markerless_final,
-        stopped_archive_hook=controller.queue_final,
+        prepare_final=controller.prepare_final,
+        invalidate_final=controller.invalidate_final,
+        prepare_start=controller.prepare_start,
+        started=controller.complete_start,
+        markerless_final=controller.prepare_markerless_final,
+        stopped=controller.queue_final,
     )
     supervisor.register_manifest(spec, _members(), expected_container_id="container-shared")
     manager.items[spec.container_name] = manager._inspection(spec, running=False)
@@ -2272,9 +2260,9 @@ def test_acquire_starts_a_settled_context_on_its_group():
 
 def _running_group(*, stopped_archive_hook=None) -> tuple[_Manager, SharedChatSessionSupervisor]:
     manager = _Manager()
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_hook=stopped_archive_hook,
+        stopped=stopped_archive_hook,
     )
     supervisor.register_manifest(_spec(), _members())
     supervisor.acquire(
@@ -2374,9 +2362,9 @@ def test_guest_network_fail_stop_archives_once_and_does_not_duplicate_on_listing
 
     manager = FailStoppedStartManager()
     archived: list[tuple] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_hook=lambda *args: archived.append(args),
+        stopped=lambda *args: archived.append(args),
     )
     supervisor.register_manifest(_spec(), _members())
 
@@ -2436,7 +2424,7 @@ def test_while_nothing_runs_the_sweep_renews_the_rules_without_reading_them():
 def test_a_running_group_without_an_active_turn_keeps_every_guard_check():
     """Background processes still require the boundary after the turn ends."""
     manager, supervisor = _running_group()
-    group = supervisor._members["athr_source"]
+    group = supervisor.state.members["athr_source"]
     assert group.inspection.running
     assert not any(member.current_turn for member in group.members.values())
 
@@ -2558,7 +2546,7 @@ def test_closing_a_terminal_does_not_arm_the_idle_deadline_of_a_lost_group():
     manager.items.pop(_spec().container_name)
     with pytest.raises(RetainedChatLost, match="missing"):
         supervisor.list_for_thread("athr_peer")
-    group = supervisor._members["athr_source"]
+    group = supervisor.state.members["athr_source"]
     assert group.container_lost is True
     assert group.inspection.running is True
 
@@ -2621,8 +2609,8 @@ def test_claude_member_launch_shares_only_native_projects(monkeypatch, tmp_path)
     factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
     source = _launch("athr_source", native_session_id="native-source", slot=0)
     child = _launch("athr_child", native_session_id="native-child", slot=1)
-    factory._prepare_claude_member_state(_spec(), source)
-    factory._prepare_claude_member_state(_spec(), child)
+    claude_member.prepare_member_state(manager, _spec(), source)
+    claude_member.prepare_member_state(manager, _spec(), child)
 
     assert [call[0][-2] for call in calls] == [
         claude_member_config_dir(0, source.thread_id),
@@ -2667,12 +2655,11 @@ def test_claude_reassigned_slot_gets_fresh_member_settings(monkeypatch, tmp_path
         return subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(manager, "exec_capture", capture, raising=False)
-    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
     old = _launch("athr_old", native_session_id="old", slot=1)
     new = _launch("athr_new", native_session_id="new", slot=1)
     assert claude_member_config_dir(1, old.thread_id) != claude_member_config_dir(1, new.thread_id)
-    factory._prepare_claude_member_state(_spec(), old)
-    factory._prepare_claude_member_state(_spec(), new)
+    claude_member.prepare_member_state(manager, _spec(), old)
+    claude_member.prepare_member_state(manager, _spec(), new)
     home = tmp_path / "member-home"
     home.mkdir()
     shared = tmp_path / "agent-state" / "claude"
@@ -2697,9 +2684,8 @@ def test_claude_member_preparation_rejects_symlinked_state(monkeypatch, tmp_path
         return subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(manager, "exec_capture", capture, raising=False)
-    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
-    factory._prepare_claude_member_state(
-        _spec(), _launch("athr_source", native_session_id="native-source", slot=0)
+    claude_member.prepare_member_state(
+        manager, _spec(), _launch("athr_source", native_session_id="native-source", slot=0)
     )
     home = tmp_path / "member"
     home.mkdir()
@@ -2731,10 +2717,9 @@ def test_claude_native_fork_uses_the_source_private_config(monkeypatch):
         )
 
     monkeypatch.setattr(manager, "exec_capture", capture, raising=False)
-    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
 
     source_launch = _launch("athr_source", native_session_id="source", slot=1)
-    assert factory._fork_claude(_spec(), "source", source_launch, 2) == "child"
+    assert claude_member.fork_session(manager, _spec(), "source", source_launch, 2) == "child"
     assert calls[0][0] == ["claude-session-fork", "source", "2"]
     assert calls[0][1]["env"]["CLAUDE_CONFIG_DIR"] == claude_member_config_dir(1, "athr_source")
     assert calls[0][1]["user_uid"] == MEMBER_UID_BASE + 1
@@ -2754,8 +2739,8 @@ def test_private_provider_members_get_deterministic_distinct_homes(
     source = _launch("athr_source", native_session_id="native-source", slot=0)
     child = replace(source, thread_id="athr_child", native_session_id="native-child", slot_id=1)
 
-    source_home = ResidentTransportFactory._member_state_dir(replace(source, runtime_id=runtime_id))
-    child_home = ResidentTransportFactory._member_state_dir(replace(child, runtime_id=runtime_id))
+    source_home = member_state_dir(replace(source, runtime_id=runtime_id))
+    child_home = member_state_dir(replace(child, runtime_id=runtime_id))
 
     assert source_home.startswith(f"/agent-state/{collection}/")
     assert child_home.startswith(f"/agent-state/{collection}/")
@@ -2863,7 +2848,7 @@ def test_a_member_provider_home_is_private_to_its_member(tmp_path: Path, runtime
     manager = _LocalMemberShell(tmp_path)
     factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
     launch = replace(_launch("athr_member", native_session_id=None, slot=1), runtime_id=runtime_id)
-    home = factory._member_state_dir(launch)
+    home = member_state_dir(launch)
 
     factory._prepare_member_state(_spec(), launch, home)
     factory._prepare_member_state(_spec(), launch, home)
@@ -2886,7 +2871,7 @@ def test_an_earlier_releases_home_moves_into_the_trusted_collection(tmp_path: Pa
     manager = _LocalMemberShell(tmp_path)
     factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
     launch = replace(_launch("athr_member", native_session_id=None, slot=1), runtime_id="opencode")
-    legacy = manager.local(factory._legacy_member_state_dir(launch))
+    legacy = manager.local(legacy_member_state_dir(launch))
     (legacy / "opencode/data").mkdir(parents=True)
     (legacy / "opencode/data/opencode.db").write_text("native session")
     (legacy / "opencode/data/opencode.db").chmod(0o660)
@@ -2894,9 +2879,9 @@ def test_an_earlier_releases_home_moves_into_the_trusted_collection(tmp_path: Pa
         directory.chmod(0o2770)
     (legacy / ".freeinference-member-state-v1").write_text("")
 
-    factory._prepare_member_state(_spec(), launch, factory._member_state_dir(launch))
+    factory._prepare_member_state(_spec(), launch, member_state_dir(launch))
 
-    home = manager.local(factory._member_state_dir(launch))
+    home = manager.local(member_state_dir(launch))
     assert not legacy.exists()
     assert (home / "opencode/data/opencode.db").read_text() == "native session"
     _assert_private(home)
@@ -2908,14 +2893,14 @@ def test_a_symlink_at_a_members_home_is_refused_not_adopted(tmp_path: Path):
     factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
     launch = replace(_launch("athr_member", native_session_id=None, slot=1), runtime_id="codex")
     manager.ensure_private_member_collections(_spec())
-    home = manager.local(factory._member_state_dir(launch))
+    home = manager.local(member_state_dir(launch))
     planted = tmp_path / "sibling-owned"
     planted.mkdir()
     planted.chmod(0o777)
     home.symlink_to(planted, target_is_directory=True)
 
     with pytest.raises(DriverError, match="not owned by this member"):
-        factory._prepare_member_state(_spec(), launch, factory._member_state_dir(launch))
+        factory._prepare_member_state(_spec(), launch, member_state_dir(launch))
 
     assert list(planted.iterdir()) == []
 
@@ -2946,7 +2931,7 @@ def test_fork_copies_a_private_home_without_widening_either_side(tmp_path: Path)
     target_launch = replace(
         _launch("athr_child", native_session_id=None, slot=2), runtime_id=runtime_id
     )
-    source_home = factory._member_state_dir(source_launch)
+    source_home = member_state_dir(source_launch)
     factory._prepare_member_state(_spec(), source_launch, source_home)
     source = manager.local(source_home)
     (source / "sessions").mkdir()
@@ -2960,7 +2945,7 @@ def test_fork_copies_a_private_home_without_widening_either_side(tmp_path: Path)
 
     factory._clone_private_member_state(_spec(), source_launch, target_launch)
 
-    child = manager.local(factory._member_state_dir(target_launch))
+    child = manager.local(member_state_dir(target_launch))
     _assert_private(child)
     # The CLI's own files keep its umask; the closed home is what protects them.
     assert stat.S_IMODE(source.stat().st_mode) == 0o700
@@ -3008,8 +2993,8 @@ def test_codex_lost_fork_response_recovers_from_the_rollout_inventory(monkeypatc
     writes: list[dict[str, object]] = []
     monkeypatch.setattr(factory, "_read_fork_journal", lambda *_args: None)
     monkeypatch.setattr(
-        factory,
-        "_codex_fork_children",
+        codex_member,
+        "fork_children",
         lambda *_args, **_kwargs: next(inventories),
     )
     monkeypatch.setattr(factory, "_clone_private_member_state", lambda *_args: None)
@@ -3070,8 +3055,8 @@ def test_a_sibling_cannot_swap_a_members_home_before_its_cli_starts(_multi_uid_s
     manager = _LocalMemberShell(base, as_uids=True)
     factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
     victim = replace(_launch("athr_victim", native_session_id=None, slot=1), runtime_id="codex")
-    factory._prepare_member_state(_spec(), victim, factory._member_state_dir(victim))
-    home = manager.local(factory._member_state_dir(victim))
+    factory._prepare_member_state(_spec(), victim, member_state_dir(victim))
+    home = manager.local(member_state_dir(victim))
     collection = home.parent
     _assert_trusted(state, collection, _SANDBOX_UID)
     assert home.stat().st_uid == MEMBER_UID_BASE + 1
@@ -3089,8 +3074,8 @@ def test_a_sibling_cannot_swap_a_members_home_before_its_cli_starts(_multi_uid_s
     _assert_trusted(state, collection, _SANDBOX_UID)
     # The sibling can still make its own home, and the victim restarts cleanly.
     own = replace(_launch("athr_sibling", native_session_id=None, slot=0), runtime_id="codex")
-    factory._prepare_member_state(_spec(), own, factory._member_state_dir(own))
-    factory._prepare_member_state(_spec(), victim, factory._member_state_dir(victim))
+    factory._prepare_member_state(_spec(), own, member_state_dir(own))
+    factory._prepare_member_state(_spec(), victim, member_state_dir(victim))
 
 
 @pytest.mark.parametrize("planted", ["sibling_directory", "sibling_file_inside"])
@@ -3100,7 +3085,7 @@ def test_a_legacy_home_a_sibling_replaced_is_refused_after_the_move(_multi_uid_s
     manager = _LocalMemberShell(base, as_uids=True)
     factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
     victim = replace(_launch("athr_victim", native_session_id=None, slot=1), runtime_id="codex")
-    legacy = manager.local(factory._legacy_member_state_dir(victim))
+    legacy = manager.local(legacy_member_state_dir(victim))
     sibling = MEMBER_UID_BASE
     # An earlier release's member-created, group-writable collection.
     made = _as_member(manager, sibling, 'umask 0007; mkdir -p -- "$1"', str(legacy.parent))
@@ -3116,13 +3101,13 @@ def test_a_legacy_home_a_sibling_replaced_is_refused_after_the_move(_multi_uid_s
     assert result.returncode == 0, result.stderr
 
     with pytest.raises(DriverError, match=r"not owned by this member|another UID"):
-        factory._prepare_member_state(_spec(), victim, factory._member_state_dir(victim))
+        factory._prepare_member_state(_spec(), victim, member_state_dir(victim))
 
     # Codex review P1 on #568: the next start must not find the refused tree at
     # the home's path, take it for an already migrated home, and adopt it.
-    home = manager.local(factory._member_state_dir(victim))
+    home = manager.local(member_state_dir(victim))
     try:
-        factory._prepare_member_state(_spec(), victim, factory._member_state_dir(victim))
+        factory._prepare_member_state(_spec(), victim, member_state_dir(victim))
     except DriverError:
         pass  # Still refused is safe; adopting the planted tree is not.
     else:
@@ -3132,7 +3117,7 @@ def test_a_legacy_home_a_sibling_replaced_is_refused_after_the_move(_multi_uid_s
 
 def _poison_legacy_home(manager: _LocalMemberShell, factory, victim) -> None:
     """An earlier release's group-writable home a sibling put its config into."""
-    legacy = manager.local(factory._legacy_member_state_dir(victim))
+    legacy = manager.local(legacy_member_state_dir(victim))
     sibling = MEMBER_UID_BASE
     made = _as_member(manager, sibling, 'umask 0007; mkdir -p -- "$1"', str(legacy.parent))
     assert made.returncode == 0, made.stderr
@@ -3148,9 +3133,9 @@ def victim_uid(launch) -> int:
 
 def _never_adopted(manager: _LocalMemberShell, factory, victim) -> None:
     """Start again: refused is safe; a home with a sibling's file in it is not."""
-    home = manager.local(factory._member_state_dir(victim))
+    home = manager.local(member_state_dir(victim))
     try:
-        factory._prepare_member_state(_spec(), victim, factory._member_state_dir(victim))
+        factory._prepare_member_state(_spec(), victim, member_state_dir(victim))
     except DriverError as exc:
         assert "another UID" in str(exc) or "not owned by this member" in str(exc)
         return
@@ -3177,7 +3162,7 @@ def test_a_sibling_holding_every_guessable_quarantine_name_gets_nothing_adopted(
     victim = replace(_launch("athr_victim", native_session_id=None, slot=1), runtime_id="codex")
     manager.ensure_private_member_collections(_spec())
     _poison_legacy_home(manager, factory, victim)
-    home = manager.local(factory._member_state_dir(victim))
+    home = manager.local(member_state_dir(victim))
     squat = (
         'for name in "$@"; do mkdir -- "$name"; : > "$name/keep"; done; '
         'i=1; while [ "$i" -le 2048 ]; do mkdir -- "$0.refused-$i"; i=$((i + 1)); done'
@@ -3194,7 +3179,7 @@ def test_a_sibling_holding_every_guessable_quarantine_name_gets_nothing_adopted(
     assert squatted.returncode == 0, squatted.stderr
 
     with pytest.raises(DriverError, match="another UID"):
-        factory._prepare_member_state(_spec(), victim, factory._member_state_dir(victim))
+        factory._prepare_member_state(_spec(), victim, member_state_dir(victim))
 
     _never_adopted(manager, factory, victim)
     _never_adopted(manager, factory, victim)
@@ -3210,7 +3195,7 @@ def test_a_poisoned_home_is_refused_on_every_start_when_it_cannot_be_set_aside(
     victim = replace(_launch("athr_victim", native_session_id=None, slot=1), runtime_id="codex")
     manager.ensure_private_member_collections(_spec())
     _poison_legacy_home(manager, factory, victim)
-    home = manager.local(factory._member_state_dir(victim))
+    home = manager.local(member_state_dir(victim))
     # Every name mktemp offers is one the sibling already holds.
     stubs = base / "stubs"
     stubs.mkdir()
@@ -3225,7 +3210,7 @@ def test_a_poisoned_home_is_refused_on_every_start_when_it_cannot_be_set_aside(
 
     for _start in range(3):
         with pytest.raises(DriverError, match="another UID"):
-            factory._prepare_member_state(_spec(), victim, factory._member_state_dir(victim))
+            factory._prepare_member_state(_spec(), victim, member_state_dir(victim))
         # The poisoned tree is still at the home's path, and still refused.
         assert (home / "config.toml").read_text() == "evil"
 
@@ -3239,8 +3224,8 @@ def test_a_clean_home_and_a_fork_copy_pass_the_every_start_check(_multi_uid_stat
         _launch("athr_source", native_session_id="native-source", slot=0), runtime_id="opencode"
     )
     child = replace(_launch("athr_child", native_session_id=None, slot=2), runtime_id="opencode")
-    factory._prepare_member_state(_spec(), source, factory._member_state_dir(source))
-    source_home = manager.local(factory._member_state_dir(source))
+    factory._prepare_member_state(_spec(), source, member_state_dir(source))
+    source_home = manager.local(member_state_dir(source))
     written = _as_member(
         manager,
         victim_uid(source),
@@ -3248,12 +3233,12 @@ def test_a_clean_home_and_a_fork_copy_pass_the_every_start_check(_multi_uid_stat
         str(source_home),
     )
     assert written.returncode == 0, written.stderr
-    factory._prepare_member_state(_spec(), source, factory._member_state_dir(source))
+    factory._prepare_member_state(_spec(), source, member_state_dir(source))
 
     factory._clone_private_member_state(_spec(), source, child)
-    factory._prepare_member_state(_spec(), child, factory._member_state_dir(child))
+    factory._prepare_member_state(_spec(), child, member_state_dir(child))
 
-    child_home = manager.local(factory._member_state_dir(child))
+    child_home = manager.local(member_state_dir(child))
     assert {path.lstat().st_uid for path in [child_home, *child_home.rglob("*")]} == {
         victim_uid(child)
     }
@@ -3306,8 +3291,8 @@ def test_codex_preparing_journal_recovers_one_persisted_child_without_refork(mon
         },
     )
     monkeypatch.setattr(
-        factory,
-        "_codex_fork_children",
+        codex_member,
+        "fork_children",
         lambda *_args, **_kwargs: {"native-old-child", "native-recovered-child"},
     )
     monkeypatch.setattr(
@@ -3362,9 +3347,9 @@ def test_http_native_fork_flushes_and_clones_private_provider_state(monkeypatch,
     writes: list[dict[str, object]] = []
     monkeypatch.setattr(factory, "_read_fork_journal", lambda *_args: None)
     monkeypatch.setattr(
-        factory,
-        "_clear_http_member_locks",
-        lambda _spec, launch: lifecycle.append(f"clear:{launch.thread_id}"),
+        http_member,
+        "clear_member_locks",
+        lambda _manager, _spec, launch: lifecycle.append(f"clear:{launch.thread_id}"),
     )
     monkeypatch.setattr(
         factory,
@@ -3413,14 +3398,14 @@ def test_claude_fork_flushes_the_source_before_reading_its_historical_boundary(m
     monkeypatch.setattr(factory, "_read_fork_journal", lambda *_args: None)
     monkeypatch.setattr(factory, "_write_fork_journal", lambda *_args: None)
 
-    def fork_claude(spec, source_id, launch, source_native_turn_no):
+    def fork_claude(_manager, spec, source_id, launch, source_native_turn_no):
         assert lifecycle == ["flush"]
         assert spec == _spec()
         assert launch == source_launch
         lifecycle.append((source_id, launch, source_native_turn_no))
         return "native-child"
 
-    monkeypatch.setattr(factory, "_fork_claude", fork_claude)
+    monkeypatch.setattr(claude_member, "fork_session", fork_claude)
 
     child_id = factory.fork_native(
         _spec(),
@@ -3489,19 +3474,18 @@ def test_http_member_lock_cleanup_runs_as_the_source_slot_owner(runtime_id: str)
             return subprocess.CompletedProcess([], 0, stdout=b"", stderr=b"")
 
     manager = LockManager()
-    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
     launch = replace(
         _launch("athr_source", native_session_id="native-source", slot=3),
         runtime_id=runtime_id,
         runtime_version="test-version",
     )
 
-    factory._clear_http_member_locks(_spec(), launch)
+    http_member.clear_member_locks(manager, _spec(), launch)
 
     assert len(manager.calls) == 1
     argv, kwargs = manager.calls[0]
     assert argv[-1] == runtime_id
-    assert argv[-2] == factory._member_state_dir(launch)
+    assert argv[-2] == member_state_dir(launch)
     assert "locks" in argv[2]
     assert kwargs["user_uid"] == 11004
     assert kwargs["user_gid"] == 10001
@@ -3519,7 +3503,7 @@ def _waits_without_sleeping(monkeypatch, supervisor) -> list[float]:
         return False
 
     monkeypatch.setattr(time, "monotonic", lambda: now[0])
-    monkeypatch.setattr(supervisor._condition, "wait", wait)
+    monkeypatch.setattr(supervisor.state.condition, "wait", wait)
     return waits
 
 
@@ -3539,16 +3523,16 @@ def test_a_prompt_waits_out_a_group_transition_and_names_it_at_the_deadline(
     """A prompt waits up to 30 s, in half-second slices, for the group to settle."""
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
-    register = supervisor.register_manifest
+    register = supervisor._registration.register_manifest
 
     def register_then_transition(*args, **kwargs):
         registered = register(*args, **kwargs)
-        group = supervisor._groups[_spec().sandbox_id]
+        group = supervisor.state.groups[_spec().sandbox_id]
         for transition in transitions:
             setattr(group, transition, True)
         return registered
 
-    monkeypatch.setattr(supervisor, "register_manifest", register_then_transition)
+    monkeypatch.setattr(supervisor._registration, "register_manifest", register_then_transition)
     waits = _waits_without_sleeping(monkeypatch, supervisor)
 
     with pytest.raises(SessionBusy, match=rf"^{message}$"):
@@ -3577,7 +3561,7 @@ def test_a_reference_names_its_kind_when_membership_changes_before_admission(
     def rejoin(group):
         group.members["athr_peer"] = replace(group.members["athr_peer"])
 
-    monkeypatch.setattr(supervisor, "_recover_start_archive_completion", rejoin)
+    monkeypatch.setattr(supervisor._lifecycle, "recover_start_archive_completion", rejoin)
 
     with pytest.raises(
         SessionLeaseLost, match=rf"^shared membership changed before {kind} admission$"
@@ -3594,13 +3578,13 @@ def test_a_reference_names_its_kind_when_the_lifecycle_changes_during_admission(
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
     supervisor.register_manifest(_spec(), _members())
-    ensure_running = supervisor._ensure_running
+    ensure_running = supervisor._lifecycle.ensure_running
 
     def ensure_running_then_restart(group, **kwargs):
         ensure_running(group, **kwargs)
         group.lifecycle_generation += 1
 
-    monkeypatch.setattr(supervisor, "_ensure_running", ensure_running_then_restart)
+    monkeypatch.setattr(supervisor._lifecycle, "ensure_running", ensure_running_then_restart)
 
     with pytest.raises(
         SessionLeaseLost, match=rf"^shared sandbox lifecycle changed during {kind} admission$"
@@ -3613,7 +3597,7 @@ def test_opening_a_reference_keeps_the_group_awake_under_its_own_token(terminal)
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager)
     supervisor.register_manifest(_spec(), _members())
-    group = supervisor._groups[_spec().sandbox_id]
+    group = supervisor.state.groups[_spec().sandbox_id]
     group.idle_deadline = 123.0
 
     opener = supervisor.terminal_opened if terminal else supervisor.operation_opened
@@ -3642,7 +3626,7 @@ def test_the_initial_archive_waits_out_a_lifecycle_check_and_names_it_at_the_dea
         has_settled_context=False,
         manifest=_members(),
     )
-    supervisor._groups[_spec().sandbox_id].lifecycle_check = object()
+    supervisor.state.groups[_spec().sandbox_id].lifecycle_check = object()
     supervisor.initial_archive_wait_s = 2.0
     waits = _waits_without_sleeping(monkeypatch, supervisor)
 
@@ -3663,14 +3647,16 @@ def test_the_initial_archive_waits_out_a_lifecycle_check_begun_under_its_barrier
         has_settled_context=False,
         manifest=_members(),
     )
-    group = supervisor._groups[_spec().sandbox_id]
-    admit = supervisor._require_initial_archive_admission
+    group = supervisor.state.groups[_spec().sandbox_id]
+    admit = supervisor._initial_archive._require_initial_archive_admission
 
     def admit_then_begin_a_check(*args, **kwargs):
         admit(*args, **kwargs)
         group.lifecycle_check = object()
 
-    monkeypatch.setattr(supervisor, "_require_initial_archive_admission", admit_then_begin_a_check)
+    monkeypatch.setattr(
+        supervisor._initial_archive, "_require_initial_archive_admission", admit_then_begin_a_check
+    )
     supervisor.initial_archive_wait_s = 2.0
     waits = _waits_without_sleeping(monkeypatch, supervisor)
 
@@ -3693,7 +3679,7 @@ def test_the_initial_archive_waits_for_open_terminals_behind_its_barrier(monkeyp
         has_settled_context=False,
         manifest=_members(),
     )
-    group = supervisor._groups[_spec().sandbox_id]
+    group = supervisor.state.groups[_spec().sandbox_id]
     group.terminal_tokens["terminal-before-barrier"] = "athr_peer"
     supervisor.initial_archive_wait_s = 2.0
     waits = _waits_without_sleeping(monkeypatch, supervisor)
@@ -4173,7 +4159,7 @@ def test_a_failed_stop_docker_cannot_inspect_leaves_the_group_unlost():
         supervisor.stop_if_idle("athr_source", generation=1)
     manager.down = False
 
-    group = supervisor._members["athr_source"]
+    group = supervisor.state.members["athr_source"]
     assert group.container_lost is False
     assert group.stopping is False
     assert group.idle_deadline is not None
@@ -4208,7 +4194,7 @@ def test_a_group_lost_in_a_failed_stop_is_never_armed_to_stop_again():
     supervisor.register_manifest(other, [replace(_members()[0], thread_id=other.thread_id)])
     with pytest.raises(SandboxError, match="docker stop failed"):
         supervisor.stop_if_idle("athr_source", generation=1)
-    lost = supervisor._members["athr_source"]
+    lost = supervisor.state.members["athr_source"]
     assert lost.container_lost is True
     assert lost.idle_deadline is None
     token, _ = supervisor.operation_opened(other.thread_id)
@@ -4307,12 +4293,12 @@ def _archive_shutdown_group(
         assert manager.network.network_for(_spec) in inspection.networks
         events.append("archive")
 
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
         transport_factory=factory,
-        stopped_archive_prepare_hook=prepare,
-        stopped_archive_invalidate_hook=invalidate,
-        stopped_archive_hook=archive,
+        prepare_final=prepare,
+        invalidate_final=invalidate,
+        stopped=archive,
     )
     supervisor.register_manifest(_spec(), _members())
     lease = supervisor.acquire(
@@ -4394,7 +4380,7 @@ def test_shutdown_flush_failure_skips_the_final_archive_and_finishes_the_stop() 
     current = manager.items[_spec().container_name]
     assert current.running is False
     assert current.networks == ()
-    group = supervisor._members["athr_source"]
+    group = supervisor.state.members["athr_source"]
     assert group.stop_archive_pending is False
     assert group.stop_archive_blocked is False
 
@@ -4427,7 +4413,7 @@ def test_flush_failure_blocks_mutations_even_when_docker_stop_raises() -> None:
     supervisor.stop_all_for_shutdown()
     assert manager.items[_spec().container_name].running is False
     assert manager.items[_spec().container_name].networks == ()
-    assert supervisor._members["athr_source"].stop_archive_blocked is False
+    assert supervisor.state.members["athr_source"].stop_archive_blocked is False
 
 
 def test_network_guard_exact_stops_a_running_native_flush_blocked_group() -> None:
@@ -4454,7 +4440,7 @@ def test_network_guard_exact_stops_a_running_native_flush_blocked_group() -> Non
     current = manager.items[_spec().container_name]
     assert current.running is False
     assert current.networks == ()
-    assert supervisor._members["athr_source"].stop_archive_blocked is False
+    assert supervisor.state.members["athr_source"].stop_archive_blocked is False
 
 
 def test_network_guard_stops_every_group_before_the_first_final_upload_completes() -> None:
@@ -4473,7 +4459,7 @@ def test_network_guard_stops_every_group_before_the_first_final_upload_completes
             assert release_first_upload.wait(timeout=2)
         archived.append(spec.sandbox_id)
 
-    supervisor = SharedChatSessionSupervisor(manager, stopped_archive_hook=archive)
+    supervisor = hooked_supervisor(manager, stopped=archive)
     supervisor.register_manifest(
         first,
         _members(),
@@ -4536,10 +4522,10 @@ def test_network_guard_stages_a_running_pending_group_before_its_upload() -> Non
             assert release_first_upload.wait(timeout=2)
         archived.append(spec.sandbox_id)
 
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=lambda *_args: None,
-        stopped_archive_hook=archive,
+        prepare_final=lambda *_args: None,
+        stopped=archive,
     )
     supervisor.register_manifest(
         first,
@@ -4623,11 +4609,11 @@ def test_network_guard_prepare_failure_exact_stops_and_skips_the_upload() -> Non
         # The controller reads the skipped marker and uploads nothing.
         events.append("archive:skipped")
 
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=prepare,
-        stopped_archive_invalidate_hook=invalidate,
-        stopped_archive_hook=archive,
+        prepare_final=prepare,
+        invalidate_final=invalidate,
+        stopped=archive,
     )
     supervisor.register_manifest(
         spec,
@@ -4644,7 +4630,7 @@ def test_network_guard_prepare_failure_exact_stops_and_skips_the_upload() -> Non
     assert current.networks == ()
     # Phase two finds the completed skip and only releases what remains.
     assert events == ["prepare", "invalidate:running", "archive:skipped", "archive:skipped"]
-    assert supervisor._members[spec.thread_id].stop_archive_blocked is False
+    assert supervisor.state.members[spec.thread_id].stop_archive_blocked is False
 
 
 def test_flush_block_persistence_failure_still_stops_and_fences_admission() -> None:
@@ -4681,12 +4667,12 @@ def test_restart_reconcile_stops_a_blocked_running_orphan_without_archiving() ->
     spec = _spec()
     manager.items[spec.container_name] = manager._inspection(spec, running=True)
     archive_calls: list[object] = []
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=lambda *_args: (_ for _ in ()).throw(
+        prepare_final=lambda *_args: (_ for _ in ()).throw(
             SandboxArchiveBlocked("native flush failure")
         ),
-        stopped_archive_hook=lambda *args: archive_calls.append(args),
+        stopped=lambda *args: archive_calls.append(args),
     )
 
     descriptors = supervisor.reconcile()
@@ -4779,12 +4765,12 @@ def test_durable_flush_skip_survives_stop_failure_and_replacement_controller() -
     first_controller.start()
     first_controller.apply(policy)
     factory = _TransportFactory()
-    first = SharedChatSessionSupervisor(
+    first = hooked_supervisor(
         manager,
         transport_factory=factory,
-        stopped_archive_prepare_hook=first_controller.prepare_final,
-        stopped_archive_invalidate_hook=first_controller.invalidate_final,
-        stopped_archive_hook=first_controller.queue_final,
+        prepare_final=first_controller.prepare_final,
+        invalidate_final=first_controller.invalidate_final,
+        stopped=first_controller.queue_final,
     )
     first.register_manifest(_spec(), _members())
     lease = first.acquire(
@@ -4824,11 +4810,11 @@ def test_durable_flush_skip_survives_stop_failure_and_replacement_controller() -
     replacement_controller = controller()
     replacement_controller.start()
     replacement_controller.apply(policy)
-    replacement = SharedChatSessionSupervisor(
+    replacement = hooked_supervisor(
         manager,
-        stopped_archive_prepare_hook=replacement_controller.prepare_final,
-        stopped_archive_invalidate_hook=replacement_controller.invalidate_final,
-        stopped_archive_hook=replacement_controller.queue_final,
+        prepare_final=replacement_controller.prepare_final,
+        invalidate_final=replacement_controller.invalidate_final,
+        stopped=replacement_controller.queue_final,
     )
 
     descriptors = replacement.reconcile()
@@ -4838,7 +4824,7 @@ def test_durable_flush_skip_survives_stop_failure_and_replacement_controller() -
     assert descriptors[0].running is False
     assert manager.items[_spec().container_name].networks == ()
     assert all(service.final_calls == 0 for service in services)
-    group = replacement._members[_spec().thread_id]
+    group = replacement.state.members[_spec().thread_id]
     assert group.stop_archive_pending is False
     assert group.stop_archive_blocked is False
     lease = replacement.acquire(
@@ -4864,7 +4850,7 @@ def test_cold_acquire_accepts_an_absent_final_marker_and_completes_the_start_fen
             self.marker_writes = 0
             self.marker_clears = 0
 
-        def _require(self, spec: ChatSandboxSpec) -> ChatSandboxInspection:
+        def require(self, spec: ChatSandboxSpec) -> ChatSandboxInspection:
             return self.items[spec.container_name]
 
         def read_final_archive_marker(self, spec, *, expected_container_id) -> bytes:
@@ -4880,7 +4866,7 @@ def test_cold_acquire_accepts_an_absent_final_marker_and_completes_the_start_fen
             )
 
         def export_archive(self, spec, path, destination, **kwargs) -> int:
-            current = self._require(spec)
+            current = self.require(spec)
             assert current.container_id == kwargs["expected_container_id"]
             assert current.running is False
             assert path == f"{INITIAL_ARCHIVE_MARKER_ROOT}/{FINAL_ARCHIVE_MARKER_NAME}"
@@ -4914,7 +4900,7 @@ def test_cold_acquire_accepts_an_absent_final_marker_and_completes_the_start_fen
             return current
 
         def clear_final_archive_marker(self, spec, *, expected_container_id) -> None:
-            current = self._require(spec)
+            current = self.require(spec)
             assert current.container_id == expected_container_id
             assert current.running is True
             self.marker = None
@@ -4929,10 +4915,10 @@ def test_cold_acquire_accepts_an_absent_final_marker_and_completes_the_start_fen
     controller = SandboxArchiveController(manager, namespace="pool-east")
     controller.start()
     controller.apply(SandboxArchivePolicy(enabled=False, revision=1).as_dict())
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        starting_archive_prepare_hook=controller.prepare_start,
-        started_archive_hook=controller.complete_start,
+        prepare_start=controller.prepare_start,
+        started=controller.complete_start,
     )
     try:
         cold = supervisor.acquire(
@@ -5002,10 +4988,10 @@ def test_archive_start_fence_runs_only_for_a_stopped_to_running_transition() -> 
     )
     controller.start()
     controller.apply(SandboxArchivePolicy(enabled=False, revision=1).as_dict())
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        starting_archive_prepare_hook=controller.prepare_start,
-        started_archive_hook=controller.complete_start,
+        prepare_start=controller.prepare_start,
+        started=controller.complete_start,
     )
     supervisor.register_manifest(_spec(), _members())
     manager.stop(_spec(), release_networks=False)
@@ -5055,10 +5041,10 @@ def test_failed_start_marker_completion_is_retried_in_place_before_workspace_wor
         if completions == 1:
             raise RuntimeError("marker clear failed")
 
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        starting_archive_prepare_hook=prepare,
-        started_archive_hook=complete,
+        prepare_start=prepare,
+        started=complete,
     )
     supervisor.register_manifest(_spec(), _members())
     manager.stop(_spec(), release_networks=False)
@@ -5158,4 +5144,4 @@ def test_initial_archive_waits_out_a_concurrent_start_and_workspace_request() ->
     assert not capturing.is_alive()
     assert "error" not in outcome
     assert captured.is_set()
-    assert supervisor._members["athr_source"].snapshotting is False
+    assert supervisor.state.members["athr_source"].snapshotting is False

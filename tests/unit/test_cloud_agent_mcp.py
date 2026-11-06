@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from cloud_agent.mcp.protocol import presented_name
-from cloud_agent_host.chat_sandbox_models import MCP_RUNNER_UID_BASE, MCP_SERVICE_UID
+from cloud_agent_host.container.chat_sandbox_models import MCP_RUNNER_UID_BASE, MCP_SERVICE_UID
 from cloud_agent_shared.sandbox_mcp import (
     ALIAS_PATTERN,
     SANDBOX_MCP_COMMANDS,

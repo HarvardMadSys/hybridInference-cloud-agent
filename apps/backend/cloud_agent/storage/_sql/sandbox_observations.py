@@ -21,8 +21,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent.domain.sandbox_group import DELETED_GROUP_STATES, GroupState
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.storage._sql.hosts import DELETED_GROUP_STATES
 from cloud_agent_shared.sandbox_resources import parse_sandbox_resource_sample
 
 if TYPE_CHECKING:
@@ -339,10 +339,10 @@ async def record_running_container(
     row = await conn.fetchrow(
         f"""
         UPDATE agent_sandboxes
-        SET state = 'running', idle_deadline = {deadline_sql},
+        SET state = {GroupState.RUNNING.sql}, idle_deadline = {deadline_sql},
             restore_checkpoint_id = NULL, updated_at = NOW()
         WHERE id = $1
-          AND (state <> 'running'
+          AND (state <> {GroupState.RUNNING.sql}
                OR idle_deadline IS DISTINCT FROM {deadline_sql}
                OR restore_checkpoint_id IS NOT NULL)
         RETURNING state
@@ -368,13 +368,16 @@ async def record_stopped_container(conn: Any, group: Mapping[str, Any]) -> str |
         await conn.execute(MEMBERS_STOPPED_SQL, group["id"])
         return None
     row = await conn.fetchrow(
-        """
+        f"""
         UPDATE agent_sandboxes
-        SET state = 'stopped', idle_deadline = NULL,
+        SET state = {GroupState.STOPPED.sql}, idle_deadline = NULL,
             stop_requested_at = NULL, updated_at = NOW()
         WHERE id = $1 AND (
-            state IN ('stopped', 'stopping', 'stopped_dirty', 'lost')
-            OR (state = 'running' AND idle_deadline IS NOT NULL
+            state IN (
+                {GroupState.STOPPED.sql}, {GroupState.STOPPING.sql},
+                {GroupState.STOPPED_DIRTY.sql}, {GroupState.LOST.sql}
+            )
+            OR (state = {GroupState.RUNNING.sql} AND idle_deadline IS NOT NULL
                 AND idle_deadline <= clock_timestamp())
         )
         RETURNING state

@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from cloud_agent.command_executions import (
+from cloud_agent.context.command_executions import (
     MAX_COMMAND_CHARS,
     MAX_OUTPUT_PREVIEW,
     SLOW_COMMAND_MS,

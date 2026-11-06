@@ -50,7 +50,7 @@ def _local_up(tmp_path: Path, *, check_status: int) -> tuple[subprocess.Complete
         'printf "%s\\n" "$*" >>"$COMPOSE_LOG"\n'
         'case "$*" in\n'
         "  *' exec -T postgres pg_isready') exit 0 ;;\n"
-        f"  *' migrate python -m cloud_agent.identity_namespace --check') exit {check_status} ;;\n"
+        f"  *' migrate python -m cloud_agent.deployment.identity_namespace --check') exit {check_status} ;;\n"
         # The full stack is where this test stops: nothing after it is asked.
         "  *' up --detach --no-build') exit 23 ;;\n"
         "  *) exit 0 ;;\n"
@@ -81,7 +81,9 @@ def test_local_up_checks_the_database_read_only_before_migrating_it(tmp_path: Pa
     probe = next(
         index for index, call in enumerate(calls) if " run --rm --no-deps migrate python -c" in call
     )
-    check = first(" run --rm --no-deps migrate python -m cloud_agent.identity_namespace --check")
+    check = first(
+        " run --rm --no-deps migrate python -m cloud_agent.deployment.identity_namespace --check"
+    )
     migrate = first(" run --rm --no-deps migrate")
     assert probe < check < migrate
     assert any(call.endswith(" up --detach --no-build") for call in calls[migrate:])

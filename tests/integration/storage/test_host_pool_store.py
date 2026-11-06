@@ -22,7 +22,7 @@ import pytest_asyncio
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations
 
-from cloud_agent.host_pool import (
+from cloud_agent.domain.host_pool import (
     HOST_DISABLED,
     HOST_DRAINING,
     HOST_ENROLLING,

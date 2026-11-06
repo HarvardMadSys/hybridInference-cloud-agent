@@ -196,7 +196,42 @@ def _operation_name(method: str, path: str) -> str:
     return "provider.request"
 
 
-def _error_reason_code(response: httpx.Response) -> str:  # noqa: C901, PLR0912 complexity baseline, #771
+def _error_text_parts(body: dict[str, Any]) -> list[str]:
+    """The public message strings of a provider error body."""
+    error_parts: list[str] = []
+    for key in ("error", "message", "detail"):
+        value = body.get(key)
+        if isinstance(value, str):
+            error_parts.append(value)
+        elif isinstance(value, list):
+            # FastAPI validation responses put field messages in a list of
+            # objects. Read only their public message field; never inspect
+            # or retain ``input``, which can echo submitted credentials.
+            error_parts.extend(
+                item["msg"]
+                for item in value
+                if isinstance(item, dict) and isinstance(item.get("msg"), str)
+            )
+    return error_parts
+
+
+def _rejected_request_code(status: int, text: str) -> str:
+    """Classify a 400 or 422 by its normalized message text."""
+    if "not a hash reference" in text or (
+        any(word in text for word in ("binding", "parameter"))
+        and any(word in text for word in ("invalid", "unknown", "required", "not a"))
+    ):
+        return "invalid_profile_binding"
+    if "profile" in text:
+        return "profile_rejected"
+    if "project" in text and any(word in text for word in ("permission", "member", "denied")):
+        return "project_access_denied"
+    if status == 422:
+        return "invalid_parameter"
+    return "invalid_request"
+
+
+def _error_reason_code(response: httpx.Response) -> str:
     """Map bounded provider text to a stable reason code; never return that text."""
     status = response.status_code
     if status in {401, 403}:
@@ -219,20 +254,7 @@ def _error_reason_code(response: httpx.Response) -> str:  # noqa: C901, PLR0912 
             "reservation_conflict",
         }:
             return code
-        error_parts: list[str] = []
-        for key in ("error", "message", "detail"):
-            value = body.get(key)
-            if isinstance(value, str):
-                error_parts.append(value)
-            elif isinstance(value, list):
-                # FastAPI validation responses put field messages in a list of
-                # objects. Read only their public message field; never inspect
-                # or retain ``input``, which can echo submitted credentials.
-                error_parts.extend(
-                    item["msg"]
-                    for item in value
-                    if isinstance(item, dict) and isinstance(item.get("msg"), str)
-                )
+        error_parts = _error_text_parts(body)
     else:
         error_parts = []
     text = " ".join(" ".join(part.split()) for part in error_parts).lower()
@@ -243,18 +265,7 @@ def _error_reason_code(response: httpx.Response) -> str:  # noqa: C901, PLR0912 
             return "capacity_unavailable"
         return "rate_limited_or_capacity"
     if status in {400, 422}:
-        if "not a hash reference" in text or (
-            any(word in text for word in ("binding", "parameter"))
-            and any(word in text for word in ("invalid", "unknown", "required", "not a"))
-        ):
-            return "invalid_profile_binding"
-        if "profile" in text:
-            return "profile_rejected"
-        if "project" in text and any(word in text for word in ("permission", "member", "denied")):
-            return "project_access_denied"
-        if status == 422:
-            return "invalid_parameter"
-        return "invalid_request"
+        return _rejected_request_code(status, text)
     if status >= 500:
         return "provider_server_error"
     return "http_rejected"
@@ -415,6 +426,33 @@ def _diagnostic_context(
             context["requested_hardware"] = value
             break
     return context
+
+
+def _acquire_payload(
+    config: CloudLabConfig, request: AcquireRequest, *, name: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The outgoing bindings and experiment request body for one acquisition."""
+    bindings = dict(config.bindings)
+    if config.host_key_source == "registration":
+        if request.registration is None:
+            raise ProviderError("registration_unavailable", "Node registration is not configured")
+        # Only the outgoing request carries the token; the persisted
+        # configuration below never does.
+        bindings[REGISTRATION_URL_BINDING] = request.registration.url
+        bindings[REGISTRATION_TOKEN_BINDING] = request.registration.token.get_secret_value()
+    payload = {
+        "name": name,
+        "project": config.project,
+        "profile_name": config.profile_name,
+        "profile_project": config.profile_project,
+        "duration": config.duration,
+        "bindings": _wire_bindings(bindings),
+    }
+    if config.group:
+        payload["group"] = config.group
+    if config.ssh_public_key:
+        payload["sshpubkey"] = config.ssh_public_key
+    return bindings, payload
 
 
 class CloudLabProvider(ComputeProvider):
@@ -772,7 +810,7 @@ class CloudLabProvider(ComputeProvider):
             ),
         )
 
-    async def acquire(self, request: AcquireRequest, intent: OperationIntent) -> ProviderReceipt:  # noqa: PLR0912 complexity baseline, #771
+    async def acquire(self, request: AcquireRequest, intent: OperationIntent) -> ProviderReceipt:
         """Execute the persisted acquisition intent and return its acknowledgement."""
         validated = self.validate_config(request.mode, request.config)
         config = CloudLabConfig.model_validate(validated)
@@ -786,28 +824,7 @@ class CloudLabProvider(ComputeProvider):
         # No vendor idempotency key exists. The orchestrator must call this
         # only on an unsent persisted intent; recovery must never re-POST it.
         name = config.name or "ca-" + intent.allocation_id.replace("-", "")[:13]
-        bindings = dict(config.bindings)
-        if config.host_key_source == "registration":
-            if request.registration is None:
-                raise ProviderError(
-                    "registration_unavailable", "Node registration is not configured"
-                )
-            # Only the outgoing request carries the token; the persisted
-            # configuration below never does.
-            bindings[REGISTRATION_URL_BINDING] = request.registration.url
-            bindings[REGISTRATION_TOKEN_BINDING] = request.registration.token.get_secret_value()
-        payload = {
-            "name": name,
-            "project": config.project,
-            "profile_name": config.profile_name,
-            "profile_project": config.profile_project,
-            "duration": config.duration,
-            "bindings": _wire_bindings(bindings),
-        }
-        if config.group:
-            payload["group"] = config.group
-        if config.ssh_public_key:
-            payload["sshpubkey"] = config.ssh_public_key
+        bindings, payload = _acquire_payload(config, request, name=name)
         context = _diagnostic_context(
             config,
             operation_id=intent.operation_id,
@@ -1018,7 +1035,72 @@ class CloudLabProvider(ComputeProvider):
             provider_request_id=response.headers.get("x-request-id"),
         )
 
-    async def _nodes(  # noqa: C901, PLR0912 complexity baseline, #771
+    async def _manifest_logins(
+        self, ref: ResourceRef, config: CloudLabConfig
+    ) -> dict[tuple[str, str], tuple[str, int]]:
+        """Read each node's SSH login for the configured user from the manifests."""
+        logins: dict[tuple[str, str], tuple[str, int]] = {}
+        path = f"/experiments/{ref.external_id}/manifests"
+        diagnostic_context = _diagnostic_context(config, external_id=ref.external_id)
+        manifest_response = await self._request(
+            "GET",
+            path,
+            config.credential_ref,
+            diagnostic_context=diagnostic_context,
+        )
+        manifests = self._json(
+            manifest_response,
+            method="GET",
+            path=path,
+            diagnostic_context=diagnostic_context,
+        )
+        for aggregate_id, manifest in manifests.items():
+            if (
+                not isinstance(manifest, str)
+                or len(manifest) > 2 * 1024 * 1024
+                or "<!DOCTYPE" in manifest.upper()
+                or "<!ENTITY" in manifest.upper()
+            ):
+                raise ProviderError(
+                    "invalid_response",
+                    "CloudLab returned an invalid manifest",
+                    diagnostics=self._response_diagnostics(
+                        manifest_response,
+                        "GET",
+                        path,
+                        diagnostic_context,
+                        reason_code="invalid_manifest",
+                    ),
+                )
+            try:
+                root = ElementTree.fromstring(manifest)
+                for node in root.findall("{*}node"):
+                    for login in node.findall("{*}services/{*}login"):
+                        if (
+                            login.get("authentication") == "ssh-keys"
+                            and login.get("username") == config.ssh_username
+                        ):
+                            address, port = login.get("hostname"), int(login.get("port", "22"))
+                            if address:
+                                logins[(aggregate_id, str(node.get("client_id")))] = (
+                                    address,
+                                    port,
+                                )
+            except (ElementTree.ParseError, ValueError):
+                raise ProviderError(
+                    "invalid_response",
+                    "CloudLab returned an invalid SSH manifest",
+                    diagnostics=self._response_diagnostics(
+                        manifest_response,
+                        "GET",
+                        path,
+                        diagnostic_context,
+                        reason_code="invalid_ssh_manifest",
+                    ),
+                ) from None
+        return logins
+
+    async def _nodes(
         self, ref: ResourceRef, config: CloudLabConfig, data: dict[str, Any], ready: bool
     ) -> tuple[list[NodeObservation], bool]:
         aggregates = data.get("aggregates")
@@ -1026,64 +1108,7 @@ class CloudLabProvider(ComputeProvider):
             return [], False
         logins: dict[tuple[str, str], tuple[str, int]] = {}
         if ready and config.ssh_username:
-            path = f"/experiments/{ref.external_id}/manifests"
-            diagnostic_context = _diagnostic_context(config, external_id=ref.external_id)
-            manifest_response = await self._request(
-                "GET",
-                path,
-                config.credential_ref,
-                diagnostic_context=diagnostic_context,
-            )
-            manifests = self._json(
-                manifest_response,
-                method="GET",
-                path=path,
-                diagnostic_context=diagnostic_context,
-            )
-            for aggregate_id, manifest in manifests.items():
-                if (
-                    not isinstance(manifest, str)
-                    or len(manifest) > 2 * 1024 * 1024
-                    or "<!DOCTYPE" in manifest.upper()
-                    or "<!ENTITY" in manifest.upper()
-                ):
-                    raise ProviderError(
-                        "invalid_response",
-                        "CloudLab returned an invalid manifest",
-                        diagnostics=self._response_diagnostics(
-                            manifest_response,
-                            "GET",
-                            path,
-                            diagnostic_context,
-                            reason_code="invalid_manifest",
-                        ),
-                    )
-                try:
-                    root = ElementTree.fromstring(manifest)
-                    for node in root.findall("{*}node"):
-                        for login in node.findall("{*}services/{*}login"):
-                            if (
-                                login.get("authentication") == "ssh-keys"
-                                and login.get("username") == config.ssh_username
-                            ):
-                                address, port = login.get("hostname"), int(login.get("port", "22"))
-                                if address:
-                                    logins[(aggregate_id, str(node.get("client_id")))] = (
-                                        address,
-                                        port,
-                                    )
-                except (ElementTree.ParseError, ValueError):
-                    raise ProviderError(
-                        "invalid_response",
-                        "CloudLab returned an invalid SSH manifest",
-                        diagnostics=self._response_diagnostics(
-                            manifest_response,
-                            "GET",
-                            path,
-                            diagnostic_context,
-                            reason_code="invalid_ssh_manifest",
-                        ),
-                    ) from None
+            logins = await self._manifest_logins(ref, config)
         result: list[NodeObservation] = []
         complete = ready
         identities: set[str] = set()

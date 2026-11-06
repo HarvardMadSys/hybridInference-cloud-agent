@@ -32,7 +32,7 @@ from typing import Any
 
 import pytest
 
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     _GUEST_NETWORK_CHECK,
     CHAT_BOOTSTRAP_NETWORK,
     CHAT_NAMESPACE_LABEL,
@@ -49,8 +49,8 @@ from cloud_agent_host.chat_sandbox import (
     RetainedChatFailStopped,
     RetainedChatLost,
 )
-from cloud_agent_host.network_guard import HostNetworkGuard
-from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
+from cloud_agent_host.container.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
+from cloud_agent_host.network.network_guard import HostNetworkGuard
 from cloud_agent_shared.egress import SandboxNetwork, network_from_env
 
 _NAMESPACE = "this-stack"
@@ -442,7 +442,7 @@ def _world(monkeypatch, *, runtime: str | None = None, config: SandboxNetwork | 
     backend._network_guard = guard  # type: ignore[assignment]
     manager = ChatSandboxManager(backend)
     docker = FakeDocker(config)
-    monkeypatch.setattr(manager, "_run", docker)
+    monkeypatch.setattr(manager.exact, "run", docker)
     return manager, docker, guard
 
 
@@ -707,7 +707,7 @@ def test_first_activation_moves_the_sandbox_off_the_dormant_bootstrap_bridge(mon
     bootstrap = docker.add_network(CHAT_BOOTSTRAP_NETWORK, subnet="172.17.0.0/16")
     docker.connect(bootstrap["Id"], "sandbox-container", [])
 
-    moved = manager._network_lifecycle._require_group_network(spec, manager._require(spec))
+    moved = manager._network_lifecycle._require_group_network(spec, manager.exact.require(spec))
 
     assert moved.networks == (manager.network.network_for(spec),)
 
@@ -720,7 +720,7 @@ def test_a_running_sandbox_is_never_rewired_underneath_it(monkeypatch):
     docker.connect(elsewhere["Id"], "sandbox-container", [])
 
     with pytest.raises(SandboxError):
-        manager._network_lifecycle._require_group_network(spec, manager._require(spec))
+        manager._network_lifecycle._require_group_network(spec, manager.exact.require(spec))
     assert "sandbox-container" in docker.network("some-bridge")["endpoints"]
 
 
@@ -742,7 +742,7 @@ def test_a_sandbox_left_on_the_old_per_phase_topology_is_refused_not_adopted(mon
     docker.connect(legacy["Id"], "sandbox-container", [])
 
     with pytest.raises(SandboxError, match="one-time cleanup"):
-        manager._network_lifecycle._require_group_network(spec, manager._require(spec))
+        manager._network_lifecycle._require_group_network(spec, manager.exact.require(spec))
     with pytest.raises(SandboxError, match="one-time cleanup"):
         manager.stop(spec)
     assert docker.network("freeinference-chat-net-oldphase") is not None
@@ -785,7 +785,7 @@ def test_wake_reconnects_a_same_name_bridge_when_docker_kept_the_old_id(monkeypa
     docker.containers["sandbox-container"]["networks"][name]["NetworkID"] = "deleted-network-id"
     network["endpoints"].pop("sandbox-container")
 
-    refreshed = manager._network_lifecycle._require_group_network(spec, manager._require(spec))
+    refreshed = manager._network_lifecycle._require_group_network(spec, manager.exact.require(spec))
 
     assert ["docker", "network", "connect", name, "sandbox-container"] in docker.calls
     assert refreshed.networks == (name,)
@@ -934,7 +934,7 @@ def test_cold_start_rechecks_host_rules_after_guest_proof(monkeypatch):
 
 def test_a_create_warms_the_helper_and_its_start_leaves_renewal_to_the_sweep(monkeypatch):
     """The start's read-back reads the kernel; renewing the verification is the sweep's."""
-    from cloud_agent_host.network_guard import GUARD_RECHECK_S, GUARD_RENEW_S
+    from cloud_agent_host.network.network_guard import GUARD_RECHECK_S, GUARD_RENEW_S
 
     manager, docker, guard = _world(monkeypatch)
     docker.add_network(CHAT_BOOTSTRAP_NETWORK, subnet="172.17.0.0/16")
@@ -1036,7 +1036,7 @@ def test_a_guest_that_could_not_be_stopped_is_proved_before_it_is_reused(monkeyp
             return subprocess.CompletedProcess(argv, 1, "", "daemon busy")
         return docker(argv, **kwargs)
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
 
     with pytest.raises(SandboxError, match="timed out") as failed:
         manager.start(spec)
@@ -1109,7 +1109,7 @@ def test_a_kata_guest_is_given_its_relays_and_the_one_resolver(monkeypatch):
         ),
     )
 
-    manager._network_lifecycle._sync_kata_guest_network(spec, manager._require(spec))
+    manager._network_lifecycle._sync_kata_guest_network(spec, manager.exact.require(spec))
 
     argv = captured[0]
     assert argv[:3] == ["python3", "-I", "-c"]
@@ -1246,7 +1246,7 @@ def test_relay_replacement_during_reconciliation_refuses_old_addresses(monkeypat
                 docker.connect(relays["Id"], "relay-mcp-new", ["agent-mcp"])
         return docker(argv, **kwargs)
 
-    monkeypatch.setattr(manager, "_run", replace_during_discovery)
+    monkeypatch.setattr(manager.exact, "run", replace_during_discovery)
     with pytest.raises(SandboxError, match="relay owners changed"):
         manager.require_network(spec)
     assert guard.events.count("sync_relays") == previous_syncs
@@ -1278,7 +1278,7 @@ def test_relay_endpoint_change_is_detected_by_the_final_discovery(monkeypatch, c
                     networks.pop(name)
         return docker(argv, **kwargs)
 
-    monkeypatch.setattr(manager, "_run", change_endpoint)
+    monkeypatch.setattr(manager.exact, "run", change_endpoint)
     with pytest.raises(SandboxError, match="relay endpoint changed"):
         manager.require_network(spec)
     assert guard.events.count("sync_relays") == previous_syncs
@@ -1323,7 +1323,7 @@ def test_attach_discards_network_evidence_from_before_connection(monkeypatch, ra
                 )
         return result
 
-    monkeypatch.setattr(manager, "_run", connect_then_change)
+    monkeypatch.setattr(manager.exact, "run", connect_then_change)
     monkeypatch.setattr(
         manager,
         "_kata_privileged_exec",
@@ -1377,7 +1377,7 @@ def test_guest_network_snapshot_still_checks_files_and_skips_unchanged_writes(
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(manager, "_kata_privileged_exec", run_script)
-    current = manager._require(spec)
+    current = manager.exact.require(spec)
     addresses = {"agent-mcp": "10.240.9.3"}
     manager._network_lifecycle._sync_kata_guest_network(spec, current, addresses)
     unchanged_mtime = 1_000_000_000
@@ -1547,7 +1547,7 @@ def test_release_tolerates_the_null_network_and_an_already_pruned_bridge(monkeyp
     manager, docker, _ = _world(monkeypatch)
     spec = _spec()
     docker.add_sandbox(spec)
-    current = manager._require(spec)
+    current = manager.exact.require(spec)
     null = ChatSandboxInspection(**{**current.__dict__, "networks": (CHAT_NULL_NETWORK,)})
     assert (
         manager._network_lifecycle._release_sandbox_networks(spec, null).container_id
@@ -1566,7 +1566,7 @@ def test_a_live_network_this_chat_does_not_own_is_still_a_violation(monkeypatch)
     other = docker.add_network("operator-network", subnet="172.19.0.0/16")
     docker.connect(other["Id"], "sandbox-container", [])
     with pytest.raises(SandboxError, match="not its group bridge"):
-        manager._network_lifecycle._release_sandbox_networks(spec, manager._require(spec))
+        manager._network_lifecycle._release_sandbox_networks(spec, manager.exact.require(spec))
 
 
 def test_opportunistic_cleanup_never_detaches_a_sandbox_that_attached_meanwhile(monkeypatch):
@@ -1622,7 +1622,7 @@ def test_final_network_release_rejects_a_restart_at_each_exact_read(monkeypatch,
     name, network = _group_bridge(manager, docker, spec)
     docker.connect(network["Id"], original["Id"], [])
     original["running"], original["status"] = False, "exited"
-    require_exact = manager._require_exact
+    require_exact = manager.exact.require_exact
     reads = 0
 
     def restart_at_exact_read(*args, **kwargs):
@@ -1632,7 +1632,7 @@ def test_final_network_release_rejects_a_restart_at_each_exact_read(monkeypatch,
             original["running"], original["status"] = True, "running"
         return require_exact(*args, **kwargs)
 
-    monkeypatch.setattr(manager, "_require_exact", restart_at_exact_read)
+    monkeypatch.setattr(manager.exact, "require_exact", restart_at_exact_read)
     docker.calls.clear()
     with pytest.raises(SandboxError, match=r"running|restarted"):
         manager.release_stopped_networks(spec, expected_container_id=original["Id"])
@@ -1666,7 +1666,7 @@ def test_final_network_release_leaves_a_same_name_bridge_replacement_alone(monke
         manager.release_stopped_networks(spec, expected_container_id=original["Id"])
 
     replacement = docker.network(name)
-    assert manager._require_exact(spec, original["Id"]).networks == (name,)
+    assert manager.exact.require_exact(spec, original["Id"]).networks == (name,)
     assert replacement is not None and replacement["Id"] != old_id
     assert not any(
         call[1:3] in (["network", "disconnect"], ["network", "rm"]) for call in docker.calls

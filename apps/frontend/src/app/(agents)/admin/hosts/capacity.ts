@@ -19,7 +19,7 @@
 //     block arrived after the page did, so a control plane older than it sends
 //     neither the numbers nor a reason, and both must read as "not measured".
 //
-// The server's contract is in `cloud_agent/capacity_protocol.py`; where a name
+// The server's contract is in `cloud_agent/schemas/capacity_protocol.py`; where a name
 // here differs from that module it is deliberate (the chart's `value` is the
 // percentage the curve plots, not the raw field).
 
@@ -1078,7 +1078,7 @@ export function groupCapacityFacts(members: AgentRunnerHost[], elapsedMs = 0): H
  * How old an observation may be before the page stops calling it current.
  *
  * The control plane's own threshold (`FRESH_AFTER_SECONDS` in
- * `cloud_agent/capacity_protocol.py`). Mirrored rather than re-derived: the
+ * `cloud_agent/schemas/capacity_protocol.py`). Mirrored rather than re-derived: the
  * two answer the same question and must not drift, or a host would be stale on
  * one side of the wire and fresh on the other.
  */

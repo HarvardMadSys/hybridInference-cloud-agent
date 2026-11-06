@@ -12,8 +12,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.storage._sql.attempts import lock_live_attempt
 from cloud_agent.storage._sql.events import insert_event
+from cloud_agent.storage._sql.fences import lock_live_attempt
 from cloud_agent.storage._sql.incidents import ADVANCE_INCIDENT_CURSOR_SQL
 from cloud_agent.storage._sql.ledger import NOTIFY_JOB_USAGE_SQL, carries_model_usage
 

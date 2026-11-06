@@ -17,10 +17,14 @@ from typing import TYPE_CHECKING
 import pytest
 from fastapi import HTTPException
 
-from cloud_agent_host import chat_sandbox
-from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
-from cloud_agent_host.sandbox import ContainerBackend, ProcessBackend, SandboxError
-from cloud_agent_host.sandbox_manager import _run_git, _run_git_metadata, _run_sandbox
+from cloud_agent_host.container import chat_sandbox
+from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+from cloud_agent_host.container.sandbox import ContainerBackend, ProcessBackend, SandboxError
+from cloud_agent_host.manager_api.workspace_commands import (
+    _run_git,
+    _run_git_metadata,
+    _run_sandbox,
+)
 from cloud_agent_host.workspace_git import GIT_VIEW_ENV, NEUTRALIZE_GIT_FILTERS
 
 if TYPE_CHECKING:

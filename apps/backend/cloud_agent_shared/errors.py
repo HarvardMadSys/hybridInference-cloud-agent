@@ -7,7 +7,7 @@ the same class when a prepared checkout cannot be archived. It is an ordinary
 dependency and belongs with the rest of the shared vocabulary rather than in
 the host package that gave it its name.
 
-The class is defined here and nowhere else. ``cloud_agent_host.sandbox``
+The class is defined here and nowhere else. ``cloud_agent_host.container.sandbox``
 imports this object and re-exports it, so the host's ``except SandboxError``
 sites and ``TerminalNotSupportedError``'s inheritance keep working unchanged.
 The only thing that changed for a caller is the module path in a traceback.

@@ -13,7 +13,10 @@ from tests.support.ssh_keys import host_key
 
 from cloud_agent.application.ssh_servers import push_ssh_access
 from cloud_agent.domain.ssh_servers import SshServerConflict, SshServerUnavailable
-from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_client import (
+    SandboxManagerClient,
+    SandboxManagerError,
+)
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

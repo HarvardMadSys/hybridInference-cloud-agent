@@ -26,9 +26,9 @@ from typing import Any
 
 import pytest
 
-from cloud_agent import host_pool
+from cloud_agent.domain import host_pool
 from cloud_agent.schemas import HostHeartbeatRequest
-from cloud_agent_host import enrollment, runner
+from cloud_agent_host.service import enrollment, host_capabilities, host_service
 from cloud_agent_shared.shared_protocol import HOST_LAUNCH_ERROR_MAX_CHARS
 
 
@@ -552,9 +552,9 @@ def test_the_runner_watches_the_marker_the_deployment_publishes(monkeypatch) -> 
     """
     monkeypatch.setenv("AGENT_SHARED_LIVE_READY_FILE", "/run/cloud-agent/shared-live-ready")
 
-    assert runner._shared_live_ready_file() == "/run/cloud-agent/shared-live-ready"
+    assert host_capabilities._shared_live_ready_file() == "/run/cloud-agent/shared-live-ready"
 
-    source = pathlib.Path(runner.__file__).read_text()
+    source = pathlib.Path(host_service.__file__).read_text()
     pool = source[source.index("pool = HostHeartbeat(") : source.index("pool.start()")]
     assert "readiness_marker=_shared_live_ready_file()" in pool, (
         "the runner builds its host heartbeat without the marker it was given"

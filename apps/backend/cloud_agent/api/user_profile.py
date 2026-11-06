@@ -13,12 +13,11 @@ from cloud_agent.api._body_limits import payload_too_large, read_bounded_body
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api._sensitive_routes import SensitiveRoute
 from cloud_agent.api.deps import get_owner_directory, get_storage, require_store
-from cloud_agent.user_avatar import generate_user_avatar
-from cloud_agent.user_profile import (
+from cloud_agent.profile.user_avatar import generate_user_avatar
+from cloud_agent.profile.user_profile import (
     MAX_PROFILE_REQUEST_BYTES,
     ProfileConflict,
     ProfileResponse,
-    ProfileView,
     UpdateProfile,
     sanitize_profile_image,
 )
@@ -27,6 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
 
     from cloud_agent.ports.user_profile import UserProfileRepository
+    from cloud_agent.schemas.user_profile import ProfileView
 
 
 class _ProfileRoute(SensitiveRoute):

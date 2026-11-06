@@ -7,7 +7,7 @@ import type { AgentAccessApi } from '@/lib/api/session';
 
 vi.mock('@/lib/api/session', () => ({ getSessionUser: vi.fn(), endSession: vi.fn() }));
 
-import { sideChatKeys } from '@/components/features/agents/sideChatStorage';
+import { sideChatKeys } from '@/components/features/agents/conversation/sideChatStorage';
 import { endSession, getSessionUser } from '@/lib/api/session';
 import { APIError } from '@/lib/utils/errors';
 import { AuthProvider, hasAgentPermission, useAuth } from './AuthProvider';

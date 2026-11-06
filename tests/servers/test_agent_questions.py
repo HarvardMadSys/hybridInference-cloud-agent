@@ -12,7 +12,7 @@ from httpx import ASGITransport, AsyncClient
 from cloud_agent.api import turns
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage
-from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 
 pytestmark = pytest.mark.asyncio
 

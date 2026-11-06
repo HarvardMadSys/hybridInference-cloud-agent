@@ -36,7 +36,7 @@ async def test_workspace_routes_leave_the_network_proof_to_admission(monkeypatch
 
     supervisor.prepare_environment = prepare_environment  # type: ignore[attr-defined]
     monkeypatch.setattr(
-        "cloud_agent_host.sandbox_manager.read_retained_file",
+        "cloud_agent_host.manager_api.workspaces.read_retained_file",
         lambda *_args, **_kwargs: {"path": "", "kind": "directory", "entries": []},
     )
     app = _app(supervisor)

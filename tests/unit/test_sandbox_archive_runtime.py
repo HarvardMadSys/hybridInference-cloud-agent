@@ -10,16 +10,16 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from cloud_agent_host import sandbox_archive_runtime as archive_runtime
-from cloud_agent_host.chat_sandbox_markers import FINAL_ARCHIVE_MARKER_MAX_BYTES
-from cloud_agent_host.sandbox import SandboxError
-from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
-from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveReceipt
-from cloud_agent_host.sandbox_archives import CaptureGate, SandboxInitialArchiveMarker
+from cloud_agent_host.archive import sandbox_archive_runtime as archive_runtime
+from cloud_agent_host.archive.sandbox_archive_runtime import SandboxArchiveController
+from cloud_agent_host.archive.sandbox_archive_s3 import SandboxArchiveReceipt
+from cloud_agent_host.archive.sandbox_archives import CaptureGate, SandboxInitialArchiveMarker
+from cloud_agent_host.container.chat_sandbox_markers import FINAL_ARCHIVE_MARKER_MAX_BYTES
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 if TYPE_CHECKING:
-    from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveS3Config
+    from cloud_agent_host.archive.sandbox_archive_s3 import SandboxArchiveS3Config
 
 _ACCOUNT = "123456789012"
 _REGION = "us-east-1"
@@ -885,7 +885,7 @@ class _CheckpointingService(_Service):
         self.checkpoint_calls: list[tuple[str, int]] = []
         self.fail_checkpoint = False
 
-    def capture_checkpoint(self, spec, _inspection, _members) -> Any:
+    def capture_checkpoint(self, spec, _inspection, _members, *, start_seq=None) -> Any:
         self.checkpoint_calls.append((spec.sandbox_id, spec.generation))
         if self.fail_checkpoint:
             raise RuntimeError("commit failed")

@@ -5,7 +5,7 @@ journal drain in a running group's container, as root in the ``agent`` group:
 the journals are group-readable, and root needs no capability for that.
 ``install_incident_routes`` adds the one route the runner calls, after a
 heartbeat answer confirmed what its beat carried: the sandbox manager forgets
-those rows (``cloud_agent_host.incident_relay``).
+those rows (``cloud_agent_host.service.incident_relay``).
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import Body, Depends
 
-from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.sandbox_incidents import DRAIN_SCRIPT, SandboxIncidents
 
 if TYPE_CHECKING:
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
     from fastapi import FastAPI
 
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
 
 #: One drain is a short read of a few small files.
 DRAIN_TIMEOUT_S = 15

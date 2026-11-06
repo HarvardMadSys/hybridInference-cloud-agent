@@ -26,8 +26,8 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from tests.servers.test_agent_jobs_api import FakeStorage, _build_app, _create_job
 
-from cloud_agent import measurement_ingest
-from cloud_agent.measurement_ingest import MeasurementRejected
+from cloud_agent.measurement import measurement_ingest
+from cloud_agent.measurement.measurement_ingest import MeasurementRejected
 from cloud_agent.tokens import SCOPE_FULL, mint_worker_token
 from cloud_agent_shared import operation_profiling
 

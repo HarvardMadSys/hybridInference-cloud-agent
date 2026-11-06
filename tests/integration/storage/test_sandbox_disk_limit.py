@@ -10,7 +10,7 @@ from tests.integration.storage.test_agent_job_store import (
 from tests.integration.storage.test_schema_upgrade import _db_config
 from tests.support.migrations import apply_migrations, downgrade_to
 
-from cloud_agent.storage.admin_sandbox_queries import AdminSandboxQueries
+from cloud_agent.storage.repositories.admin.sandboxes import PostgresAdminSandboxQueries
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -39,9 +39,11 @@ async def test_disk_limit_is_immutable_and_admin_inventory_reads_the_reserved_va
     for invalid in [-1, 16777217, True, 1.0, "16384"]:
         with pytest.raises(ValueError, match="disk limit"):
             await store.sandbox.reserve_thread_sandbox(**{**reserve, "disk_limit_mib": invalid})
-    detail = await AdminSandboxQueries(pool).detail(sandbox["sandbox_id"])
+    detail = await PostgresAdminSandboxQueries(pool).detail(sandbox["sandbox_id"])
     assert detail is not None and detail.sandbox.disk_limit_mib == 16384
-    page = await AdminSandboxQueries(pool).list_sandboxes(cursor=None, limit=10, state="all")
+    page = await PostgresAdminSandboxQueries(pool).list_sandboxes(
+        cursor=None, limit=10, state="all"
+    )
     assert page.sandboxes[0].disk_limit_mib == 16384
 
 

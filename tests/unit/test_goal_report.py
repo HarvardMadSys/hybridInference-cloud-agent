@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 
+from cloud_agent.domain.goals import GoalReport, GoalReportEnvelope
 from cloud_agent.goals.report import (
     GOAL_REPORT_FENCE,
     MAX_EVIDENCE_CHARS,
@@ -19,8 +20,6 @@ from cloud_agent.goals.report import (
     MAX_REPORT_BYTES,
     REPORT_INVALID_REASONS,
     REPORT_VERSION,
-    GoalReport,
-    GoalReportEnvelope,
     invalid,
     parse_goal_report,
 )

@@ -23,6 +23,7 @@ from cloud_agent.api.deps import (
     require_store,
     verify_admin_access,
 )
+from cloud_agent.api.errors import typed_error
 from cloud_agent.application.teams import (
     admin_audit_events,
     admin_team_detail,
@@ -67,9 +68,7 @@ router = APIRouter(
 
 
 def _not_found(exc: TeamNotFound) -> HTTPException:
-    return HTTPException(
-        status_code=404, detail={"error": {"type": "not_found", "message": exc.message}}
-    )
+    return typed_error(404, "not_found", exc.message)
 
 
 @router.get("", response_model=AdminTeamListResponse)

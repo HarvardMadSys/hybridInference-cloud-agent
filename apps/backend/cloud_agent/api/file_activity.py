@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage, require_store
+from cloud_agent.api.errors import typed_error
 from cloud_agent.file_activity.models import (
     DEFAULT_FILE_PAGE,
     DEFAULT_OPERATION_PAGE,
@@ -51,16 +52,11 @@ router = APIRouter(prefix="/v1/agent", tags=["file-activity"], dependencies=[Dep
 
 
 def _not_found(job_id: str) -> HTTPException:
-    return HTTPException(
-        status_code=404,
-        detail={"error": {"type": "not_found", "message": f"No thread for {job_id}"}},
-    )
+    return typed_error(404, "not_found", f"No thread for {job_id}")
 
 
 def _invalid(message: str) -> HTTPException:
-    return HTTPException(
-        status_code=422, detail={"error": {"type": "invalid_filter", "message": message}}
-    )
+    return typed_error(422, "invalid_filter", message)
 
 
 class FileActivityFilterEcho(BaseModel):

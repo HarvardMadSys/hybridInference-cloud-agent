@@ -11,7 +11,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_host.enrollment import credential_path
+from cloud_agent_host.service.enrollment import credential_path
 from cloud_agent_shared.errors import SandboxError
 from cloud_agent_shared.git.source_archive import (
     DEFAULT_MAX_UPLOAD_ARCHIVE_BYTES,
@@ -23,8 +23,8 @@ ENV_UPLOAD_RECEIPT_DIR = "AGENT_UPLOAD_RECEIPT_DIR"
 
 
 if TYPE_CHECKING:
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
     from cloud_agent_host.claimed_job import ClaimedJob
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
     from cloud_agent_host.control_plane_client import ControlPlane
 
 

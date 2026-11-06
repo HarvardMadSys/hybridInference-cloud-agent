@@ -8,19 +8,19 @@ import pytest
 from tests.integration.storage.test_host_pool_store import db as db
 from tests.support.db import assert_pool_idle
 
-from cloud_agent.admin_observability import decode_cursor, encode_cursor
-from cloud_agent.admin_sandbox_inventory import (
+from cloud_agent.domain.cursors import decode_cursor, encode_cursor
+from cloud_agent.schemas.admin_sandbox_inventory import (
     SandboxInventoryCursor,
     decode_inventory_cursor,
     inventory_scope,
 )
-from cloud_agent.admin_sandboxes import SandboxCursor, sandbox_cursor_scope
-from cloud_agent.storage.admin_sandbox_inventory import (
-    AdminSandboxInventory,
+from cloud_agent.schemas.admin_sandboxes import SandboxCursor, sandbox_cursor_scope
+from cloud_agent.storage.repositories.admin.sandbox_inventory import (
+    PostgresAdminSandboxInventory,
     _capture_pages,
     _prune,
 )
-from cloud_agent.storage.admin_sandbox_queries import AdminSandboxQueries
+from cloud_agent.storage.repositories.admin.sandboxes import PostgresAdminSandboxQueries
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -79,7 +79,7 @@ async def seed(pool, count):
 
 
 async def read(pool, cursor=None, *, limit=200, state="running", include_archived=False):
-    return await AdminSandboxInventory(pool).read(
+    return await PostgresAdminSandboxInventory(pool).read(
         cursor=decode_inventory_cursor(cursor, inventory_scope(state, include_archived, limit)),
         state=state,
         include_archived=include_archived,
@@ -105,7 +105,7 @@ async def test_unchanged_reads_and_bytes_do_not_scale_with_fleet(db, count):
     baseline = CountedPool(db)
     legacy_rows, legacy_cursor, legacy_bytes = [], None, 0
     while True:
-        legacy = await AdminSandboxQueries(baseline).list_sandboxes(
+        legacy = await PostgresAdminSandboxQueries(baseline).list_sandboxes(
             cursor=decode_cursor(legacy_cursor, SandboxCursor, sandbox_cursor_scope("running")),
             limit=200,
             state="running",

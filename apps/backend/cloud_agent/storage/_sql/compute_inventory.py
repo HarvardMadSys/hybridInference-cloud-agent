@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from cloud_agent.domain.sandbox_group import DeletionState
 from cloud_agent.storage._sql import environment_runs
 from cloud_agent.storage._sql.compute_admission import compute_admission
 
@@ -37,7 +38,7 @@ async def load_allocations(conn: Any, decode: RowDecoder) -> list[dict[str, Any]
                (h.slots_used+{environment_runs.env_runs_holding_slots("h.host")}) AS slots_used,
                h.last_heartbeat_at,h.broker_url AS sandbox_manager_url,h.drain_fence_active,
                (SELECT count(*) FROM agent_sandboxes g
-                WHERE g.host=h.host AND g.deletion_state<>'deleted') AS retained_groups
+                WHERE g.host=h.host AND g.deletion_state<>{DeletionState.DELETED.sql}) AS retained_groups
         FROM agent_runner_hosts h JOIN agent_compute_nodes n ON n.id=h.compute_node_id
         WHERE n.allocation_id=ANY($1::text[]) ORDER BY h.host
     """,
@@ -76,7 +77,7 @@ async def load_hosts(conn: Any, allocations: list[dict[str, Any]]) -> list[dict[
                h.slots_total,h.slots_desired,h.last_heartbeat_at,
                h.labels->>'physical_host' AS physical_host,h.broker_url AS sandbox_manager_url,
                (SELECT count(*) FROM agent_sandboxes g
-                WHERE g.host=h.host AND g.deletion_state<>'deleted') AS retained_groups,
+                WHERE g.host=h.host AND g.deletion_state<>{DeletionState.DELETED.sql}) AS retained_groups,
                clock_timestamp() AS database_now,
                EXISTS (SELECT 1 FROM agent_host_admission_holds x WHERE x.host=h.host) AS held,
                EXISTS (SELECT 1 FROM agent_host_admission_holds x

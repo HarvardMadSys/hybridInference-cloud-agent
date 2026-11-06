@@ -12,7 +12,10 @@ from pathlib import Path
 
 import pytest
 
-from cloud_agent_host.other_plugins import _INSTALL_SCRIPT, install_other_runtime_plugins
+from cloud_agent_host.member_setup.other_plugins import (
+    _INSTALL_SCRIPT,
+    install_other_runtime_plugins,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -21,7 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def test_installer_returns_only_explicit_member_paths(monkeypatch, runtime):
     calls = []
     monkeypatch.setattr(
-        "cloud_agent_host.other_plugins.run_plugin_command",
+        "cloud_agent_host.member_setup.other_plugins.run_plugin_command",
         lambda *args, **kwargs: calls.append((args, kwargs)),
     )
     selected = "@example/plugin@1.2.3"
@@ -50,7 +53,7 @@ def test_installer_returns_only_explicit_member_paths(monkeypatch, runtime):
 def test_installer_starts_in_the_workspace_without_importing_from_it(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(
-        "cloud_agent_host.other_plugins.run_plugin_command",
+        "cloud_agent_host.member_setup.other_plugins.run_plugin_command",
         lambda *args, **kwargs: calls.append((args, kwargs)),
     )
     tools = tmp_path / "bin"

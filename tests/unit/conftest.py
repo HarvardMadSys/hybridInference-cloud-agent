@@ -10,7 +10,8 @@ import httpx
 import pytest
 
 from cloud_agent.mcp import package_pins
-from cloud_agent_host import network_guard_helper, sandbox_mcp
+from cloud_agent_host import sandbox_mcp
+from cloud_agent_host.network import network_guard_helper
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

@@ -12,15 +12,15 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from cloud_agent.storage._sql.ledger import USAGE_EVENT_PAYLOAD_SQL
-from cloud_agent.storage._sql.rows import load_json
-from cloud_agent.thread_stats import (
+from cloud_agent.domain.thread_stats import (
     ATTEMPT_ROLLUP_VERSION,
     AttemptStatsAccumulator,
     AttemptStatsRollup,
     attempt_rollup_from_payload,
     attempt_rollup_payload,
 )
+from cloud_agent.storage._sql.ledger import USAGE_EVENT_PAYLOAD_SQL
+from cloud_agent.storage._sql.rows import load_json
 
 THREAD_STATS_EVENT_PAGE_SIZE = 1_000
 

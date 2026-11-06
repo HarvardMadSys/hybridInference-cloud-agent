@@ -2,12 +2,12 @@
 
 import logging
 
-from cloud_agent.github_cache import RepositoryCache
+from cloud_agent.source_control.github_cache import RepositoryCache
 
 
 def test_lru_does_not_extend_ttl_and_expiry_sweeps_unrelated_keys(monkeypatch, caplog):
     now = [100.0]
-    monkeypatch.setattr("cloud_agent.github_cache.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("cloud_agent.source_control.github_cache.time.monotonic", lambda: now[0])
     caplog.set_level(logging.DEBUG, logger="cloud_agent.github_cache")
     cache = RepositoryCache[str, int]("test", max_size=2)
     cache.remember("old", 1, ttl=10)
@@ -27,7 +27,7 @@ def test_lru_does_not_extend_ttl_and_expiry_sweeps_unrelated_keys(monkeypatch, c
 
 def test_replacement_resets_insertion_order_and_setting_changes_expire_immediately(monkeypatch):
     now = [100.0]
-    monkeypatch.setattr("cloud_agent.github_cache.time.monotonic", lambda: now[0])
+    monkeypatch.setattr("cloud_agent.source_control.github_cache.time.monotonic", lambda: now[0])
     cache = RepositoryCache[str, int]("test", max_size=2)
     cache.remember("first", 1, ttl=10)
     now[0] += 1

@@ -14,10 +14,10 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from fastapi.responses import JSONResponse
 
-from cloud_agent import measurement_writer
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.measurement_ingest import Owner
-from cloud_agent.measurement_persistence import prepare_measurement, store_prepared
+from cloud_agent.measurement import measurement_writer
+from cloud_agent.measurement.measurement_ingest import Owner
+from cloud_agent.measurement.measurement_persistence import prepare_measurement, store_prepared
 from cloud_agent.schemas import AgentOperationProfilingFragment
 from cloud_agent_shared.operation_profiling import manifest_for_measurement
 
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
     from fastapi import Response
 
-    from cloud_agent.operation_measurement import Selection
+    from cloud_agent.measurement.operation_measurement import Selection
     from cloud_agent.ports.operation_measurements import OperationMeasurements
 
 logger = get_logger(__name__)

@@ -85,9 +85,9 @@ if TYPE_CHECKING:
 
     from fastapi import BackgroundTasks, Response
 
+    from cloud_agent.accounts.agent_access import AgentAccessDecision
     from cloud_agent.accounts.mail import AccountMailer
     from cloud_agent.accounts.sms import SmsSender
-    from cloud_agent.agent_access import AgentAccessDecision
     from cloud_agent.domain.accounts import AccountRecord
     from cloud_agent.ports.accounts import LocalAccountRepository
 

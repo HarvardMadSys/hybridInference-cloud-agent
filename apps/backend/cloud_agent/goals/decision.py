@@ -31,21 +31,18 @@ The rules, in the order they are read — the order *is* the specification:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
+from cloud_agent.domain.goals import (
+    GoalAction,
+    GoalReport,
+    GoalReportParse,
+)
 from cloud_agent.goals.models import (
     MAX_REASON_CHARS,
     MAX_REPORT_REPAIRS,
-    GoalPauseReason,
     GoalRoundKind,
     GoalState,
 )
-from cloud_agent.goals.report import GoalReport, GoalReportOutcome, GoalReportParse
-
-#: What the platform does next. ``none`` covers every state that is not
-#: ``active``, every case where another turn already owns the outcome, and
-#: "yield to the message a person already queued".
-GoalActionKind = Literal["none", "queue_work_round", "queue_repair_round", "complete", "pause"]
 
 
 @dataclass(frozen=True)
@@ -91,17 +88,6 @@ class GoalContext:
     repair_supported: bool = False
     #: The runtime serving this conversation cannot deliver the report protocol.
     runtime_supported: bool = True
-
-
-@dataclass(frozen=True)
-class GoalAction:
-    """The one thing to persist, and the counters that go with it."""
-
-    kind: GoalActionKind
-    reason: GoalPauseReason | None = None
-    message: str | None = None
-    #: ``complete`` only: the name of the evidence the platform accepted.
-    completion_basis: str | None = None
 
 
 def decide(ctx: GoalContext) -> GoalAction:
@@ -211,4 +197,4 @@ def _clip(value: str | None) -> str | None:
     return value[:MAX_REASON_CHARS]
 
 
-__all__ = ["GoalAction", "GoalActionKind", "GoalContext", "GoalReportOutcome", "decide"]
+__all__ = ["GoalContext", "decide"]

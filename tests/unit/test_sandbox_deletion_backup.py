@@ -14,20 +14,21 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from cloud_agent_host import sandbox_deletion_backup as deletion_backup
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.archive import sandbox_deletion_backup as deletion_backup
+from cloud_agent_host.archive.sandbox_deletion_backup import (
+    ArchiveIdentity,
+    SandboxDeletionBackupService,
+)
+from cloud_agent_host.container.chat_sandbox import (
     ChatSandboxInspection,
     ChatSandboxSpec,
     ChatSandboxStatus,
 )
-from cloud_agent_host.sandbox import ProcessBackend, SandboxError
-from cloud_agent_host.sandbox_deletion_backup import ArchiveIdentity, SandboxDeletionBackupService
+from cloud_agent_host.container.sandbox import ProcessBackend, SandboxError
 from cloud_agent_host.sandbox_manager import create_app
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
-from cloud_agent_host.shared_session_supervisor import (
-    SharedChatSessionSupervisor,
-    SharedMemberManifest,
-)
+from cloud_agent_host.supervisor.shared_session_state import SharedMemberManifest
+from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 
 
 class _Manager:
@@ -238,7 +239,7 @@ def test_discard_completes_stale_membership_after_proving_container_absent(
     discard = replace(identity, request_id="discard-absent", archive_key="")
     forgotten: list[str] = []
     monkeypatch.setattr(
-        "cloud_agent_host.sandbox_deletion_backup.forget_deleted_container_uploads",
+        "cloud_agent_host.archive.sandbox_deletion_backup.forget_deleted_container_uploads",
         forgotten.append,
     )
 
@@ -280,7 +281,7 @@ def test_absent_discard_retries_when_upload_receipt_cleanup_fails(archive_setup,
             raise OSError("cleanup failed")
 
     monkeypatch.setattr(
-        "cloud_agent_host.sandbox_deletion_backup.forget_deleted_container_uploads",
+        "cloud_agent_host.archive.sandbox_deletion_backup.forget_deleted_container_uploads",
         fail_once,
     )
 
@@ -511,7 +512,7 @@ def test_prepare_rejects_running_or_stale_identity(archive_setup, change):
 )
 def test_deletion_preserves_lifecycle_archive_fences(archive_setup, monkeypatch, flag):
     manager, supervisor, service, identity, spec, _members = archive_setup
-    group = supervisor._groups[spec.sandbox_id]
+    group = supervisor.state.groups[spec.sandbox_id]
     setattr(group, flag, True)
     with pytest.raises(SessionBusy, match="lifecycle archive"):
         service.prepare(identity)

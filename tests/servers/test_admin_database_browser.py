@@ -9,16 +9,16 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
 
-from cloud_agent.admin_database import (
+from cloud_agent.api import admin_database_browser
+from cloud_agent.api.deps import verify_admin_access
+from cloud_agent.app import install_admin_no_store
+from cloud_agent.schemas.admin_database import (
     DatabaseQueryInvalid,
     DatabaseQueryResult,
     DatabaseQueryTimeout,
     DatabaseQueryUnavailable,
     DatabaseTables,
 )
-from cloud_agent.api import admin_database_browser
-from cloud_agent.api.deps import verify_admin_access
-from cloud_agent.app import install_admin_no_store
 
 ADMIN = {"Authorization": "Bearer test-browser-admin"}
 ROOT = "/admin/agent/database"

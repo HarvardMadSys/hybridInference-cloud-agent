@@ -17,8 +17,8 @@ from cloud_agent.schemas import (
     WorkerResourcesRequest,
     WorkerToolCallResources,
 )
-from cloud_agent_host.resources import Sample
-from cloud_agent_host.tool_windows import (
+from cloud_agent_host.observe.resources import Sample
+from cloud_agent_host.observe.tool_windows import (
     MAX_TOOL_CALLS,
     TOOL_MARK_FILE,
     TOOL_MARK_HELPER,

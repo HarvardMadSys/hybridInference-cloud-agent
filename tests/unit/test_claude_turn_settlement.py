@@ -27,23 +27,24 @@ import pytest
 from tests.unit.test_agent_runner import _run_shared_boundary_case
 from tests.unit.test_agent_sandbox_manager import _app, _SharedSupervisor
 
-from cloud_agent_host import claude_background, runner as runner_mod
-from cloud_agent_host.claude_background import notified_tasks
 from cloud_agent_host.drivers import (
     TURN_COMPLETED,
     USER_MESSAGE_EVENT,
-    ClaudeCodeLiveSession,
     InputOutcome,
     LaunchContext,
     TurnInput,
     TurnResult,
-    driver_for,
 )
-from cloud_agent_host.guest_observer import GuestObservation
+from cloud_agent_host.observe.guest_observer import GuestObservation
 from cloud_agent_host.resident_transport import ResidentTurn
 from cloud_agent_host.runtimes import EMPTY_RUNTIME_MCP_CONFIG, ClaudeCodeRuntime
-from cloud_agent_host.session_supervisor_client import SessionSupervisorClient
-from cloud_agent_host.shared_session_supervisor import SharedTurnTelemetry
+from cloud_agent_host.runtimes.claude import background as claude_background
+from cloud_agent_host.runtimes.claude.background import notified_tasks
+from cloud_agent_host.runtimes.claude.session import ClaudeCodeLiveSession
+from cloud_agent_host.runtimes.live import driver_for
+from cloud_agent_host.sandbox_manager_client import SandboxManagerClient
+from cloud_agent_host.supervisor.member_sessions import SharedTurnTelemetry
+from cloud_agent_host.turn import shared_live_attempt, turn_stream
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -55,7 +56,7 @@ _STILL_WAITING_S = 0.3
 
 #: Captured before any test replaces it, so the end-to-end case can put the
 #: real relay back under the runner harness that stubs it.
-_REAL_STREAM_SHARED_TURN = runner_mod._stream_shared_agent_turn
+_REAL_STREAM_SHARED_TURN = turn_stream._stream_shared_agent_turn
 
 
 class _ResidentProcess:
@@ -698,7 +699,7 @@ def test_a_completed_resident_turn_finishes_the_platform_attempt(resident, monke
         _RESULT,
     )
     owner = _ResidentSupervisor(resident.session)
-    client = SessionSupervisorClient("http://sandbox-manager", "sandbox-manager-secret")
+    client = SandboxManagerClient("http://sandbox-manager", "sandbox-manager-secret")
     client._client.close()
     client._client = TestClient(
         _app(owner),
@@ -713,7 +714,7 @@ def test_a_completed_resident_turn_finishes_the_platform_attempt(resident, monke
             relayed.append(outcome)
             return outcome
 
-        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", relay)
+        monkeypatch.setattr(shared_live_attempt, "_stream_shared_agent_turn", relay)
         supervisor.start_shared_turn.side_effect = client.start_shared_turn
         supervisor.interrupt_shared.side_effect = client.interrupt_shared
         control.lease_lost = False

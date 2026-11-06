@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from cloud_agent.owner_usage import (
+    from cloud_agent.usage.owner_usage import (
         OwnerContainerCursor,
         OwnerContainerList,
         OwnerResourceHistory,

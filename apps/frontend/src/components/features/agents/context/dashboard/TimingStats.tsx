@@ -4,17 +4,17 @@
 // time in the centre and a strip of the time in order. Layout adapted from
 // bowenliang123/dsh-context `statsTiming.tsx` and `timingStrip.tsx`
 // (Apache-2.0, commit 32982aa6aa2c70fbda6b81281de98a72ea625001). The numbers
-// come from `GET …/thread/context/timing` (see `cloud_agent.context_timing`):
-// TTFT and generation as the Gateway measured them, Claude Code's streamed
-// block times inside generation, tool windows from the event ledger, and the
-// rest of each execution as "not attributed". A split that was not measured is
-// listed as such, never drawn as 0.
+// come from `GET …/thread/context/timing` (see `cloud_agent.context.context_timing`):
+// tool windows from the event ledger, and the rest of each execution as model
+// and harness time together, divided by Claude Code's streamed block times
+// where the stream recorded them. Block time that was not measured is listed as
+// such, never drawn as 0.
 
 import { useMemo, useState } from 'react';
 import { useLocale } from '@/components/providers';
 import type { ThreadTimingApi, TimingKind } from '@/lib/api/agents';
 import type { TranslationKey } from '@/lib/i18n/translate';
-import { formatDuration } from '../../TurnFooter';
+import { formatDuration } from '../../conversation/TurnFooter';
 import { DashCard, shareText } from './DashCard';
 import { Donut } from './Donut';
 import { SliceList, type SliceRow } from './SliceList';
@@ -22,37 +22,29 @@ import { TIMING_SWATCH } from './palette';
 import { TIMING_DOM_MAX, TIMING_ORDER, bandAt, stripBands, stripGradient } from './timingModel';
 
 const LABEL: Record<TimingKind, TranslationKey> = {
-  ttft: 'dashboard.timing.ttft',
   reasoning: 'dashboard.timing.reasoning',
   text: 'dashboard.timing.text',
   toolarg: 'dashboard.timing.toolarg',
-  gen: 'dashboard.timing.gen',
   tools: 'dashboard.timing.tools',
   unsplit: 'dashboard.timing.unsplit',
-  other: 'dashboard.timing.other',
 };
 
 const TIP: Partial<Record<TimingKind, TranslationKey>> = {
-  ttft: 'dashboard.timing.ttftTip',
-  gen: 'dashboard.timing.genTip',
   tools: 'dashboard.timing.toolsTip',
   unsplit: 'dashboard.timing.unsplitTip',
-  other: 'dashboard.timing.otherTip',
 };
 
-/** Rows of the legend: measured kinds, and splits that were not measured. */
+/** Rows of the legend: measured kinds, and block times that were not measured. */
 export function timingRows(
   timing: ThreadTimingApi,
   t: (key: TranslationKey, vars?: Record<string, string | number>) => string,
 ): SliceRow[] {
-  const split = timing.executions_split > 0;
   const blocks = Object.values(timing.blocks).some((count) => count > 0);
   const rows: SliceRow[] = [];
   for (const kind of TIMING_ORDER) {
     const ms = timing.totals[kind] ?? 0;
     const blockKind = kind === 'reasoning' || kind === 'text' || kind === 'toolarg';
-    const missing = (kind === 'ttft' && !split) || (blockKind && !blocks);
-    if (missing) {
+    if (blockKind && !blocks) {
       rows.push({
         key: kind,
         bg: TIMING_SWATCH[kind].bg,
@@ -60,7 +52,7 @@ export function timingRows(
         count: t('dashboard.notRecorded'),
         pct: null,
         dim: true,
-        tip: t(kind === 'ttft' ? 'dashboard.timing.noGateway' : 'dashboard.timing.noBlocks'),
+        tip: t('dashboard.timing.noBlocks'),
       });
       continue;
     }
@@ -87,18 +79,9 @@ export function TimingStats({
 }) {
   const { t, locale } = useLocale();
   const [hover, setHover] = useState<string | null>(null);
-  const aside =
-    timing?.output_tps != null ? (
-      <span className="text-[11px] text-muted" title={t('dashboard.timing.tpsTip')}>
-        {t('dashboard.timing.tps', {
-          tps:
-            timing.output_tps >= 10 ? Math.round(timing.output_tps) : timing.output_tps.toFixed(1),
-        })}
-      </span>
-    ) : null;
   if (!timing || timing.active_ms <= 0) {
     return (
-      <DashCard title={t('dashboard.timing.title')} aside={aside}>
+      <DashCard title={t('dashboard.timing.title')}>
         <p className="text-xs text-muted">
           {t(loading ? 'context.loading' : 'dashboard.timing.empty')}
         </p>
@@ -110,22 +93,11 @@ export function TimingStats({
     stroke: TIMING_SWATCH[kind].stroke,
     value: timing.totals[kind] ?? 0,
   }));
-  const notes: string[] = [];
-  if (timing.gateway !== 'available') {
-    notes.push(
-      t(`dashboard.timing.gateway.${timing.gateway}` as TranslationKey, {
-        split: timing.executions_split.toLocaleString(locale),
-        total: timing.executions.toLocaleString(locale),
-      }),
-    );
-  }
-  if (timing.tool_calls_unpaired > 0) {
-    notes.push(
-      t('dashboard.timing.unpaired', { count: timing.tool_calls_unpaired.toLocaleString(locale) }),
-    );
-  }
+  const count = timing.tool_calls_unpaired.toLocaleString(locale);
+  const unpaired =
+    timing.tool_calls_unpaired > 0 ? t('dashboard.timing.unpaired', { count }) : null;
   return (
-    <DashCard title={t('dashboard.timing.title')} aside={aside}>
+    <DashCard title={t('dashboard.timing.title')}>
       <div className="flex flex-wrap items-center gap-3">
         <Donut
           segments={segments}
@@ -145,10 +117,9 @@ export function TimingStats({
       <p className="mt-1 text-[11px] text-muted">
         {t('dashboard.timing.counts', {
           executions: timing.executions.toLocaleString(locale),
-          requests: timing.model_requests.toLocaleString(locale),
           tools: timing.tool_calls.toLocaleString(locale),
         })}
-        {notes.length ? ` ${notes.join(' ')}` : ''}
+        {unpaired ? ` ${unpaired}` : ''}
       </p>
     </DashCard>
   );

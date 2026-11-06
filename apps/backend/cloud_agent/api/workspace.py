@@ -24,7 +24,6 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
-from cloud_agent import measurement_writer
 from cloud_agent.api._local_auth import terminal_open_fence
 from cloud_agent.api._operation_measurements import (
     FILE_READ_STAGE,
@@ -48,10 +47,16 @@ from cloud_agent.api._workspace_access import (
     _workspace_not_ready,
 )
 from cloud_agent.api.deps import get_agent_app_credentials, get_storage, require_store
+from cloud_agent.api.errors import typed_error
 from cloud_agent.api.threads import _SSE_HEADERS
-from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
+from cloud_agent.api.workspace_errors import (
+    _sandbox_manager_http_error,
+    _workspace_not_materialized,
+)
+from cloud_agent.application.terminal_coordination import resume_settled_terminal
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.operation_measurement import (
+from cloud_agent.measurement import measurement_writer
+from cloud_agent.measurement.operation_measurement import (
     FILE_CANDIDATES,
     FILES_LIST,
     ROUTE_FILES,
@@ -64,7 +69,7 @@ from cloud_agent.operation_measurement import (
     operation as measured_operation,
     root_scope,
 )
-from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 from cloud_agent.schemas import (
     AgentGitWorkspaceMetadataResponse,
     AgentGitWorkspaceResponse,
@@ -76,16 +81,13 @@ from cloud_agent.schemas import (
     AgentWorkspaceResponse,
     AgentWorkspaceWriteRequest,
 )
-from cloud_agent.terminal_coordination import resume_settled_terminal
-from cloud_agent.workspace_errors import (
-    _sandbox_manager_http_error,
-    _workspace_not_materialized,
-)
+from cloud_agent.source_control.entitlement import RepoNotAllowed, require_entitled_repo
 from cloud_agent_shared.workspace_browser import WorkspacePathError, normalize_workspace_path
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
+    from cloud_agent.measurement.operation_measurement import Selection
     from cloud_agent.ports import (
         ConversationQueries,
         HostPoolRepository,
@@ -94,7 +96,10 @@ if TYPE_CHECKING:
         SourceControlRepository as SourceControlPort,
     )
     from cloud_agent.ports.environments import EnvironmentBindingRepository
-    from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerStream
+    from cloud_agent.sandbox_manager.sandbox_manager_client import (
+        SandboxManagerClient,
+        SandboxManagerStream,
+    )
 
 
 router = APIRouter(prefix="/v1/agent")
@@ -128,14 +133,8 @@ def _require_store(store: _WorkspaceStorage | None) -> _WorkspaceStorage:
 def _terminal_sandbox_manager_http_error(exc: SandboxManagerError) -> HTTPException:
     """Preserve terminal errors while presenting a missing workspace as a conflict."""
     if _workspace_not_materialized(exc):
-        return HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "workspace_unavailable",
-                    "message": "This chat has no live terminal workspace.",
-                }
-            },
+        return typed_error(
+            409, "workspace_unavailable", "This chat has no live terminal workspace."
         )
     return _sandbox_manager_http_error(exc)
 
@@ -173,10 +172,7 @@ async def _require_workspace_entitlement(
             app_credentials=app_credentials,
         )
     except RepoNotAllowed as exc:
-        raise HTTPException(
-            status_code=403,
-            detail={"error": {"type": "repo_not_allowed", "message": str(exc)}},
-        ) from exc
+        raise typed_error(403, "repo_not_allowed", str(exc)) from exc
 
 
 async def _terminal_owner_workspace(
@@ -216,14 +212,8 @@ async def _terminal_owner_workspace(
         )
     sandbox_manager = await _sandbox_manager_for_job(job_store, job)
     if sandbox_manager is None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "workspace_unavailable",
-                    "message": "This deployment has no live sandbox manager.",
-                }
-            },
+        raise typed_error(
+            409, "workspace_unavailable", "This deployment has no live sandbox manager."
         )
     if job.get("terminal_resume_pending"):
         # The sandbox manager resolved a few lines up is this job's own host's, so the
@@ -234,14 +224,8 @@ async def _terminal_owner_workspace(
             job_id=job_id,
             sandbox_manager=sandbox_manager,
         ):
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "error": {
-                        "type": "workspace_unavailable",
-                        "message": "The settled terminal workspace is still resuming.",
-                    }
-                },
+            raise typed_error(
+                503, "workspace_unavailable", "The settled terminal workspace is still resuming."
             )
         await job_store.sandbox.mark_terminal_resume_complete(job_id=job_id)
         job["terminal_resume_pending"] = False
@@ -298,8 +282,61 @@ async def _terminal_control(
         raise _terminal_sandbox_manager_http_error(exc) from exc
 
 
+def _confirm_file_answer(measure: Selection, frame: str | None, body: dict[str, Any]) -> bool:
+    """Record a file answer's facts, or discard a measurement it does not belong to.
+
+    False when the answer is another operation's: the measurement is then
+    discarded and the caller answers unmeasured.
+    """
+    kind = str(body.get("kind") or "")
+    kind_operation = measure.result_operation(body, default=FILES_LIST)
+    sandbox_manager_operation = str(body.get("profiling_operation") or "").strip()
+    result_operation = (
+        ""
+        if sandbox_manager_operation and sandbox_manager_operation != kind_operation
+        else kind_operation
+    )
+    if not measure.confirm(result_operation):
+        measure.discard()
+        return False
+    measure.record_answer(FILE_READ_STAGE, frame, body)
+    measure.measurement.facts["kind"] = kind
+    if kind == "directory":
+        measure.measurement.facts["entry_count"] = len(body.get("entries") or [])
+    else:
+        measure.measurement.facts["content_truncated"] = bool(body.get("truncated"))
+        measure.measurement.facts["binary"] = bool(body.get("binary"))
+    measure.outcome = "completed"
+    return True
+
+
+def _settle_failed_file_read(
+    job_store: _WorkspaceStorage,
+    job: dict[str, Any],
+    measure: Selection | None,
+    *,
+    safe_path: str,
+) -> None:
+    """Report a file read that ended without an answer."""
+    if measure is not None and safe_path and measure.request_kind == "files.read":
+        # The failed read never produced the kind that decides
+        # list versus open. Filing it under the provisional first
+        # candidate corrupts that operation's failure rate.
+        measure.discard()
+        local_writer = measurement_writer.writer()
+        local_writer.counts.rejected += 1
+        local_writer.counts.note("ambiguous_file_kind")
+    else:
+        record_measurement(
+            store=job_store,
+            job=job,
+            measure=measure,
+            failure="failed",
+        )
+
+
 @router.get("/jobs/{job_id}/files", response_model=AgentWorkspaceResponse)
-async def get_agent_job_workspace_file(  # noqa: PLR0912, PLR0915 complexity baseline, #771
+async def get_agent_job_workspace_file(
     job_id: str,
     request: Request,
     path: str = Query("", max_length=4096),
@@ -313,10 +350,7 @@ async def get_agent_job_workspace_file(  # noqa: PLR0912, PLR0915 complexity bas
     try:
         safe_path = normalize_workspace_path(path)
     except WorkspacePathError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": {"type": "invalid_path", "message": str(exc)}},
-        ) from exc
+        raise typed_error(400, "invalid_path", str(exc)) from exc
 
     await _require_workspace_entitlement(
         job=job, user=user, store=job_store, app_credentials=app_credentials
@@ -326,15 +360,7 @@ async def get_agent_job_workspace_file(  # noqa: PLR0912, PLR0915 complexity bas
     scope = root_scope(FILES_LIST, job, service=ROUTE_FILES, candidates=candidates)
     sandbox_manager = await _sandbox_manager_for_job(job_store, job)
     if sandbox_manager is None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "workspace_unavailable",
-                    "message": "This chat has no owning sandbox manager.",
-                }
-            },
-        )
+        raise typed_error(409, "workspace_unavailable", "This chat has no owning sandbox manager.")
     recorded = False
     with measured_operation(FILES_LIST, scope, continuing=continuation(request.headers)) as measure:
         try:
@@ -357,37 +383,13 @@ async def get_agent_job_workspace_file(  # noqa: PLR0912, PLR0915 complexity bas
                 )
             except SandboxManagerError as exc:
                 if _workspace_not_materialized(exc):
-                    raise HTTPException(
-                        status_code=409,
-                        detail={
-                            "error": {
-                                "type": "workspace_unavailable",
-                                "message": "This chat has no retained workspace.",
-                            }
-                        },
+                    raise typed_error(
+                        409, "workspace_unavailable", "This chat has no retained workspace."
                     ) from exc
                 raise _sandbox_manager_http_error(exc) from exc
-            if measure is not None:
-                kind = str(body.get("kind") or "")
-                kind_operation = measure.result_operation(body, default=FILES_LIST)
-                sandbox_manager_operation = str(body.get("profiling_operation") or "").strip()
-                result_operation = (
-                    ""
-                    if sandbox_manager_operation and sandbox_manager_operation != kind_operation
-                    else kind_operation
-                )
-                if not measure.confirm(result_operation):
-                    measure.discard()
-                    recorded = True
-                    return measured_response(AgentWorkspaceResponse, None, body)
-                measure.record_answer(FILE_READ_STAGE, frame, body)
-                measure.measurement.facts["kind"] = kind
-                if kind == "directory":
-                    measure.measurement.facts["entry_count"] = len(body.get("entries") or [])
-                else:
-                    measure.measurement.facts["content_truncated"] = bool(body.get("truncated"))
-                    measure.measurement.facts["binary"] = bool(body.get("binary"))
-                measure.outcome = "completed"
+            if measure is not None and not _confirm_file_answer(measure, frame, body):
+                recorded = True
+                return measured_response(AgentWorkspaceResponse, None, body)
             response = measured_response(AgentWorkspaceResponse, measure, body)
             record_measurement(
                 store=job_store,
@@ -398,21 +400,7 @@ async def get_agent_job_workspace_file(  # noqa: PLR0912, PLR0915 complexity bas
             return response
         finally:
             if not recorded:
-                if measure is not None and safe_path and measure.request_kind == "files.read":
-                    # The failed read never produced the kind that decides
-                    # list versus open. Filing it under the provisional first
-                    # candidate corrupts that operation's failure rate.
-                    measure.discard()
-                    local_writer = measurement_writer.writer()
-                    local_writer.counts.rejected += 1
-                    local_writer.counts.note("ambiguous_file_kind")
-                else:
-                    record_measurement(
-                        store=job_store,
-                        job=job,
-                        measure=measure,
-                        failure="failed",
-                    )
+                _settle_failed_file_read(job_store, job, measure, safe_path=safe_path)
 
 
 #: Characters a downloaded file's name cannot carry on common filesystems.
@@ -446,26 +434,10 @@ async def download_agent_job_workspace(
         job=job, user=user, store=job_store, app_credentials=app_credentials
     )
     if job.get("thread_sandbox") is None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "workspace_unavailable",
-                    "message": "This chat has no retained workspace.",
-                }
-            },
-        )
+        raise typed_error(409, "workspace_unavailable", "This chat has no retained workspace.")
     sandbox_manager = await _sandbox_manager_for_job(job_store, job)
     if sandbox_manager is None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "workspace_unavailable",
-                    "message": "This chat has no owning sandbox manager.",
-                }
-            },
-        )
+        raise typed_error(409, "workspace_unavailable", "This chat has no owning sandbox manager.")
     try:
         stream = await sandbox_manager.workspace_archive(_workspace_id(job))
     except SandboxManagerError as exc:
@@ -506,10 +478,7 @@ async def write_agent_job_workspace_file(
     try:
         safe_path = normalize_workspace_path(path)
     except WorkspacePathError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"error": {"type": "invalid_path", "message": str(exc)}},
-        ) from exc
+        raise typed_error(400, "invalid_path", str(exc)) from exc
     if not safe_path:
         raise HTTPException(status_code=400, detail="A file path is required.")
     await _require_workspace_entitlement(
@@ -518,14 +487,8 @@ async def write_agent_job_workspace_file(
     await _require_mutable_workspace_ready(job=job, store=job_store.sandbox)
     sandbox_manager = await _sandbox_manager_for_job(job_store, job)
     if sandbox_manager is None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "workspace_unavailable",
-                    "message": "This deployment has no live sandbox manager.",
-                }
-            },
+        raise typed_error(
+            409, "workspace_unavailable", "This deployment has no live sandbox manager."
         )
     try:
         return AgentWorkspaceResponse(
@@ -533,14 +496,8 @@ async def write_agent_job_workspace_file(
         )
     except SandboxManagerError as exc:
         if _workspace_not_materialized(exc):
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": {
-                        "type": "workspace_unavailable",
-                        "message": "This retained workspace is not materialized.",
-                    }
-                },
+            raise typed_error(
+                409, "workspace_unavailable", "This retained workspace is not materialized."
             ) from exc
         raise _sandbox_manager_http_error(exc) from exc
 

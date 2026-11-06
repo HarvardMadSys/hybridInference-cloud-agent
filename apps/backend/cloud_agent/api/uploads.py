@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage, require_store
+from cloud_agent.api.errors import typed_error
 from cloud_agent.attachments.models import (
     MAX_ATTACHMENT_FILE_BYTES,
     MAX_ATTACHMENT_PATH_LENGTH,
@@ -71,10 +72,7 @@ class CreateUpload(BaseModel):
 
 def upload_http_error(exc: AttachmentError) -> HTTPException:
     """Map a domain refusal to a useful owner-facing error."""
-    return HTTPException(
-        status_code=400,
-        detail={"error": {"type": "invalid_upload", "message": str(exc)}},
-    )
+    return typed_error(400, "invalid_upload", str(exc))
 
 
 @router.post("", response_model=AttachmentView, status_code=201)
@@ -123,13 +121,7 @@ async def delete_upload(
         user_id=user["user_id"], attachment_id=attachment_id
     )
     if not removed:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error": {
-                    "type": "upload_not_found",
-                    "message": "Upload not found, or it already belongs to a task.",
-                }
-            },
+        raise typed_error(
+            404, "upload_not_found", "Upload not found, or it already belongs to a task."
         )
     return Response(status_code=204)

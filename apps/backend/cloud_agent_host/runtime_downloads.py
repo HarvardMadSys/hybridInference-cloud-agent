@@ -45,6 +45,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from cloud_agent_host.container.sandbox import runtime_bin_dir
 from cloud_agent_host.runtime_images import (
     NAMESPACE_LABEL,
     RUNTIME_LABEL,
@@ -61,7 +62,6 @@ from cloud_agent_host.runtime_images import (
     short_id,
 )
 from cloud_agent_host.runtime_probe import ProbeResult, probe_runtime
-from cloud_agent_host.sandbox import runtime_bin_dir
 from cloud_agent_shared.runtime_catalog import downloadable_runtimes
 from cloud_agent_shared.runtime_downloads import (
     DOWNLOAD_ERROR_MAX_CHARS,

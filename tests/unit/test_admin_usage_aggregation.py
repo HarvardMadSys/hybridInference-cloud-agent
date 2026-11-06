@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta, timezone
 
-from cloud_agent.admin_usage import (
+from cloud_agent.usage.admin_usage import (
     BREAKDOWN_TOP_GROUPS,
     MAX_USAGE_WINDOW_DAYS,
     aggregate_jobs,
@@ -14,7 +14,7 @@ from cloud_agent.admin_usage import (
     days_breakdown,
     resolve_usage_window,
 )
-from cloud_agent.runtime_usage import NO_RUNTIME_REPORT, summarize_runtime_job
+from cloud_agent.usage.runtime_usage import NO_RUNTIME_REPORT, summarize_runtime_job
 
 TERMINAL = ("succeeded", "failed", "cancelled")
 DAY = datetime(2026, 9, 9, tzinfo=UTC)

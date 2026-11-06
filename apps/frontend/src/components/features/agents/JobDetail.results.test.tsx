@@ -10,12 +10,12 @@ import {
   type AgentThreadApi,
   type AgentThreadEventApi,
 } from '@/lib/api/agents';
-import { toDisplayJob } from './adapt';
+import { toDisplayJob } from './adapt/jobAdapter';
 import { JobDetail } from './JobDetail';
-import { buildTrajectorySteps } from './trajectorySteps';
+import { buildTrajectorySteps } from './trajectory/trajectorySteps';
 
-vi.mock('./trajectorySteps', async (importOriginal) => {
-  const original = await importOriginal<typeof import('./trajectorySteps')>();
+vi.mock('./trajectory/trajectorySteps', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./trajectory/trajectorySteps')>();
   return { ...original, buildTrajectorySteps: vi.fn(original.buildTrajectorySteps) };
 });
 

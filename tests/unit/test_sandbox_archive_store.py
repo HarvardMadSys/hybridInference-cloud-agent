@@ -12,8 +12,9 @@ import pytest
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-from cloud_agent import sandbox_archive, settings
-from cloud_agent.sandbox_archive import (
+from cloud_agent import settings
+from cloud_agent.sandbox_archive import sandbox_archive
+from cloud_agent.sandbox_archive.sandbox_archive import (
     MAX_ARCHIVE_BYTES,
     UPLOAD_EXPIRES_SECONDS,
     S3SandboxArchiveStore,

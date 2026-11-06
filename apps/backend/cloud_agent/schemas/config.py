@@ -12,7 +12,7 @@ from cloud_agent.schemas.mcp import (
     McpConnectionSummary,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
 from cloud_agent.skills.models import SkillLimits
-from cloud_agent.source_control_runtime import (
+from cloud_agent.source_control.source_control_runtime import (
     LoadStatus,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
 from cloud_agent_shared.environment import environment_limits

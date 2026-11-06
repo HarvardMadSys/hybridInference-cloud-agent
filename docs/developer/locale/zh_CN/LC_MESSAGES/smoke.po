@@ -109,11 +109,11 @@ msgstr "记下确切的发布 SHA。API、主机、sandbox manager 和沙箱都�
 #: ../developer/smoke.md:46
 msgid ""
 "Start from a new, empty Agent database. Run     `python -m "
-"cloud_agent.identity_namespace --check` against it first; it     must "
+"cloud_agent.deployment.identity_namespace --check` against it first; it     must "
 "report an empty database and change nothing     ([cutover](upgrade-"
 "notes.md#independent-accounts-cutover))."
 msgstr ""
-"从一个新的空 Agent 数据库开始。先针对它运行 `python -m cloud_agent.identity_namespace "
+"从一个新的空 Agent 数据库开始。先针对它运行 `python -m cloud_agent.deployment.identity_namespace "
 "--check`；它必须报告这是空数据库，并且不做任何改动（[切换说明](upgrade-notes.md#independent-"
 "accounts-cutover)）。"
 

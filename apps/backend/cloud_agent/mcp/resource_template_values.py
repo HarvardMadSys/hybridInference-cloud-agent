@@ -124,10 +124,8 @@ def _maps(
             yield list(pairs)
 
 
-def _values(variable: Variable, raw: str, spend: Callable[[int], None]) -> Iterator[Any]:  # noqa: PLR0912 complexity baseline, #771
-    """Infer scalar, list and map candidates; expansion checks every candidate."""
-    named = variable.operator in {";", "?", "&"}
-    name = canonical_percent(variable.name)
+def _scalar(variable: Variable, raw: str, *, named: bool, name: str) -> str | None:
+    """The scalar text a raw capture holds, without a named operator's ``name=``."""
     scalar: str | None = raw
     if named:
         if raw == name and variable.operator == ";":
@@ -136,6 +134,14 @@ def _values(variable: Variable, raw: str, spend: Callable[[int], None]) -> Itera
             scalar = raw[len(name) + 1 :]
         else:
             scalar = None
+    return scalar
+
+
+def _values(variable: Variable, raw: str, spend: Callable[[int], None]) -> Iterator[Any]:
+    """Infer scalar, list and map candidates; expansion checks every candidate."""
+    named = variable.operator in {";", "?", "&"}
+    name = canonical_percent(variable.name)
+    scalar = _scalar(variable, raw, named=named, name=name)
     if scalar is not None:
         yield from _decoded(scalar)
     if variable.prefix is not None:
@@ -169,7 +175,56 @@ def _compatible(previous: _Binding | None, value: Any) -> bool:
     return isinstance(value, str) and value.startswith(previous.value)
 
 
-def matches_expansion(expander: URITemplate, tokens: tuple[str | Variable, ...], uri: str) -> bool:  # noqa: C901, PLR0915 complexity baseline, #771
+def _continues_expression(tokens: tuple[str | Variable, ...], index: int, token: Variable) -> bool:
+    """Whether ``token`` follows another variable of its own expression."""
+    previous_token = tokens[index - 1] if index else None
+    return isinstance(previous_token, Variable) and previous_token.expression == token.expression
+
+
+def _candidate_ends(
+    uri: str, following: str | Variable | None, start: int, spend: Callable[[], None]
+) -> Iterable[int]:
+    """Where a variable's capture may end, given the token that follows it."""
+    ends: Iterable[int]
+    if isinstance(following, str) and following:
+        ends = []
+        end = uri.find(following, start)
+        while end >= 0:
+            spend()
+            ends.append(end)
+            end = uri.find(following, end + 1)
+    elif following is None:
+        ends = [len(uri)]
+    else:
+        ends = range(len(uri), start - 1, -1)
+    return ends
+
+
+def _fitting_bindings(
+    token: Variable,
+    raw: str,
+    spend: Callable[[int], None],
+    *,
+    previous: _Binding | None,
+    emitted: bool,
+    expected: str,
+) -> Iterator[_Binding]:
+    """Yield, lazily, each candidate value whose expansion recreates ``expected``."""
+    for value in _values(token, raw, spend):
+        spend(1)
+        if not _compatible(previous, value):
+            continue
+        prefix = token.prefix
+        if prefix is not None and (not isinstance(value, str) or len(value) > prefix):
+            continue
+        if canonical_percent(token.render(value, emitted)) != expected:
+            continue
+        # A value shorter than the prefix bound is already complete.
+        partial = prefix if prefix is not None and len(value) == prefix else None
+        yield _Binding(value, partial)
+
+
+def matches_expansion(expander: URITemplate, tokens: tuple[str | Variable, ...], uri: str) -> bool:
     """Match only with a consistent assignment that recreates the complete URI.
 
     RE2 has already rejected lexical mismatches. The search below handles
@@ -186,7 +241,7 @@ def matches_expansion(expander: URITemplate, tokens: tuple[str | Variable, ...],
         if steps > MAX_MATCH_STEPS:
             raise TemplateMatchLimit("The resource URI template is too ambiguous to authorize.")
 
-    def search(  # noqa: C901, PLR0912 complexity baseline, #771
+    def search(
         index: int, offset: int, bindings: dict[str, _Binding], emitted: bool = False
     ) -> bool:
         spend()
@@ -203,12 +258,8 @@ def matches_expansion(expander: URITemplate, tokens: tuple[str | Variable, ...],
             return uri.startswith(token, offset) and search(
                 index + 1, offset + len(token), bindings
             )
-        previous_token = tokens[index - 1] if index else None
-        if (
-            not isinstance(previous_token, Variable)
-            or previous_token.expression != token.expression
-        ):
-            emitted = False
+        # A new expression starts its own delimiters.
+        emitted = emitted and _continues_expression(tokens, index, token)
         previous = bindings.get(token.name)
         if previous is not None and (
             previous.prefix is None
@@ -235,35 +286,15 @@ def matches_expansion(expander: URITemplate, tokens: tuple[str | Variable, ...],
         following = tokens[index + 1] if index + 1 < len(tokens) else None
         # Literal anchors make long paths cheap; adjacent variables use the
         # same bounded search rather than trusting a greedy capture boundary.
-        ends: Iterable[int]
-        if isinstance(following, str) and following:
-            ends = []
-            end = uri.find(following, start)
-            while end >= 0:
-                spend()
-                ends.append(end)
-                end = uri.find(following, end + 1)
-        elif following is None:
-            ends = [len(uri)]
-        else:
-            ends = range(len(uri), start - 1, -1)
-        for end in ends:
+        for end in _candidate_ends(uri, following, start, spend):
             spend()
             raw = uri[start:end]
             if token.matcher.fullmatch(raw) is None:
                 continue
-            for value in _values(token, raw, spend):
-                spend()
-                if not _compatible(previous, value):
-                    continue
-                prefix = token.prefix
-                if prefix is not None and (not isinstance(value, str) or len(value) > prefix):
-                    continue
-                if canonical_percent(token.render(value, emitted)) != target[offset:end]:
-                    continue
-                # A value shorter than the prefix bound is already complete.
-                partial = prefix if prefix is not None and len(value) == prefix else None
-                if search(index + 1, end, {**bindings, token.name: _Binding(value, partial)}, True):
+            for binding in _fitting_bindings(
+                token, raw, spend, previous=previous, emitted=emitted, expected=target[offset:end]
+            ):
+                if search(index + 1, end, {**bindings, token.name: binding}, True):
                     return True
         return False
 

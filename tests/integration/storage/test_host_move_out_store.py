@@ -26,14 +26,18 @@ from tests.integration.storage.test_sandbox_restore_store import (
 )
 from tests.support.follow_ups import append_follow_up
 
-from cloud_agent.execution_profiles import KATA_RUNTIME
-from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.domain.execution_profiles import KATA_RUNTIME
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
+from cloud_agent.settings import number_setting
 from cloud_agent.workers import sandbox_deletion
 
 if TYPE_CHECKING:
     from cloud_agent.storage.assembly import Storage
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
+
+#: The queue age the queue monitor reads and hands the health query.
+QUEUE_ALERT_AFTER_S = number_setting("queue_alert_after_s")
 
 
 async def _moving_out(pool, host: str = "runner-a", allocation_id: str = "leaving") -> None:
@@ -975,7 +979,9 @@ async def _waiting(pool, job_id: str) -> None:
 
 
 async def _queue(store: Storage) -> tuple[int, int]:
-    health = await store.host_pool.queue_health(expected_deployment_sha="test-deployment")
+    health = await store.host_pool.queue_health(
+        expected_deployment_sha="test-deployment", queue_alert_after_s=QUEUE_ALERT_AFTER_S
+    )
     return health["queued"], health["unavailable"]
 
 

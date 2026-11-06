@@ -19,8 +19,7 @@ import asyncio
 import contextlib
 from typing import Any, cast
 
-import pytest
-from fastapi import HTTPException
+from tests.support.refusals import raises_http
 
 from cloud_agent.application import job_admission, session_fork
 from cloud_agent.storage.assembly import Storage
@@ -109,7 +108,7 @@ async def test_the_fork_flow_refuses_through_the_assembled_host_pool() -> None:
     pool = _RecordingPool()
     operation = {"id": "sfo_1", "state": "preparing"}
 
-    with pytest.raises(HTTPException) as refusal:
+    with raises_http() as refusal:
         await session_fork.materialize_session_fork(
             operation, job_id="ajob_1", job_store=_assembled(pool)
         )

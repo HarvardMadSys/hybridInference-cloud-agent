@@ -82,7 +82,6 @@ const job: AgentJob = {
   branch: 'agent/task',
   runtime: 'claude-code',
   model: 'qwen-test',
-  timeoutLabel: '',
   sandbox: 'container',
   attempts: [{ no: 1, status: 'live' }],
   currentAttemptNo: 1,

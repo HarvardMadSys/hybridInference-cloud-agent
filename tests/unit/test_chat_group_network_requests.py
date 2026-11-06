@@ -19,20 +19,18 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from tests.unit.test_chat_group_network import _NAMESPACE, FakeDocker, FakeGuard, _config
 
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     _GUEST_NETWORK_CHECK,
     CHAT_NAMESPACE_LABEL,
     CHAT_SANDBOX_LABEL,
     ChatSandboxManager,
     ChatSandboxSpec,
 )
+from cloud_agent_host.container.sandbox import KATA_RUNTIME, ContainerBackend, ProcessBackend
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
-from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, ProcessBackend
 from cloud_agent_host.sandbox_manager import create_app
-from cloud_agent_host.shared_session_supervisor import (
-    SharedChatSessionSupervisor,
-    SharedMemberManifest,
-)
+from cloud_agent_host.supervisor.shared_session_state import SharedMemberManifest
+from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 
 
 class _KataExecDocker(FakeDocker):
@@ -75,7 +73,7 @@ def _hot_kata_workspace(monkeypatch, *, stopped_groups: int = 0):
     backend._network_guard = FakeGuard()  # type: ignore[assignment]
     manager = ChatSandboxManager(backend)
     docker = _KataExecDocker(config)
-    monkeypatch.setattr(manager, "_run", docker)
+    monkeypatch.setattr(manager.exact, "run", docker)
     run, popen = subprocess.run, subprocess.Popen
 
     def exec_run(argv, **kwargs):

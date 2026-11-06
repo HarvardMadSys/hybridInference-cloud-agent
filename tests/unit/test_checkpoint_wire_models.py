@@ -8,7 +8,7 @@ import pytest
 
 from cloud_agent.schemas.hosts import SandboxCheckpointBeat
 from cloud_agent.schemas.workers import WorkerSandboxRestore
-from cloud_agent_host.sandbox_manager import SharedSandboxRestoreRequest
+from cloud_agent_host.manager_api.models import SharedSandboxRestoreRequest
 from cloud_agent_shared.sandbox_restore import (
     CheckpointRestore,
     SandboxCheckpointReceipt,

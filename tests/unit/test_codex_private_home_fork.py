@@ -18,9 +18,11 @@ from test_shared_session_supervisor import (
     _spec,
 )
 
-from cloud_agent_host.chat_sandbox import MEMBER_UID_BASE
+from cloud_agent_host.container.chat_sandbox import MEMBER_UID_BASE
 from cloud_agent_host.drivers import DriverError
+from cloud_agent_host.member_setup.member_homes import member_state_dir
 from cloud_agent_host.resident_transport import ResidentTransportFactory
+from cloud_agent_host.runtimes.codex import member as codex_member
 
 
 def test_codex_fork_rebases_indexed_rollouts_into_the_child_home(tmp_path: Path):
@@ -34,7 +36,7 @@ def test_codex_fork_rebases_indexed_rollouts_into_the_child_home(tmp_path: Path)
     target_launch = replace(
         _launch("athr_child", native_session_id=None, slot=2), runtime_id=runtime_id
     )
-    source_home = factory._member_state_dir(source_launch)
+    source_home = member_state_dir(source_launch)
     factory._prepare_member_state(_spec(), source_launch, source_home)
     source = manager.local(source_home)
     (source / "sessions").mkdir()
@@ -51,10 +53,7 @@ def test_codex_fork_rebases_indexed_rollouts_into_the_child_home(tmp_path: Path)
                 ("prefix collision", str(source) + "-sibling/rollout.jsonl"),
                 (
                     "already target-rooted",
-                    str(
-                        manager.local(factory._member_state_dir(target_launch))
-                        / "sessions/target.jsonl"
-                    ),
+                    str(manager.local(member_state_dir(target_launch)) / "sessions/target.jsonl"),
                 ),
             ],
         )
@@ -72,7 +71,7 @@ def test_codex_fork_rebases_indexed_rollouts_into_the_child_home(tmp_path: Path)
 
     factory._clone_private_member_state(_spec(), source_launch, target_launch)
 
-    child = manager.local(factory._member_state_dir(target_launch))
+    child = manager.local(member_state_dir(target_launch))
     _assert_private(child)
     # The CLI's own files keep its umask; the closed home is what protects them.
     assert stat.S_IMODE(source.stat().st_mode) == 0o700
@@ -93,7 +92,7 @@ def test_codex_fork_rebases_indexed_rollouts_into_the_child_home(tmp_path: Path)
     assert paths["unrelated"] == "/outside/source/home/rollout.jsonl"
     assert paths["prefix collision"] == str(source) + "-sibling/rollout.jsonl"
     assert paths["already target-rooted"] == str(
-        manager.local(factory._member_state_dir(target_launch)) / "sessions/target.jsonl"
+        manager.local(member_state_dir(target_launch)) / "sessions/target.jsonl"
     )
     assert Path(paths["native-source"]).read_text() == '{"id":"native-source"}\n'
     assert Path(paths["codex fork child"]).read_text() == "child\n"
@@ -117,8 +116,8 @@ def test_codex_rollout_rebase_failure_rolls_back_target_index(tmp_path: Path):
     target_launch = replace(
         _launch("athr_child", native_session_id=None, slot=2), runtime_id="codex"
     )
-    source_dir = manager.local(factory._member_state_dir(source_launch))
-    factory._prepare_member_state(_spec(), source_launch, factory._member_state_dir(source_launch))
+    source_dir = manager.local(member_state_dir(source_launch))
+    factory._prepare_member_state(_spec(), source_launch, member_state_dir(source_launch))
     (source_dir / "sessions").mkdir()
     rollout = source_dir / "sessions/rollout.jsonl"
     rollout.write_text("source rollout\n")
@@ -141,7 +140,7 @@ def test_codex_rollout_rebase_failure_rolls_back_target_index(tmp_path: Path):
         factory._clone_private_member_state(_spec(), source_launch, target_launch)
 
     assert index_path.read_bytes() == index_before
-    child_db = manager.local(factory._member_state_dir(target_launch)) / "state_5.sqlite"
+    child_db = manager.local(member_state_dir(target_launch)) / "state_5.sqlite"
     child_index = sqlite3.connect(child_db)
     paths = dict(child_index.execute("SELECT id, rollout_path FROM threads"))
     child_index.close()
@@ -159,8 +158,8 @@ def test_codex_rollout_rebase_rejects_parent_traversal(tmp_path: Path):
     target_launch = replace(
         _launch("athr_child", native_session_id=None, slot=2), runtime_id="codex"
     )
-    factory._prepare_member_state(_spec(), source_launch, factory._member_state_dir(source_launch))
-    source = manager.local(factory._member_state_dir(source_launch))
+    factory._prepare_member_state(_spec(), source_launch, member_state_dir(source_launch))
+    source = manager.local(member_state_dir(source_launch))
     (source / "sessions").mkdir()
     (source / "sessions/rollout.jsonl").write_text("source rollout\n")
     escaped = str(source / "../outside/rollout.jsonl")
@@ -176,9 +175,7 @@ def test_codex_rollout_rebase_rejects_parent_traversal(tmp_path: Path):
         factory._clone_private_member_state(_spec(), source_launch, target_launch)
 
     assert index_path.read_bytes() == source_index_before
-    child_index = sqlite3.connect(
-        manager.local(factory._member_state_dir(target_launch)) / "state_5.sqlite"
-    )
+    child_index = sqlite3.connect(manager.local(member_state_dir(target_launch)) / "state_5.sqlite")
     assert child_index.execute(
         "SELECT rollout_path FROM threads WHERE id = 'escape'"
     ).fetchone() == (escaped,)
@@ -200,8 +197,8 @@ def test_codex_rollout_rebase_rejects_symlink_escape_after_partial_update(
     target_launch = replace(
         _launch("athr_child", native_session_id=None, slot=2), runtime_id="codex"
     )
-    factory._prepare_member_state(_spec(), source_launch, factory._member_state_dir(source_launch))
-    source = manager.local(factory._member_state_dir(source_launch))
+    factory._prepare_member_state(_spec(), source_launch, member_state_dir(source_launch))
+    source = manager.local(member_state_dir(source_launch))
     (source / "sessions").mkdir()
     rollout = source / "sessions/rollout.jsonl"
     rollout.write_text("valid internal rollout\n")
@@ -218,7 +215,7 @@ def test_codex_rollout_rebase_rejects_symlink_escape_after_partial_update(
     # A normal in-home path remains forkable; the escape below must not make
     # the containment check reject legitimate rollouts in general.
     factory._clone_private_member_state(_spec(), source_launch, control_launch)
-    control = manager.local(factory._member_state_dir(control_launch))
+    control = manager.local(member_state_dir(control_launch))
     control_index = sqlite3.connect(f"file:{control / 'state_5.sqlite'}?mode=ro", uri=True)
     control_path = control_index.execute(
         "SELECT rollout_path FROM threads WHERE id = 'internal'"
@@ -253,7 +250,7 @@ def test_codex_rollout_rebase_rejects_symlink_escape_after_partial_update(
         "_write_fork_journal",
         lambda _spec, _operation_id, entry: journal_writes.append(dict(entry)),
     )
-    monkeypatch.setattr(factory, "_codex_fork_children", lambda *_args, **_kwargs: set())
+    monkeypatch.setattr(codex_member, "fork_children", lambda *_args, **_kwargs: set())
     manager.normalize_member_files = lambda *_args, **_kwargs: None
     lifecycle: list[str] = []
     fork_source = SimpleNamespace(
@@ -280,7 +277,7 @@ def test_codex_rollout_rebase_rejects_symlink_escape_after_partial_update(
     assert (source / "sessions/escape").resolve() == external_dir
     assert external_rollout.read_bytes() == external_before
 
-    child = manager.local(factory._member_state_dir(target_launch))
+    child = manager.local(member_state_dir(target_launch))
     child_symlink_rollout = child / "sessions/escape/rollout.jsonl"
     assert child_symlink_rollout.is_relative_to(child)
     assert child_symlink_rollout.resolve() == external_rollout
@@ -342,7 +339,7 @@ def test_codex_rebase_failure_leaves_preparing_journal_for_idempotent_recovery(m
 
     monkeypatch.setattr(factory, "_read_fork_journal", read_journal)
     monkeypatch.setattr(factory, "_write_fork_journal", write_journal)
-    monkeypatch.setattr(factory, "_codex_fork_children", child_inventory)
+    monkeypatch.setattr(codex_member, "fork_children", child_inventory)
     monkeypatch.setattr(factory, "_clone_private_member_state", clone)
 
     with pytest.raises(DriverError, match="could not be materialized"):
@@ -371,8 +368,8 @@ def _codex_fork_homes(root: Path):
     target_launch = replace(
         _launch("athr_child", native_session_id=None, slot=2), runtime_id="codex"
     )
-    factory._prepare_member_state(_spec(), source_launch, factory._member_state_dir(source_launch))
-    source = manager.local(factory._member_state_dir(source_launch))
+    factory._prepare_member_state(_spec(), source_launch, member_state_dir(source_launch))
+    source = manager.local(member_state_dir(source_launch))
     (source / "sessions").mkdir()
     (source / "sessions/rollout.jsonl").write_text("source rollout\n")
     index = sqlite3.connect(source / "state_5.sqlite")
@@ -383,7 +380,7 @@ def _codex_fork_homes(root: Path):
     )
     index.commit()
     index.close()
-    child = manager.local(factory._member_state_dir(target_launch))
+    child = manager.local(member_state_dir(target_launch))
     return factory, source_launch, target_launch, child
 
 

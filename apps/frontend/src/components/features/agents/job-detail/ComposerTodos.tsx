@@ -1,8 +1,8 @@
 'use client';
 
 import { useT } from '@/components/providers';
-import type { ActivityOverview } from '../activityOverview';
-import { ActivityIcon } from '../ActivityWindow';
+import type { ActivityOverview } from '../conversation/activityOverview';
+import { ActivityIcon } from '../conversation/ActivityWindow';
 
 export interface ComposerTodosProps {
   /** The shown turn's recorded tasks and subagents; only its task list is summarized. */

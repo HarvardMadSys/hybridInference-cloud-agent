@@ -33,17 +33,10 @@ from cloud_agent.api.deps import (
     log_admin_action,
     verify_admin_access,
 )
+from cloud_agent.api.errors import typed_error
 from cloud_agent.application.host_commands import HostCommandError, HostCommands, SandboxPlacement
-from cloud_agent.capacity_protocol import (
-    DEFAULT_HISTORY_RANGE,
-    HISTORY_RANGES,
-    AgentHostCapacityHistoryResponse,
-    admin_capacity_view,
-    history_point_grid,
-    resolve_history_range,
-)
-from cloud_agent.execution_profiles import KATA_RUNTIME, default_execution_profile
-from cloud_agent.host_pool import (
+from cloud_agent.domain.execution_profiles import KATA_RUNTIME, default_execution_profile
+from cloud_agent.domain.host_pool import (
     HOST_DRAINING,
     HOST_ONLINE,
 )
@@ -61,6 +54,14 @@ from cloud_agent.schemas import (
     SetRuntimeVersionRequest,
     SetSandboxArchiveSettingsRequest,
     host_setting_definitions,
+)
+from cloud_agent.schemas.capacity_protocol import (
+    DEFAULT_HISTORY_RANGE,
+    HISTORY_RANGES,
+    AgentHostCapacityHistoryResponse,
+    admin_capacity_view,
+    history_point_grid,
+    resolve_history_range,
 )
 from cloud_agent_shared.host_settings import admin_values, reported_values
 from cloud_agent_shared.sandbox_archive_settings import (
@@ -118,10 +119,7 @@ async def _apply(command: Awaitable[_Result]) -> _Result:
         return await command
     except HostCommandError as exc:
         if exc.code is not None:
-            raise HTTPException(
-                status_code=exc.status,
-                detail={"error": {"type": exc.code, "message": str(exc)}},
-            ) from None
+            raise typed_error(exc.status, exc.code, str(exc)) from None
         raise HTTPException(status_code=exc.status, detail=str(exc)) from None
 
 

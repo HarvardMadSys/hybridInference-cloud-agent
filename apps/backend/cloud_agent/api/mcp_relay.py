@@ -51,19 +51,14 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from cloud_agent import memory_tool, web_search
-from cloud_agent.agent_memory import MemoryTask
 from cloud_agent.api.deps import get_http_client, get_mcp_decision_signal, get_storage
-from cloud_agent.credential_cipher import CredentialCipherError
+from cloud_agent.api.errors import typed_error
+from cloud_agent.crypto.credential_cipher import CredentialCipherError
+from cloud_agent.domain.agent_memory import MemoryTask
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp import protocol, sandbox_tools
 from cloud_agent.mcp.authorization import decide, visible_capabilities
-from cloud_agent.mcp.host import (
-    HostError,
-    SessionKey,
-    arguments_digest,
-    encode_arguments,
-)
+from cloud_agent.mcp.host import HostError, SessionKey, arguments_digest, encode_arguments
 from cloud_agent.mcp.invocations import MAX_HELD_ARGUMENTS_BYTES, deadline_for
 from cloud_agent.mcp.jsonrpc import (
     INTERNAL_ERROR,
@@ -89,6 +84,8 @@ from cloud_agent.mcp.resources import (
     split_resource_uri,
 )
 from cloud_agent.mcp.runtime import get_host as _host
+from cloud_agent.memory import memory_tool
+from cloud_agent.providers import web_search
 from cloud_agent.tokens import (
     SCOPE_MCP,
     InvalidAgentToken,
@@ -222,23 +219,15 @@ def _bearer(authorization: str | None) -> str:
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
     if not token:
-        raise HTTPException(
-            status_code=401,
-            detail={
-                "error": {
-                    "type": "invalid_request_error",
-                    "message": "This endpoint takes an MCP-scoped job token.",
-                }
-            },
+        raise typed_error(
+            401, "invalid_request_error", "This endpoint takes an MCP-scoped job token."
         )
     return token
 
 
 def _refused(status_code: int, kind: str, message: str) -> HTTPException:
     """Build the JSON error shape every refusal on this surface uses."""
-    return HTTPException(
-        status_code=status_code, detail={"error": {"type": kind, "message": message}}
-    )
+    return typed_error(status_code, kind, message)
 
 
 class _BodyRefused(Exception):

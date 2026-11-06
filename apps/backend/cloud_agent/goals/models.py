@@ -38,8 +38,9 @@ from __future__ import annotations
 from datetime import datetime  # noqa: TC003 - Pydantic model field.
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel
 
+from cloud_agent.domain.goals import GoalPauseReason  # noqa: TC001 - Pydantic model field.
 from cloud_agent_shared.shared_protocol import GOAL_REPORT_CAPABILITY
 
 #: An objective is a paragraph, not a document. It is carried verbatim in every
@@ -89,49 +90,6 @@ GoalState = Literal["active", "paused", "complete"]
 #: charged to the budget.
 GoalRoundKind = Literal["work", "repair"]
 
-#: Why an ``active`` goal stopped continuing by itself. The first two are what
-#: an owner asks for; the rest are the platform telling the owner which
-#: condition stopped it. ``fork`` is recorded on the *child* task, never on the
-#: parent, because a fork copies an objective without inheriting the authority
-#: to run it.
-#:
-#: ``round_limit`` is not a default stop any more — it is reachable only when the
-#: owner stated a bound themselves, and it stays in the vocabulary because rows
-#: written before that change still carry it. Resuming one releases the spent
-#: bound, so the state is never a dead end.
-GOAL_PAUSE_REASONS = (
-    "user",
-    "fork",
-    "needs_input",
-    "round_limit",
-    "execution_failed",
-    "cancelled",
-    "report_invalid",
-    "report_unavailable",
-    "runtime_unsupported",
-    "context_lost",
-    "access_denied",
-    "quota_unavailable",
-    "scheduling_failed",
-    "archived",
-)
-GoalPauseReason = Literal[
-    "user",
-    "fork",
-    "needs_input",
-    "round_limit",
-    "execution_failed",
-    "cancelled",
-    "report_invalid",
-    "report_unavailable",
-    "runtime_unsupported",
-    "context_lost",
-    "access_denied",
-    "quota_unavailable",
-    "scheduling_failed",
-    "archived",
-]
-
 #: The only way a first-version goal completes: the model said so, in a valid
 #: report, on a turn that ended workably. The platform does not claim to have
 #: independently verified the objective, and the name says so.
@@ -164,53 +122,6 @@ class GoalConflict(GoalError):
     """A write made against a revision the goal has already moved past."""
 
 
-class GoalInput(BaseModel):
-    """An owner's completion condition for one conversation.
-
-    ``max_rounds`` is **tri-state**, and the three states mean three different
-    things. Omitted — the ordinary case, and what every client sends — leaves
-    whatever bound the goal already carries exactly as it is, so a caller that
-    only changes the words cannot silently delete a limit its owner stated.
-    A number states a bound; an explicit ``null`` lifts one. That is why no
-    writer reads the field directly: what the request *said* is
-    :attr:`states_max_rounds`, and absence is not the same fact as ``None``.
-    """
-
-    model_config = ConfigDict(str_strip_whitespace=True)
-
-    objective: str = Field(min_length=1, max_length=MAX_OBJECTIVE_CHARS)
-    #: An *optional* bound the owner states. Omitted means "leave the bound
-    #: alone" — never "no limit", which would make every edit that does not
-    #: mention one a silent removal. An explicit ``null`` is how a bound is
-    #: lifted; a number is how one is set, and it is honored exactly, with no
-    #: maximum, because there is no longer a ceiling for the platform to impose.
-    max_rounds: int | None = Field(
-        None,
-        ge=1,
-        description=(
-            "An explicit maximum number of automatic rounds. A number sets it "
-            "and an explicit null lifts it; omitting the field leaves whatever "
-            "bound the goal already carries unchanged. Omitting it on a goal "
-            "that has none means no limit: the goal continues until the "
-            "objective is met, paused, cleared, blocked on the owner, or "
-            "stopped by an existing run-time limit. There is no default and no "
-            "maximum."
-        ),
-    )
-
-    @property
-    def states_max_rounds(self) -> bool:
-        """Whether the request said anything about the bound at all.
-
-        Pydantic keeps the keys the caller actually sent, which is the only
-        place the difference between "omitted" and "explicitly null" survives
-        validation — both arrive as ``None``. Every writer of the column reads
-        this rather than the field, or an edit that mentions nothing about a
-        bound would clear one.
-        """
-        return "max_rounds" in self.model_fields_set
-
-
 class GoalView(BaseModel):
     """The conversation's goal as its owner reads it."""
 
@@ -234,7 +145,6 @@ class GoalView(BaseModel):
 
 
 __all__ = [
-    "GOAL_PAUSE_REASONS",
     "GOAL_REPORT_PROTOCOL",
     "GOAL_REPORT_RUNTIMES",
     "MAX_OBJECTIVE_CHARS",
@@ -245,9 +155,7 @@ __all__ = [
     "CompletionBasis",
     "GoalConflict",
     "GoalError",
-    "GoalInput",
     "GoalLimits",
-    "GoalPauseReason",
     "GoalRoundKind",
     "GoalState",
     "GoalView",

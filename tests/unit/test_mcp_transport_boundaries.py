@@ -13,7 +13,17 @@ import pytest
 from fastapi import HTTPException
 
 from cloud_agent.api import mcp_connections, mcp_relay
-from cloud_agent.mcp import catalog, host, oauth, protocol, refresh, sse, transports
+from cloud_agent.domain.errors import Refused
+from cloud_agent.mcp import (
+    catalog,
+    host,
+    oauth,
+    oauth_authorization,
+    protocol,
+    refresh,
+    sse,
+    transports,
+)
 from cloud_agent.mcp.jsonrpc import decode, id_key
 from cloud_agent.mcp.models import AuthKind, AuthProfile, HeaderAuth
 from cloud_agent.mcp.net_policy import EgressPolicy, EndpointRejected, normalize_url
@@ -531,10 +541,11 @@ async def test_oauth_posts_negotiate_identity_and_refuse_compression(monkeypatch
         client=oauth.ClientIdentity(client_id="client", registration="preregistered"),
     )
     with pytest.raises(
-        (HTTPException, TransportError, refresh.RefreshRefused), match="compressed response"
+        (HTTPException, Refused, TransportError, refresh.RefreshRefused),
+        match="compressed response",
     ):
         if operation == "registration":
-            await mcp_connections._post_json(None, token_request.url, {}, policy=policy)
+            await oauth_authorization.post_json(None, token_request.url, {}, policy=policy)
         elif operation == "token":
             await mcp_connections._post_form(token_request, policy=policy)
         else:

@@ -7,8 +7,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import AliasChoices, BaseModel, Field, StrictInt, ValidationError, model_validator
 
-from cloud_agent.capacity_protocol import HostCapacityReport, parse_capacity_block
-from cloud_agent.host_pool import ENROLL_TOKEN_TTL_S
+from cloud_agent.domain.host_pool import ENROLL_TOKEN_TTL_S
 from cloud_agent.schemas._host_reports import (
     HOST_LABELS_MAX_ITEMS,
     _HostCapability,
@@ -20,6 +19,7 @@ from cloud_agent.schemas._host_reports import (
 from cloud_agent.schemas.archive_settings import (
     HostSandboxArchiveSettings,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
+from cloud_agent.schemas.capacity_protocol import HostCapacityReport, parse_capacity_block
 from cloud_agent.schemas.workers import (
     WorkerSandboxMember,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
@@ -465,7 +465,7 @@ class HostResidencyEstablishResponse(BaseModel):
     thread_id: str
     generation: int
     ttl_seconds: float
-    #: A Gateway grant, or an owner connection's own long-lived key: never in a repr.
+    #: The owner model connection's own long-lived key: never in a repr.
     credential: str | None = Field(None, repr=False)
     model: str | None = None
     #: For a residency on an owner model connection, the credential revision

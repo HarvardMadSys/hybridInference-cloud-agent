@@ -18,7 +18,8 @@ What is measured
 ----------------
 
 One *simulated* startup attempt, shaped after the claim in ``run_forever`` and
-``_run_shared_live_attempt`` in ``apps/backend/cloud_agent_host/runner.py``:
+``_run_shared_live_attempt`` in ``apps/backend/cloud_agent_host/service/host_service.py`` and
+``apps/backend/cloud_agent_host/turn/shared_live_attempt.py``:
 
 * one ``start_operation(operation="attempt.startup", host=..., worker_id=...)``,
 * one ``span`` around a stand-in for the attestation and claim call,
@@ -137,7 +138,7 @@ from cloud_agent_shared.operation_profiling import (
     ENV_PROFILING_SINK,
 )
 
-#: Mirrors ``cloud_agent_host.runner.STARTUP_OPERATION``.  The runner module is
+#: Mirrors ``cloud_agent_host.service.host_service.STARTUP_OPERATION``.  That module is
 #: not imported on purpose: it pulls in Docker, the runtimes and the control
 #: plane, none of which this measurement needs.
 STARTUP_OPERATION = "attempt.startup"

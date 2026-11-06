@@ -39,6 +39,7 @@ from cloud_agent.api.deps import (
     get_owner_directory,
     get_storage,
 )
+from cloud_agent.api.errors import install_domain_errors
 from cloud_agent.api.worker import verify_claiming_host
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.workers.attempts import reap_expired_attempts
@@ -179,6 +180,7 @@ async def api(monkeypatch):
 
     app = FastAPI()
     app.include_router(agent_jobs_router.router)
+    install_domain_errors(app)
     app.dependency_overrides[get_storage] = lambda: store
     app.dependency_overrides[get_owner_directory] = _FakeOwners
     app.dependency_overrides[get_agent_app_credentials] = lambda: None

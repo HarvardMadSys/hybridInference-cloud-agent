@@ -22,7 +22,7 @@ from pydantic import ValidationError
 from tests.support.ssh_keys import host_key, private_key
 
 from cloud_agent_host import ssh_access as host_ssh
-from cloud_agent_host.chat_sandbox_models import MEMBER_UID_BASE, ChatSandboxSpec
+from cloud_agent_host.container.chat_sandbox_models import MEMBER_UID_BASE, ChatSandboxSpec
 from cloud_agent_shared.errors import SandboxError
 
 if TYPE_CHECKING:

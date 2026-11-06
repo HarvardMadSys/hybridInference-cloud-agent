@@ -22,23 +22,12 @@ TEST_LIMIT = 2000
 
 #: Line counts of the modules over the limit when it arrived.
 BASELINE = {
-    "apps/backend/cloud_agent_host/shared_session_supervisor.py": 5113,
-    "apps/backend/cloud_agent_host/runner.py": 4685,
-    "apps/backend/cloud_agent_host/chat_sandbox.py": 4044,
-    "apps/backend/cloud_agent/storage/repositories/compute_resources.py": 3815,
-    "apps/backend/cloud_agent_host/sandbox_manager.py": 3283,
-    "apps/backend/cloud_agent/storage/repositories/sandbox.py": 3403,
-    "apps/backend/cloud_agent_host/drivers.py": 2856,
-    "apps/backend/cloud_agent/api/worker.py": 1971,
-    "apps/backend/cloud_agent/storage/repositories/host_pool.py": 2267,
-    "apps/backend/cloud_agent/application/compute_reconcile.py": 2245,
-    "apps/backend/cloud_agent/api/mcp_connections.py": 2220,
-    "apps/backend/cloud_agent/storage/repositories/attempt_commands.py": 2019,
-    "apps/backend/cloud_agent/storage/repositories/mcp.py": 1974,
-    "apps/backend/cloud_agent/storage/repositories/environments.py": 1931,
-    "apps/backend/cloud_agent/api/mcp_relay.py": 1795,
+    "apps/backend/cloud_agent_host/container/chat_sandbox.py": 3816,
+    "apps/backend/cloud_agent/application/compute_reconcile.py": 2199,
+    "apps/backend/cloud_agent/api/mcp_connections.py": 1960,
+    "apps/backend/cloud_agent/api/mcp_relay.py": 1784,
     "apps/backend/cloud_agent_host/host_capacity.py": 1636,
-    "apps/backend/cloud_agent_host/chat_sandbox_network.py": 1569,
+    "apps/backend/cloud_agent_host/network/chat_sandbox_network.py": 1532,
 }
 
 #: Exact line counts of test modules over their calibrated limit after #894's
@@ -51,19 +40,19 @@ TEST_BASELINE = {
     "tests/integration/storage/test_goal_store.py": 2133,
     "tests/integration/storage/test_host_pool_store.py": 3212,
     "tests/integration/storage/test_mcp_connection_store.py": 3182,
-    "tests/servers/test_admin_compute.py": 2090,
-    "tests/servers/test_agent_jobs_api.py": 6002,
-    "tests/unit/test_agent_runner.py": 2542,
-    "tests/unit/test_agent_sandbox_manager.py": 3451,
-    "tests/unit/test_chat_sandbox.py": 3138,
+    "tests/servers/test_admin_compute.py": 2089,
+    "tests/servers/test_agent_jobs_api.py": 5993,
+    "tests/unit/test_agent_runner.py": 2318,
+    "tests/unit/test_agent_sandbox_manager.py": 3437,
+    "tests/unit/test_chat_sandbox.py": 3137,
     "tests/unit/test_compute_providers.py": 2002,
     "tests/unit/test_compute_reconcile.py": 2291,
     "tests/unit/test_deploy_config.py": 2058,
-    "tests/unit/test_host_pool_api.py": 3378,
+    "tests/unit/test_host_pool_api.py": 3377,
     "tests/unit/test_mcp_connections_api.py": 3043,
     "tests/unit/test_retained_deploy.py": 2231,
-    "tests/unit/test_runner_host_service.py": 2842,
-    "tests/unit/test_shared_session_supervisor.py": 5161,
+    "tests/unit/test_runner_host_service.py": 2822,
+    "tests/unit/test_shared_session_supervisor.py": 5147,
 }
 
 

@@ -1,0 +1,1860 @@
+// Tests for the API → UI adapter.
+//
+// The cases that matter are the ones where a wrong mapping would mislead a
+// user about their own job: a completed chat looking active while it publishes, a
+// superseded attempt looking live, or an event kind silently vanishing.
+
+import { describe, expect, it } from 'vitest';
+
+import type { AgentJobApi, AgentJobEventApi } from '@/lib/api/agents';
+import { getConversationState, toConversationState } from '../sidebar/conversationState';
+
+import { createDisplayJobAdapter, toDisplayJob } from './jobAdapter';
+import { lifecyclePhaseLabel, subagentDisplayEvents, toDisplayEvent } from './events';
+import { ownerFailureMessage, siteMisconfiguredReason, toDisplayState } from './jobState';
+import { toDiffFileDetails, toDiffFiles } from './diff';
+
+describe('owner failure wording', () => {
+  it.each([
+    'retained sandbox activation lease expired; context marked lost',
+    'retained Agent CLI turn became indeterminate after prompt admission',
+    'attempt lease lost during shared live execution',
+    'native context unavailable',
+    'native Agent CLI session locator is missing',
+    'shared Session Supervisor is unavailable',
+    'cannot settle without a live resident transport',
+    'shared member resident transport is unavailable before settlement',
+    'attempt dispatch failed (SandboxError)',
+    'shared live chat failed unexpectedly: connection reset',
+  ])('explains infrastructure failure without exposing internal terms: %s', (detail) => {
+    const expected = 'The connection was interrupted before this response could be confirmed.';
+    expect(ownerFailureMessage(detail)).toBe(expected);
+    expect(toDisplayEvent(event(1, 'error', { text: detail }))).toEqual({
+      kind: 'lifecycle',
+      text: expected,
+      sourceEventId: 1,
+    });
+    expect(toDisplayJob({ ...JOB, state: 'failed', detail }, {}).stateNote).toBe(expected);
+  });
+
+  it('keeps actionable task errors and assistant content unchanged', () => {
+    const detail = 'setup failed (1): missing package example';
+    expect(ownerFailureMessage(detail)).toBe(detail);
+    expect(
+      toDisplayEvent(event(1, 'message', { text: 'Investigate why the lease expired.' })),
+    ).toEqual({ kind: 'message', text: 'Investigate why the lease expired.', sourceEventId: 1 });
+  });
+
+  it('treats a settled boundary as finished, not interrupted', () => {
+    for (const detail of [
+      'Agent CLI context settled, but job finalization expired; the prompt was not replayed',
+      'job finalization expired after context settlement',
+    ]) {
+      expect(ownerFailureMessage(detail)).toContain('The response finished');
+    }
+  });
+
+  it('names a repository over the import limit as such, with its size when known', () => {
+    const cases: [string, string][] = [
+      [
+        "source checkout (8.43 GiB including its Git objects) exceeds this host's 1.00 GiB retained import size limit",
+        'This repository is larger than this server allows (8.43 GiB; the limit is 1.00 GiB).',
+      ],
+      [
+        "source archive exceeds this host's 1.00 GiB retained import size limit",
+        'This repository is larger than this server allows (the limit is 1.00 GiB).',
+      ],
+      // A host older than the size report names neither.
+      [
+        'source checkout exceeds the retained import size limit',
+        'This repository is larger than this server allows.',
+      ],
+    ];
+    for (const [detail, expected] of cases) {
+      expect(ownerFailureMessage(detail)).toBe(expected);
+      expect(toDisplayEvent(event(1, 'error', { text: detail }))).toEqual({
+        kind: 'lifecycle',
+        text: expected,
+        sourceEventId: 1,
+      });
+      const job = toDisplayJob({ ...JOB, state: 'failed', detail }, {});
+      expect(job.stateNote).toBe(expected);
+      expect(job.failureCause).toBe('repository_too_large');
+    }
+    const other = toDisplayJob({ ...JOB, state: 'failed', detail: 'agent exited 1: boom' }, {});
+    expect(other.failureCause).toBeUndefined();
+  });
+
+  it("shows the agent's own reason for failing, not the end of its output", () => {
+    const cases: [string, string][] = [
+      [
+        'agent reported an error: Failed to authenticate. API Error: 403 This account has no active API key, so its spending limit cannot be applied.',
+        'Failed to authenticate. API Error: 403 This account has no active API key, so its spending limit cannot be applied.',
+      ],
+      [
+        'agent reported an error: unexpected status 403 Forbidden: This account has no active API key, so its spending limit cannot be applied.',
+        'unexpected status 403 Forbidden: This account has no active API key, so its spending limit cannot be applied.',
+      ],
+      [
+        'agent reported an error: API Error: Stream idle timeout - no chunks received',
+        'API Error: Stream idle timeout - no chunks received',
+      ],
+    ];
+    for (const [detail, expected] of cases) {
+      expect(ownerFailureMessage(detail)).toBe(expected);
+      expect(toDisplayJob({ ...JOB, state: 'failed', detail }, {}).stateNote).toBe(expected);
+    }
+  });
+
+  it('names a sandbox failure as one, without its internal paths', () => {
+    const detail =
+      "sandbox failed: shared member activation boundary failed: shared member permission normalization failed: chmod: cannot access '/agent-state/codex-members/abc/.tmp/plugins-clone-x': No such file or directory";
+    expect(ownerFailureMessage(detail)).toBe('The sandbox failed while running this response.');
+  });
+
+  it('keeps a site misconfiguration in its own words and marks it for an admin', () => {
+    // The runner's SITE_MISCONFIGURED_MCP, verbatim.
+    const detail =
+      'Site misconfigured: this chat uses connected tools, but the server that ran it ' +
+      'has no MCP relay. Ask an admin to finish setting up the site.';
+    expect(ownerFailureMessage(detail)).toBe(detail);
+    const job = toDisplayJob({ ...JOB, state: 'failed', detail }, {});
+    expect(job.stateNote).toBe(detail);
+    expect(job.failureCause).toBe('site_misconfigured');
+    expect(siteMisconfiguredReason(detail)).toBe(
+      'This chat uses connected tools, but the server that ran it has no MCP relay. ' +
+        'Ask an admin to finish setting up the site.',
+    );
+  });
+
+  it('distinguishes execution timeout and cancellation from connection failure', () => {
+    expect(ownerFailureMessage('shared Agent CLI turn exceeded its execution timeout')).toBe(
+      'This response took too long and was stopped.',
+    );
+    expect(ownerFailureMessage('cancelled after an indeterminate retained Agent CLI turn')).toBe(
+      'This response was stopped at your request.',
+    );
+  });
+});
+
+const JOB: AgentJobApi = {
+  id: 'ajob_1',
+  repo: 'o/n',
+  task_prompt: 'fix the flaky test\nmore detail',
+  runtime: 'claude-code',
+  model: 'glm-5.1',
+  base_sha: 'abcdef1234567890',
+  state: 'running',
+  cancel_requested: false,
+  current_attempt_id: 1,
+  published_pr_url: null,
+  detail: null,
+  metadata: null,
+  created_at: null,
+  updated_at: null,
+};
+
+function event(
+  id: number,
+  event_type: string,
+  payload: Record<string, unknown> = {},
+  attempt_id = 1,
+): AgentJobEventApi {
+  return { id, attempt_id, seq: id, event_type, payload, created_at: null };
+}
+
+describe('toDisplayState', () => {
+  it('separates published from merely finished', () => {
+    // Both are idle conversations; per-turn results retain their legacy values.
+    expect(toDisplayState({ ...JOB, state: 'succeeded', published_pr_url: 'u' })).toBe('done');
+    expect(toDisplayState({ ...JOB, state: 'succeeded', published_pr_url: null })).toBe(
+      'needs_review',
+    );
+  });
+
+  it('shows publishing as still running', () => {
+    expect(toDisplayState({ ...JOB, state: 'publishing' })).toBe('running');
+  });
+
+  it.each([
+    ['queued', 'queued'],
+    ['running', 'running'],
+    ['failed', 'failed'],
+    ['cancelled', 'cancelled'],
+  ] as const)('maps %s', (wire, display) => {
+    expect(toDisplayState({ ...JOB, state: wire })).toBe(display);
+  });
+});
+
+describe('conversation display state', () => {
+  it('preserves a cancelled turn while carrying the whole conversation activity', () => {
+    const job = toDisplayJob({ ...JOB, state: 'cancelled', conversation_state: 'running' });
+    expect(job.state).toBe('cancelled');
+    expect(job.conversationState).toBe('running');
+    expect(getConversationState(job)).toBe('running');
+  });
+  it.each([
+    ['queued', null, 'queued'],
+    ['running', null, 'running'],
+    ['publishing', null, 'running'],
+    ['succeeded', null, 'idle'],
+    ['succeeded', 'https://github.com/o/n/pull/1', 'idle'],
+    ['failed', null, 'failed'],
+    ['cancelled', null, 'idle'],
+  ] as const)('displays %s with PR %s as %s', (state, published_pr_url, expected) => {
+    const job = toDisplayJob({ ...JOB, state, published_pr_url });
+    expect(toConversationState(job.state)).toBe(expected);
+    // Presentation never rewrites the individual turn's result or PR metadata.
+    expect(job.state).toBe(toDisplayState({ ...JOB, state, published_pr_url }));
+  });
+});
+
+describe('toDisplayEvent', () => {
+  it('preserves recorded reasoning text separately from assistant output', () => {
+    expect(toDisplayEvent(event(1, 'thinking', { text: 'Check the failing assertion.' }))).toEqual({
+      kind: 'thinking',
+      text: 'Check the failing assertion.',
+      sourceEventId: 1,
+    });
+  });
+
+  it('keeps raw runtime protocol events out of the terminal transcript', () => {
+    expect(
+      toDisplayEvent(
+        event(1, 'raw', {
+          text: '{"type":"system","subtype":"thinking_tokens","estimated_tokens":1}',
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it('reads an older host-only failure as a connection that failed, not a block', () => {
+    // Earlier runs recorded failed connections with only the host. The network
+    // is open to the public internet, so the row must not claim a policy did it.
+    expect(toDisplayEvent(event(1, 'error', { host: 'example.com', attempts: 3 }))).toEqual({
+      kind: 'lifecycle',
+      text: 'Could not reach example.com',
+      sourceEventId: 1,
+    });
+  });
+
+  it('keeps the MCP server a Codex call went to, and names none for other calls', () => {
+    const mcp = toDisplayEvent(
+      event(1, 'tool_use', { id: 'm', name: 'review__task', input: {}, mcp_server: 'session' }),
+    );
+    expect(mcp).toMatchObject({ kind: 'tool_use', tool: 'review__task', mcpServer: 'session' });
+    const command = toDisplayEvent(event(2, 'tool_use', { id: 'c', name: 'Bash', input: 'ls' }));
+    expect(command).not.toHaveProperty('mcpServer');
+  });
+
+  it('keeps a plain error as a lifecycle row', () => {
+    expect(toDisplayEvent(event(1, 'error', { detail: 'boom' }))).toEqual({
+      kind: 'lifecycle',
+      text: 'boom',
+      sourceEventId: 1,
+    });
+  });
+
+  it('renders an interruption without its internal reason', () => {
+    const row = toDisplayEvent(event(1, 'attempt_superseded', { reason: 'lease_expired' }));
+    expect(row).toEqual({ kind: 'lifecycle', text: 'attempt_superseded', sourceEventId: 1 });
+  });
+
+  it('shows every provider retry with its reported delay and attempt', () => {
+    for (const [attempt, delay] of [
+      [1, 5000],
+      [2, 10000],
+    ]) {
+      const display = toDisplayEvent(
+        event(attempt, 'lifecycle', {
+          phase: 'api_retry',
+          error_status: 503,
+          attempt,
+          max_retries: 10,
+          retry_delay_ms: delay,
+        }),
+      );
+      const text = `Provider temporarily unavailable. Retrying in ${delay / 1000}s (retry ${attempt} of 10).`;
+      expect(display).toEqual({ kind: 'lifecycle', text, sourceEventId: attempt });
+      expect(lifecyclePhaseLabel(text).milestone).toBe(false);
+    }
+  });
+
+  it.each([
+    [{ retry_delay_ms: 0, attempt: 1 }, 'Retrying now (retry 1).'],
+    [{ retry_delay_ms: 4500 }, 'Retrying in 5s.'],
+    [{}, 'Retrying model request.'],
+    [{ retry_delay_ms: -1, attempt: '2', max_retries: Number.NaN }, 'Retrying model request.'],
+  ])('does not invent missing retry timing or counts: %j', (payload, text) => {
+    expect(toDisplayEvent(event(1, 'lifecycle', { phase: 'api_retry', ...payload }))).toEqual({
+      kind: 'lifecycle',
+      text,
+      sourceEventId: 1,
+    });
+  });
+
+  it('says a temporary workspace starts empty rather than that a repository is ready', () => {
+    const checkout = (payload: Record<string, unknown>) =>
+      toDisplayEvent(event(1, 'lifecycle', { phase: 'checked_out', ...payload }));
+
+    expect(checkout({ temporary: true, reused: false })).toEqual({
+      kind: 'lifecycle',
+      text: 'workspace_created',
+      sourceEventId: 1,
+    });
+    expect(lifecyclePhaseLabel('workspace_created')).toEqual({
+      text: 'Empty workspace ready',
+      milestone: true,
+    });
+    // A later turn in the same sandbox reuses its tree, temporary or not.
+    expect(checkout({ temporary: true, reused: true })).toMatchObject({ text: 'workspace_reused' });
+    expect(checkout({ reused: false })).toMatchObject({ text: 'checked_out' });
+  });
+
+  it('keeps rate-limit warnings while hiding normal allowance events', () => {
+    expect(
+      toDisplayEvent(event(1, 'lifecycle', { phase: 'rate_limit', info: { status: 'allowed' } })),
+    ).toBeNull();
+    expect(
+      toDisplayEvent(event(1, 'lifecycle', { phase: 'rate_limit', info: { status: 'rejected' } })),
+    ).toEqual({ kind: 'lifecycle', text: 'Model usage limit reached', sourceEventId: 1 });
+    expect(
+      toDisplayEvent(
+        event(1, 'lifecycle', { phase: 'rate_limit', info: { status: 'allowed_warning' } }),
+      ),
+    ).toEqual({ kind: 'lifecycle', text: 'Approaching model usage limit', sourceEventId: 1 });
+  });
+
+  it('keeps an unfamiliar tool visible by its actual name', () => {
+    expect(toDisplayEvent(event(1, 'tool_use', { name: 'WebFetch', detail: 'x' }))).toEqual({
+      kind: 'tool_use',
+      tool: 'WebFetch',
+      detail: 'x',
+      id: undefined,
+      sourceEventId: 1,
+    });
+  });
+
+  it('keeps tool results available for folding into the matching activity', () => {
+    expect(
+      toDisplayEvent(
+        event(1, 'tool_result', {
+          tool_use_id: 'tool_1',
+          content: 'all green',
+          is_error: false,
+        }),
+      ),
+    ).toEqual({
+      kind: 'tool_result',
+      text: 'all green',
+      toolUseId: 'tool_1',
+      isError: false,
+      sourceEventId: 1,
+    });
+    expect(toDisplayEvent(event(1, 'diff'))).toBeNull();
+  });
+
+  it('keeps complete tool arguments alongside a compact command and completion output', () => {
+    expect(
+      toDisplayEvent(
+        event(1, 'tool_use', {
+          name: 'command_execution',
+          input: { command: 'pytest -q', cwd: '/workspace', timeout: 0 },
+          output: '1 passed',
+          exit_code: 0,
+        }),
+      ),
+    ).toEqual({
+      kind: 'tool_use',
+      tool: 'command_execution',
+      id: undefined,
+      detail: 'pytest -q',
+      input: { command: 'pytest -q', cwd: '/workspace', timeout: 0 },
+      output: ['1 passed'],
+      sourceEventId: 1,
+    });
+  });
+
+  it('keeps internal event kinds out of the conversation', () => {
+    expect(toDisplayEvent(event(1, 'something_new'))).toBeNull();
+  });
+
+  it('hides internal lifecycle phases while preserving task outcomes and errors', () => {
+    for (const phase of ['shared_workspace_settled', 'thinking_tokens', 'base_imported']) {
+      expect(toDisplayEvent(event(1, 'lifecycle', { phase }))).toBeNull();
+    }
+    expect(toDisplayEvent(event(1, 'lifecycle', { phase: 'shared_tool_errors_observed' }))).toEqual(
+      {
+        kind: 'lifecycle',
+        text: 'Some tools encountered errors',
+        sourceEventId: 1,
+      },
+    );
+    expect(
+      toDisplayEvent(
+        event(1, 'error', {
+          phase: 'shared_snapshot_publish_rejected',
+          detail: 'Could not open pull request',
+        }),
+      ),
+    ).toEqual({ kind: 'lifecycle', text: 'Could not open pull request', sourceEventId: 1 });
+    for (const phase of [
+      'result',
+      'shared_snapshot_publishing',
+      'shared_snapshot_published',
+      'cancelled_by_owner',
+    ]) {
+      expect(toDisplayEvent(event(1, 'lifecycle', { phase }))).toEqual({
+        kind: 'lifecycle',
+        text: phase,
+        sourceEventId: 1,
+      });
+      expect(lifecyclePhaseLabel(phase).milestone).toBe(true);
+    }
+  });
+});
+
+describe('recorded reasoning', () => {
+  const notification = (
+    id: number,
+    method: string,
+    params: Record<string, unknown>,
+    attemptId = 1,
+  ) =>
+    event(id, 'raw', { protocol: 'codex-app-server', notification: { method, params } }, attemptId);
+
+  it('keeps consecutive reasoning blocks and the answer as distinct rows', () => {
+    const rows = toDisplayJob(JOB, {
+      events: [
+        event(1, 'thinking', { text: 'First recorded block.', usage_id: 'response' }),
+        event(2, 'thinking', { text: 'Second recorded block.', usage_id: 'response' }),
+        event(3, 'message', { text: 'The result.', usage_id: 'response' }),
+      ],
+    }).events;
+    expect(rows).toEqual([
+      { kind: 'thinking', text: 'First recorded block.', sourceEventId: 1, attemptNo: 1 },
+      { kind: 'thinking', text: 'Second recorded block.', sourceEventId: 2, attemptNo: 1 },
+      { kind: 'message', text: 'The result.', sourceEventId: 3, attemptNo: 1 },
+    ]);
+  });
+
+  it('folds native deltas, snapshots and completion into the first stored row', () => {
+    const events = [
+      notification(1, 'item/started', { item: { id: 'r', type: 'reasoning' } }),
+      notification(2, 'item/reasoning/summaryTextDelta', { itemId: 'r', delta: 'First ' }),
+      notification(3, 'item/reasoning/summaryTextDelta', { itemId: 'r', delta: 'pass.' }),
+    ];
+    const live = toDisplayJob(JOB, { events }).events;
+    expect(live).toEqual([
+      {
+        kind: 'thinking',
+        text: 'First pass.',
+        reasoningBlocks: [{ channel: 'summary', text: 'First pass.' }],
+        sourceEventId: 1,
+        attemptNo: 1,
+      },
+    ]);
+    const complete = toDisplayJob(JOB, {
+      events: [
+        ...events,
+        notification(4, 'item/updated', {
+          item: { id: 'r', type: 'reasoning', summary: ['A revised plan.'] },
+        }),
+        event(5, 'thinking', { native_item_id: 'r', text: 'The complete plan.' }),
+        event(6, 'message', { text: 'Done.' }),
+      ],
+    }).events;
+    expect(complete).toEqual([
+      {
+        ...live[0],
+        text: 'The complete plan.',
+        reasoningBlocks: [{ channel: 'summary', text: 'The complete plan.' }],
+      },
+      { kind: 'message', text: 'Done.', sourceEventId: 6, attemptNo: 1 },
+    ]);
+  });
+
+  it('preserves summary and detailed reasoning channels through completion', () => {
+    const rows = toDisplayJob(JOB, {
+      events: [
+        notification(1, 'item/reasoning/summaryTextDelta', { itemId: 'r', delta: 'Short plan.' }),
+        notification(2, 'item/reasoning/textDelta', { itemId: 'r', delta: 'Detailed ' }),
+        notification(3, 'item/reasoning/textDelta', { itemId: 'r', delta: 'reasoning.' }),
+        event(4, 'thinking', { native_item_id: 'r', text: 'Complete summary.' }),
+      ],
+    }).events;
+    expect(rows).toEqual([
+      {
+        kind: 'thinking',
+        text: 'Complete summary.\n\nDetailed reasoning.',
+        reasoningBlocks: [
+          { channel: 'summary', text: 'Complete summary.' },
+          { channel: 'reasoning', text: 'Detailed reasoning.' },
+        ],
+        sourceEventId: 1,
+        attemptNo: 1,
+      },
+    ]);
+  });
+
+  it('reads both channels from native item snapshots without normalized completion', () => {
+    const rows = toDisplayJob(JOB, {
+      events: [
+        notification(1, 'item/started', { item: { id: 'r', type: 'reasoning' } }),
+        notification(2, 'item/completed', {
+          item: {
+            id: 'r',
+            type: 'reasoning',
+            summary: ['Summary one.', 'Summary two.'],
+            content: ['Detailed text.'],
+          },
+        }),
+      ],
+    }).events;
+    expect(rows).toEqual([
+      {
+        kind: 'thinking',
+        text: 'Summary one.\nSummary two.\n\nDetailed text.',
+        reasoningBlocks: [
+          { channel: 'summary', text: 'Summary one.\nSummary two.' },
+          { channel: 'reasoning', text: 'Detailed text.' },
+        ],
+        sourceEventId: 1,
+        attemptNo: 1,
+      },
+    ]);
+  });
+
+  it('keeps indexed channel parts ordered through snapshots and later deltas', () => {
+    const rows = toDisplayJob(JOB, {
+      events: [
+        notification(1, 'item/started', {
+          item: { id: 'r', type: 'reasoning', summary: ['First', 'Second'] },
+        }),
+        notification(2, 'item/reasoning/summaryTextDelta', {
+          itemId: 'r',
+          summaryIndex: 0,
+          delta: ' expanded.',
+        }),
+        notification(3, 'item/reasoning/summaryTextDelta', {
+          itemId: 'r',
+          summaryIndex: 1,
+          delta: ' expanded.',
+        }),
+        notification(4, 'item/reasoning/textDelta', {
+          itemId: 'r',
+          contentIndex: 1,
+          delta: 'Later detail.',
+        }),
+        notification(5, 'item/reasoning/textDelta', {
+          itemId: 'r',
+          contentIndex: 0,
+          delta: 'Earlier detail.',
+        }),
+      ],
+    }).events;
+    expect(rows).toEqual([
+      {
+        kind: 'thinking',
+        text: 'First expanded.\nSecond expanded.\n\nEarlier detail.\nLater detail.',
+        reasoningBlocks: [
+          { channel: 'summary', text: 'First expanded.\nSecond expanded.' },
+          { channel: 'reasoning', text: 'Earlier detail.\nLater detail.' },
+        ],
+        sourceEventId: 1,
+        attemptNo: 1,
+      },
+    ]);
+  });
+
+  it('scopes reused native IDs and empty statuses to their attempt', () => {
+    const rows = toDisplayJob(JOB, {
+      events: [
+        notification(1, 'item/reasoning/summaryTextDelta', { itemId: 'r', delta: 'First.' }),
+        notification(2, 'item/reasoning/summaryTextDelta', { itemId: 'r', delta: 'Second.' }, 2),
+        event(3, 'thinking', {}, 2),
+        event(4, 'thinking', {}, 3),
+      ],
+    }).events;
+    expect(rows.map((row) => [row.kind, 'text' in row ? row.text : '', row.attemptNo])).toEqual([
+      ['thinking', 'First.', 1],
+      ['thinking', 'Second.', 2],
+      ['thinking', '', 2],
+      ['thinking', '', 3],
+    ]);
+  });
+
+  it('suppresses delegated reasoning and projects no extra assistant message fragments', () => {
+    const rows = toDisplayJob(JOB, {
+      events: [
+        event(1, 'thinking', { text: 'Delegated plan.', parent_tool_use_id: 'task' }),
+        {
+          ...notification(2, 'item/reasoning/summaryTextDelta', {
+            itemId: 'child',
+            delta: 'Child.',
+          }),
+          payload: {
+            ...notification(2, 'item/reasoning/summaryTextDelta', {
+              itemId: 'child',
+              delta: 'Child.',
+            }).payload,
+            parent_tool_use_id: 'task',
+          },
+        },
+        notification(3, 'item/agentMessage/delta', { itemId: 'm', delta: 'Raw duplicate.' }),
+        event(4, 'raw', { protocol: 'reply-preview', preview_id: 'm', delta: 'The answer.' }),
+        event(5, 'message', { text: 'The answer.', preview_id: 'm', native_item_id: 'm' }),
+      ],
+    }).events;
+    expect(rows).toEqual([
+      { kind: 'message', text: 'The answer.', previewId: 'm', sourceEventId: 4, attemptNo: 1 },
+    ]);
+  });
+
+  it('keeps a Codex subagent thread’s records out of the conversation', () => {
+    const thread = { agent_thread_id: 'child-t' };
+    const owned = { ...thread, parent_tool_use_id: 'call-spawn' };
+    const rows = toDisplayJob(JOB, {
+      events: [
+        event(1, 'message', { text: 'CHILD', native_item_id: 'child-msg', ...owned }),
+        event(2, 'message', { text: 'Before the spawn named it', ...thread }),
+        event(3, 'thinking', { text: 'Child reasoning.', ...owned }),
+        event(4, 'tool_use', { name: 'commandExecution', id: 'child-cmd', input: 'ls', ...thread }),
+        event(5, 'tool_result', { tool_use_id: 'child-cmd', content: 'a', ...thread }),
+        event(6, 'tool_use', { name: 'commandExecution', id: 'linked', input: 'pwd', ...owned }),
+        event(7, 'lifecycle', { phase: 'result', status: 'completed', ...owned }),
+        event(8, 'message', { text: 'DONE' }),
+      ],
+    }).events;
+    expect(rows).toMatchObject([
+      { kind: 'tool_use', id: 'child-cmd', parentToolUseId: 'child-t', output: ['a'] },
+      { kind: 'tool_use', id: 'linked', parentToolUseId: 'call-spawn' },
+      { kind: 'message', text: 'DONE' },
+    ]);
+    expect(rows).toHaveLength(3);
+  });
+
+  it('joins historical deltas only when the same attempt recorded their native owner', () => {
+    const historical = (id: number, attemptId: number) =>
+      event(
+        id,
+        'raw',
+        {
+          text: JSON.stringify({
+            method: 'item/reasoning/summaryTextDelta',
+            params: { itemId: 'r', delta: 'Partial ' },
+          }),
+        },
+        attemptId,
+      );
+    const rows = toDisplayJob(JOB, {
+      events: [
+        historical(1, 1),
+        historical(2, 2),
+        event(3, 'thinking', { native_item_id: 'r', text: 'Complete.' }, 2),
+      ],
+    }).events;
+    expect(rows).toEqual([
+      {
+        kind: 'thinking',
+        text: 'Complete.',
+        reasoningBlocks: [{ channel: 'summary', text: 'Complete.' }],
+        sourceEventId: 2,
+        attemptNo: 2,
+      },
+    ]);
+  });
+});
+
+describe('toDisplayJob', () => {
+  it.each([null, 'ajob_previous'])(
+    'does not infer a queue reason from the parent ID %s',
+    (parent_job_id) => {
+      const job = toDisplayJob({ ...JOB, state: 'queued', parent_job_id, detail: null });
+      expect(job.state).toBe('queued');
+      expect(job.stateNote).toBeUndefined();
+    },
+  );
+
+  it('states the branch the publisher will use', () => {
+    expect(toDisplayJob(JOB).branch).toBe('agent/ajob_1');
+  });
+
+  it("carries the conversation goal and this round's report", () => {
+    const job = toDisplayJob({
+      ...JOB,
+      turn_source: 'goal',
+      goal_round: 3,
+      goal_round_kind: 'repair',
+      goal_report_parse: 'valid',
+      goal_report_outcome: 'needs_input',
+      goal_report_detail: 'which environment should this deploy to?',
+      goal: {
+        goal_id: 'goal_1',
+        objective: 'make `pytest` pass',
+        state: 'paused',
+        revision: 4,
+        max_rounds: 10,
+        rounds_used: 3,
+        pause_reason: 'needs_input',
+        pause_detail: 'the agent stopped and asked for input',
+        completion_basis: null,
+        completed_by_job_id: null,
+        created_at: null,
+        updated_at: null,
+      },
+    });
+    expect(job.goal).toEqual({
+      objective: 'make `pytest` pass',
+      state: 'paused',
+      revision: 4,
+      roundsUsed: 3,
+      maxRounds: 10,
+      pauseReason: 'needs_input',
+      pauseDetail: 'the agent stopped and asked for input',
+    });
+    expect(job.goalTurn).toEqual({
+      source: 'goal',
+      round: 3,
+      kind: 'repair',
+      reportParse: 'valid',
+      reportOutcome: 'needs_input',
+      reportDetail: 'which environment should this deploy to?',
+    });
+  });
+
+  it('carries a completion as the model report it is', () => {
+    const job = toDisplayJob({
+      ...JOB,
+      turn_source: 'goal',
+      goal_round: 4,
+      goal_round_kind: 'work',
+      goal_report_parse: 'valid',
+      goal_report_outcome: 'complete',
+      goal: {
+        goal_id: 'goal_1',
+        objective: 'make `pytest` pass',
+        state: 'complete',
+        revision: 4,
+        max_rounds: 10,
+        rounds_used: 4,
+        pause_reason: null,
+        pause_detail: null,
+        completion_basis: 'model_reported',
+        completed_by_job_id: 'ajob_1',
+        created_at: null,
+        updated_at: null,
+      },
+    });
+    expect(job.goal?.completionBasis).toBe('model_reported');
+    expect(job.goalTurn?.reportOutcome).toBe('complete');
+  });
+
+  it('says nothing about a goal on a conversation that has none', () => {
+    // A deployment older than this feature, and every conversation nobody set
+    // a goal on: the transcript must not grow an empty band for either, and a
+    // turn must not carry a goal relationship it does not have. Written out
+    // inline, this object was on every job in the product.
+    const job = toDisplayJob(JOB);
+    expect(job.goal).toBeUndefined();
+    expect(job.goalTurn).toBeUndefined();
+  });
+
+  it("reads no completion report out of a person's own turn", () => {
+    // The platform parses the final message of the rounds it queued itself.
+    // A report-shaped row on a turn the owner sent is not a report the platform
+    // made, and the transcript must not present one as the goal's last word.
+    const job = toDisplayJob({
+      ...JOB,
+      turn_source: 'human',
+      goal_report_parse: 'valid',
+      goal_report_outcome: 'complete',
+      goal_report_detail: 'all green',
+    });
+    expect(job.goalTurn).toBeUndefined();
+  });
+
+  it('maps the conversation pin time', () => {
+    expect(toDisplayJob({ ...JOB, pinned_at: '2026-07-29T12:00:00Z' }).pinnedAt).toBe(
+      '2026-07-29T12:00:00Z',
+    );
+  });
+
+  it('uses server-authoritative base and output branch fields', () => {
+    const job = toDisplayJob({ ...JOB, base_ref: 'dev', output_branch: 'agent/thread_7' });
+    expect(job.baseRef).toBe('dev');
+    expect(job.branch).toBe('agent/thread_7');
+  });
+
+  it('names the isolation boundary from the current attempt without exposing runtime internals', () => {
+    const events = [
+      event(1, 'lifecycle', { phase: 'started', sandbox_backend: 'process' }, 10),
+      event(
+        2,
+        'lifecycle',
+        {
+          phase: 'started',
+          sandbox_backend: 'container',
+          sandbox_runtime: 'io.containerd.kata.v2',
+          sandbox_image: 'registry.example/agent:1',
+        },
+        11,
+      ),
+    ];
+    const job = toDisplayJob({ ...JOB, current_attempt_id: 11 }, { events });
+
+    expect(job.sandbox).toBe('Isolated VM');
+  });
+
+  it.each([
+    ['container', 'runc', 'Container'],
+    ['process', '', 'Host process'],
+    ['kata', '', 'Isolated VM'],
+    ['io.containerd.kata.v2', '', 'Isolated VM'],
+    ['', 'io.containerd.kata.v2', 'Isolated VM'],
+  ])('describes the %s boundary accurately', (backend, runtime, label) => {
+    const job = toDisplayJob(JOB, {
+      events: [
+        event(1, 'lifecycle', {
+          phase: 'started',
+          sandbox_backend: backend,
+          sandbox_runtime: runtime,
+        }),
+      ],
+    });
+    expect(job.sandbox).toBe(label);
+  });
+
+  it('uses execution timestamps independently of submission and metadata update times', () => {
+    const job = toDisplayJob({
+      ...JOB,
+      created_at: '2026-09-10T10:00:00Z',
+      updated_at: '2026-09-10T10:12:00Z',
+      started_at: '2026-09-10T10:05:00Z',
+      finished_at: '2026-09-10T10:06:00Z',
+    });
+    expect(job.startedAt).toBe('2026-09-10T10:05:00Z');
+    expect(job.finishedAt).toBe('2026-09-10T10:06:00Z');
+    const legacy = toDisplayJob({ ...JOB, created_at: '2026-09-10T10:00:00Z' });
+    expect(legacy.startedAt).toBeUndefined();
+    expect(legacy.finishedAt).toBeUndefined();
+  });
+
+  it('distinguishes a readable empty workspace from an unavailable diff', () => {
+    expect(toDisplayJob(JOB, { patch: '' }).workspaceDiffAvailable).toBe(true);
+    expect(toDisplayJob(JOB, { patch: null }).workspaceDiffAvailable).toBe(false);
+    expect(toDisplayJob(JOB).workspaceDiffAvailable).toBe(false);
+  });
+
+  it('marks a superseded attempt rather than showing it live', () => {
+    const events = [
+      event(1, 'message', {}, 10),
+      event(2, 'attempt_superseded', { reason: 'lease_expired' }, 10),
+      event(3, 'message', {}, 11),
+    ];
+    const job = toDisplayJob(JOB, { events });
+    expect(job.attempts).toHaveLength(2);
+    expect(job.attempts[0].status).toBe('superseded');
+    expect(job.attempts[0].note).toContain('This run was interrupted.');
+    expect(job.attempts[0].note).toContain('Another run started.');
+    expect(job.attempts[1].status).toBe('live');
+  });
+
+  it('does not invent a replacement when lease loss terminates the only attempt', () => {
+    const job = toDisplayJob(
+      { ...JOB, state: 'failed', current_attempt_id: 10 },
+      {
+        events: [
+          event(1, 'lifecycle', { phase: 'workspace_preparing' }, 10),
+          event(2, 'attempt_superseded', { reason: 'lease_expired' }, 10),
+        ],
+      },
+    );
+    expect(job.attempts).toHaveLength(1);
+    expect(job.attempts[0].note).toBe('This run was interrupted.');
+    expect(lifecyclePhaseLabel('attempt superseded (lease_expired)').text).toBe('Run interrupted');
+  });
+
+  it('identifies the server-authoritative current attempt for readiness checks', () => {
+    const events = [
+      event(1, 'lifecycle', { phase: 'workspace_ready' }, 10),
+      event(2, 'attempt_superseded', { reason: 'lease_expired' }, 10),
+      event(3, 'lifecycle', { phase: 'started' }, 11),
+    ];
+    const job = toDisplayJob({ ...JOB, current_attempt_id: 11 }, { events });
+
+    expect(job.currentAttemptNo).toBe(2);
+  });
+
+  it('pairs telemetry with attempts by server identity', () => {
+    const events = [
+      event(1, 'attempt_superseded', { reason: 'lease_expired' }, 10),
+      event(2, 'message', {}, 11),
+    ];
+    const job = toDisplayJob(
+      {
+        ...JOB,
+        current_attempt_id: 11,
+        attempt_telemetry: [
+          {
+            attempt_id: 10,
+            attempt_no: 1,
+            continuity_mode: 'replay',
+            context_status: 'lost',
+            duration_ms: 3_000,
+          },
+          {
+            attempt_id: 11,
+            attempt_no: 2,
+            continuity_mode: 'warm_native',
+            context_status: 'restored',
+            duration_ms: 9_000,
+          },
+        ],
+      },
+      { events },
+    );
+
+    expect(job.attempts[0].telemetry).toMatchObject({
+      contextStatus: 'lost',
+      durationMs: 3_000,
+    });
+    expect(job.attempts[1].telemetry).toMatchObject({
+      contextStatus: 'restored',
+      durationMs: 9_000,
+    });
+    expect(job.attempts.map((attempt) => attempt.id)).toEqual([10, 11]);
+    expect(job.attempts.every((attempt) => attempt.telemetry?.resources === undefined)).toBe(true);
+    expect(job.attemptTelemetryAvailable).toBe(true);
+  });
+
+  it('does not assign a cached snapshot to a new attempt missing from the summary', () => {
+    const job = toDisplayJob(
+      {
+        ...JOB,
+        current_attempt_id: 11,
+        telemetry_attempt_id: 10,
+        duration_ms: 3_000,
+        context_status: 'lost',
+        attempt_telemetry: [
+          {
+            attempt_id: 10,
+            attempt_no: 1,
+            continuity_mode: 'replay',
+            context_status: 'lost',
+            duration_ms: 3_000,
+          },
+        ],
+      },
+      { events: [event(1, 'attempt_superseded', {}, 10), event(2, 'lifecycle', {}, 11)] },
+    );
+    expect(job.attempts[0].telemetry?.durationMs).toBe(3_000);
+    expect(job.attempts[1].telemetry).toBeUndefined();
+  });
+
+  it('never uses top-level fallback when a modern server reports no summaries', () => {
+    const job = toDisplayJob(
+      { ...JOB, attempt_telemetry: [], duration_ms: 3_000 },
+      { events: [event(1, 'message')] },
+    );
+    expect(job.attempts[0].telemetry).toBeUndefined();
+  });
+
+  it('retains unmatched tool results', () => {
+    const events = [event(1, 'message'), event(2, 'tool_result', { content: 'done' })];
+    const job = toDisplayJob(JOB, { events });
+    expect(job.events).toHaveLength(2);
+  });
+
+  it('leaves unknown operational fields empty rather than inventing them', () => {
+    // The API does not report these yet; a fabricated value would be worse
+    // than a blank one.
+    const job = toDisplayJob(JOB);
+    expect(job.gates).toEqual([]);
+  });
+
+  it('folds a tool result into its matching activity and preserves its attempt', () => {
+    const events = [
+      event(1, 'tool_use', { id: 'tool_1', name: 'Bash', input: { command: 'pytest' } }, 7),
+      event(2, 'tool_result', { tool_use_id: 'tool_1', content: '1 passed', is_error: false }, 7),
+    ];
+
+    const job = toDisplayJob(JOB, { events });
+
+    expect(job.events).toEqual([
+      expect.objectContaining({
+        kind: 'tool_use',
+        detail: 'pytest',
+        output: ['1 passed'],
+        attemptNo: 1,
+      }),
+    ]);
+  });
+
+  const piece = (id: number, preview_id: string, delta: string, extra = {}) =>
+    event(id, 'raw', { protocol: 'reply-preview', preview_id, delta, ...extra });
+
+  it('grows an answer while it is written, then shows the complete message in its place', () => {
+    const streaming = [
+      event(1, 'thinking', { text: 'plan', usage_id: 'msg_1' }),
+      piece(2, 'msg_1:1', 'Let me '),
+      piece(3, 'msg_1:1', 'look.'),
+    ];
+
+    expect(toDisplayJob(JOB, { events: streaming }).events).toEqual([
+      expect.objectContaining({ kind: 'thinking' }),
+      {
+        kind: 'message',
+        text: 'Let me look.',
+        previewId: 'msg_1:1',
+        streaming: true,
+        sourceEventId: 2,
+        attemptNo: 1,
+      },
+    ]);
+
+    const rows = toDisplayJob(JOB, {
+      events: [
+        ...streaming,
+        event(4, 'message', { text: 'Let me look.', usage_id: 'msg_1', preview_id: 'msg_1:1' }),
+      ],
+    }).events;
+    // The complete message keeps the row's first id and is no longer a preview.
+    expect(rows[1]).toEqual({
+      kind: 'message',
+      text: 'Let me look.',
+      previewId: 'msg_1:1',
+      sourceEventId: 2,
+      attemptNo: 1,
+    });
+  });
+
+  it('completes each answer where it was written, even when it arrives after later activity', () => {
+    // OpenCode and Kilo report their complete parts only when the turn settles.
+    const rows = toDisplayJob(JOB, {
+      events: [
+        piece(1, 'first', 'Let me'),
+        piece(2, 'first', ' check.'),
+        event(3, 'tool_use', { id: 'call_1', name: 'bash', input: { command: 'pwd' } }),
+        event(4, 'tool_result', { tool_use_id: 'call_1', content: '/workspace' }),
+        piece(5, 'second', 'Al'),
+        piece(6, 'second', 'All done.', { reset: true }),
+        event(7, 'message', { text: 'Let me check.', preview_id: 'first' }),
+        event(8, 'message', { text: 'All done.', preview_id: 'second' }),
+      ],
+    }).events;
+
+    expect(rows.map((row) => [row.kind, 'text' in row ? row.text : row.detail])).toEqual([
+      ['message', 'Let me check.'],
+      ['tool_use', 'pwd'],
+      ['message', 'All done.'],
+    ]);
+    expect(rows.some((row) => row.kind === 'message' && row.streaming)).toBe(false);
+  });
+
+  it('keeps answers of different attempts apart when they share a preview id', () => {
+    const rows = toDisplayJob(
+      { ...JOB, current_attempt_id: 2 },
+      {
+        events: [
+          event(1, 'raw', { protocol: 'reply-preview', preview_id: 'same', delta: 'First try' }),
+          event(2, 'raw', { protocol: 'reply-preview', preview_id: 'same', delta: 'Second' }, 2),
+          event(3, 'raw', { protocol: 'reply-preview', preview_id: 'same', delta: ' try' }, 2),
+        ],
+      },
+    ).events;
+    expect(rows.map((row) => [row.attemptNo, 'text' in row ? row.text : ''])).toEqual([
+      [1, 'First try'],
+      [2, 'Second try'],
+    ]);
+  });
+
+  it('shows a complete message on its own when nothing was previewed before it', () => {
+    const job = toDisplayJob(JOB, {
+      events: [event(1, 'message', { text: 'Hello.', usage_id: 'msg_1' })],
+    });
+    expect(job.events).toEqual([
+      { kind: 'message', text: 'Hello.', sourceEventId: 1, attemptNo: 1 },
+    ]);
+  });
+
+  it('keeps a message sent into a running turn where it arrived, marked as such', () => {
+    expect(
+      toDisplayEvent(
+        event(9, 'user_message', { text: 'also check the docs', pending_message_id: 'apmsg_1' }),
+      ),
+    ).toEqual({ kind: 'user_message', text: 'also check the docs', sourceEventId: 9 });
+    const job = toDisplayJob(
+      { ...JOB, thread_id: 'thread_1', parent_job_id: 'ajob_0', turn_no: 2 },
+      {
+        thread: {
+          thread_id: 'thread_1',
+          title: 'Stable conversation title',
+          jobs: [],
+          messages: [
+            { id: 1, role: 'user', content: 'first question', job_id: 'ajob_0', created_at: null },
+            {
+              id: 2,
+              role: 'user',
+              content: 'also check the docs',
+              job_id: 'ajob_0',
+              created_at: null,
+              mid_turn: true,
+            },
+          ],
+        },
+      },
+    );
+    expect(job.threadMessages?.map((message) => [message.content, message.midTurn])).toEqual([
+      ['first question', undefined],
+      ['also check the docs', true],
+    ]);
+  });
+
+  it('renders earlier thread messages without duplicating the current turn', () => {
+    const job = toDisplayJob(
+      { ...JOB, thread_id: 'thread_1', parent_job_id: 'ajob_0', turn_no: 2 },
+      {
+        thread: {
+          thread_id: 'thread_1',
+          title: 'Stable conversation title',
+          jobs: [],
+          messages: [
+            {
+              id: 1,
+              role: 'user',
+              content: 'first question',
+              job_id: 'ajob_0',
+              created_at: null,
+            },
+            {
+              id: 2,
+              role: 'assistant',
+              content: 'first answer',
+              job_id: 'ajob_0',
+              created_at: null,
+            },
+            {
+              id: 3,
+              role: 'user',
+              content: JOB.task_prompt,
+              job_id: JOB.id,
+              created_at: null,
+            },
+          ],
+        },
+      },
+    );
+
+    expect(job.prompt).toBe(JOB.task_prompt);
+    expect(job.title).toBe('Stable conversation title');
+    expect(job.turnNo).toBe(2);
+    expect(job.branch).toBe('agent/thread_1');
+    expect(job.threadMessages?.map((message) => message.content)).toEqual([
+      'first question',
+      'first answer',
+    ]);
+  });
+
+  it('reconstructs a previous turn with its tool activity in stream order', () => {
+    const current = { ...JOB, id: 'ajob_2', thread_id: 'thread_1', turn_no: 2 };
+    const job = toDisplayJob(current, {
+      thread: {
+        thread_id: 'thread_1',
+        jobs: [
+          {
+            ...JOB,
+            id: 'ajob_1',
+            thread_id: 'thread_1',
+            turn_no: 1,
+            native_fork_available: true,
+          },
+          current,
+        ],
+        messages: [
+          { id: 1, role: 'user', content: 'first question', job_id: 'ajob_1', created_at: null },
+          { id: 2, role: 'assistant', content: 'first answer', job_id: 'ajob_1', created_at: null },
+        ],
+      },
+      threadEvents: [
+        {
+          ...event(1, 'tool_use', { id: 'tool_1', name: 'Bash', input: { command: 'pwd' } }),
+          job_id: 'ajob_1',
+          turn_no: 1,
+        },
+        {
+          ...event(2, 'tool_result', { tool_use_id: 'tool_1', content: '/workspace' }),
+          job_id: 'ajob_1',
+          turn_no: 1,
+        },
+        {
+          ...event(3, 'message', { text: 'first answer' }),
+          job_id: 'ajob_1',
+          turn_no: 1,
+        },
+      ],
+    });
+
+    expect(job.historyTurns).toHaveLength(1);
+    expect(job.historyTurns?.[0].forkable).toBe(true);
+    expect(job.historyTurns?.[0].messages[0].content).toBe('first question');
+    expect(job.historyTurns?.[0].events).toEqual([
+      expect.objectContaining({ kind: 'tool_use', detail: 'pwd', output: ['/workspace'] }),
+      expect.objectContaining({ kind: 'message', text: 'first answer' }),
+    ]);
+  });
+
+  it.each([
+    ['failed', 'failed'],
+    ['cancelled', 'cancelled'],
+    ['succeeded', 'needs_review'],
+  ] as const)("carries a stored turn's %s outcome onto its rail entry", (state, expected) => {
+    // A turn that failed is not the same as a turn that was never classified:
+    // the rail says so from the thread's job row rather than from whichever
+    // events that turn happens to carry.
+    const current = {
+      ...JOB,
+      id: 'ajob_2',
+      thread_id: 'thread_1',
+      turn_no: 2,
+      state: 'succeeded' as const,
+    };
+    const job = toDisplayJob(current, {
+      thread: {
+        thread_id: 'thread_1',
+        jobs: [{ ...JOB, id: 'ajob_1', thread_id: 'thread_1', turn_no: 1, state }, current],
+        messages: [],
+      },
+      threadEvents: [],
+    });
+
+    expect(toConversationState(job.state)).toBe('idle');
+    expect(job.historyTurns?.[0].state).toBe(expected);
+  });
+
+  it('renders a settled turn from durable messages when it has no events', () => {
+    // A fork's copied anchor never streamed: its thread messages are the only
+    // record, prompt included, so the separate prompt card must stand down.
+    const job = toDisplayJob(
+      { ...JOB, id: 'ajob_2', state: 'succeeded', thread_id: 'thread_1', turn_no: 2 },
+      {
+        thread: {
+          thread_id: 'thread_1',
+          jobs: [],
+          messages: [
+            { id: 1, role: 'user', content: 'first question', job_id: 'ajob_0', created_at: null },
+            {
+              id: 2,
+              role: 'assistant',
+              content: 'first answer',
+              job_id: 'ajob_0',
+              created_at: null,
+            },
+            { id: 3, role: 'user', content: 'forked question', job_id: 'ajob_2', created_at: null },
+            {
+              id: 4,
+              role: 'assistant',
+              content: 'forked answer',
+              job_id: 'ajob_2',
+              created_at: null,
+            },
+          ],
+        },
+      },
+    );
+
+    expect(job.threadMessages?.map((message) => message.content)).toEqual([
+      'first question',
+      'first answer',
+      'forked question',
+      'forked answer',
+    ]);
+    expect(job.historyIncludesPrompt).toBe(true);
+  });
+
+  it('keeps a live turn rendering from its stream, not from thread copies', () => {
+    const job = toDisplayJob(
+      { ...JOB, id: 'ajob_2', state: 'running', thread_id: 'thread_1', turn_no: 2 },
+      {
+        thread: {
+          thread_id: 'thread_1',
+          jobs: [],
+          messages: [
+            {
+              id: 3,
+              role: 'user',
+              content: 'current question',
+              job_id: 'ajob_2',
+              created_at: null,
+            },
+          ],
+        },
+      },
+    );
+
+    expect(job.threadMessages).toEqual([]);
+    expect(job.historyIncludesPrompt).toBe(false);
+  });
+
+  it('does not duplicate a settled turn that already streamed its answer', () => {
+    const job = toDisplayJob(
+      { ...JOB, id: 'ajob_2', state: 'succeeded', thread_id: 'thread_1', turn_no: 2 },
+      {
+        events: [event(1, 'message', { text: 'streamed answer' })],
+        thread: {
+          thread_id: 'thread_1',
+          jobs: [],
+          messages: [
+            { id: 3, role: 'user', content: 'q', job_id: 'ajob_2', created_at: null },
+            {
+              id: 4,
+              role: 'assistant',
+              content: 'streamed answer',
+              job_id: 'ajob_2',
+              created_at: null,
+            },
+          ],
+        },
+      },
+    );
+
+    expect(job.threadMessages).toEqual([]);
+    expect(job.historyIncludesPrompt).toBe(false);
+  });
+
+  it('does not render turns queued after the job being viewed as history', () => {
+    const current = { ...JOB, thread_id: 'thread_1', turn_no: 2 };
+    const future = { ...JOB, id: 'ajob_3', thread_id: 'thread_1', turn_no: 3 };
+    const job = toDisplayJob(current, {
+      thread: {
+        thread_id: 'thread_1',
+        jobs: [{ ...JOB, id: 'ajob_1', thread_id: 'thread_1', turn_no: 1 }, current, future],
+        messages: [
+          { id: 1, role: 'user', content: 'first', job_id: 'ajob_1', created_at: null },
+          { id: 2, role: 'user', content: 'future', job_id: 'ajob_3', created_at: null },
+        ],
+      },
+    });
+
+    expect(job.threadMessages?.map((message) => message.content)).toEqual(['first']);
+  });
+
+  it('carries the PR label through', () => {
+    const job = toDisplayJob({
+      ...JOB,
+      state: 'succeeded',
+      published_pr_url: 'https://github.com/o/n/pull/44',
+    });
+    expect(job.prLabel).toBe('draft PR 44');
+  });
+
+  it('keeps the thread draft PR visible on a later no-op turn', () => {
+    const previous = {
+      ...JOB,
+      id: 'ajob_0',
+      thread_id: 'thread_1',
+      turn_no: 1,
+      published_pr_url: 'https://github.com/o/n/pull/44',
+    };
+    const current = {
+      ...JOB,
+      thread_id: 'thread_1',
+      turn_no: 2,
+      state: 'succeeded' as const,
+      published_pr_url: null,
+    };
+    const job = toDisplayJob(current, {
+      thread: { thread_id: 'thread_1', jobs: [previous, current], messages: [] },
+    });
+
+    expect(job.prUrl).toBe('https://github.com/o/n/pull/44');
+    expect(job.prLabel).toBe('draft PR 44');
+  });
+
+  it('opens the latest session PR when an earlier turn has the closed PR URL', () => {
+    const previous = {
+      ...JOB,
+      thread_id: 'thread_1',
+      turn_no: 1,
+      published_pr_url: 'https://github.com/o/n/pull/44',
+    };
+    const current = {
+      ...previous,
+      id: 'ajob_2',
+      turn_no: 2,
+      published_pr_url: 'https://github.com/o/n/pull/45',
+    };
+    const job = toDisplayJob(previous, {
+      thread: { thread_id: 'thread_1', jobs: [previous, current], messages: [] },
+    });
+
+    expect(job.prUrl).toBe('https://github.com/o/n/pull/45');
+    expect(job.prLabel).toBe('draft PR 45');
+  });
+
+  it('keeps a fresh PR update while the thread read still has the earlier URL', () => {
+    const stale = {
+      ...JOB,
+      thread_id: 'thread_1',
+      turn_no: 2,
+      published_pr_url: 'https://github.com/o/n/pull/44',
+    };
+    const fresh = { ...stale, published_pr_url: 'https://github.com/o/n/pull/45' };
+    const job = toDisplayJob(fresh, {
+      thread: { thread_id: 'thread_1', jobs: [stale], messages: [] },
+    });
+
+    expect(job.prUrl).toBe('https://github.com/o/n/pull/45');
+  });
+});
+
+describe('patch parsing', () => {
+  const PATCH = [
+    'diff --git a/src/x.py b/src/x.py',
+    'index 111..222 100644',
+    '--- a/src/x.py',
+    '+++ b/src/x.py',
+    '@@ -1,3 +1,3 @@',
+    ' context',
+    '-old',
+    '+new',
+  ].join('\n');
+
+  it('lists changed files', () => {
+    expect(toDiffFiles(PATCH)).toEqual(['src/x.py']);
+  });
+
+  it('creates per-file diffs and stats for the Git workspace', () => {
+    const second = [
+      'diff --git a/src/y.py b/src/y.py',
+      '--- a/src/y.py',
+      '+++ b/src/y.py',
+      '@@ -0,0 +1 @@',
+      '+created',
+    ].join('\n');
+    expect(toDiffFileDetails(`${PATCH}\n${second}`)).toEqual([
+      expect.objectContaining({ path: 'src/x.py', add: 1, del: 1 }),
+      expect.objectContaining({ path: 'src/y.py', add: 1, del: 0 }),
+    ]);
+  });
+
+  it('counts added and removed lines without the headers', () => {
+    expect(toDisplayJob(JOB, { patch: PATCH }).diffStat).toEqual({ add: 1, del: 1 });
+  });
+
+  // What the host's `git diff` writes for `文档.md`: core.quotePath is on, so
+  // the name is quoted and each byte of its UTF-8 spelling is an octal escape.
+  const QUOTED = [
+    'diff --git "a/\\346\\226\\207\\346\\241\\243.md" "b/\\346\\226\\207\\346\\241\\243.md"',
+    'index ce01362..3b18e51 100644',
+    '--- "a/\\346\\226\\207\\346\\241\\243.md"',
+    '+++ "b/\\346\\226\\207\\346\\241\\243.md"',
+    '@@ -1 +1 @@',
+    '-hello',
+    '+hello world',
+  ].join('\n');
+
+  it('decodes a quoted non-ASCII path', () => {
+    expect(toDiffFiles(QUOTED)).toEqual(['文档.md']);
+    expect(toDiffFileDetails(QUOTED)).toEqual([
+      expect.objectContaining({ path: '文档.md', add: 1, del: 1 }),
+    ]);
+  });
+
+  it('keeps a quoted file out of the file listed before it', () => {
+    const patch = `${PATCH}\n${QUOTED}`;
+    expect(toDiffFiles(patch)).toEqual(['src/x.py', '文档.md']);
+    expect(toDiffFileDetails(patch)).toEqual([
+      expect.objectContaining({ path: 'src/x.py', add: 1, del: 1 }),
+      expect.objectContaining({ path: '文档.md', add: 1, del: 1 }),
+    ]);
+  });
+
+  it.each([
+    ['tab\\tname.md', 'tab\tname.md'],
+    ['say \\"hi\\".md', 'say "hi".md'],
+    ['back\\\\slash.md', 'back\\slash.md'],
+  ])('decodes the escape in "b/%s"', (quoted, path) => {
+    expect(toDiffFiles(`diff --git "a/${quoted}" "b/${quoted}"`)).toEqual([path]);
+  });
+
+  it('leaves out a file whose name is not UTF-8, with its lines', () => {
+    // A Latin-1 `café.md`: Git writes its é as the one byte \351, which spells
+    // no UTF-8 name, and the workspace lists no such file to open.
+    const latin1 = [
+      'diff --git "a/caf\\351.md" "b/caf\\351.md"',
+      'index ce01362..3b18e51 100644',
+      '--- "a/caf\\351.md"',
+      '+++ "b/caf\\351.md"',
+      '@@ -1 +1 @@',
+      '-hello',
+      '+hello world',
+    ].join('\n');
+    const patch = `${PATCH}\n${latin1}`;
+    expect(toDiffFiles(patch)).toEqual(['src/x.py']);
+    expect(toDiffFileDetails(patch)).toEqual([
+      expect.objectContaining({ path: 'src/x.py', add: 1, del: 1 }),
+    ]);
+    // Its lines still count, as a header without prefixes does.
+    expect(toDisplayJob(JOB, { patch }).diffStat).toEqual({ add: 2, del: 2 });
+  });
+
+  it('reads a header that quotes only one of its names', () => {
+    const rename = [
+      'diff --git a/plain.md "b/\\345\\220\\215\\345\\255\\227.md"',
+      'similarity index 100%',
+      'rename from plain.md',
+      'rename to "\\345\\220\\215\\345\\255\\227.md"',
+    ].join('\n');
+    expect(toDiffFiles(rename)).toEqual(['名字.md']);
+  });
+
+  it('reads each line of a hunk by its first character', () => {
+    // A removed `--count;` and an added `++count;` are changes like any other,
+    // not the `---` and `+++` lines that name the file before its first hunk.
+    const patch = [
+      'diff --git a/tick.c b/tick.c',
+      'index 15c5242..04c18dc 100644',
+      '--- a/tick.c',
+      '+++ b/tick.c',
+      '@@ -1,3 +1,3 @@',
+      ' void tick(void) {',
+      '---count;',
+      '+++count;',
+      ' }',
+    ].join('\n');
+    const [file] = toDiffFileDetails(patch);
+    expect(file).toMatchObject({ add: 1, del: 1 });
+    expect(file.lines.slice(0, 2)).toEqual([
+      { marker: 'ctx', text: '--- a/tick.c' },
+      { marker: 'ctx', text: '+++ b/tick.c' },
+    ]);
+    expect(file.lines.slice(4, 6)).toEqual([
+      { marker: 'del', text: '---count;' },
+      { marker: 'add', text: '+++count;' },
+    ]);
+    expect(toDisplayJob(JOB, { patch }).diffStat).toEqual({ add: 1, del: 1 });
+  });
+
+  it('counts a patch whose headers a repository writes without the a/ and b/ prefixes', () => {
+    // diff.noPrefix drops them and diff.mnemonicPrefix swaps them for i/ and w/.
+    // The file list cannot name such a file, but the count must still see it.
+    for (const [from, to] of [
+      ['tick.c', 'tick.c'],
+      ['i/tick.c', 'w/tick.c'],
+    ]) {
+      const patch = [
+        `diff --git ${from} ${to}`,
+        'index 15c5242..04c18dc 100644',
+        `--- ${from}`,
+        `+++ ${to}`,
+        '@@ -1,3 +1,3 @@',
+        ' void tick(void) {',
+        '---count;',
+        '+++count;',
+        '+  ready();',
+        ' }',
+      ].join('\n');
+      expect(toDisplayJob(JOB, { patch }).diffStat).toEqual({ add: 2, del: 1 });
+    }
+  });
+
+  it('reads a file that became a symlink as one changed file', () => {
+    // What `git diff` writes for a change of file type: a deletion and a
+    // creation, each with its own header, under the one name.
+    const patch = [
+      'diff --git a/config.yml b/config.yml',
+      'deleted file mode 100644',
+      'index a52e282..0000000',
+      '--- a/config.yml',
+      '+++ /dev/null',
+      '@@ -1 +0,0 @@',
+      '-plain text',
+      'diff --git a/config.yml b/config.yml',
+      'new file mode 120000',
+      'index 0000000..0190743',
+      '--- /dev/null',
+      '+++ b/config.yml',
+      '@@ -0,0 +1 @@',
+      '+shared/config.yml',
+      '\\ No newline at end of file',
+    ].join('\n');
+    expect(toDiffFiles(patch)).toEqual(['config.yml']);
+    const files = toDiffFileDetails(patch);
+    expect(files).toEqual([expect.objectContaining({ path: 'config.yml', add: 1, del: 1 })]);
+    expect(files[0].lines.filter((line) => line.marker !== 'ctx')).toEqual([
+      { marker: 'hunk', text: '@@ -1 +0,0 @@' },
+      { marker: 'del', text: '-plain text' },
+      { marker: 'hunk', text: '@@ -0,0 +1 @@' },
+      { marker: 'add', text: '+shared/config.yml' },
+    ]);
+    expect(toDisplayJob(JOB, { patch }).diffStat).toEqual({ add: 1, del: 1 });
+  });
+
+  it('handles a job that produced no patch', () => {
+    const job = toDisplayJob(JOB, { patch: null });
+    expect(job.diffFiles).toEqual([]);
+    expect(job.diffStat).toBeUndefined();
+  });
+});
+
+describe('job usage fields', () => {
+  it("carries no cost or billed count: the job usage read is the agent's report", () => {
+    const job = toDisplayJob(JOB) as unknown as Record<string, unknown>;
+    expect(job).not.toHaveProperty('spentUsd');
+    expect(job).not.toHaveProperty('hasLedger');
+    expect(job).not.toHaveProperty('usage');
+  });
+});
+
+describe('lifecycle noise', () => {
+  const event = (id: number, event_type: string, payload: Record<string, unknown>) => ({
+    id,
+    attempt_id: 1,
+    seq: id,
+    event_type,
+    payload,
+    created_at: null,
+  });
+
+  const job = {
+    id: 'ajob_1',
+    repo: 'owner/repo',
+    task_prompt: 'walk through this repo',
+    runtime: 'claude-code',
+    model: 'glm-5.1',
+    base_sha: null,
+    state: 'succeeded' as const,
+    cancel_requested: false,
+    current_attempt_id: 1,
+    published_pr_url: null,
+    detail: null,
+    metadata: null,
+    created_at: null,
+    updated_at: null,
+  };
+
+  it('does not render an unknown phase as a completed milestone', () => {
+    // The staging run stored 408 of these; each one was drawn with a ✓.
+    const { text, milestone } = lifecyclePhaseLabel('thinking_tokens');
+    expect(milestone).toBe(false);
+    expect(text).toBe('thinking tokens');
+    expect(lifecyclePhaseLabel('checked_out')).toEqual({
+      text: 'Repository ready',
+      milestone: true,
+    });
+    expect(lifecyclePhaseLabel('workspace_ready')).toEqual({
+      text: 'Workspace ready',
+      milestone: true,
+    });
+    expect(lifecyclePhaseLabel('workspace_finalizing')).toEqual({
+      text: 'Saving workspace changes',
+      milestone: true,
+    });
+  });
+
+  it("shows an error in the agent's own words as said, even one named like a built-in", () => {
+    // The agent chooses those words. `__proto__` and `constructor` are not
+    // entries of the label table, and must not find Object.prototype's.
+    for (const word of ['__proto__', 'constructor']) {
+      expect(
+        toDisplayEvent(event(1, 'error', { detail: `agent reported an error: ${word}` })),
+      ).toEqual({ kind: 'lifecycle', text: word, sourceEventId: 1 });
+    }
+    expect(lifecyclePhaseLabel('__proto__')).toEqual({ text: '  proto  ', milestone: false });
+    expect(lifecyclePhaseLabel('constructor')).toEqual({ text: 'constructor', milestone: false });
+  });
+
+  it('collapses consecutive reasoning rows into one status', () => {
+    const events = [
+      event(1, 'thinking', { text: '' }),
+      event(2, 'thinking', { text: '' }),
+      event(3, 'thinking', { text: '' }),
+      event(4, 'message', { text: 'done' }),
+      event(5, 'thinking', { text: '' }),
+    ];
+    const kinds = toDisplayJob(job, { events }).events.map((e) => e.kind);
+    // Three in a row become one; the later one after a message is its own.
+    expect(kinds).toEqual(['thinking', 'message', 'thinking']);
+  });
+
+  it('tells the platform starting a turn apart from the agent coming up', () => {
+    // These were one label, collapsed when adjacent. They are two different
+    // milestones — the platform claimed the turn, then the CLI announced
+    // itself — and on a resident turn other milestones fall between them, so
+    // the collapse missed and the same words appeared twice.
+    const events = [
+      event(1, 'lifecycle', { phase: 'started' }),
+      event(2, 'lifecycle', { phase: 'checked_out' }),
+      event(3, 'lifecycle', { phase: 'init' }),
+    ];
+
+    const texts = toDisplayJob(job, { events })
+      .events.filter((e) => e.kind === 'lifecycle')
+      .map((e) => (e.kind === 'lifecycle' ? lifecyclePhaseLabel(e.text).text : ''));
+
+    expect(texts).toEqual(['Run started', 'Repository ready', 'Agent ready']);
+  });
+
+  it('still collapses the same milestone reported twice in a row', () => {
+    const events = [
+      event(1, 'lifecycle', { phase: 'init' }),
+      event(2, 'lifecycle', { phase: 'system' }),
+      event(3, 'lifecycle', { phase: 'checked_out' }),
+    ];
+
+    const texts = toDisplayJob(job, { events })
+      .events.filter((e) => e.kind === 'lifecycle')
+      .map((e) => (e.kind === 'lifecycle' ? lifecyclePhaseLabel(e.text).text : ''));
+
+    expect(texts).toEqual(['Agent ready', 'Repository ready']);
+  });
+
+  it('says a resident turn reused its tree rather than claiming a checkout', () => {
+    // The runner skips the clone entirely on a resident turn. Reporting
+    // "Repository ready" either way told the owner their conversation had
+    // been rebuilt, contradicting the continuity badge on the same turn.
+    const events = [event(1, 'lifecycle', { phase: 'checked_out', reused: true })];
+
+    const texts = toDisplayJob(job, { events })
+      .events.filter((e) => e.kind === 'lifecycle')
+      .map((e) => (e.kind === 'lifecycle' ? lifecyclePhaseLabel(e.text).text : ''));
+
+    expect(texts).toEqual(['Reusing this conversation\u2019s workspace']);
+  });
+
+  it('still reports a real checkout as one', () => {
+    const events = [event(1, 'lifecycle', { phase: 'checked_out', reused: false })];
+
+    const texts = toDisplayJob(job, { events })
+      .events.filter((e) => e.kind === 'lifecycle')
+      .map((e) => (e.kind === 'lifecycle' ? lifecyclePhaseLabel(e.text).text : ''));
+
+    expect(texts).toEqual(['Repository ready']);
+  });
+});
+
+describe('subagentDisplayEvents', () => {
+  const stored = (
+    id: number,
+    event_type: string,
+    payload: Record<string, unknown>,
+  ): AgentJobEventApi => ({ id, attempt_id: 1, seq: id, event_type, payload, created_at: null });
+
+  it('reads one subagent’s records as its own conversation', () => {
+    const events = [
+      stored(1, 'tool_use', { id: 'delegate', name: 'Agent', input: { prompt: 'Review' } }),
+      stored(2, 'thinking', { text: 'Looking at the tests', parent_tool_use_id: 'delegate' }),
+      stored(3, 'tool_use', {
+        id: 'child-read',
+        name: 'Read',
+        input: { file_path: 'a.ts' },
+        parent_tool_use_id: 'delegate',
+      }),
+      stored(4, 'tool_result', {
+        tool_use_id: 'child-read',
+        content: 'file body',
+        parent_tool_use_id: 'delegate',
+      }),
+      stored(5, 'message', { text: 'Tests pass', parent_tool_use_id: 'delegate' }),
+      stored(6, 'lifecycle', { phase: 'result', parent_tool_use_id: 'delegate' }),
+      stored(7, 'message', { text: 'Another agent', parent_tool_use_id: 'other' }),
+      stored(8, 'message', { text: 'The main reply' }),
+    ];
+    const rows = subagentDisplayEvents(events, { callId: 'delegate', threads: [] });
+    expect(rows.map((row) => row.kind)).toEqual(['thinking', 'tool_use', 'message']);
+    expect(rows[1]).toMatchObject({ tool: 'Read', output: ['file body'], resultState: 'received' });
+    expect(rows[1]).not.toHaveProperty('parentToolUseId');
+    expect(rows[2]).toMatchObject({ kind: 'message', text: 'Tests pass' });
+  });
+
+  it('keeps a Codex thread apart from its siblings started by the same call', () => {
+    const owned = (thread: string) => ({
+      agent_thread_id: thread,
+      parent_tool_use_id: 'call-spawn',
+    });
+    const events = [
+      stored(1, 'message', { text: 'From the thread', ...owned('thread-1') }),
+      stored(2, 'message', { text: 'From a sibling', ...owned('thread-2') }),
+      // Recorded after a restart forgot which call started the thread.
+      stored(3, 'message', { text: 'Thread only', agent_thread_id: 'thread-1' }),
+    ];
+    expect(
+      subagentDisplayEvents(events, { callId: 'call-spawn', threads: ['thread-1'] }).map(
+        (row) => row.kind === 'message' && row.text,
+      ),
+    ).toEqual(['From the thread', 'Thread only']);
+    // Before the spawn returns its threads, the call is the only owner known.
+    expect(
+      subagentDisplayEvents(events, { callId: 'call-spawn', threads: [] }).map(
+        (row) => row.kind === 'message' && row.text,
+      ),
+    ).toEqual(['From the thread', 'From a sibling']);
+  });
+});
+
+describe('projecting a running turn again', () => {
+  const call = (id: number, callId: string, command: string) =>
+    event(id, 'tool_use', { id: callId, name: 'bash', input: { command } });
+
+  it('keeps each unchanged row and builds a new one only for a row that changed', () => {
+    const project = createDisplayJobAdapter();
+    const streamed = [call(1, 'call_1', 'pwd'), event(2, 'message', { text: 'Checking.' })];
+    const before = project(JOB, { events: [...streamed, call(3, 'call_2', 'ls')] }).events;
+    const after = project(JOB, {
+      events: [
+        ...streamed,
+        call(3, 'call_2', 'ls'),
+        event(4, 'tool_result', { tool_use_id: 'call_1', content: '/workspace' }),
+      ],
+    }).events;
+
+    expect(after[0]).not.toBe(before[0]);
+    expect(after[0]).toMatchObject({ kind: 'tool_use', output: ['/workspace'] });
+    expect(after[1]).toBe(before[1]);
+    expect(after[2]).toBe(before[2]);
+  });
+
+  it('returns the same rows when nothing changed', () => {
+    const project = createDisplayJobAdapter();
+    const events = [call(1, 'call_1', 'pwd'), event(2, 'tool_result', { tool_use_id: 'call_1' })];
+    const before = project(JOB, { events }).events;
+    expect(project(JOB, { events: [...events] }).events).toBe(before);
+  });
+
+  it('does not carry rows from one turn into another', () => {
+    const project = createDisplayJobAdapter();
+    const events = [event(1, 'message', { text: 'Same text.' })];
+    const before = project(JOB, { events }).events;
+    const other = project({ ...JOB, id: 'ajob_2' }, { events }).events;
+    expect(other).toEqual(before);
+    expect(other[0]).not.toBe(before[0]);
+  });
+
+  it('reads an unchanged workspace patch once', () => {
+    const project = createDisplayJobAdapter();
+    const patch = 'diff --git a/x.ts b/x.ts\n--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-a\n+b';
+    const first = project(JOB, { events: [], patch });
+    const again = project(JOB, { events: [], patch });
+    expect(again.diffFileDetails).toBe(first.diffFileDetails);
+    expect(again.diffFiles).toBe(first.diffFiles);
+    const changed = project(JOB, { events: [], patch: `${patch}\n+c` });
+    expect(changed.diffFileDetails).not.toBe(first.diffFileDetails);
+    expect(changed.diffStat).toEqual({ add: 2, del: 1 });
+  });
+});
+
+describe('workspace pull request', () => {
+  it('carries the newest pull request the conversation opened', () => {
+    const none = toDisplayJob({ ...JOB, state: 'succeeded', workspace_pr_url: null }, {});
+    expect(none.workspacePrUrl).toBeUndefined();
+
+    const opened = toDisplayJob(
+      { ...JOB, state: 'succeeded', workspace_pr_url: 'https://github.com/o/n/pull/4' },
+      {},
+    );
+    expect(opened.workspacePrUrl).toBe('https://github.com/o/n/pull/4');
+    // A pull request opened in an earlier turn is not this turn's.
+    expect(opened.prUrl).toBeUndefined();
+  });
+});

@@ -17,21 +17,23 @@ from typing import Any
 
 import httpx
 import pytest
+from tests.support.archive_policy import archive_hooks
 from tests.unit.test_sandbox_deletion_backup import _Manager as _ArchivingDocker
 from tests.unit.test_shared_session_supervisor import _Manager, _members, _spec
 
-from cloud_agent_host import sandbox_deletion_diagnostics
-from cloud_agent_host.chat_sandbox import ChatSandboxSpec
+from cloud_agent_host.archive import sandbox_deletion_diagnostics
+from cloud_agent_host.archive.sandbox_deletion_backup import (
+    ArchiveIdentity,
+    SandboxDeletionBackupService,
+)
+from cloud_agent_host.archive.sandbox_deletion_diagnostics import KNOWN_REASONS
+from cloud_agent_host.container.chat_sandbox import ChatSandboxSpec
+from cloud_agent_host.container.sandbox import ProcessBackend, SandboxError
 from cloud_agent_host.logging_utils import _FORMAT
-from cloud_agent_host.sandbox import ProcessBackend, SandboxError
-from cloud_agent_host.sandbox_deletion_backup import ArchiveIdentity, SandboxDeletionBackupService
-from cloud_agent_host.sandbox_deletion_diagnostics import KNOWN_REASONS
 from cloud_agent_host.sandbox_manager import create_app
 from cloud_agent_host.session_lifecycle import SessionBusy, SessionLeaseLost
-from cloud_agent_host.shared_session_supervisor import (
-    SharedChatSessionSupervisor,
-    SharedMemberManifest,
-)
+from cloud_agent_host.supervisor.shared_session_state import SharedMemberManifest
+from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_shared.logging_utils import JsonLogFormatter
 
 _CONTAINER = "0f1e2d3c4b5a" + "0" * 52
@@ -71,7 +73,7 @@ def _running_group(**hooks: Any) -> tuple[_Docker, SharedChatSessionSupervisor]:
     docker.items[spec.container_name] = replace(
         docker._inspection(spec, running=True), container_id=_CONTAINER
     )
-    supervisor = SharedChatSessionSupervisor(docker, **hooks)
+    supervisor = SharedChatSessionSupervisor(docker, archive_policy=archive_hooks(**hooks))
     supervisor.register_manifest(spec, _members(), expected_container_id=_CONTAINER)
     return docker, supervisor
 
@@ -98,8 +100,8 @@ def test_a_pending_final_archive_is_named_in_both_log_formats(tmp_path, caplog):
         raise SandboxError("synthetic upload failure")
 
     docker, supervisor = _running_group(
-        stopped_archive_prepare_hook=lambda *_args: None,
-        stopped_archive_hook=fail_upload,
+        prepare_final=lambda *_args: None,
+        stopped=fail_upload,
     )
     with pytest.raises(SandboxError, match="synthetic upload failure"):
         supervisor.stop_if_idle("athr_source", generation=1)
@@ -293,7 +295,7 @@ async def test_a_receipt_the_filesystem_refuses_is_logged_and_still_answered_500
 def test_every_known_reason_is_a_sentence_the_host_raises():
     source = "\n".join(
         path.read_text()
-        for path in _HOST_SOURCE.glob("*.py")
+        for path in _HOST_SOURCE.rglob("*.py")
         if path.name != "sandbox_deletion_diagnostics.py"
     )
     missing = sorted(reason for reason in KNOWN_REASONS if f'"{reason}"' not in source)

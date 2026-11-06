@@ -12,7 +12,7 @@ from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.api import admin_runtime_upgrades
 from cloud_agent.api.deps import get_storage, verify_admin_access
-from cloud_agent.runtime_upgrades import RegistryClient
+from cloud_agent.application.runtime_upgrades import RegistryClient
 
 LATEST = {
     "@anthropic-ai/claude-code": "2.1.300",

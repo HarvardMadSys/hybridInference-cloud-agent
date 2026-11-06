@@ -94,7 +94,7 @@ EXPECTED_PLATFORMS: dict[str, tuple[str, ...]] = artifact_catalog.expected_platf
 WEB_VARIANTS: dict[str, str] = artifact_catalog.web_variants()
 
 #: The sandbox image's runtime labels. Duplicated from
-#: `cloud_agent_host.sandbox` on purpose — this module is imported by a
+#: `cloud_agent_host.container.sandbox` on purpose — this module is imported by a
 #: publication job that has no business loading the host package — and
 #: `test_release_manifest.py` fails if the two ever disagree.
 RUNTIME_LABEL_PREFIX = "org.freeinference.runtime."

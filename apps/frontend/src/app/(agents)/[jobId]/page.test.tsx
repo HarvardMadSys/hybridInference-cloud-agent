@@ -3,7 +3,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentJob } from '@/components/features/agents/types';
-import { useConversationReadState } from '@/components/features/agents/useConversationReadState';
+import { useConversationReadState } from '@/components/features/agents/sidebar/useConversationReadState';
 const fixture = vi.hoisted(() => ({
   id: 'job-a',
   loading: false,

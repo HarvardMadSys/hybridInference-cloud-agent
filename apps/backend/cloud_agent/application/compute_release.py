@@ -27,13 +27,13 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.compute_secrets import ComputeSecretError
 from cloud_agent.ports.external.compute_provider import (
     ProviderError,
     ProviderReceipt,
     ResourceObservation,
     ResourceRef,
 )
+from cloud_agent.providers.compute.compute_secrets import ComputeSecretError
 
 if TYPE_CHECKING:
     from cloud_agent.application.compute_reconcile import ComputeReconciler

@@ -18,8 +18,8 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from cloud_agent.domain.execution import RUNNING, TERMINAL_STATES
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.sandbox_manager_client import SandboxManagerError
-from cloud_agent.sandbox_manager_routing import sandbox_manager_for_attempt
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_routing import sandbox_manager_for_attempt
 from cloud_agent_shared.shared_protocol import (
     INPUT_PROCESS_GONE,
     INPUT_REFUSALS,

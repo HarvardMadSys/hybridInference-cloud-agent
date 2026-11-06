@@ -7,13 +7,27 @@ from typing import TYPE_CHECKING, Protocol
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
-from cloud_agent.admin_observability import decode_cursor
-from cloud_agent.admin_sandbox_inventory import (
+from cloud_agent.api.deps import (
+    get_client_ip,
+    get_storage,
+    require_store,
+    verify_admin_access,
+)
+from cloud_agent.domain.cursors import decode_cursor
+from cloud_agent.logging_utils import get_logger
+from cloud_agent.sandbox_archive.sandbox_archive import S3SandboxArchiveStore
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_routing import (
+    SandboxManagerUrlRefused,
+    sandbox_manager_configuration_error,
+    sandbox_manager_for_host,
+)
+from cloud_agent.schemas.admin_sandbox_inventory import (
     AdminSandboxInventoryPage,
     decode_inventory_cursor,
     inventory_scope,
 )
-from cloud_agent.admin_sandboxes import (
+from cloud_agent.schemas.admin_sandboxes import (
     AdminSandboxArchiveRequest,
     AdminSandboxDetail,
     AdminSandboxList,
@@ -25,24 +39,10 @@ from cloud_agent.admin_sandboxes import (
     sandbox_cursor_scope,
     sandbox_trajectory_cursor_scope,
 )
-from cloud_agent.api.deps import (
-    get_client_ip,
-    get_storage,
-    require_store,
-    verify_admin_access,
-)
-from cloud_agent.logging_utils import get_logger
-from cloud_agent.sandbox_archive import S3SandboxArchiveStore
-from cloud_agent.sandbox_manager_client import SandboxManagerError
-from cloud_agent.sandbox_manager_routing import (
-    SandboxManagerUrlRefused,
-    sandbox_manager_configuration_error,
-    sandbox_manager_for_host,
-)
 
 if TYPE_CHECKING:
     from cloud_agent.ports import HostPoolRepository, SandboxRepository
-    from cloud_agent.storage.admin_sandbox_queries import AdminSandboxQueries
+    from cloud_agent.ports.admin_queries import AdminSandboxQueries
 
 
 logger = get_logger(__name__)

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
+from cloud_agent.domain.sandbox_group import GroupState
 from cloud_agent.domain.ssh_servers import (
     CHECK_EVENTS,
     SshServerConflict,
@@ -439,7 +440,7 @@ class PostgresSshServerRepository:
         """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                """
+                f"""
                 WITH touched AS (
                     SELECT DISTINCT m.sandbox_id
                     FROM agent_thread_sandbox_memberships m
@@ -462,7 +463,7 @@ class PostgresSshServerRepository:
                            LIMIT 1
                        ) AS resident_thread_id
                 FROM touched
-                JOIN agent_sandboxes s ON s.id = touched.sandbox_id AND s.state = 'running'
+                JOIN agent_sandboxes s ON s.id = touched.sandbox_id AND s.state = {GroupState.RUNNING.sql}
                 LEFT JOIN agent_runner_hosts h ON h.host = s.host
                 WHERE ($3::text IS NULL OR s.id > $3)
                 ORDER BY s.id LIMIT $4
