@@ -150,13 +150,16 @@
 
 **A 层的现状（2026-11-05）。** 已实现，尚未在 dev 上连续跑满一周：
 
-- 脚本 `scripts/check_mixed_protocol.py`，两个进程驱动 `tests/support/mixed_protocol_control.py`（某一版的控制面）和 `tests/support/mixed_protocol_host.py`（某一版的 host 端代码），共用的模型检查在 `tests/support/mixed_protocol_wire.py`。上一版用 `git archive` 取出，在自己的目录里 `uv sync --frozen --no-dev` 建 venv。
+- 脚本 `scripts/check_mixed_protocol.py`，两个进程驱动 `tests/support/mixed_protocol_control.py`（某一版的控制面）和 `tests/support/mixed_protocol_host.py`（某一版的 host 端代码），共用的模型检查在 `tests/support/mixed_protocol_wire.py`。上一版用 `git archive` 取出，在自己的目录里 `uv sync --frozen` 建 venv（含 dev 依赖：Sandbox Manager 配对要用那一版 tests 里的 fake）。
 - 四组配对并行跑：本版 host 对上一版控制面、上一版 host 对本版控制面，以及两版各自同版本配对作为基准。每组一个随机数据库，用该组控制面自己的 Alembic 迁移。控制面是真实的 `create_app()`（含后台任务），出站 HTTP 指向一个关闭的代理端口。
 - 覆盖 §3.4 的 1–7 步：注册和心跳（`retained_sandboxes` 由那一版自己的心跳行构建函数从假 Sandbox Manager 读出）；新对话 claim 和两次后续 claim；reserve、running、residency、process、admit；事件和 attempt 心跳，第二轮中途取消并在心跳里看到 `cancel_requested`；settle 和 finish，第三轮 abandon 和 finish；心跳下发空闲停止、host 停掉后下一次心跳报告已停止；驱逐 residency 后心跳返回 `residencies_lost`。
 - 断言：每次调用的状态码；接收方用自己那一版的模型解析——控制面按路由的请求模型、host 按路由的响应模型、假 Sandbox Manager 按 host 那一版的 `manager_api` 请求模型——出现被拒收或被静默丢弃的非空字段就失败；数据库状态在第一轮之后、驱逐之后、空闲停止之后和结束时，都要和同版本基准一致。已知的丢弃只有一项白名单：控制面在终端挂起和恢复里发的 `lease_generation`，由 `sandbox_manager_client.py` 的 `COMPAT(remove-after=2026-11-30)` 管着。
 - CI：`ci.yml` 的 test-db 任务在滚动升级检查之后、只在 shard 1 上跑，由 `changes` 任务的 `protocol` 输出控制（路径见 §3.2，另加 `api/worker_events.py`、`service/host_control.py`、`service/host_service.py`、`cloud_agent_host/sandbox_manager_client.py` 和检查自己的文件）。本地对 `agent-9a2b9e1` 跑一次约 10 秒。
 - 人为不兼容已验证会失败：把 settle 的 `native_session_id` 改名，两个混合方向都报"控制面的请求模型丢弃该字段"和数据库差异，基准两组通过；把心跳响应的 `retained_sandboxes_stop` 改名，两个混合方向都报 host 的响应模型丢弃该字段、没收到停止，以及空闲停止之后的数据库差异。
-- 未做：§3.2 第三条的 Sandbox Manager 线上协议对照只覆盖了这个流程里控制面真实发出的调用（`/health`、`/shared-sandboxes/{thread_id}/register`、终端 suspend/resume），没有单独对照 §2.1 的 35 个方法，也没有起上一版的 `manager_api` app。§3.4 第 8 步（控制面直接调 Sandbox Manager 的状态、SSH 同步）不在内。
+- Sandbox Manager 线上协议（§3.2 第三条）：另跑四组配对（`tests/support/mixed_protocol_manager.py`）——本版控制面的 `SandboxManagerClient` 对上一版的 Sandbox Manager app、上一版的 client 对本版的 app，以及两版各自同版本配对。app 后面是那一版自己 `tests/unit/test_agent_sandbox_manager.py` 里的假 supervisor（`_SharedSupervisor`，补上它测试里没用到的 `residency_lost`）。覆盖 §9.1 里算作命令或状态的调用：`health`、`list_sandboxes`（全部和按 thread）、`shared_chat_sandbox_status`、`register_shared_sandbox`、`shared_residency_lost`、`sync_ssh_access`、`suspend_terminals`、`resume_terminals`、`resume_settled_terminals`。断言：两端都不报错、无 4xx、Sandbox Manager 的请求模型没有丢弃非空字段（`lease_generation` 同上白名单）、应答不缺 client 自己那一版 Sandbox Manager 会给的键（应答是普通 JSON，client 没有模型）。人为把 residency-lost 的 `generation` 改名，两个混合方向都报 422 和字段丢弃，基准两组通过。
+- §3.4 第 8 步：host 流程在 running 之后调 `suspend_terminals("workspace_preparing")` 和 `resume_terminals()`，控制面再直接调 Sandbox Manager 的 suspend/resume，由假 Sandbox Manager 按 host 那一版的模型检查；finish 时控制面对 Sandbox Manager 的 `register` 和终端 resume 同样被检查。状态、SSH 同步和 residency 丢失走上面的 Sandbox Manager 配对。
+- 未做：删除和 archive（`admin-delete/*`）的五个调用——它们有自己的持久状态机，请求体由 `workers/sandbox_deletion.py` 按数据库行构建，假 supervisor 后面也没有导出和上传，手写请求体测的就不是控制面真实发出的东西；环境准备和状态；交互式调用（文件、终端 I/O、git、问答、Fork、mid-turn 输入）。控制面主动推 SSH 访问（`push_ssh_access`）要求 owner 有 SSH 服务器，A 层没有建，只对照了线上形状。本地全套（八组）约 10–14 秒。
+- 顺带：host 心跳里一直发送的 `"profiling": null` 已删除——没有调用方传值，本版和上一版控制面的 `HostHeartbeatRequest` 都没有这个字段。host 仍读心跳应答里的 `profiling`，两版控制面的 `HostHeartbeatResponse` 也都没有这个字段，未改动。
 
 ## 4. 10.1 协议版本
 
