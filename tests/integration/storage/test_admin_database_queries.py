@@ -59,6 +59,13 @@ async def test_schema_and_rows_exclude_credentials_content_and_new_columns(db, s
             await conn.execute("ALTER TABLE agent_jobs DROP COLUMN browser_future_secret")
 
 
+async def test_composite_primary_keys_keep_their_declared_order(store):
+    schema = await store.admin_database.list_tables()
+    keys = {table.name: table.primary_key for table in schema.tables}
+    assert keys["agent_thread_pull_requests"] == ["thread_id", "repo", "number"]
+    assert keys["agent_tool_call_resources"] == ["attempt_id", "call_seq"]
+
+
 async def test_numeric_boolean_time_null_filters_and_stable_pagination(db, store):
     jobs = [await _create_job(store, user_id=f"owner-{number}") for number in range(3)]
     instant = datetime(2026, 10, 11, tzinfo=UTC)
