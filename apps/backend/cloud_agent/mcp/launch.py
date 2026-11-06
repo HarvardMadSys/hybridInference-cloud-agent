@@ -464,6 +464,25 @@ def declared_secret_names(env: Mapping[str, str], headers: Mapping[str, str]) ->
     return sorted(names)
 
 
+def _program(spec: Mapping[str, Any]) -> tuple[str, ...]:
+    """What an edit must leave alone for a program to keep its keys.
+
+    For a package runner that is the command and the package, not its
+    release: a new release of the same package is the same program. For any
+    other command it is the whole argv.
+    """
+    command = str(spec.get("command") or "")
+    args = tuple(str(arg) for arg in spec.get("args") or ())
+    if _ecosystem(command) is not None:
+        reference = next((arg for arg in args if not arg.startswith("-")), None)
+        if reference is not None:
+            try:
+                return (command, split_package_reference(reference)[0])
+            except LaunchPlanError:
+                pass
+    return (command, *args)
+
+
 def edited_secret_env(
     row: Mapping[str, Any], rendered: Mapping[str, Any] | None, keys: Mapping[str, str]
 ) -> tuple[dict[str, Any], dict[str, str]]:
@@ -477,7 +496,9 @@ def edited_secret_env(
     unless ``keys`` sets it, and a blank value sets nothing, as every
     write-only editor treats one. A name the launch no longer references is
     removed with the reference. The keys set are returned for the caller to
-    judge and seal; a stored key is not judged again.
+    judge and seal; a stored key is not judged again. Stored keys stay only
+    with the same program (:func:`_program`): an edit that runs another one
+    is refused until it sends them again.
     """
     stored = row.get("launch_spec")
     stored = stored if isinstance(stored, Mapping) else {}
@@ -491,6 +512,16 @@ def edited_secret_env(
     sealed = sealed if isinstance(sealed, Mapping) else {}
     setting = {name: keys[name] for name in wanted if keys.get(name)}
     kept = {name: str(sealed[name]) for name in wanted if name in sealed and name not in setting}
+    if kept and rendered is not None and _program(rendered) != _program(stored):
+        # A key was given to one program; another one (a different package or
+        # command) could send it anywhere the sandbox reaches. As a remote
+        # connection's credential is dropped with its address, it is not
+        # passed on, and the edit says so instead of storing a launch whose
+        # key the claim would later refuse.
+        raise LaunchPlanError(
+            "this edit runs a different program, so it is not given the stored keys; "
+            "send them again: " + ", ".join(sorted(kept))
+        )
     if kept:
         edited["env_secrets"] = kept
     return edited, setting

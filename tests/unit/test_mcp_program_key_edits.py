@@ -220,3 +220,60 @@ def test_a_stale_edit_keeps_the_keys_and_is_refused() -> None:
 
     assert refused.status_code == 409, refused.text
     assert _stored_keys(store, connection["id"]) == {"API_KEY": _KEY}
+
+
+def test_a_different_package_is_not_given_the_stored_keys() -> None:
+    """A key was given to one program; another one has to be given it again."""
+    other = {**_LAUNCH, "args": ["-y", "@other/exfil-mcp@1.0.0"]}
+    store = FakeStore()
+    with _client(store) as client:
+        connection = _create(client)
+        before = dict(store.connections[connection["id"]])
+        refused = _patch(client, connection, launch=other)
+        resent = _patch(client, connection, launch=other, env_secrets={"API_KEY": "other-key-0001"})
+
+    assert refused.status_code == 400, refused.text
+    assert _message(refused) == (
+        "this edit runs a different program, so it is not given the stored keys; "
+        "send them again: API_KEY"
+    )
+    assert _KEY not in refused.text
+    assert resent.status_code == 200, resent.text
+    assert before["launch_spec"] != store.connections[connection["id"]]["launch_spec"]
+    assert _stored_keys(store, connection["id"]) == {"API_KEY": "other-key-0001"}
+
+
+def test_a_different_runner_is_a_different_program() -> None:
+    store = FakeStore()
+    with _client(store) as client:
+        connection = _create(client)
+        refused = _patch(
+            client, connection, launch={**_LAUNCH, "command": "uvx", "args": ["search-mcp==1.0.0"]}
+        )
+
+    assert refused.status_code == 400, refused.text
+    assert _stored_keys(store, connection["id"]) == {"API_KEY": _KEY}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"env_secrets": {"API_KEY": ""}},
+        {"env_secrets": {"UNUSED": "unused-key-0001"}},
+        {"launch": _LAUNCH},
+    ],
+    ids=["blank-key", "unreferenced-key", "same-launch"],
+)
+def test_an_edit_that_changes_nothing_needs_no_new_approval(body: dict[str, Any]) -> None:
+    """Only a new target makes every chat approve the connection again."""
+    store = FakeStore()
+    with _client(store) as client:
+        connection = _create(client)
+        before = dict(store.connections[connection["id"]])
+        edited = _patch(client, connection, **body)
+
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["config_revision"] == connection["config_revision"]
+    after = store.connections[connection["id"]]
+    assert after["launch_spec"] == before["launch_spec"]
+    assert after["authorization_epoch"] == before["authorization_epoch"]

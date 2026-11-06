@@ -243,11 +243,14 @@ def edited_launch_spec(
     *,
     transport: Transport,
     location: ExecutionLocation,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     """The launch an edit stores: the submitted one, or the stored one, with its keys.
 
     Checked as create checks it; only the form it renders is stored, with the
     keys ``launch.edited_secret_env`` keeps and sets, the ones set sealed here.
+    ``None`` when that is the stored launch unchanged, so an edit that changes
+    nothing (blank keys, names the launch does not use, the same launch sent
+    back) does not count as a new target that every chat must approve again.
     """
     launch_spec = None
     if submitted is not None:
@@ -260,6 +263,8 @@ def edited_launch_spec(
         raise _invalid(str(exc)) from exc
     if keys:
         launch_spec = sealed_launch_spec(launch_spec, keys, location=location) or launch_spec
+    if launch_spec == existing.get("launch_spec"):
+        return None
     return launch_spec
 
 
