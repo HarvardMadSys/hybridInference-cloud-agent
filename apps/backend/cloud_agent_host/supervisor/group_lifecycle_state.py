@@ -16,8 +16,23 @@ needed, notifies; admission stays with ``GroupLifecycle.admit``. Nothing
 outside this module assigns these fields.
 
 A precondition that does not hold is a violation: it is logged as
-``group_lifecycle_violation`` and the transition then does what the code
-before this state did, so a violation changes no behaviour. The invariants
+``group_lifecycle_violation`` and the transition goes on. It then writes what
+the flag assignments it replaced wrote, except where the state cannot hold
+what they would have left:
+
+* :meth:`~GroupLifecycleState.begin_stop_locked` and
+  :meth:`~GroupLifecycleState.hold_archive_locked` on a group already
+  stopping replace the one stop holder, so an archive request's id goes
+  with the stop it held (the flags kept ``archive_request_id`` apart);
+* :meth:`~GroupLifecycleState.refresh_final_members_locked` with no final
+  archive owed writes nothing (the flags took members without
+  ``stop_archive_pending``);
+* :meth:`~GroupLifecycleState.marker_read_locked` with no orphan owed does
+  nothing (the flags cleared an unreadable marker no finalization owned);
+* :meth:`~GroupLifecycleState.accepted_stopped_locked` never releases another
+  holder's exclusive workspace (spec Q2, a decided change).
+
+The admission rows exclude every state where these differ (A2 spec §4). The invariants
 the A2 spec proves (:meth:`GroupLifecycleState.check_invariants`) are logged
 with the combination counts (``violation:<name>`` parts).
 
