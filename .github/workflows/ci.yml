@@ -1188,6 +1188,14 @@ jobs:
         # backstop, because a build can still fail for reasons of its own and
         # running it once more is cheaper than a red cell.
         continue-on-error: true
+        # A build that stops making progress is a failure, and gets the retry.
+        # Over the 60 runs before 2026-11-06 every image built in at most 312s
+        # (the sandbox; the others in under 150s), while three hosted sandbox
+        # builds hung for 27-35 minutes, and nothing else bounded them: GitHub
+        # ends a job only after six hours. Ten minutes is twice the slowest
+        # healthy build. A retry after a timeout keeps the layers the first
+        # attempt finished in the builder's cache.
+        timeout-minutes: 10
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           builder: ${{ env.BUILDER }}
@@ -1209,6 +1217,7 @@ jobs:
       # before the first attempt. What can still fail is the build itself.
       - name: Build ${{ matrix.artifact.name }} (retry)
         if: steps.build.outcome == 'failure'
+        timeout-minutes: 10
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           builder: ${{ env.BUILDER }}
@@ -1456,6 +1465,7 @@ jobs:
       - name: Build ${{ matrix.artifact.name }}
         id: build
         continue-on-error: true
+        timeout-minutes: 10
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           builder: ${{ env.BUILDER }}
@@ -1471,6 +1481,7 @@ jobs:
 
       - name: Build ${{ matrix.artifact.name }} (retry)
         if: steps.build.outcome == 'failure'
+        timeout-minutes: 10
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           builder: ${{ env.BUILDER }}

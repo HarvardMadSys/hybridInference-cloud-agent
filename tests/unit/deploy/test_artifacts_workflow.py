@@ -746,3 +746,25 @@ def test_the_job_logs_in_to_a_config_of_its_own() -> None:
     assert 'echo "DOCKER_CONFIG=${RUNNER_TEMP}/docker-config" >> "${GITHUB_ENV}"' in naming
     names = [str(s.get("name", "")) for s in workflow()["jobs"]["artifacts"]["steps"]]
     assert names.index("Name this cell's artifacts") < names.index("Log in to Docker Hub")
+
+
+#: Twice the slowest healthy image build seen (312s, the hosted sandbox).
+BUILD_TIMEOUT_MINUTES = 10
+
+
+@pytest.mark.parametrize("job", ["artifacts", "mcp"])
+def test_a_build_that_stops_making_progress_fails_into_its_retry(job: str) -> None:
+    """A hung build is bounded, and its bound is what sends it to the retry.
+
+    Hosted sandbox builds have hung for 27-35 minutes with nothing to end them
+    short of GitHub's six-hour job limit. A step's timeout fails the step, and
+    the first attempt's ``continue-on-error`` turns that failure into the
+    ``failure`` outcome the retry runs on; the retry is bounded the same way,
+    so a cell that hangs twice goes red instead of holding the pull request.
+    """
+    first = step("Build ${{ matrix.artifact.name }}", job=job)
+    retry = step("Build ${{ matrix.artifact.name }} (retry)", job=job)
+    assert first["name"] == "Build ${{ matrix.artifact.name }}"
+    assert first["id"] == "build" and first["continue-on-error"] is True
+    assert retry["if"] == "steps.build.outcome == 'failure'"
+    assert first["timeout-minutes"] == retry["timeout-minutes"] == BUILD_TIMEOUT_MINUTES
