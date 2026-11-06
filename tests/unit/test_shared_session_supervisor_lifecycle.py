@@ -6,6 +6,7 @@ import asyncio
 import json
 
 from tests.support.archive_policy import hooked_supervisor
+from tests.support.group_lifecycle import set_flags
 from tests.unit.test_shared_session_supervisor import (
     _HELD_S,
     _UNBLOCKED_S,
@@ -205,9 +206,7 @@ def test_background_final_archive_failure_preserves_fence_and_retries():
         supervisor.list(background_recovery=True)
         with supervisor.state.condition:
             group = supervisor.state.members[spec.thread_id]
-            assert supervisor.state.condition.wait_for(
-                lambda: group.lifecycle_check is None, timeout=2
-            )
+            assert supervisor.state.condition.wait_for(lambda: group.life.check is None, timeout=2)
         assert attempts == ["archive"]
         assert supervisor.status(spec.thread_id).lifecycle_pending is True
         assert manager.items[spec.container_name].networks == ("agent-net",)
@@ -215,9 +214,7 @@ def test_background_final_archive_failure_preserves_fence_and_retries():
             supervisor.operation_opened(spec.thread_id)
         supervisor.list(background_recovery=True)
         with supervisor.state.condition:
-            assert supervisor.state.condition.wait_for(
-                lambda: group.lifecycle_check is None, timeout=2
-            )
+            assert supervisor.state.condition.wait_for(lambda: group.life.check is None, timeout=2)
         assert attempts == ["archive", "archive"]
         assert supervisor.status(spec.thread_id).lifecycle_pending is False
         assert manager.items[spec.container_name].networks == ()
@@ -345,7 +342,7 @@ def test_lifecycle_check_rejects_superseded_observations(monkeypatch, caplog, op
             if fence == "index":
                 supervisor.state.groups.pop(spec.sandbox_id)
             elif fence == "lifecycle":
-                group.lifecycle_generation += 1
+                group.life.generation += 1
             elif fence == "spec":
                 group.spec = replace(spec, generation=spec.generation + 1)
             else:
@@ -358,7 +355,7 @@ def test_lifecycle_check_rejects_superseded_observations(monkeypatch, caplog, op
         def call():
             return supervisor.stop_if_idle(spec.thread_id, generation=spec.generation)
     elif operation == "reconcile_marker":
-        group.orphan_marker_unreadable = True
+        set_flags(group, orphan_marker_unreadable=True)
         monkeypatch.setattr(manager, "read_running_final_archive_marker", changed)
         call = supervisor.reconcile
     else:
@@ -387,7 +384,7 @@ def test_lifecycle_check_rejects_superseded_observations(monkeypatch, caplog, op
             call()
     assert manager.stop_count == 0
     assert group.inspection.running is True
-    assert group.archive_request_id is None
+    assert group.life.archive_request_id is None
 
 
 @pytest.mark.parametrize("operation", ["idle_stop", "begin_archive"])
@@ -415,9 +412,9 @@ def test_failed_lifecycle_proof_releases_only_its_temporary_reservation(monkeypa
                     generation=spec.generation,
                     container_id=group.inspection.container_id,
                 )
-    assert group.lifecycle_check is None
-    assert group.archive_request_id is None
-    assert not group.stopping
+    assert group.life.check is None
+    assert group.life.archive_request_id is None
+    assert group.life.stop is None
     token, descriptor = supervisor.operation_opened(spec.thread_id)
     assert descriptor.running
     supervisor.operation_closed(spec.thread_id, token)
@@ -589,9 +586,9 @@ def test_deletion_proves_both_container_identities_absent_before_forgetting_grou
         )
     assert supervisor.state.groups[spec.sandbox_id] is group
     assert supervisor.state.members[spec.thread_id] is group
-    assert group.archive_request_id == "delete-1"
-    assert group.stopping
-    assert group.lifecycle_check is None
+    assert group.life.archive_request_id == "delete-1"
+    assert group.life.stop is not None
+    assert group.life.check is None
 
 
 def test_refused_busy_deletion_does_not_invalidate_active_lifecycle(monkeypatch):
@@ -601,7 +598,7 @@ def test_refused_busy_deletion_does_not_invalidate_active_lifecycle(monkeypatch)
     supervisor.register_manifest(spec, _members())
     token, _descriptor = supervisor.operation_opened(spec.thread_id)
     group = supervisor.state.members[spec.thread_id]
-    generation = group.lifecycle_generation
+    generation = group.life.generation
 
     def inspect(*_args):
         pytest.fail("a refused busy deletion must not perform Docker I/O")
@@ -611,9 +608,9 @@ def test_refused_busy_deletion_does_not_invalidate_active_lifecycle(monkeypatch)
         supervisor.commit_archive(
             spec, request_id="delete-1", container_id=group.inspection.container_id
         )
-    assert group.lifecycle_generation == generation
-    assert group.lifecycle_check is None
-    assert group.archive_request_id is None
+    assert group.life.generation == generation
+    assert group.life.check is None
+    assert group.life.archive_request_id is None
     supervisor.operation_closed(spec.thread_id, token)
 
 
@@ -816,8 +813,8 @@ def test_failed_idle_stop_keeps_its_automatic_retry_deadline(monkeypatch):
     monkeypatch.setattr(manager, "stop", fail_stop)
     with pytest.raises(SandboxError, match="temporarily unavailable"):
         supervisor.stop_if_idle(spec.thread_id, generation=spec.generation)
-    assert group.lifecycle_check is None
-    assert group.stopping is False
+    assert group.life.check is None
+    assert group.life.stop is None
     assert group.idle_deadline == now["value"] + supervisor.idle_timeout_s
     monkeypatch.setattr(manager, "stop", stop)
     now["value"] += supervisor.idle_timeout_s + 1
@@ -1760,7 +1757,7 @@ def test_abandon_drops_the_window_when_normal_turn_cleanup_fails(monkeypatch):
 def test_a_stopping_group_is_included_in_the_exact_host_rule_check():
     """It remains guarded through archive preparation and Docker stop."""
     manager, supervisor = _running_group()
-    supervisor.state.members["athr_source"].stopping = True
+    set_flags(supervisor.state.members["athr_source"], stopping=True)
 
     assert supervisor.guard_network() == []
 
@@ -1768,3 +1765,117 @@ def test_a_stopping_group_is_included_in_the_exact_host_rule_check():
     assert manager.host_rule_running == [[_spec()]]
     assert manager.host_rule_renewals == 0
     assert manager.stop_count == 0
+
+
+class _UncertainStartManager(_Manager):
+    """Its start fails after the durable start fence, with an unclassified error."""
+
+    def start(self, spec, *, before_stopped_start=None, **_kwargs):
+        self.starts.append(spec.container_name)
+        before_stopped_start(self.items[spec.container_name])
+        raise RuntimeError("guest network proof failed after the start")
+
+
+def test_shutdown_leaves_a_start_in_progress_its_own_final_archive():
+    """A start fail-stopping at shutdown is a failure there, not a second archive.
+
+    The shutdown's final archive retry holds no lifecycle check, so its
+    admission refuses a start in progress (A2 spec, step 4). Before, the retry
+    took the group's stop beside the start and archived the group again while
+    the start's own fail-stop archive was still uploading.
+
+    The cost, accepted: if that upload then fails, this shutdown does not
+    retry it. The group stays stopped with its bridge and pending marker, and
+    the next boot's reconciliation finishes the final archive.
+    """
+    manager = _UncertainStartManager()
+    spec = _spec()
+    manager.items[spec.container_name] = manager._inspection(spec, running=False)
+    uploading, release = threading.Event(), threading.Event()
+    uploads: list[str] = []
+
+    def stopped(spec, *_args):
+        uploads.append(spec.sandbox_id)
+        uploading.set()
+        assert release.wait(_HELD_S)
+
+    supervisor = hooked_supervisor(manager, prepare_start=lambda *_args: None, stopped=stopped)
+    supervisor.register_manifest(spec, _members())
+    group = supervisor.state.groups[spec.sandbox_id]
+    starting, outcome = _in_thread(lambda: supervisor._lifecycle.start_group(group, start_seq=7))
+    try:
+        assert uploading.wait(_UNBLOCKED_S)
+        with pytest.raises(SandboxError, match=r"^1 shared sandbox shutdown") as raised:
+            supervisor.stop_all_for_shutdown(include_running=False)
+        refused = raised.value.__cause__
+        assert type(refused) is SessionBusy
+        assert str(refused) == "shared sandbox group start is in progress"
+        with supervisor.state.lock:
+            assert group.life.start is not None
+            assert group.life.stop is None
+            assert group.life.final_archive_pending
+    finally:
+        release.set()
+        starting.join(_HELD_S)
+    assert isinstance(outcome.get("error"), RuntimeError)
+    assert uploads == [spec.sandbox_id]
+    with supervisor.state.lock:
+        assert group.life.start is None
+        assert not group.life.final_archive_pending
+
+
+class _BridgeRecordingManager(_Manager):
+    """Its start attaches the group bridge first, as ``ChatSandboxManager.start`` does."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.bridge_connects: list[str] = []
+
+    def start(self, spec, **kwargs):
+        current = self.items[spec.container_name]
+        if not current.running:
+            self.bridge_connects.append(spec.container_name)
+        return super().start(spec, **kwargs)
+
+
+def test_a_turns_start_whose_lease_a_stop_cleared_starts_nothing():
+    """The lease is checked as the start is admitted, before Docker or the bridge.
+
+    A request in the run it was admitted to begins no run, so a stale
+    activation's start would carry the label of the stop that cleared it.
+    It is refused, it is not recorded as a failed start, and it leaves no
+    bridge attached to the stopped container: an attached bridge is the
+    durable sign of an unfinished final archive.
+    """
+    manager = _BridgeRecordingManager()
+    spec = _spec()
+    manager.items[spec.container_name] = manager._inspection(spec, running=False)
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(spec, _members())
+    group = supervisor.state.groups[spec.sandbox_id]
+
+    with pytest.raises(SessionLeaseLost, match="Environment preparation lease was lost"):
+        supervisor._lifecycle.start_group(group, activation_owner="lease-a-stop-cleared")
+
+    assert manager.bridge_connects == []
+    assert manager.starts == []
+    assert manager.items[spec.container_name].running is False
+    with supervisor.state.lock:
+        assert group.life.start is None
+        assert group.life.last_start_failed is False
+
+
+def test_a_turns_start_under_its_lease_starts_the_stopped_group():
+    manager = _BridgeRecordingManager()
+    spec = _spec()
+    manager.items[spec.container_name] = manager._inspection(spec, running=False)
+    supervisor = SharedChatSessionSupervisor(manager)
+    supervisor.register_manifest(spec, _members())
+    group = supervisor.state.groups[spec.sandbox_id]
+    with supervisor.state.lock:
+        group.members["athr_source"].lease_token = "lease"
+
+    supervisor._lifecycle.start_group(group, activation_owner="lease")
+
+    assert manager.bridge_connects == [spec.container_name]
+    assert manager.items[spec.container_name].running is True

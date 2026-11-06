@@ -8,6 +8,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from tests.support.group_lifecycle import set_flags
 from tests.unit.test_shared_session_supervisor import (
     SharedChatSessionSupervisor,
     _Manager,
@@ -133,20 +134,20 @@ def _fall_through_cases():
         return _ready(), lease.token
 
     def failed_start(manager, supervisor, lease):
-        supervisor.state.members["athr_source"].start_failed = True
+        set_flags(supervisor.state.members["athr_source"], start_failed=True)
         return _ready(), lease.token
 
     def archive_completion(manager, supervisor, lease):
         group = supervisor.state.members["athr_source"]
-        group.start_archive_completion_pending = True
+        set_flags(group, start_archive_completion_pending=True)
         return _ready(), lease.token
 
     def container_lost(manager, supervisor, lease):
-        supervisor.state.members["athr_source"].container_lost = True
+        set_flags(supervisor.state.members["athr_source"], container_lost=True)
         return _ready(), lease.token
 
     def capturing(manager, supervisor, lease):
-        supervisor.state.members["athr_source"].snapshotting = True
+        set_flags(supervisor.state.members["athr_source"], snapshotting=True)
         return _ready(), lease.token
 
     def removed(manager, supervisor, lease):
@@ -245,8 +246,8 @@ def test_a_lifecycle_change_during_the_reads_takes_the_full_path():
         group = supervisor.state.members["athr_source"]
         if not reads:
             with supervisor.state.lock:
-                group.lifecycle_generation += 1
-        reads.append(group.lifecycle_generation)
+                group.life.generation += 1
+        reads.append(group.life.generation)
         return _ready()
 
     supervisor.prepare_environment(

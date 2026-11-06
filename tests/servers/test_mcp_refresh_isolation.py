@@ -15,7 +15,7 @@ from tests.servers.test_mcp_relay_host import (
     store as store,
 )
 
-from cloud_agent.api import mcp_relay
+from cloud_agent.api import _mcp_relay_callers
 from cloud_agent.mcp.refresh import RefreshRefused
 from cloud_agent.mcp.registry import mcp_cipher
 
@@ -50,7 +50,7 @@ async def test_catalogue_does_not_contact_an_oauth_endpoint(
         refreshed.append(row["id"])
         pytest.fail(f"{method} waited on connection {row['id']}'s OAuth refresh")
 
-    monkeypatch.setattr(mcp_relay, "ensure_fresh", refresh)
+    monkeypatch.setattr(_mcp_relay_callers, "ensure_fresh", refresh)
     response = await asyncio.wait_for(
         client.post("/v1/agent/mcp", json=_rpc(method), headers=_auth()), _HANG_GUARD_S
     )
@@ -71,7 +71,7 @@ async def test_a_healthy_tool_does_not_wait_for_another_connections_refresh(
             pytest.fail("a call to docs waited on the GitHub connection's OAuth refresh")
         return row
 
-    monkeypatch.setattr(mcp_relay, "ensure_fresh", refresh)
+    monkeypatch.setattr(_mcp_relay_callers, "ensure_fresh", refresh)
     response = await asyncio.wait_for(
         client.post(
             "/v1/agent/mcp",
@@ -111,7 +111,7 @@ async def test_changes_during_refresh_prevent_dispatch(
             await finish.wait()
         return row
 
-    monkeypatch.setattr(mcp_relay, "ensure_fresh", refresh)
+    monkeypatch.setattr(_mcp_relay_callers, "ensure_fresh", refresh)
     task = asyncio.create_task(
         client.post(
             "/v1/agent/mcp",
@@ -157,7 +157,7 @@ async def test_a_refresh_failure_is_local_to_the_selected_connection(
             raise RefreshRefused("fixture issuer unavailable")
         return row
 
-    monkeypatch.setattr(mcp_relay, "ensure_fresh", refresh)
+    monkeypatch.setattr(_mcp_relay_callers, "ensure_fresh", refresh)
     failed = await client.post(
         "/v1/agent/mcp", json=_rpc("tools/call", name="github__get_issue"), headers=_auth()
     )
@@ -179,7 +179,7 @@ async def test_the_selected_call_uses_its_fresh_credential(client, store, host, 
         store.connections[7]["access_token_ciphertext"] = mcp_cipher().encrypt("fresh-fixture")
         return dict(store.connections[7])
 
-    monkeypatch.setattr(mcp_relay, "ensure_fresh", refresh)
+    monkeypatch.setattr(_mcp_relay_callers, "ensure_fresh", refresh)
     response = await client.post(
         "/v1/agent/mcp", json=_rpc("tools/call", name="github__get_issue"), headers=_auth()
     )
@@ -201,7 +201,7 @@ async def test_approval_cannot_dispatch_after_its_refresh_outlives_the_lease(
             await finish.wait()
         return row
 
-    monkeypatch.setattr(mcp_relay, "ensure_fresh", refresh)
+    monkeypatch.setattr(_mcp_relay_callers, "ensure_fresh", refresh)
     task = asyncio.create_task(
         client.post(
             "/v1/agent/mcp", json=_rpc("tools/call", name="github__get_issue"), headers=_auth()

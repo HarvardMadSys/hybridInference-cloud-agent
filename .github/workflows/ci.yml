@@ -56,6 +56,7 @@ jobs:
       web: ${{ steps.classify.outputs.web }}
       docker: ${{ steps.classify.outputs.docker }}
       docs: ${{ steps.classify.outputs.docs }}
+      protocol: ${{ steps.classify.outputs.protocol }}
       image_scope: ${{ steps.classify.outputs.image_scope }}
       artifacts: ${{ steps.images.outputs.artifacts }}
     steps:
@@ -111,6 +112,7 @@ jobs:
               echo "web=true"
               echo "docker=true"
               echo "docs=true"
+              echo "protocol=true"
               echo "image_scope=all"
             } >> "${GITHUB_OUTPUT}"
             exit 0
@@ -166,10 +168,24 @@ jobs:
             docs=false
           fi
 
+          # Protocol: any backend package, its locked dependencies, and the check
+          # that runs two releases against each other (host protocol v2 design
+          # §3.2). The wire is built from models imported across schemas/,
+          # attachments/, the claim use case and host modules well beyond the
+          # clients, and pydantic itself decides what parses; a list of files
+          # misses some, and the check costs seconds.
+          if matches '^apps/backend/cloud_agent(_host|_shared)?/' \
+             || matches '^(pyproject\.toml|uv\.lock)$' \
+             || matches '^(scripts/check_mixed_protocol\.py|tests/support/mixed_protocol_.*\.py)$'; then
+            protocol=true
+          else
+            protocol=false
+          fi
+
           # A change to CI itself runs all of it: the thing being changed is the
           # checking, and a filtered CI edit is checked by nothing.
           if matches '^(\.github/workflows/|scripts/ci_image_matrix\.py$)'; then
-            backend=true; web=true; docker=true; docs=true
+            backend=true; web=true; docker=true; docs=true; protocol=true
           fi
 
           # Narrow only source-only image changes. Deployment assets, external
@@ -192,6 +208,7 @@ jobs:
             echo "web=${web}"
             echo "docker=${docker}"
             echo "docs=${docs}"
+            echo "protocol=${protocol}"
           } | tee -a "${GITHUB_OUTPUT}"
 
       - name: Plan image checks
@@ -713,6 +730,23 @@ jobs:
           # releases create lightweight tags, so include them with --tags.
           previous="$(git describe --tags --first-parent --match 'agent-*' --abbrev=0 "$base")"
           uv run python scripts/check_rolling_upgrade.py --base "$previous"
+
+      # Layer A of the mixed-version test (host protocol v2 design §3.2): this
+      # version's host code against the previous release's control plane and
+      # the previous host against this one, each release in an environment
+      # from its own lock, against this job's Postgres. Once per commit, and
+      # only when something the host protocol is made of changed.
+      - name: Host protocol works one release apart in both directions
+        if: matrix.shard == 1 && needs.changes.outputs.protocol == 'true'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="${PR_BASE_SHA:-${BEFORE_SHA:-HEAD^}}"
+          # The same release the migration check above runs against.
+          previous="$(git describe --tags --first-parent --match 'agent-*' --abbrev=0 "$base")"
+          uv run python scripts/check_mixed_protocol.py --base "$previous"
 
       # The second half of the same guard. A fixture that skips on a database
       # it cannot reach turns a broken service container into a passing job,

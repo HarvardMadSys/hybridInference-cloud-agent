@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_host.container.chat_sandbox import RetainedChatBackend
+from cloud_agent_host.container.retained_backend import RetainedChatBackend
 from cloud_agent_host.environment_preparation import prepared_in
 from cloud_agent_host.session_lifecycle import SessionBusy
 from cloud_agent_host.supervisor.group_lifecycle import Operation
@@ -44,7 +44,7 @@ def ready_boot(
     with state.lock:
         group, member = state.member(thread_id)
         observed = group.inspection
-        generation = group.lifecycle_generation
+        generation = group.life.generation
         if not observed.running or not _admitted(group):
             return None
     try:
@@ -64,7 +64,7 @@ def ready_boot(
             or group.inspection != observed
             or state.members.get(thread_id) is not group
             or group.members.get(thread_id) is not member
-            or group.lifecycle_generation != generation
+            or group.life.generation != generation
             or (activation_owner is not None and member.lease_token != activation_owner)
             or not _admitted(group)
         ):
@@ -75,7 +75,7 @@ def ready_boot(
 
 def _admitted(group: Any) -> bool:
     """Whether the group is still its container's, started cleanly, and open to mutations."""
-    if group.container_lost or group.start_failed:
+    if group.life.container_lost or group.life.last_start_failed:
         return False
     try:
         group.lifecycle.admit(Operation.MUTATION)

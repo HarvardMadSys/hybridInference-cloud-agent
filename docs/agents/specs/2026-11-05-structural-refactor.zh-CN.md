@@ -878,7 +878,7 @@ class DeliveredCredential(BaseModel):
 | `str(exc) ==` | 7 | 0 |
 | storage 里内联的 group 状态字面量 | 52 | 0 |
 | 写 `agent_thread_sandbox_memberships` 的 storage 模块 | 11 | 1 |
-| supervisor 里的 `SessionBusy(` | 54 | 只在 `group_lifecycle.py` 里 |
+| `group_lifecycle.py`、`group_lifecycle_state.py` 之外给 group 生命周期字段赋值的语句（`tests/unit/test_group_lifecycle_writes.py`） | 122 | 0：生命周期字段只在 `group_lifecycle.py` 里赋值（A2 把状态和转移放在同目录的 `group_lifecycle_state.py`） |
 | 新加一种 sandbox 能力要改的地方 | 5 | 3（facet、线上字段、CLI 适配器） |
 | 手写的脱敏或兼容性名单 | 2 | 0 |
 | 控制面顶层模块 | 82 | 不超过 10 |

@@ -24625,6 +24625,13 @@
             ],
             "title": "Auth Kind"
           },
+          "env_secrets": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Env Secrets",
+            "type": "object"
+          },
           "expected_config_revision": {
             "minimum": 1.0,
             "title": "Expected Config Revision",

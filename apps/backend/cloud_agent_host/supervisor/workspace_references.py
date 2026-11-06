@@ -12,9 +12,7 @@ import math
 import secrets
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.container.chat_sandbox import (
-    RetainedChatBackend,
-)
+from cloud_agent_host.container.retained_backend import RetainedChatBackend
 from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.session_lifecycle import (
     SessionLeaseLost,
@@ -80,7 +78,7 @@ class WorkspaceReferences:
             if current_group is not group or current_member is not member:
                 raise SessionLeaseLost(f"shared membership changed before {kind} admission")
             group.lifecycle.admit(Operation.MUTATION)
-            lifecycle_generation = group.lifecycle_generation
+            lifecycle_generation = group.life.generation
         admit_running(self._lifecycle, group, start_seq=start_seq, reuse=not terminal)
         with self._state.lock:
             self._state.wait_for_start_locked(group)
@@ -88,7 +86,7 @@ class WorkspaceReferences:
             if (
                 current_group is not group
                 or current_member is not member
-                or group.lifecycle_generation != lifecycle_generation
+                or group.life.generation != lifecycle_generation
             ):
                 raise SessionLeaseLost(f"shared sandbox lifecycle changed during {kind} admission")
             group.lifecycle.admit(Operation.MUTATION)

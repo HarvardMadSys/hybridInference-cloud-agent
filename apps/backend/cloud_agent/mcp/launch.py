@@ -20,11 +20,9 @@ from __future__ import annotations
 
 import re
 import shlex
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
+from typing import Any
 
 from cloud_agent.mcp.models import ExecutionLocation, LaunchSpec
 from cloud_agent_shared.sandbox_mcp import SANDBOX_MCP_COMMANDS
@@ -292,6 +290,74 @@ def declared_secret_names(env: Mapping[str, str], headers: Mapping[str, str]) ->
     return sorted(names)
 
 
+def _program(spec: Mapping[str, Any]) -> tuple[str, ...]:
+    """What an edit must leave alone for a program to keep its keys.
+
+    The whole argv, except the release of a package runner's package: a new
+    release of the same package is the same program. Every other argument
+    stays part of it, because a runner's options and the arguments after the
+    package can change what runs (``npx --package pkg@1 --call 'node x.js'``
+    installs ``pkg`` but runs ``x.js``).
+    """
+    command = str(spec.get("command") or "")
+    args = tuple(str(arg) for arg in spec.get("args") or ())
+    if _ecosystem(command) is not None:
+        # The package is found as _install_for finds it.
+        index = next((i for i, arg in enumerate(args) if not arg.startswith("-")), None)
+        if index is not None:
+            try:
+                package = split_package_reference(args[index])[0]
+            except LaunchPlanError:
+                pass
+            else:
+                return (command, *args[:index], package, *args[index + 1 :])
+    return (command, *args)
+
+
+def edited_secret_env(
+    row: Mapping[str, Any], rendered: Mapping[str, Any] | None, keys: Mapping[str, str]
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """The launch an edit stores, with the keys it keeps, and the keys the edit sets.
+
+    A program's keys are its ``secret://NAME`` values, stored sealed under
+    ``env_secrets`` in the connection's ``launch_spec``. ``rendered`` is the
+    submitted launch as validated, or ``None`` when the edit changes only keys
+    and the stored launch stays. Either way no sealed value comes from the
+    request: each name the launch references keeps its stored ciphertext
+    unless ``keys`` sets it, and a blank value sets nothing, as every
+    write-only editor treats one. A name the launch no longer references is
+    removed with the reference. The keys set are returned for the caller to
+    judge and seal; a stored key is not judged again. Stored keys stay only
+    with the same program (:func:`_program`): an edit that runs another one
+    is refused until it sends them again.
+    """
+    stored = row.get("launch_spec")
+    stored = stored if isinstance(stored, Mapping) else {}
+    if rendered is None and not stored.get("command"):
+        raise LaunchPlanError("a stdio connection needs a command")
+    source = stored if rendered is None else rendered
+    edited = {key: value for key, value in source.items() if key != "env_secrets"}
+    env = {str(key): str(value) for key, value in (edited.get("env") or {}).items()}
+    wanted = declared_secret_names(env, {})
+    sealed = stored.get("env_secrets")
+    sealed = sealed if isinstance(sealed, Mapping) else {}
+    setting = {name: keys[name] for name in wanted if keys.get(name)}
+    kept = {name: str(sealed[name]) for name in wanted if name in sealed and name not in setting}
+    if kept and rendered is not None and _program(rendered) != _program(stored):
+        # A key was given to one program; another one (a different package or
+        # command) could send it anywhere the sandbox reaches. As a remote
+        # connection's credential is dropped with its address, it is not
+        # passed on, and the edit says so instead of storing a launch whose
+        # key the claim would later refuse.
+        raise LaunchPlanError(
+            "this edit runs a different program, so it is not given the stored keys; "
+            "send them again: " + ", ".join(sorted(kept))
+        )
+    if kept:
+        edited["env_secrets"] = kept
+    return edited, setting
+
+
 __all__ = [
     "MAX_ARGV_BYTES",
     "MAX_ENV_ENTRIES",
@@ -302,6 +368,7 @@ __all__ = [
     "LaunchPlanError",
     "build_launch_plan",
     "declared_secret_names",
+    "edited_secret_env",
     "is_exact_release",
     "split_package_reference",
 ]

@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     import subprocess
     from collections.abc import Iterator
 
-    from cloud_agent_host.container.chat_sandbox import RetainedChatBackend
+    from cloud_agent_host.container.retained_backend import RetainedChatBackend
 
 ENVIRONMENT_UIDS = (30000, 30001, 30002)
 ACTION_UIDS = tuple(range(31000, 31064))

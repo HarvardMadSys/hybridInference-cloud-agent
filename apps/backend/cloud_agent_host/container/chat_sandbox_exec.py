@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
+    from cloud_agent_host.container.chat_sandbox_members import MemberExecMixin
     from cloud_agent_host.container.chat_sandbox_models import (
         ChatSandboxInspection,
         ChatSandboxSpec,
@@ -127,7 +128,7 @@ def install_once(
 
 
 def spawn_target(
-    manager: ChatSandboxManager,
+    manager: MemberExecMixin,
     spec: ChatSandboxSpec,
     env: dict[str, str] | None = None,
     *,

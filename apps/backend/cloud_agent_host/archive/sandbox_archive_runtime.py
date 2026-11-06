@@ -80,8 +80,8 @@ if TYPE_CHECKING:
         ChatSandboxInspection,
         ChatSandboxManager,
         ChatSandboxSpec,
-        RetainedChatBackend,
     )
+    from cloud_agent_host.container.retained_backend import RetainedChatBackend
     from cloud_agent_host.supervisor.shared_session_state import SharedMemberManifest
     from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef
 

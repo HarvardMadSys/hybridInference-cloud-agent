@@ -25,12 +25,13 @@ from cloud_agent_host.container.chat_sandbox import (
     CHAT_UPLOADS_DIR,
     CHAT_WORKDIR,
     ChatSandboxSpec,
-    RetainedChatBackend,
 )
+from cloud_agent_host.container.retained_backend import RetainedChatBackend
 from cloud_agent_host.container.sandbox import SandboxBackend, SandboxError
 from cloud_agent_host.control_plane_client import ControlPlane, _log_control_failure
 from cloud_agent_host.drivers import DriverError
 from cloud_agent_host.github_relay_env import residency_github_launch
+from cloud_agent_host.launch.facets import launch_secrets
 from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_host.measurement_delivery import DELIVERY_HANDOFF_DRAIN_S
 from cloud_agent_host.observe.resources import shared_member_resource_rollup
@@ -958,6 +959,9 @@ class _SharedLiveAttempt:
             residency_generation=int(residency["generation"]),
             **residency_github_launch(job.repo, residency),
         )
+        # The claim's values built the redactor before the residency existed;
+        # its credentials are masked from here on, before the process starts.
+        self.control.add_secrets(launch_secrets(launch))
         resident_call = operation_profiling.expect_fragment(
             self.measurement, SANDBOX_MANAGER_PRODUCER, "resident_start"
         )

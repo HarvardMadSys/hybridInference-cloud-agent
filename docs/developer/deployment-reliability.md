@@ -191,6 +191,48 @@ This checks common storage paths against the previous release. Authenticated
 browser flows and compatibility with every historical release need separate
 evidence.
 
+## Host and control plane one release apart
+
+Hosts deploy before the control plane, and a managed compute host follows a
+new control plane later, so for a while each side talks to the other's
+previous release. When a change touches any backend package or the locked
+dependencies (the wire is built from models and payload code spread well
+beyond the clients, and pydantic decides what parses), the same Postgres job
+runs
+[`scripts/check_mixed_protocol.py`](../../scripts/check_mixed_protocol.py)
+against the same previous release. It archives that release and gives it an
+environment from its own lock file, then runs four pairings, each on a
+random `mixed_protocol_test_*` database migrated by its control plane's own
+Alembic graph: this host against the previous control plane, the previous
+host against this control plane, and each release against itself as the
+baseline.
+
+In each pairing the control plane's real application serves on loopback,
+and the host's own enrollment, claim and attempt client register and
+heartbeat, run a new chat's turn and two follow-ups, see a cancellation,
+settle, abandon and finish, and carry out a stop and a residency eviction
+the control plane orders. A scripted sandbox manager stands in for Docker. A
+pairing fails when a call is refused, when a receiver's own model rejects a
+message or would silently drop a field it carries, or when the database
+differs from the baseline's after any of those steps. It runs no image, no
+sandbox and no model, so it does not replace the release acceptance or the
+Kata check.
+
+Four more pairings check the control plane's own calls to a host's sandbox
+manager: this release's client against the previous release's sandbox manager,
+the previous client against this one, and each against itself. Behind each
+sandbox manager is the fake supervisor from that release's tests. They cover
+the inventory, a member's status, group registration, a residency loss, an SSH
+access push and terminal suspend and resume, and fail on a refused call, a
+dropped field, or an answer missing a key the client's own release sends.
+
+Run it against disposable local Postgres with the same tag as above:
+
+```bash
+TEST_DB_HOST=127.0.0.1 TEST_DB_PORT=5432 \
+  uv run python scripts/check_mixed_protocol.py --base "$ROLLING_BASE_TAG"
+```
+
 ## Detection after deployment
 
 The main API runs one queue monitor; the MCP listener runs none. After two

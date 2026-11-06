@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Self, override
 
-from cloud_agent_host.launch.facet import LaunchFacet
+from cloud_agent_host.launch.facet import SECRET, LaunchFacet
 from cloud_agent_shared.shared_protocol import is_residency_mcp_credential
 
 if TYPE_CHECKING:
@@ -23,7 +23,7 @@ class McpRelayFacet(LaunchFacet):
 
     server_ids: tuple[str, ...]
     base_url: str
-    credential: str = field(repr=False)
+    credential: str = field(repr=False, metadata=SECRET)
 
     @override
     def fingerprint(self) -> Mapping[str, object]:

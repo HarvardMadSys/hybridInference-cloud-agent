@@ -549,6 +549,7 @@ SELECTS_NOTHING = {
     "web": "false",
     "docker": "false",
     "docs": "false",
+    "protocol": "false",
     "image_scope": "all",
 }
 SELECTS_EVERYTHING = {
@@ -556,6 +557,7 @@ SELECTS_EVERYTHING = {
     "web": "true",
     "docker": "true",
     "docs": "true",
+    "protocol": "true",
     "image_scope": "all",
 }
 

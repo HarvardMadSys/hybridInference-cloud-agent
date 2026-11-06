@@ -29,7 +29,7 @@ from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.environment_process import ACTION_UIDS, ENVIRONMENT_UIDS
 
 if TYPE_CHECKING:
-    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
+    from cloud_agent_host.container.chat_sandbox_members import MemberExecMixin
     from cloud_agent_host.container.chat_sandbox_models import ChatSandboxSpec
 
 #: Seconds a shared-writer census may hold writers stopped before it gives up
@@ -65,7 +65,7 @@ TASK_STATE_SCRIPT = (
 )
 
 
-def operation_writer_uids(manager: ChatSandboxManager, spec: ChatSandboxSpec) -> list[int]:
+def operation_writer_uids(manager: MemberExecMixin, spec: ChatSandboxSpec) -> list[int]:
     """Enumerate active operation identities without reading their environments."""
     script = """import os
 # AGENT_OPERATION_UID_CENSUS
@@ -89,7 +89,7 @@ print(' '.join(str(uid) for uid in sorted(uids) if uid in (30000,30001,30002) or
 
 
 def freeze(
-    manager: ChatSandboxManager,
+    manager: MemberExecMixin,
     spec: ChatSandboxSpec,
     *,
     slot_ids: list[int],
@@ -259,7 +259,7 @@ def freeze(
 
 
 def thaw(
-    manager: ChatSandboxManager,
+    manager: MemberExecMixin,
     spec: ChatSandboxSpec,
     *,
     slot_ids: list[int],
@@ -377,7 +377,7 @@ def encode_frozen_processes(
     return "".join(lines).encode("ascii")
 
 
-def receipt_path(manager: ChatSandboxManager, spec: ChatSandboxSpec, uid: int, token: str) -> str:
+def receipt_path(manager: MemberExecMixin, spec: ChatSandboxSpec, uid: int, token: str) -> str:
     """Name one identity's census receipt in the tmpfs only it can write."""
     if uid == manager.backend.uid:
         directory = ACTIVATION_TMPFS
@@ -391,7 +391,7 @@ def receipt_path(manager: ChatSandboxManager, spec: ChatSandboxSpec, uid: int, t
 
 
 def _resume(
-    manager: ChatSandboxManager,
+    manager: MemberExecMixin,
     spec: ChatSandboxSpec,
     *,
     target_uids: list[int],

@@ -69,9 +69,15 @@ def test_a_running_replica_observes_verdict_unlink_recreation_and_replacement(tm
             "no-new-privileges:true",
             "--mount",
             f"type=bind,src={source},dst={target},readonly",
+            # The whole packages, not one module: host_capacity imports its
+            # siblings (observe/sandbox_inventory.py, cloud_agent_shared), so
+            # a single-file bind would mix this tree with the image's.
             "--mount",
-            f"type=bind,src={REPO_ROOT}/cloud_agent_host/host_capacity.py,"
-            "dst=/app/cloud_agent_host/host_capacity.py,readonly",
+            f"type=bind,src={REPO_ROOT}/apps/backend/cloud_agent_host,"
+            "dst=/app/cloud_agent_host,readonly",
+            "--mount",
+            f"type=bind,src={REPO_ROOT}/apps/backend/cloud_agent_shared,"
+            "dst=/app/cloud_agent_shared,readonly",
             "--entrypoint",
             "sleep",
             image,

@@ -32,8 +32,9 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.container.chat_sandbox import TURN_NETWORK_PROOF_S, RetainedChatLost
+from cloud_agent_host.container.chat_sandbox import RetainedChatLost
 from cloud_agent_host.container.chat_sandbox_exec import standing_network_proof
+from cloud_agent_host.container.retained_backend import TURN_NETWORK_PROOF_S
 from cloud_agent_host.supervisor.group_lifecycle import Operation
 
 if TYPE_CHECKING:
@@ -55,9 +56,9 @@ def admit_running(
     records it for the group's lifecycle generation either way.
     """
     with lifecycle.state.lock:
-        generation = group.lifecycle_generation
+        generation = group.life.generation
         recorded = group.network_proof
-        reuse = reuse and not group.start_failed
+        reuse = reuse and not group.life.last_start_failed
     if reuse and recorded is not None and recorded[0] == generation:
         standing = _standing_proof(lifecycle, group, generation)
         if standing is not None:
@@ -82,7 +83,7 @@ def _standing_proof(
     if proved_from is None:
         return None
     with lifecycle.state.lock:
-        if group.lifecycle_generation != generation or group.start_failed:
+        if group.life.generation != generation or group.life.last_start_failed:
             return None
         # The group's identity fence: a different container is lost, as on a start.
         lifecycle.state.accept_inspection_locked(group, current)
@@ -91,14 +92,28 @@ def _standing_proof(
 
 
 def ensure_running(
-    lifecycle: GroupLifecycleController, group: _Group, *, start_seq: int | _SameRun | None
+    lifecycle: GroupLifecycleController,
+    group: _Group,
+    *,
+    start_seq: int | _SameRun | None,
+    activation_owner: str | None = None,
 ) -> None:
-    """Start the group if it is stopped, and prove its network for this request."""
+    """Start the group if it is stopped, and prove its network for this request.
+
+    ``activation_owner`` is the lease a turn's own request runs under; a
+    stopped container is started for it only while a member still holds it.
+    """
     current = lifecycle.state.manager.inspect(group.spec.container_name)
     if current is None:
         raise RetainedChatLost("shared sandbox container is missing")
-    group.lifecycle.admit(Operation.RUN)
-    group.inspection = lifecycle.start_and_prove(group, start_seq=start_seq)
+    with lifecycle.state.lock:
+        group.lifecycle.admit(Operation.RUN)
+    # The start runs Docker without the lock and revalidates under it.
+    inspection = lifecycle.start_and_prove(
+        group, start_seq=start_seq, activation_owner=activation_owner
+    )
+    with lifecycle.state.lock:
+        group.inspection = inspection
 
 
 def backend_proved_at(group: _Group, network_proved_at: float | None) -> float | None:

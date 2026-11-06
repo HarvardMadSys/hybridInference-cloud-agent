@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from cloud_agent.api import mcp_relay
+from cloud_agent.api import _mcp_relay_approval
 from cloud_agent.workers.mcp_decision_signal import McpDecisionSignal
 
 INVOCATION = 41
@@ -81,13 +81,15 @@ def _live_binding(monkeypatch):
         server="server",
         secret="secret",
     )
-    monkeypatch.setattr(mcp_relay, "_resolve_live_binding", AsyncMock(return_value=current))
+    monkeypatch.setattr(
+        _mcp_relay_approval, "resolve_live_binding", AsyncMock(return_value=current)
+    )
 
 
 def _hold(store: Store, request: Request | None, *, expires_in_s: float = 600.0) -> asyncio.Task:
     authorized = _authorized()
     task = asyncio.create_task(
-        mcp_relay._wait_for_approval(
+        _mcp_relay_approval.wait_for_approval(
             authorized,  # type: ignore[arg-type]
             store,  # type: ignore[arg-type]
             invocation={
@@ -104,7 +106,7 @@ def _hold(store: Store, request: Request | None, *, expires_in_s: float = 600.0)
 
 
 async def test_an_approval_dispatches_the_call_at_once(monkeypatch):
-    monkeypatch.setattr(mcp_relay, "_APPROVAL_IDLE_S", 30.0)
+    monkeypatch.setattr(_mcp_relay_approval, "APPROVAL_IDLE_S", 30.0)
     signal = McpDecisionSignal()
     signal.reset(listening=True)
     store = Store()
@@ -121,7 +123,7 @@ async def test_an_approval_dispatches_the_call_at_once(monkeypatch):
 
 
 async def test_a_refusal_answers_the_caller_at_once(monkeypatch):
-    monkeypatch.setattr(mcp_relay, "_APPROVAL_IDLE_S", 30.0)
+    monkeypatch.setattr(_mcp_relay_approval, "APPROVAL_IDLE_S", 30.0)
     signal = McpDecisionSignal()
     signal.reset(listening=True)
     store = Store()
@@ -137,8 +139,8 @@ async def test_a_refusal_answers_the_caller_at_once(monkeypatch):
 
 
 async def test_without_a_listener_it_looks_on_its_clock(monkeypatch):
-    monkeypatch.setattr(mcp_relay, "_APPROVAL_POLL_S", 0.01)
-    monkeypatch.setattr(mcp_relay, "_APPROVAL_IDLE_S", 30.0)
+    monkeypatch.setattr(_mcp_relay_approval, "APPROVAL_POLL_S", 0.01)
+    monkeypatch.setattr(_mcp_relay_approval, "APPROVAL_IDLE_S", 30.0)
     signal = McpDecisionSignal()  # not listening: nothing would wake it
     store = Store()
     held = _hold(store, Request(signal))
@@ -154,7 +156,7 @@ async def test_without_a_listener_it_looks_on_its_clock(monkeypatch):
 
 
 async def test_the_deadline_ends_the_wait_without_a_decision(monkeypatch):
-    monkeypatch.setattr(mcp_relay, "_APPROVAL_IDLE_S", 30.0)
+    monkeypatch.setattr(_mcp_relay_approval, "APPROVAL_IDLE_S", 30.0)
     signal = McpDecisionSignal()
     signal.reset(listening=True)
     store = Store()

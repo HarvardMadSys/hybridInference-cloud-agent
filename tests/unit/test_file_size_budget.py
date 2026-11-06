@@ -20,15 +20,9 @@ REPO = Path(__file__).resolve().parents[2]
 LIMIT = 1500
 TEST_LIMIT = 2000
 
-#: Line counts of the modules over the limit when it arrived.
-BASELINE = {
-    "apps/backend/cloud_agent_host/container/chat_sandbox.py": 3816,
-    "apps/backend/cloud_agent/application/compute_reconcile.py": 2199,
-    "apps/backend/cloud_agent/api/mcp_connections.py": 1912,
-    "apps/backend/cloud_agent/api/mcp_relay.py": 1777,
-    "apps/backend/cloud_agent_host/host_capacity.py": 1636,
-    "apps/backend/cloud_agent_host/network/chat_sandbox_network.py": 1532,
-}
+#: Line counts of the modules over the limit when it arrived. Empty since
+#: the last ones were split: no production module may exceed LIMIT again.
+BASELINE: dict[str, int] = {}
 
 #: Exact line counts of test modules over their calibrated limit after #894's
 #: first behavior-focused splits. Unlike the older production baseline, these
@@ -46,13 +40,12 @@ TEST_BASELINE = {
     "tests/unit/test_agent_sandbox_manager.py": 3437,
     "tests/unit/test_chat_sandbox.py": 3137,
     "tests/unit/test_compute_providers.py": 2002,
-    "tests/unit/test_compute_reconcile.py": 2291,
     "tests/unit/test_deploy_config.py": 2058,
     "tests/unit/test_host_pool_api.py": 3377,
     "tests/unit/test_mcp_connections_api.py": 2880,
     "tests/unit/test_retained_deploy.py": 2231,
     "tests/unit/test_runner_host_service.py": 2822,
-    "tests/unit/test_shared_session_supervisor.py": 5147,
+    "tests/unit/test_shared_session_supervisor.py": 5146,
 }
 
 

@@ -92,7 +92,7 @@ class GroupRegistration:
                 self._state.condition.wait(timeout=min(remaining, 0.5))
                 group = self._state.groups.get(spec.sandbox_id)
             if group is not None:
-                while group.lifecycle_check is not None:
+                while group.life.check is not None:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise SessionBusy("shared sandbox lifecycle check is in progress")
@@ -137,8 +137,10 @@ class GroupRegistration:
                 group = _Group(
                     spec=spec,
                     inspection=created,
+                    life=self._state.new_lifecycle(
+                        sealed_seq=self._archive.checkpoint_seq(spec, created)
+                    ),
                     environment_snapshot_failure=snapshot_failure,
-                    sealed_seq=self._archive.checkpoint_seq(spec, created),
                 )
                 self._state.groups[spec.sandbox_id] = group
             return self._install_manifest_locked(

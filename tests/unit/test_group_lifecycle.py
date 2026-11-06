@@ -8,9 +8,11 @@ decides the message a caller sees.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import pytest
+from tests.support.group_lifecycle import FLAGS, new_state, set_flags
 
 from cloud_agent_host.container.chat_sandbox import (
     ChatSandboxInspection,
@@ -25,6 +27,7 @@ from cloud_agent_host.supervisor.group_lifecycle import (
     GroupLifecycle,
     Operation,
 )
+from cloud_agent_host.supervisor.group_lifecycle_state import CombinationCounts
 from cloud_agent_host.supervisor.shared_session_state import _Group, _Member
 
 CHECK = "shared sandbox lifecycle check is in progress"
@@ -65,10 +68,12 @@ def _group(running: bool = True, **fields: Any) -> _Group:
         mounts=(),
         networks=("agent-net",),
     )
-    group = _Group(spec=spec, inspection=inspection)
+    group = _Group(spec=spec, inspection=inspection, life=new_state())
     group.members["athr_source"] = _Member(thread_id="athr_source")
+    set_flags(group, **{name: value for name, value in fields.items() if name in FLAGS})
     for name, value in fields.items():
-        setattr(group, name, value)
+        if name not in FLAGS:
+            setattr(group, name, value)
     return group
 
 
@@ -122,15 +127,22 @@ _CASES: list[tuple[Operation, dict[str, Any], bool, type[Exception] | None, str 
     ),
     (Operation.MUTATION, {"container_lost": True}, False, None, None),
     (Operation.MUTATION, {"start_failed": True}, False, None, None),
-    (Operation.MUTATION, {"initial_archive_preservation_pending": True}, False, None, None),
+    (
+        Operation.MUTATION,
+        {"initial_archive_preservation_pending": True, "snapshotting": False},
+        False,
+        None,
+        None,
+    ),
     (Operation.MUTATION, {"operation_tokens": {"fork:op": "athr_source"}}, False, None, None),
     # DELETION: a lost container first, then any lifecycle archive fence.
     (Operation.DELETION, {"container_lost": True, "starting": True}, False, RetainedChatLost, LOST),
     (Operation.DELETION, {"snapshotting": True}, False, SessionBusy, BEFORE_DELETION),
     (Operation.DELETION, {"starting": True}, False, SessionBusy, BEFORE_DELETION),
     (
+        # Without the snapshot barrier I5 gives it, so this row alone refuses.
         Operation.DELETION,
-        {"initial_archive_preservation_pending": True},
+        {"initial_archive_preservation_pending": True, "snapshotting": False},
         False,
         SessionBusy,
         BEFORE_DELETION,
@@ -153,7 +165,6 @@ _CASES: list[tuple[Operation, dict[str, Any], bool, type[Exception] | None, str 
     ),
     (Operation.DELETION, {"stopping": True}, False, None, None),
     (Operation.DELETION, {"lifecycle_check": HELD_CHECK}, False, None, None),
-    (Operation.DELETION, {"orphan_marker_unreadable": True}, False, None, None),
     (Operation.DELETION, {"operation_tokens": {"t": "athr_source"}}, False, None, None),
     # ARCHIVE and IDLE_DELETION: deletion fences, then mutation's, then idle.
     (Operation.ARCHIVE, {"starting": True}, False, SessionBusy, BEFORE_DELETION),
@@ -224,6 +235,36 @@ _CASES: list[tuple[Operation, dict[str, Any], bool, type[Exception] | None, str 
     (Operation.ACTIVATION_WAIT, {"starting": True, "stopping": True}, False, SessionBusy, START),
     (Operation.ACTIVATION_WAIT, {"stopping": True}, False, SessionBusy, STOP),
     (Operation.ACTIVATION_WAIT, {"stop_archive_pending": True}, False, None, None),
+    (
+        Operation.INITIAL_ARCHIVE_WAIT,
+        {"starting": True, "lifecycle_check": HELD_CHECK},
+        False,
+        SessionBusy,
+        START,
+    ),
+    (Operation.INITIAL_ARCHIVE_WAIT, {"lifecycle_check": HELD_CHECK}, False, SessionBusy, CHECK),
+    (
+        Operation.INITIAL_ARCHIVE_WAIT,
+        {"operation_tokens": {"t": "athr_source"}, "snapshotting": True},
+        False,
+        None,
+        None,
+    ),
+    (
+        Operation.INITIAL_ARCHIVE_DRAIN,
+        {"lifecycle_check": HELD_CHECK, "terminal_tokens": {"t": "athr_source"}},
+        False,
+        SessionBusy,
+        CHECK,
+    ),
+    (
+        Operation.INITIAL_ARCHIVE_DRAIN,
+        {"operation_tokens": {"t": "athr_source"}},
+        False,
+        SessionBusy,
+        "shared workspace still has active mutations",
+    ),
+    (Operation.INITIAL_ARCHIVE_DRAIN, {"members": _leased(), "stopping": True}, False, None, None),
     # RUN and JOIN_RUN.
     (
         Operation.RUN,
@@ -277,6 +318,23 @@ _CASES: list[tuple[Operation, dict[str, Any], bool, type[Exception] | None, str 
     (Operation.IDLE_STOP, {}, False, None, None),
     (Operation.TAKE_STOP, {"stopping": True}, False, SessionBusy, GROUP_STOP),
     (Operation.TAKE_STOP, {"starting": True}, False, None, None),
+    (Operation.TAKE_STOP, {"lifecycle_check": HELD_CHECK}, False, None, None),
+    (
+        Operation.SHUTDOWN_TAKE_STOP,
+        {"stopping": True, "starting": True},
+        False,
+        SessionBusy,
+        GROUP_STOP,
+    ),
+    (
+        Operation.SHUTDOWN_TAKE_STOP,
+        {"starting": True, "lifecycle_check": HELD_CHECK},
+        False,
+        SessionBusy,
+        GROUP_START,
+    ),
+    (Operation.SHUTDOWN_TAKE_STOP, {"lifecycle_check": HELD_CHECK}, False, SessionBusy, CHECK),
+    (Operation.SHUTDOWN_TAKE_STOP, {"snapshotting": True}, False, None, None),
     (
         Operation.ORPHAN_FINALIZATION,
         {"stopping": True},
@@ -396,6 +454,46 @@ def test_the_view_reads_the_groups_fields_in_place() -> None:
     group = _group()
     lifecycle = GroupLifecycle(group)
     lifecycle.admit(Operation.MUTATION)
-    group.starting = True
+    set_flags(group, starting=True)
     with pytest.raises(SessionBusy, match=START):
         lifecycle.admit(Operation.MUTATION)
+
+
+def test_a_combination_lists_what_holds_in_a_fixed_order() -> None:
+    assert _group().lifecycle.combination() == ()
+    group = _group(
+        stopping=True,
+        lifecycle_check=HELD_CHECK,
+        snapshotting=True,
+        stop_archive_pending=True,
+        start_failed=True,
+    )
+    assert group.lifecycle.combination() == (
+        "stop:shutdown",
+        "exclusive:initial_archive",
+        "check",
+        "start_failed",
+        "final_archive",
+    )
+
+
+def test_combinations_are_logged_when_first_seen_and_counted_hourly(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = [0.0]
+    counts = CombinationCounts(clock=lambda: now[0], interval_s=3600.0)
+    caplog.set_level(logging.INFO, logger="cloud_agent_host.supervisor.group_lifecycle")
+
+    counts.observe(("start",), site="end_start")
+    counts.observe(("start",), site="end_start")
+    counts.observe((), site="end_lifecycle_check")
+    now[0] = 3600.0
+    counts.observe(("start",), site="end_start")
+
+    events = [(record.getMessage(), record.__dict__) for record in caplog.records]
+    first_seen = [extra["combination"] for message, extra in events if message.endswith("ation")]
+    assert first_seen == ["start", "idle"]
+    reports = [
+        extra["counts"] for message, extra in events if message.endswith("combination_counts")
+    ]
+    assert reports == [{"start": 3, "idle": 1}]

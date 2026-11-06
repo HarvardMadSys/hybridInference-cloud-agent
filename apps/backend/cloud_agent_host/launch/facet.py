@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, Self
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+
+
+#: The metadata of a facet field holding a credential the launch brings into
+#: the sandbox, as ``field(repr=False, metadata=SECRET)``. The facet's
+#: ``secrets()`` names the field's value, which
+#: ``tests/unit/test_launch_secret_masking.py`` proves for every facet.
+SECRET: Mapping[str, bool] = MappingProxyType({"secret": True})
 
 
 @dataclass(frozen=True)
@@ -58,8 +66,9 @@ class LaunchFacet(Protocol):
     def secrets(self) -> dict[str, str]:
         """The values, by name, this capability brings into the sandbox.
 
-        Output must never show them. The runner's redactor still takes its
-        values from the claim (``claim_secret_values``); this states the
-        launch's own half, which is not yet wired into it.
+        Output must never show them. The runner's redactor starts from the
+        claim's values (``claim_secret_values``); a residency's credentials
+        arrive only when its member's process is opened, and the attempt then
+        adds every facet's values (``launch_secrets``) to the redactor.
         """
         return {}

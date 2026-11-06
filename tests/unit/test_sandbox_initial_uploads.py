@@ -36,7 +36,7 @@ from cloud_agent_host.archive.sandbox_initial_uploads import (
     InitialUploadWorker,
     SpooledInitialUpload,
 )
-from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, RetainedChatBackend
+from cloud_agent_host.container.retained_backend import RetainedChatBackend
 from cloud_agent_host.container.sandbox import ProcessBackend
 from cloud_agent_host.sandbox_manager import create_app
 from cloud_agent_host.supervisor.group_archive_policy import ServiceArchivePolicy
@@ -50,6 +50,7 @@ if TYPE_CHECKING:
         SandboxArchiveS3Config,
         SandboxArchiveS3Uploader,
     )
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
 
 _WAIT_S = 5.0
 

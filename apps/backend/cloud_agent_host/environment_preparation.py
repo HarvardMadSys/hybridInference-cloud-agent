@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from cloud_agent_host.container.chat_sandbox import RetainedChatBackend
+    from cloud_agent_host.container.retained_backend import RetainedChatBackend
     from cloud_agent_host.setup import SetupResult
     from cloud_agent_shared.environment import BoundEnvironment
 
