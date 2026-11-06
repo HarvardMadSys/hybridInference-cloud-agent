@@ -391,7 +391,7 @@ Q1–Q4 的决定可以插在第 3 步之后任何时候做，每个单独一个
 
 ### 9.3 第 4 步
 
-`stop_all_for_shutdown` 改用 `SHUTDOWN_TAKE_STOP`，它在 `TAKE_STOP` 之外还拒 S 和 C；被拒的 group 照旧记进 `failures`。新用例 `test_shutdown_leaves_a_start_in_progress_its_own_final_archive` 让一个启动在 start fence 之后失败、在上传 fail-stop archive 时挂住，再调用关机：group 进了 `failures`，没有拿到 `stopping`。在旧代码上，这个用例里关机会拿到 `stopping`，把同一个 group 再归档一次。U1 从此是已证明的不变量：S 在 T 期间不能开始，T（包括 `ARCHIVE_HOLD`）在 S 期间也不能开始。
+`stop_all_for_shutdown` 改用 `SHUTDOWN_TAKE_STOP`，它在 `TAKE_STOP` 之外还拒 S 和 C；被拒的 group 照旧记进 `failures`。新用例 `test_shutdown_leaves_a_start_in_progress_its_own_final_archive` 让一个启动在 start fence 之后失败、在上传 fail-stop archive 时挂住，再调用关机：group 进了 `failures`，没有拿到 `stopping`。在旧代码上，这个用例里关机会拿到 `stopping`，把同一个 group 再归档一次。U1 从此是已证明的不变量：S 在 T 期间不能开始，T（包括 `ARCHIVE_HOLD`）在 S 期间也不能开始。代价是接受的：被拒的那次启动自己的 fail-stop 上传如果随后失败，这次关机不会再重试它；group 保持停止，网桥和待完成的标记都留着，由下一次启动后的 reconcile 完成 final archive。旧代码会在同一次关机里和启动并发地重试。
 
 ### 9.4 没有做的
 

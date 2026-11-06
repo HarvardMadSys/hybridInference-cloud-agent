@@ -1783,6 +1783,10 @@ def test_shutdown_leaves_a_start_in_progress_its_own_final_archive():
     admission refuses a start in progress (A2 spec, step 4). Before, the retry
     took the group's stop beside the start and archived the group again while
     the start's own fail-stop archive was still uploading.
+
+    The cost, accepted: if that upload then fails, this shutdown does not
+    retry it. The group stays stopped with its bridge and pending marker, and
+    the next boot's reconciliation finishes the final archive.
     """
     manager = _UncertainStartManager()
     spec = _spec()
