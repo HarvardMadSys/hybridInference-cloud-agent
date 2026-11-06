@@ -206,6 +206,7 @@ const ACCOUNT: Record<string, (who: string) => string> = {
   erase: (who) => `Erased ${who} and all of its data`,
   transfer_team: (who) => `Handed ${who}'s team to another member`,
   setup_admin: (who) => `Created the first administrator, ${who}`,
+  import: (who) => `Imported ${who} from another service, approved`,
   signup: (who) => `${who} signed up`,
   password_set: (who) => `${who} set a password`,
   password_change: (who) => `${who} changed its password`,
