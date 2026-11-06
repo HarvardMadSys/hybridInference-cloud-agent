@@ -352,6 +352,9 @@ class UpdateConnectionRequest(BaseModel):
     auth_kind: str | None = None
     account_label: str | None = None
     request_timeout_s: float | None = Field(default=None, ge=5, le=900)
+    #: New values for a stdio launch's ``secret://NAME`` keys. Write-only; one
+    #: left out or blank keeps its stored value (``launch.edited_secret_env``).
+    env_secrets: dict[str, str] = Field(default_factory=dict)
 
 
 class EnableConnectionRequest(BaseModel):
@@ -750,16 +753,21 @@ async def update_connection(
             launch=None,
         )
     launch_spec = None
-    if body.launch is not None:
+    if body.launch is not None or body.env_secrets:
         if location is ExecutionLocation.REMOTE:
             raise _bad_request("a remote connection has no process to launch")
-        # The check create applies, and only the form it renders is stored. A
-        # submitted document is not stored as sent: its ``mounts`` are the
-        # plan's to decide and its ``env_secrets`` are ciphertext only the
-        # secret routes write, so neither may arrive through an edit.
-        _unused_url, launch_spec = _validate_target(
-            transport=transport, location=location, url=None, launch=body.launch
-        )
+        # Checked as create checks it; only the form it renders is stored, with
+        # the keys ``launch.edited_secret_env`` keeps and sets, sealed here.
+        if body.launch is not None:
+            _unused_url, launch_spec = _validate_target(
+                transport=transport, location=location, url=None, launch=body.launch
+            )
+        try:
+            launch_spec, keys = launch.edited_secret_env(existing, launch_spec, body.env_secrets)
+        except LaunchPlanError as exc:
+            raise _bad_request(str(exc)) from exc
+        if keys:
+            launch_spec = _sealed_launch_spec(launch_spec, keys, location=location) or launch_spec
     auth_kind = body.auth_kind
     if auth_kind is not None:
         auth_kind = _parse_auth_kind(auth_kind).value

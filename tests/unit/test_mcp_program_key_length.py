@@ -2,8 +2,9 @@
 
 The runner masks a sandbox program's keys only from ``MIN_SECRET_CHARS`` up, as
 it masks an environment Secret, so a new shorter key is refused where it is
-saved: a hand-added program, a pasted configuration's preview and its save. A
-short key stored before the rule still opens at the claim.
+saved: a hand-added program, a key an edit sets, a pasted configuration's
+preview and its save. A short key stored before the rule still opens at the
+claim, and an edit that keeps it does not judge it.
 """
 
 from __future__ import annotations
@@ -115,8 +116,8 @@ def test_a_supplied_value_the_launch_does_not_name_is_not_judged() -> None:
     assert response.status_code == 201, response.text
 
 
-def test_an_edit_cannot_seal_a_key_short_or_not() -> None:
-    """An edit carries no key: one sent beside the launch is refused, one inside it dropped."""
+def test_an_edit_judges_the_key_it_sets_and_drops_one_inside_the_launch() -> None:
+    """A key an edit sets beside the launch is judged; one inside the document is dropped."""
     store = FakeStore()
     connection_id = _seed(
         store,
@@ -145,7 +146,8 @@ def test_an_edit_cannot_seal_a_key_short_or_not() -> None:
             },
         )
 
-    assert beside.status_code == 422
+    assert beside.status_code == 400, beside.text
+    assert _message(beside) == _REFUSAL
     assert inside.status_code == 200, inside.text
     assert "env_secrets" not in store.connections[connection_id]["launch_spec"]
 
