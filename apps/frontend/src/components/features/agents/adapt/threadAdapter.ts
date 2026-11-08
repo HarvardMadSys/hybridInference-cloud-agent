@@ -44,6 +44,8 @@ export function displayHistoryTurn(
     ...(goalTurn ? { goalTurn } : {}),
     messages: messages.map(mapThreadMessage),
     events: transcriptEvents(events, job, messages, historyLoading),
+    startedAt: job.started_at,
+    finishedAt: job.finished_at,
   };
 }
 

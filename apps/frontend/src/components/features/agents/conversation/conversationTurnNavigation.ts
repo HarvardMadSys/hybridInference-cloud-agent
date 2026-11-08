@@ -72,6 +72,9 @@ export interface ConversationTurnDescription {
   lastResponse: string;
   state?: AgentJobState;
   isCurrent: boolean;
+  /** When a stored turn ran; the newest turn reads its own job instead. */
+  startedAt?: string | null;
+  finishedAt?: string | null;
 }
 
 /** One mark on the navigation rail. */
@@ -316,6 +319,8 @@ function historyTurnDescription(
         ? lastEventMessage(turn.events)
         : lastAssistantMessage(fallbackResponses),
     isCurrent: false,
+    startedAt: turn.startedAt,
+    finishedAt: turn.finishedAt,
   };
 }
 

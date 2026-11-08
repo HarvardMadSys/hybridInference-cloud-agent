@@ -143,6 +143,9 @@ export interface AgentHistoryTurn {
   events: AgentEvent[];
   /** How this turn came to exist and what it reported. Absent on older rows. */
   goalTurn?: GoalTurn;
+  /** When the turn ran, which places the images its tools saved under it. */
+  startedAt?: string | null;
+  finishedAt?: string | null;
 }
 
 export interface DiffLine {
