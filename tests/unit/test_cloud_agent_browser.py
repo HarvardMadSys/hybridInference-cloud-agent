@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fcntl
 import importlib.util
 import json
 import logging
@@ -189,6 +190,48 @@ def test_every_runtime_launch_starts_the_service_first(runtime_id):
     assert events[0] == ("exec", LAUNCHER, BROWSER_SERVICE_UID)
     # The image names the shared browser's paths; a member gets none of its own.
     assert not any(key.startswith("CLOUD_AGENT_BROWSER_") for key in context.base_env)
+
+
+# -- launch environment -----------------------------------------------------------
+
+
+def test_chromium_gets_no_dbus_and_keeps_a_writable_home(tmp_path):
+    # A bus that accepts without answering held Chromium past READY_TIMEOUT_S
+    # on CI runners; an address it cannot parse fails each call at once.
+    env = browser.chromium_env(
+        str(tmp_path / "profile"),
+        {
+            "HOME": str(tmp_path),
+            "PATH": "/usr/bin",
+            "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1001/bus",
+            "DBUS_SYSTEM_BUS_ADDRESS": "unix:path=/run/dbus/system_bus_socket",
+        },
+    )
+    assert env["DBUS_SESSION_BUS_ADDRESS"] == env["DBUS_SYSTEM_BUS_ADDRESS"] == "disabled:"
+    assert env["HOME"] == str(tmp_path)
+    assert env["PATH"] == "/usr/bin"
+
+    unset = browser.chromium_env(str(tmp_path / "profile"), {"HOME": str(tmp_path)})
+    assert unset["DBUS_SESSION_BUS_ADDRESS"] == unset["DBUS_SYSTEM_BUS_ADDRESS"] == "disabled:"
+
+
+def test_the_service_log_appends_after_chromium_instead_of_over_it(tmp_path, monkeypatch):
+    # Chromium appends to daemon.log; the service writing from offset 0 would
+    # overwrite Chromium's first lines, which say why it did not start.
+    paths = browser.resolve_paths(
+        {"HOME": str(tmp_path), "CLOUD_AGENT_BROWSER_STATE_DIR": str(tmp_path / "run")}
+    )
+    (tmp_path / "run").mkdir()
+    seen = {}
+
+    def popen(*_args, stdout, **_kwargs):
+        seen["flags"] = fcntl.fcntl(stdout, fcntl.F_GETFL)
+        raise OSError("stop here")
+
+    monkeypatch.setattr(browser.subprocess, "Popen", popen)
+    with pytest.raises(OSError, match="stop here"):
+        browser._spawn(paths, idle_s=1.0)
+    assert seen["flags"] & os.O_APPEND
 
 
 # -- paths ----------------------------------------------------------------------
