@@ -35,20 +35,35 @@ import type { JobDetailPanels } from './useJobDetailPanels';
 function StoredTurnView({
   outputs,
   onOpenFile,
+  threadId,
   ...props
 }: Omit<ComponentProps<typeof HistoryTurn>, 'results'> & {
   outputs?: RecordedTurnOutputs | null;
   onOpenFile: (selection: RecordedFileSelection) => void;
+  /** The conversation, so every turn shares one listing of its images. */
+  threadId?: string;
 }) {
+  const { turn } = props;
   return (
     <HistoryTurn
       {...props}
       results={
-        <TurnDeliverables
-          job={{ id: props.turn.jobId, state: props.turn.state }}
-          outputs={outputs}
-          onOpenFile={onOpenFile}
-        />
+        <>
+          <TurnDeliverables
+            job={{ id: turn.jobId, state: turn.state }}
+            outputs={outputs}
+            onOpenFile={onOpenFile}
+          />
+          <TurnScreenshots
+            job={{
+              id: turn.jobId,
+              threadId,
+              state: turn.state,
+              startedAt: turn.startedAt,
+              finishedAt: turn.finishedAt,
+            }}
+          />
+        </>
       }
     />
   );
@@ -155,6 +170,7 @@ export function JobTranscript({
             onInspectEvent={hasStoredEvents ? inspectStoredEvent : undefined}
             outputs={recordedOutputs.get(turn.jobId)}
             onOpenFile={openStoredFile}
+            threadId={job.threadId}
             showActivityDetails={false}
             rewindAnchorJobId={rewindAnchorJobId}
             busy={forking}

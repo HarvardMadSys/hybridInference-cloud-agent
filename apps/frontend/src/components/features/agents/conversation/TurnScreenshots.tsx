@@ -58,7 +58,10 @@ export function turnImages(
     .sort((a, b) => a.modified_at - b.modified_at);
 }
 
-type ScreenshotTurn = Pick<AgentJob, 'id' | 'threadId' | 'state' | 'startedAt' | 'finishedAt'>;
+type ScreenshotTurn = Pick<AgentJob, 'id' | 'threadId' | 'startedAt' | 'finishedAt'> & {
+  /** Absent on an older stored turn, which then shows nothing. */
+  state?: AgentJob['state'];
+};
 
 export function TurnScreenshots({ job }: { job: ScreenshotTurn }) {
   const t = useT();
