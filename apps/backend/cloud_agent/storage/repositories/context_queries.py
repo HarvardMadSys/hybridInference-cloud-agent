@@ -46,6 +46,8 @@ if TYPE_CHECKING:
 
 #: Events one page of a profile refresh reads.
 CONTEXT_EVENT_PAGE_SIZE = 1_000
+#: How long one statement of an insights page may run, in milliseconds.
+INSIGHTS_STATEMENT_TIMEOUT_MS = 5_000
 
 _THREAD_ROWS_SQL = f"""
     /* thread_context_rows */
@@ -672,7 +674,7 @@ class PostgresContextQueries:
         chosen = filters or InsightsFilters()
         runs = chosen.params()
         async with self._pool.acquire() as conn:
-            await conn.execute("SET statement_timeout = '5s'")
+            await conn.execute(f"SET statement_timeout = {INSIGHTS_STATEMENT_TIMEOUT_MS}")
             await conn.execute(_READ_SETTINGS_SQL.format(scope=""))
             try:
                 stale = [
@@ -691,7 +693,7 @@ class PostgresContextQueries:
             finally:
                 await conn.execute("RESET statement_timeout; RESET plan_cache_mode; RESET jit")
             async with conn.transaction(isolation="repeatable_read", readonly=True):
-                await conn.execute("SET LOCAL statement_timeout = '5s'")
+                await conn.execute(f"SET LOCAL statement_timeout = {INSIGHTS_STATEMENT_TIMEOUT_MS}")
                 await conn.execute(_READ_SETTINGS_SQL.format(scope="LOCAL "))
                 page = [
                     dict(row)
