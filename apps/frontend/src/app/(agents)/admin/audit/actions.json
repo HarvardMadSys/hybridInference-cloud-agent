@@ -65,6 +65,11 @@
     "kind": "change"
   },
   {
+    "action": "agent.local_account.import",
+    "category": "accounts",
+    "kind": "change"
+  },
+  {
     "action": "agent.local_account.signup",
     "category": "accounts",
     "kind": "self_service"

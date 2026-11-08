@@ -154,8 +154,13 @@ def _frozen_table() -> tuple[tuple[str, str, str | None, str | None, str | None,
     return module._FROZEN
 
 
+#: Declared after migration 0114 shipped. No row of theirs predates it, so its
+#: frozen copy has nothing to backfill for them and does not list them.
+_DECLARED_AFTER_0114 = {"agent.local_account.import"}
+
+
 def test_the_migration_backfills_exactly_what_the_registry_declares() -> None:
-    """The migration's copy is frozen; on the day it ships it must say the same."""
+    """The migration's copy is frozen: what the registry declared when it shipped."""
     declared = {
         (
             action.name,
@@ -166,8 +171,10 @@ def test_the_migration_backfills_exactly_what_the_registry_declares() -> None:
             action.asynchronous,
         )
         for action in ACTIONS.values()
+        if action.name not in _DECLARED_AFTER_0114
     }
     assert set(_frozen_table()) == declared
+    assert ACTIONS.keys() >= _DECLARED_AFTER_0114
 
 
 def _page_list() -> list[dict[str, str]]:

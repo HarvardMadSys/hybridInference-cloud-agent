@@ -136,6 +136,53 @@ administration or access, or declining it, is refused with 409
 `listed_admin_address` until the address is removed from the list (or the
 account is suspended), because the next sign-in would grant it back.
 
+### Importing accounts from FreeInference
+
+A deployment can be seeded once with FreeInference's active users. Each
+becomes an approved account that signs in here with the same email, login
+name or phone and the same password: both services hash passwords with the
+same Argon2id parameters, so the copied hash verifies unchanged. Nothing
+links the two accounts afterwards; a later change on either side does not
+reach the other.
+
+Export on the FreeInference database, read-only. Users waiting for approval,
+rejected, suspended or deleted there are left out:
+
+```bash
+(umask 077; psql "$FREEINFERENCE_DATABASE_URL" -At -c "
+  SELECT json_build_object(
+    'email', email, 'email_verified', coalesce(email_verified, false),
+    'login_name', login_name, 'phone', phone, 'phone_verified', phone_verified,
+    'user_name', user_name, 'password_hash', password_hash)
+  FROM users WHERE status = 'active' AND NOT hard_delete_pending
+  ORDER BY created_at, id" > users.jsonl)
+```
+
+The file holds password hashes. Keep it readable by its owner only, copy it
+over SSH, and delete it after the import. Then, on the control plane:
+
+```bash
+python -m cloud_agent.accounts.import_accounts users.jsonl          # dry run
+python -m cloud_agent.accounts.import_accounts users.jsonl --apply
+```
+
+Without `--apply` nothing is written. Both report how many accounts are (or
+would be) imported, which input lines were skipped and why, and what was left
+out of imported accounts. The report names line numbers, never an identifier.
+
+- An account any of whose identifiers already belongs to someone here is
+  skipped whole, and the existing account is not changed. A second run
+  imports nothing twice.
+- An email FreeInference verified counts as proven, like one the operator
+  creates, so the administrator email list applies to it; an unverified one
+  is imported unverified. A phone is imported only if it was verified. A
+  login name needs a password, and a hash in another format is dropped,
+  leaving its holder to reset the password by email.
+- Each account is created and approved in one transaction, audited as
+  `agent.local_account.import` with the actor `operator:account-import`. No mail is
+  sent, no model connection is created, and the Terms are not recorded as
+  accepted.
+
 ## The HTTP surface
 
 Errors use the usual envelope, `{"detail": {"error": {"type", "message"}}}`.

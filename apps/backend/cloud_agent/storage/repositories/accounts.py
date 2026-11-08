@@ -65,7 +65,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from cloud_agent.domain.accounts import AdmissionEdit
-    from cloud_agent.ports.accounts import IdentifierKind
+    from cloud_agent.ports.accounts import IdentifierKind, ImportedIdentity
 
 #: Termination passes one process runs at once. Each holds one connection for
 #: its lock and borrows one more at a time, so two leave most of the pool free.
@@ -291,6 +291,30 @@ class PostgresLocalAccountRepository(
             purpose=purpose,
         )
 
+    async def import_account(
+        self,
+        *,
+        account_id: str,
+        identities: list[ImportedIdentity],
+        password_hash: str | None,
+        user_name: str | None,
+        actor_id: str,
+    ) -> bool:
+        """Create an approved, imported account; ``False`` if any of its identifiers is taken.
+
+        Created and approved in one audited transaction, so a run that stops
+        part way leaves each account either absent or approved, never waiting.
+        """
+        return await self._create(
+            account_id,
+            [(i.kind, i.value, i.value, "operator" if i.verified else None) for i in identities],
+            password_hash=password_hash,
+            user_name=user_name,
+            tos_accepted=False,
+            purpose=None,
+            approved_by=actor_id,
+        )
+
     async def _create(
         self,
         account_id: str,
@@ -300,6 +324,7 @@ class PostgresLocalAccountRepository(
         user_name: str | None,
         tos_accepted: bool,
         purpose: str | None,
+        approved_by: str | None = None,
     ) -> bool:
         try:
             async with self._pool.acquire() as conn, conn.transaction():
@@ -331,7 +356,26 @@ class PostgresLocalAccountRepository(
                         account_id,
                         password_hash,
                     )
-                if purpose is None:
+                if approved_by is not None:
+                    await conn.execute(
+                        "INSERT INTO agent_local_admissions (account_id, status, reviewed_at, "
+                        "reviewed_by) VALUES ($1, 'approved', NOW(), $2)",
+                        account_id,
+                        approved_by,
+                    )
+                    await write_audit(
+                        conn,
+                        action="agent.local_account.import",
+                        actor_id=approved_by,
+                        admin_ip="local",
+                        account_id=account_id,
+                        details={
+                            "to": {"status": "active", "admission": "approved", "is_admin": False},
+                            "identities": [kind for kind, *_ in identities],
+                            "has_password": password_hash is not None,
+                        },
+                    )
+                elif purpose is None:
                     await conn.execute(
                         "INSERT INTO agent_local_admissions (account_id) VALUES ($1)", account_id
                     )
