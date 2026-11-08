@@ -405,8 +405,9 @@ describe('Command Executions and File Activity in the one-flow layout', () => {
     fireEvent.click(within(details).getByRole('button', { name: 'Open turn' }));
     expect(onOpenTurn).toHaveBeenLastCalledWith('j1', 1);
 
+    // This card's heading, too, renders before its files have loaded.
     const files = await vi.waitFor(() => card('File Activity'));
-    fireEvent.click(within(files).getByLabelText('Show operations on a.ts'));
+    fireEvent.click(await within(files).findByLabelText('Show operations on a.ts'));
     expect(await within(files).findByText(/of 1 recorded operations shown/)).toBeInTheDocument();
     fireEvent.click(within(files).getAllByRole('button', { name: 'Step' })[0]);
     expect(onOpenPoint).toHaveBeenLastCalledWith({ jobId: 'j2', turnNo: 2, eventId: 10 });

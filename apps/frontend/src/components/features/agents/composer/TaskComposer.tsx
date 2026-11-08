@@ -45,6 +45,7 @@ import type { SelectedSkillApi } from '@/lib/api/skills';
 import { validPluginForRuntime } from '@/lib/pluginConfiguration';
 import { readNewTaskDraft } from './newTaskDraft';
 import { useComposerModel } from './useComposerModel';
+import { useEnvironmentStatus } from './useEnvironmentStatus';
 import { EnvironmentPicker, type EnvironmentSelection } from '../environment/EnvironmentPicker';
 import { UserAvatar } from './UserAvatar';
 import { UserHomeInsights } from './UserHomeInsights';
@@ -152,9 +153,8 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
   // The first temporary workspace's first message waits here for its owner to
   // say they know what one keeps.
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const [environmentStatus, setEnvironmentStatus] = useState<'loading' | 'ready' | 'error'>(
-    'loading',
-  );
+  // Loading until the picker reports for this repository, not the last one.
+  const [environmentStatus, setEnvironmentStatus] = useEnvironmentStatus(repo);
   const [environmentSelection, setEnvironmentSelection] = useState<EnvironmentSelection | null>(
     null,
   );
