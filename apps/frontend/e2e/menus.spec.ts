@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './network-change';
 
 // The shared menu surfaces, exercised through the real specialty controls:
 // the composer's model and agent pickers, the repository menu with its search

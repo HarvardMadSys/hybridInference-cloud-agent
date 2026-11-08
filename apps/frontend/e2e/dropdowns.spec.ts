@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './network-change';
 
 const tableNames = [
   'agent_admin_audit_log',

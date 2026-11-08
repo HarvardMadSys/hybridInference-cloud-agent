@@ -1,4 +1,5 @@
-import { expect, test, type Locator, type Page } from '@playwright/test';
+import { type Locator, type Page } from '@playwright/test';
+import { expect, test } from './network-change';
 
 // Placeholder Terms, long enough to scroll: the deployment's own wording is
 // configuration, not part of this repository.
