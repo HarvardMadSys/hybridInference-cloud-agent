@@ -30,10 +30,14 @@ from tests.unit.test_autoscaling_archive_policy import (
     _observe,
 )
 
-from cloud_agent.sandbox_archive_credentials import seal_archive_storage, stored_archive_policy
+from cloud_agent.sandbox_archive.sandbox_archive_credentials import (
+    seal_archive_storage,
+    stored_archive_policy,
+)
 from cloud_agent.storage._sql.move_out import move_out_blocker
 from cloud_agent.storage._sql.runner_policy import heartbeat_policy
 from cloud_agent.storage.repositories import attempt_commands
+from cloud_agent.storage.repositories.attempt_commands import claims
 from cloud_agent.storage.repositories.environment_snapshots import (
     PostgresEnvironmentSnapshotRepository,
 )
@@ -163,11 +167,9 @@ async def test_the_claim_reads_the_queue_only_under_a_policy_it_can_read(
         "shared_sandbox_claim_attested",
         "compatible_shared_sandbox_followup_attested",
     ):
-        monkeypatch.setattr(attempt_commands, attested, lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(attempt_commands, "lock_compute_topology", AsyncMock())
-    monkeypatch.setattr(
-        attempt_commands, "host_compute_admission", AsyncMock(return_value=(True, True))
-    )
+        monkeypatch.setattr(claims, attested, lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(claims, "lock_compute_topology", AsyncMock())
+    monkeypatch.setattr(claims, "host_compute_admission", AsyncMock(return_value=(True, True)))
     connection = _ClaimConnection(stored.row)
 
     claim = await attempt_commands.PostgresAttemptCommands(_pool(connection)).claim_job(
@@ -248,7 +250,7 @@ async def test_queue_health_counts_a_host_only_under_a_policy_it_can_read(
     )
 
     await PostgresHostPoolRepository(_pool(connection)).queue_health(
-        expected_deployment_sha="test-deployment"
+        expected_deployment_sha="test-deployment", queue_alert_after_s=600.0
     )
     # Archives required, at the revision a serving Host must have applied. A
     # policy it cannot read asks for one no Host has, as the claim refuses them.
@@ -283,9 +285,9 @@ async def test_environment_snapshots_are_on_only_under_a_policy_they_can_read(
 #: Where the control plane parses a policy mapping, and why each may.
 PARSES = {
     # Opens a stored key before it parses: every reader's way in.
-    "sandbox_archive_credentials.py:stored_archive_policy",
+    "sandbox_archive/sandbox_archive_credentials.py:stored_archive_policy",
     # The administrator's request, which holds the key as they typed it.
-    "storage/repositories/host_pool.py:PostgresHostPoolRepository.set_sandbox_archive_settings",
+    "storage/repositories/host_pool/settings.py:SettingsMixin.set_sandbox_archive_settings",
 }
 
 

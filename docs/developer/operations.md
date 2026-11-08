@@ -679,8 +679,9 @@ before the same fenced deletion request can be claimed again.
 
 Each claim pass marks at most 50 exhausted requests, oldest request first, before
 claiming due deletion work. Later worker passes continue through any remaining
-exhausted requests. Exhaustion state, trajectory events, and audit records commit
-together; updating the diagnostic attempt history is best-effort.
+exhausted requests. Exhaustion state and trajectory events commit together with
+the request's result on the audit log; updating the diagnostic attempt history
+is best-effort.
 
 **Sandboxes of deleted chats are removed automatically.** When an owner
 permanently deletes the last chat in a sandbox, the deletion worker asks the
@@ -845,15 +846,40 @@ and no column allowlist. If an investigation needs a task's raw events, that is
 a reason to build an audited route, not a reason to go around the audit.
 
 **Reading the trail.** _Admin → Audit log_ (`GET /admin/agent/audit-log`)
-lists what administrators did, newest first: settings and agent-version
-changes, server actions (pause, remove, placement, adding or releasing a
-server) and measurement runs. It filters by `category` (`settings`,
-`servers`, `measurements`, `content`; `content` holds the event-content reads a
-since-retired admin route recorded) and pages with `before`, the oldest `id` of
-the previous page. The Servers page's polling
-reads are not recorded; rows they left before that changed stay in
-`agent_admin_audit_log` and are never listed. The page names an administrator
-by user id only, because identity tokens carry no display name.
+answers who did what, to whom, with what result, newest first. Each action is
+declared once in `cloud_agent/domain/audit.py`, which files it under a
+`category` (`accounts`, `settings`, `servers`, `sandboxes`, `measurements`,
+`sensitive_access`, `access_control`), names what it acted on (`target_type`
+and `target_id`) and the user it affected (`target_user_id`: the account
+itself, or the owner of a sandbox), and says whether its work runs later.
+Pages follow `before`, the oldest `id` of the previous page.
+
+- **Who acted** (`actor_type`) is derived by the database from `actor_id`:
+  `admin` (an administrator's session), `break_glass` (access that belongs to
+  no account: `ADMIN_TOKEN`, first-run setup, the bootstrap command), `service`
+  (a named automation), `system` (the control plane's own policy and workers),
+  `user` (an account changing itself) or `anonymous`. The page shows `admin`
+  and `break_glass` unless asked for everything (`actors=all`); break-glass
+  access is always shown, in red.
+- **Names** are kept as they were when the row was written, with a short id
+  beside them: erasing an account frees its login name for a new account.
+  Erasing an account deletes no audit row.
+- **What came of it.** `outcome` is `applied`, `refused`, `failed`,
+  `replayed`, or `requested` for work that runs later. A requested sandbox
+  deletion carries the deletion worker's final result; a requested compute
+  operation carries the operation's own state. The worker's steps are in the
+  sandbox's trajectory, not the audit log.
+- **One account or object.** `user=<account id>` shows everything about an
+  account (the users page links to it); `target_type=` with `target_id=`
+  everything about one host, sandbox or server operation.
+- **Recording never fails an action.** A row that cannot be written is logged
+  as `agent_admin_audit_write_failed`, counted in
+  `agent_admin_audit_write_failures`, and reported at the top of the page
+  for seven days; the action itself goes ahead.
+
+Reads are not recorded, nor are connection checks. Revision
+`0114_admin_audit_attribution` removed the polling reads older releases
+recorded.
 
 ## Teams
 
@@ -1026,14 +1052,17 @@ the pinned CLI. It skips when those prerequisites are absent and belongs to the
 external tier. Run it deliberately after changes to the merged endpoint, host,
 or bridge; it crosses seams the per-layer suites do not.
 
-### Connector configuration
+### Where a connection runs
 
-No connector runtime ships, and the routes that registered, bound and revoked a
-user's machine are retired. A `user-connector` connection can still name a
-connector registered before then, and is refused at use. Deleting the
-connection removes its link to that connector, and the connector's authorization
-for it, in the same transaction. Managed-worker connections likewise require an
-available worker. Configuration support does not establish execution support.
+What the owner added decides where it runs: an address is a `remote` service
+behind this relay, and a command is a `sandbox` program
+([sandbox MCP servers](#sandbox-mcp-servers)). Nothing else runs one: there is
+no connector on the owner's machine and no managed worker, and the API refuses
+both locations. `0115_mcp_retire_dead_locations` moved every connection stored
+at `managed-worker` or `user-connector` to `sandbox`, with its command as
+stored ([upgrade notes](upgrade-notes.md#mcp-servers-run-in-two-places)). The
+connector tables and `agent_mcp_connections.connector_id` are unused, and a
+later migration drops them.
 
 ### Deployment and rollback
 
@@ -1076,7 +1105,7 @@ There is no feature switch or preview tier. Rollbacks must retain a schema-compa
 service and leave the migrated connection and binding data in place; fix forward
 when a schema downgrade would discard those records.
 
-MCP and connectors are independent of the owner's model connection. Credential
+MCP is independent of the owner's model connection. Credential
 rotation uses the existing `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY`; domain
 separation prevents source-control and MCP ciphertext from being read as each
 other.
@@ -1200,7 +1229,12 @@ why it is built this way and what comes next.
   threads. The launcher allows at most four renderer processes.
 - **Screenshots.** Tools write them to `/workspace/.cloud-agent-artifacts`
   (`CLOUD_AGENT_ARTIFACTS_DIR`). It shows in the workspace files and is added to
-  `.git/info/exclude`, so it never reaches a diff or a published branch.
+  `.git/info/exclude`, so it never reaches a diff or a published branch. A turn
+  shows the images written there while it ran (`GET
+  /v1/agent/jobs/{job_id}/artifacts/images`, at most 200, newest first), and an
+  image opens through `GET /v1/agent/jobs/{job_id}/files/image`, which answers
+  PNG, JPEG, GIF and WebP files, recognized by their bytes, up to 10 MiB, past
+  the text preview's bound.
 
 The image build starts the service and runs `cloud-agent-browser self-test` as
 the unprivileged user: two clients connect, one loads and screenshots a page,
@@ -1224,9 +1258,18 @@ explains it.
   cannot find, is refused. It may use the owner's credentials, as
   any command the agent runs may: keys pasted with it are sealed at rest and
   named `secret://NAME`, and `${NAME}` is filled from the chat's environment.
+  A sealed key shorter than 8 characters is refused when it is added,
+  imported or set by an edit, as a short environment Secret is: the runner
+  masks only longer keys in the chat's output. One stored before that rule
+  still runs, unmasked.
   The host hands both only to the slot's runner, in a file only that runner's
   user reads (`/run/agent-mcp-slots/<slot>/secrets.json`). The admission names
-  variables, never values.
+  variables, never values. An edit keeps every stored key it does not set, or
+  sets blank, and removes one whose `secret://NAME` its launch no longer names.
+  Stored keys stay only with the same program: the same command and the
+  same arguments, of which only the package's release may change. An edit
+  that changes anything else, such as the package, the command, a runner
+  option or an argument, is refused until it sends them again.
 - **How it runs.** Before it launches a member's CLI, the host writes the
   slot's admission as root, then starts the image's MCP gateway,
   `cloud-agent-mcp`, as `agent-mcp` (uid 10003) on
@@ -1248,6 +1291,36 @@ explains it.
   starts and stops in `/run/agent-mcp-slots/<slot>/runner.log`, and each
   server's own output is in `/run/agent-mcp-slots/<slot>/<alias>.log`, readable
   as `agent-mcp-<slot>`. Admissions are in `/run/agent-mcp-admissions`.
+
+## Sandbox incidents
+
+A host records what goes wrong in each retained sandbox as **incidents**, in
+the sandbox's event list on the admin sandbox page; the sandbox list shows the
+newest one within a day under the sandbox's name. The
+[design](../agents/specs/2026-11-04-sandbox-incidents.md) explains it.
+
+- **What is recorded.** `out_of_memory` (Docker's `oom`: the OOM killer killed
+  some process in the container), `container_exited` (a `die` with no `kill`
+  before it, so nobody asked for it), `memory_high` and `pids_high` (a reading
+  at 90% of the limit), `browser_crashed` (Chromium exited with no stop
+  requested), and `mcp_server_failed` (a program could not start, or exited
+  on its own; it names the chat and the server). A stop, idle stop or deletion
+  the platform made is not an incident.
+- **Repeats.** The first of a kind goes out at once; repeats within the next
+  minute become one `.repeated` row with a count. A sandbox records at most 60
+  rows an hour, and one `dropped` row counts the rest.
+- **What people see.** A chat shows one line in a running turn for
+  `out_of_memory`, `container_exited` and its own `mcp_server_failed`. The
+  agent's next prompt lists what happened since it was last told, and a chat's
+  first prompt says the sandbox has a browser.
+- **What it carries.** Kinds, times, exit codes, limits and MCP aliases only:
+  no stderr, URL, command line or environment.
+- **Where to look.** The browser service journals to
+  `/run/agent-browser/events.jsonl`, each slot's MCP runner to
+  `/run/agent-mcp-slots/<slot>/events.jsonl`. The sandbox manager reads them
+  every minute and holds the rows until a heartbeat answer says
+  `incidents: "accepted"`; a control plane older than this release never
+  does, and the rows wait.
 
 ## Before a job can run for real
 

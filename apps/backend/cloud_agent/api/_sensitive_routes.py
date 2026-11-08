@@ -8,6 +8,8 @@ from fastapi import HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 
+from cloud_agent.api.errors import raising_http
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
 
@@ -55,7 +57,8 @@ class SensitiveRoute(APIRoute):
 
         async def sensitive(request: Request) -> Response:
             try:
-                response = await handler(request)
+                # A flow's domain refusal is an HTTP one here, as it is for the app.
+                response = await raising_http(handler, request)
             except self.validation_exceptions as exc:
                 response = self.validation_response(exc)
             except HTTPException as exc:

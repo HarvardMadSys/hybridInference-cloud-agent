@@ -29,7 +29,7 @@ Server-request operations (the default; ``--skip-server-ops`` turns them off)
     The four declared startup paths -- ``new_group``, ``resume_stopped``,
     ``resume_running``, ``reuse_live`` -- produced by a real retained container
     and a real :class:`SharedChatSessionSupervisor`, classified by the real
-    ``cloud_agent_host.runner._classify_startup_path``.
+    ``cloud_agent_host.turn.shared_live_attempt._classify_startup_path``.
 
 Cohorts, and what each one really is
 ------------------------------------
@@ -156,8 +156,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from cloud_agent import measurement_writer, sandbox_manager_routing
-from cloud_agent.operation_measurement import reset as reset_selections
+from cloud_agent.measurement import measurement_writer
+from cloud_agent.measurement.operation_measurement import reset as reset_selections
+from cloud_agent.sandbox_manager import sandbox_manager_routing
 from cloud_agent_host import operation_call
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.sandbox_manager_compat import SANDBOX_MANAGER_PRODUCER
@@ -549,7 +550,7 @@ class BenchSandboxManager:
         """Answer a stream attach in headers, the way the sandbox manager's SSE route does."""
         import httpx
 
-        from cloud_agent.sandbox_manager_client import SandboxManagerStream
+        from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerStream
 
         self.calls.append({"op": "stream_terminal", "workspace_id": workspace_id})
         call = self._open(profiling, "terminal.open")
@@ -1604,12 +1605,12 @@ class StartupSandbox:
     """The Docker plumbing one real retained chat container needs."""
 
     def __init__(self) -> None:
-        from cloud_agent_host.chat_sandbox import (
+        from cloud_agent_host.container.chat_sandbox import (
             ChatSandboxManager,
             ChatSandboxSpec,
-            RetainedChatBackend,
         )
-        from cloud_agent_host.sandbox import ContainerBackend
+        from cloud_agent_host.container.retained_backend import RetainedChatBackend
+        from cloud_agent_host.container.sandbox import ContainerBackend
         from cloud_agent_shared.egress import network_from_env
 
         self.network = network_from_env(
@@ -1680,7 +1681,7 @@ class StartupSandbox:
 
     def down(self) -> None:
         """Remove the container, the relays, every network and the host rules."""
-        from cloud_agent_host.chat_sandbox import CHAT_NAMESPACE_LABEL
+        from cloud_agent_host.container.chat_sandbox import CHAT_NAMESPACE_LABEL
 
         _docker("rm", "-f", self.container_name, check=False)
         _docker("rm", "-f", BENCH_MCP, check=False)
@@ -1781,7 +1782,7 @@ class BenchTransportFactory:
 
 def _startup_manifest(*, native_session_id: str | None) -> list[Any]:
     """Return the control plane's member manifest for the one bench member."""
-    from cloud_agent_host.shared_session_supervisor import SharedMemberManifest
+    from cloud_agent_host.supervisor.shared_session_state import SharedMemberManifest
 
     return [
         SharedMemberManifest(
@@ -2013,7 +2014,7 @@ def _activate_path(
     ``timed`` exists for the warmup: a warmup activation runs the same code with
     no measurement open, and its duration is discarded.
     """
-    from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+    from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 
     def run(supervisor: Any, **kwargs: Any) -> tuple[int, str, str, Any]:
         if not timed:
@@ -2151,8 +2152,9 @@ def _ensure_running_container(sandbox: StartupSandbox) -> Any:
 
 async def _run_startup_section(session: BenchSession, args: argparse.Namespace) -> dict[str, Any]:
     """Measure the four startup paths, per cohort, on a real container."""
-    from cloud_agent_host import runner as runner_mod
-    from cloud_agent_host.runner import ClaimedJob
+    from cloud_agent_host.claimed_job import ClaimedJob
+    from cloud_agent_host.measurement_delivery import DELIVERY_HANDOFF_DRAIN_S
+    from cloud_agent_host.service import measurement_sender
 
     sandbox = StartupSandbox()
     results: dict[str, dict[str, Any]] = {}
@@ -2183,11 +2185,11 @@ async def _run_startup_section(session: BenchSession, args: argparse.Namespace) 
     )
 
     def handoff(_frozen: Any) -> None:
-        runner_mod._enqueue_delivery(
+        measurement_sender._enqueue_delivery(
             _frozen,
             job=bench_job,
             base_url=session.url,
-            drain_s=runner_mod.DELIVERY_HANDOFF_DRAIN_S,
+            drain_s=DELIVERY_HANDOFF_DRAIN_S,
         )
 
     try:
@@ -2207,7 +2209,7 @@ async def _run_startup_section(session: BenchSession, args: argparse.Namespace) 
                 operations=(STARTUP_OPERATION,),
                 target={"job_id": session.job_id},
             )
-            runner_mod.reset_delivery_state()
+            measurement_sender.reset_delivery_state()
             on_frozen = handoff if cohort == "on-persist" else None
             #: Rows the control plane had accepted while this cohort was still
             #: activating. A delivery this script cannot serve is not a
@@ -2320,7 +2322,7 @@ async def _run_startup_section(session: BenchSession, args: argparse.Namespace) 
                     # delivered/duplicate/dropped names are the runner's, so a
                     # shortfall here is the delivery runtime's answer and not
                     # this script's bookkeeping.
-                    waited = await _await_handoff_deliveries(runner_mod, expected=expected)
+                    waited = await _await_handoff_deliveries(measurement_sender, expected=expected)
                     delivery = {**(delivery or {}), **waited}
                     stored = await _postgres_measurement_footprint(session.pool, run_id)
                     wanted = dict.fromkeys(STARTUP_PATHS, args.startup_iterations)
@@ -2404,7 +2406,7 @@ def _recorded_startup_path(record: dict[str, Any]) -> str:
     return str(record.get("startup_path") or "")
 
 
-async def _await_handoff_deliveries(runner_mod: Any, *, expected: int) -> dict[str, Any]:
+async def _await_handoff_deliveries(sender: Any, *, expected: int) -> dict[str, Any]:
     """Wait for the sends the handoff started, and report the runner's counts.
 
     The enqueue at the freeze point deliberately does not wait -- that is the
@@ -2417,15 +2419,15 @@ async def _await_handoff_deliveries(runner_mod: Any, *, expected: int) -> dict[s
     def _join() -> dict[str, Any]:
         deadline = time.monotonic() + 60.0
         while time.monotonic() < deadline:
-            state = runner_mod._IN_FLIGHT_DELIVERIES
+            state = sender._IN_FLIGHT_DELIVERIES
             if not state:
                 break
             for thread in list(state.values()):
                 thread.join(timeout=1.0)
         return {
-            "delivered": len(runner_mod._DELIVERED_MEASUREMENT_IDS),
-            "dropped": int(runner_mod._DELIVERY_DROPPED_COUNT),
-            "drain_timeouts": int(runner_mod._DELIVERY_DRAIN_TIMEOUTS),
+            "delivered": len(sender._DELIVERED_MEASUREMENT_IDS),
+            "dropped": int(sender._DELIVERY_DROPPED_COUNT),
+            "drain_timeouts": int(sender._DELIVERY_DRAIN_TIMEOUTS),
             "expected": expected,
         }
 
@@ -2434,7 +2436,7 @@ async def _await_handoff_deliveries(runner_mod: Any, *, expected: int) -> dict[s
 
 def _classify(container_action: str, resident_action: str) -> str:
     """Call the real startup-path classifier."""
-    from cloud_agent_host.runner import _classify_startup_path
+    from cloud_agent_host.turn.shared_live_attempt import _classify_startup_path
 
     return _classify_startup_path(container_action, resident_action)
 

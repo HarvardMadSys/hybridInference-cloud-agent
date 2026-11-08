@@ -8,13 +8,13 @@ import time
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_host.sandbox import SandboxError, SandboxProcess
+from cloud_agent_host.container.sandbox import SandboxError, SandboxProcess
 
 if TYPE_CHECKING:
     import subprocess
     from collections.abc import Iterator
 
-    from cloud_agent_host.chat_sandbox import RetainedChatBackend
+    from cloud_agent_host.container.retained_backend import RetainedChatBackend
 
 ENVIRONMENT_UIDS = (30000, 30001, 30002)
 ACTION_UIDS = tuple(range(31000, 31064))

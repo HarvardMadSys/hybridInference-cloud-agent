@@ -12,8 +12,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.storage._sql.attempts import lock_live_attempt
 from cloud_agent.storage._sql.events import insert_event
+from cloud_agent.storage._sql.fences import lock_live_attempt
+from cloud_agent.storage._sql.incidents import ADVANCE_INCIDENT_CURSOR_SQL
 from cloud_agent.storage._sql.ledger import NOTIFY_JOB_USAGE_SQL, carries_model_usage
 
 if TYPE_CHECKING:
@@ -48,6 +49,12 @@ async def append_attempt_events(
             await conn.execute(
                 "UPDATE agent_attempts SET terminal_ready = FALSE WHERE id = $1", attempt_id
             )
+        elif phase == "turn_started":
+            # The runner writes this once the sandbox manager has dispatched the
+            # prompt, not at ``started`` (the container), before which the
+            # workspace, uploads and runtime may still fail: only now is what
+            # the prompt told of the sandbox's incidents told.
+            await conn.execute(ADVANCE_INCIDENT_CURSOR_SQL, attempt_id)
         event_ids.append(
             await insert_event(
                 conn,

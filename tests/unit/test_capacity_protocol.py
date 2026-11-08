@@ -17,7 +17,8 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
-from cloud_agent.capacity_protocol import (
+from cloud_agent.schemas import HostHeartbeatRequest
+from cloud_agent.schemas.capacity_protocol import (
     FRESH_AFTER_SECONDS,
     HISTORY_RANGES,
     MAX_CAPACITY_BYTES,
@@ -32,8 +33,7 @@ from cloud_agent.capacity_protocol import (
     parse_capacity_block,
     resolve_history_range,
 )
-from cloud_agent.schemas import HostHeartbeatRequest
-from cloud_agent_host.host_capacity import OTHER_STATES
+from cloud_agent_host.observe.sandbox_inventory import OTHER_STATES
 
 SAMPLE_ID = "00000000-0000-4000-8000-000000000001"
 BOOT_ID = "00000000-0000-4000-8000-000000000002"

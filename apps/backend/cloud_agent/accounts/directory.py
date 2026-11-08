@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.agent_access import AgentAccessDecision
+from cloud_agent.accounts.agent_access import AgentAccessDecision
 from cloud_agent.domain.accounts import may_sign_in, permissions_for
 from cloud_agent.logging_utils import get_logger
 

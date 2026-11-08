@@ -22,17 +22,17 @@ from typing import TYPE_CHECKING
 import pytest
 from fastapi import HTTPException
 
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     ACTIVATION_TMPFS,
     CHAT_NAMESPACE_LABEL,
     CHAT_WORKDIR,
     ChatSandboxManager,
     ChatSandboxSpec,
-    RetainedChatBackend,
 )
+from cloud_agent_host.container.retained_backend import RetainedChatBackend
+from cloud_agent_host.container.sandbox import ContainerBackend, SandboxProcess, SandboxSpec
 from cloud_agent_host.environment_process import ACTION_UIDS, ENVIRONMENT_UIDS
-from cloud_agent_host.sandbox import ContainerBackend, SandboxProcess, SandboxSpec
-from cloud_agent_host.sandbox_manager import _run_sandbox
+from cloud_agent_host.manager_api.workspace_commands import _run_sandbox
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -188,7 +188,7 @@ def retained_command_container(tmp_path: Path):
             time.sleep(0.05)
         # These are actual Docker inspections, not patched identity or mount
         # checks. Spawning and reaping likewise use the production wrapper.
-        assert manager._require(spec).running
+        assert manager.exact.require(spec).running
         _docker(
             "exec",
             spec.container_name,
@@ -254,7 +254,7 @@ def test_command_limits_reap_only_the_failed_command(retained_command_container,
     time.sleep(0.25)
     assert _ticks(backend) > before
     assert sibling.poll() is None
-    assert backend.manager._require(backend.spec).running
+    assert backend.manager.exact.require(backend.spec).running
     census = _docker(
         "exec",
         backend.spec.container_name,
@@ -290,7 +290,7 @@ done
     assert census.returncode == 0, census.stdout + census.stderr
     sibling.kill()
     sibling.wait()
-    assert backend.manager._require(backend.spec).running
+    assert backend.manager.exact.require(backend.spec).running
     remaining = _docker(
         "exec", backend.spec.container_name, "find", ACTIVATION_TMPFS, "-name", "command-*.pid"
     ).stdout.strip()

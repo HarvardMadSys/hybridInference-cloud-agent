@@ -16,8 +16,9 @@ from tests.integration.storage.test_compute_rotation_workflow import (
 from tests.integration.storage.test_host_pool_store import db as db, hosts as hosts, store as store
 
 from cloud_agent.application.compute_reconcile import ComputeReconciler
+from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.ports.external.compute_provider import ProviderError
-from cloud_agent.schemas_compute import RotateComputeRequest
+from cloud_agent.schemas.compute import RotateComputeRequest
 from cloud_agent.workers.compute_resources import ComputeResourceWorker
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -247,7 +248,7 @@ async def test_an_unexpected_failure_after_takeover_only_retries_cleanup(
         nonlocal failed
         if kwargs["scope"] is None and kwargs["allocation_id"] != r.allocation_id and not failed:
             failed = True
-            raise ValueError("host_not_found")
+            raise StorageConflict(ConflictCode.HOST_NOT_FOUND)
         return await original(**kwargs)
 
     monkeypatch.setattr(r.repo, "set_rotation_hold", set_hold)

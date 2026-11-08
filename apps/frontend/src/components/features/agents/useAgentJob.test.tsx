@@ -24,7 +24,7 @@ import {
   resetAgentPush,
   setAgentPushLive,
 } from './agentPush';
-import { buildTrajectorySteps, turnContextFromJobs } from './trajectorySteps';
+import { buildTrajectorySteps, turnContextFromJobs } from './trajectory/trajectorySteps';
 import { STREAM_RETRY_MAX_MS, STREAM_RETRY_MIN_MS, useAgentJob } from './useAgentJobs';
 import { AgentReadProvider } from './AgentReadProvider';
 

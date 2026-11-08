@@ -20,12 +20,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests.support.member_loopback import HELPER_IN_PLACE
 from tests.support.owners import launch_connection
 
-from cloud_agent_host.chat_sandbox import ChatSandboxSpec
-from cloud_agent_host.chat_sandbox_models import BROWSER_SERVICE_UID
+from cloud_agent_host.container.chat_sandbox import ChatSandboxSpec
+from cloud_agent_host.container.chat_sandbox_models import BROWSER_SERVICE_UID
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
-from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_host.sandbox_browser import LAUNCHER, ensure_browser_service
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -155,6 +156,9 @@ def test_every_runtime_launch_starts_the_service_first(runtime_id):
         ensure_mcp_helpers=lambda *args: events.append(("helpers",)),
         ensure_kilo_mcp_runtime=lambda *args: events.append(("kilo",)),
         ensure_codex_mcp_policy=lambda *args: events.append(("codex",)),
+        # A direct plan's member starts behind its request meter, which the
+        # host installs (found in place here) after the browser service.
+        exact=HELPER_IN_PLACE,
     )
     spec = ChatSandboxSpec(
         thread_id="athr_owner",
@@ -712,6 +716,13 @@ def test_the_service_starts_chromium_per_use_for_every_member(fake_paths):
             daemon._stop("test over")
             await asyncio.wait_for(service, 10)
         assert browser.status(paths)["service"] is False
+        # A member's stop, a crash, an idle stop: only the crash was nobody's
+        # request, so only it is journalled for the host.
+        journal = Path(paths.incidents).read_text().splitlines()
+        assert [(entry["kind"], entry["signal"]) for entry in map(json.loads, journal)] == [
+            ("browser_crashed", 9)
+        ]
+        assert os.stat(paths.incidents).st_mode & 0o777 == 0o640
 
     asyncio.run(scenario())
 

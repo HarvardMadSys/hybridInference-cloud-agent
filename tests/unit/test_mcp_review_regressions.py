@@ -42,7 +42,7 @@ class TestTheRedirectUri:
         authorization carried the per-connection one -- a prefix of the right
         answer, which is the kind of difference that only shows at the browser.
         """
-        from cloud_agent.api.mcp_connections import _callback_url
+        from cloud_agent.mcp.oauth_authorization import callback_url as _callback_url
 
         base = "https://agent.example.com"
         registered = _callback_url(base, 8)

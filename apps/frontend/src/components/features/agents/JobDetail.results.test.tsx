@@ -6,16 +6,19 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   getAgentJobGit,
+  getAgentJobImage,
+  listAgentJobArtifactImages,
   type AgentJobApi,
   type AgentThreadApi,
   type AgentThreadEventApi,
 } from '@/lib/api/agents';
-import { toDisplayJob } from './adapt';
+import { toDisplayJob } from './adapt/jobAdapter';
+import { clearScreenshotListings } from './conversation/TurnScreenshots';
 import { JobDetail } from './JobDetail';
-import { buildTrajectorySteps } from './trajectorySteps';
+import { buildTrajectorySteps } from './trajectory/trajectorySteps';
 
-vi.mock('./trajectorySteps', async (importOriginal) => {
-  const original = await importOriginal<typeof import('./trajectorySteps')>();
+vi.mock('./trajectory/trajectorySteps', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./trajectory/trajectorySteps')>();
   return { ...original, buildTrajectorySteps: vi.fn(original.buildTrajectorySteps) };
 });
 
@@ -34,6 +37,8 @@ vi.mock('@/lib/api/agents', async (importOriginal) => ({
     github_install_url: null,
   }),
   getAgentJobGit: vi.fn(),
+  getAgentJobImage: vi.fn(),
+  listAgentJobArtifactImages: vi.fn(),
   getAgentJobGitMetadata: vi.fn().mockResolvedValue({
     available: false,
     branch: '',
@@ -257,6 +262,47 @@ describe('recorded results in the conversation', () => {
     expect(
       screen.queryByRole('region', { name: 'Recorded changes · Turn 1' }),
     ).not.toBeInTheDocument();
+  });
+
+  it('shows an earlier turn the screenshots taken while it ran', async () => {
+    // A screenshot from turn 1 stays under turn 1 once turn 2 is the newest.
+    clearScreenshotListings();
+    URL.createObjectURL = vi.fn(() => 'blob:turn-1');
+    URL.revokeObjectURL = vi.fn();
+    vi.mocked(getAgentJobImage).mockResolvedValue(new Blob(['png'], { type: 'image/png' }));
+    vi.mocked(listAgentJobArtifactImages).mockResolvedValue({
+      images: [
+        {
+          path: '.cloud-agent-artifacts/example.com.png',
+          size: 68104,
+          modified_at: Date.parse('2026-11-06T01:39:00Z') / 1000,
+        },
+      ],
+      truncated: false,
+    });
+    const props = fixture([
+      rawJob('history-turn', 1, {
+        started_at: '2026-11-06T01:38:05Z',
+        finished_at: '2026-11-06T01:39:09Z',
+      }),
+      rawJob('current-turn', 2, {
+        started_at: '2026-11-08T02:56:27Z',
+        finished_at: '2026-11-08T02:56:56Z',
+      }),
+    ]);
+    render(<JobDetail {...props} />);
+
+    const historical = screen.getByRole('region', { name: 'Turn 1' });
+    expect(
+      await within(historical).findByRole('button', { name: 'Open example.com.png' }),
+    ).toBeInTheDocument();
+    expect(getAgentJobImage).toHaveBeenCalledWith(
+      'history-turn',
+      '.cloud-agent-artifacts/example.com.png',
+      expect.any(AbortSignal),
+    );
+    expect(listAgentJobArtifactImages).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByRole('button', { name: 'Open example.com.png' })).toHaveLength(1);
   });
 
   it('assigns each turn only its directly recorded PR, including historical turns', () => {

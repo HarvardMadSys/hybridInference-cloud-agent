@@ -63,8 +63,8 @@ def terminal_freeze_token(user_id: str, generation: int) -> str:
 
 async def _end_group_terminals(storage: Storage, group: dict[str, Any], token: str) -> bool:
     """Freeze, kill and release one group's terminals; whether it was acknowledged."""
-    from cloud_agent.sandbox_manager_client import SandboxManagerError
-    from cloud_agent.sandbox_manager_routing import sandbox_manager_for_host
+    from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
+    from cloud_agent.sandbox_manager.sandbox_manager_routing import sandbox_manager_for_host
 
     host = await storage.host_pool.get_host(host=str(group["host"]))
     manager = sandbox_manager_for_host(host) if host is not None else None

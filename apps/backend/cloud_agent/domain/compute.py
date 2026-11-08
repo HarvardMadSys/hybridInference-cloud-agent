@@ -93,6 +93,13 @@ def move_out_window_seconds(policy: dict[str, Any]) -> int:
     return max(0, window)
 
 
+class _UnsupportedHostKey(ValueError):
+    """A well-formed OpenSSH key of a type or size this control plane refuses."""
+
+    def __init__(self) -> None:
+        super().__init__("unsupported")
+
+
 def _openssh_public_key(algorithm: str, body: str) -> str:
     """Return ``algorithm body`` when the blob matches its label and type."""
     try:
@@ -106,7 +113,7 @@ def _openssh_public_key(algorithm: str, body: str) -> str:
         isinstance(key, rsa.RSAPublicKey) and key.key_size >= 2048
     )
     if not labelled or not supported:
-        raise ValueError("unsupported")
+        raise _UnsupportedHostKey
     return f"{algorithm} {body}"
 
 
@@ -264,13 +271,14 @@ def normalize_host_keys(keys: list[str]) -> list[str]:
             )
         try:
             canonical = _openssh_public_key(parts[0], parts[1])
-        except ValueError as exc:
-            message = (
-                "Host key type is not supported."
-                if str(exc) == "unsupported"
-                else "Host keys must be OpenSSH public keys."
-            )
-            raise ComputeRefusal("invalid_host_keys", message, status=422) from None
+        except _UnsupportedHostKey:
+            raise ComputeRefusal(
+                "invalid_host_keys", "Host key type is not supported.", status=422
+            ) from None
+        except ValueError:
+            raise ComputeRefusal(
+                "invalid_host_keys", "Host keys must be OpenSSH public keys.", status=422
+            ) from None
         normalized.add(canonical)
     if not normalized:
         raise ComputeRefusal("invalid_host_keys", "No host key was supplied.", status=422)

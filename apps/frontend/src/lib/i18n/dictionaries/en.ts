@@ -283,6 +283,12 @@ export const en = {
   'workspaceFiles.copyFailed': 'Could not copy. Select the text and copy it manually.',
   'workspaceFiles.previewAlt': 'Preview of {name}',
   'workspaceFiles.imageFailed': 'This image could not be decoded. You can still download the file.',
+  'workspaceFiles.loadingImage': 'Loading image…',
+  'turnScreenshots.title': 'Screenshots',
+  'turnScreenshots.earlier': '{count} earlier screenshots are in the workspace files.',
+  'turnScreenshots.open': 'Open {name}',
+  'turnScreenshots.close': 'Close',
+  'turnScreenshots.failed': 'Could not load',
   'workspaceFiles.tooLarge':
     'This file exceeds the workspace preview limit. Preview and download are unavailable.',
   'workspaceFiles.binaryPreview':

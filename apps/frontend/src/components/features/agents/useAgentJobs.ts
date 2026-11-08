@@ -20,9 +20,9 @@ import type {
   AgentThreadApi,
   AgentThreadEventApi,
 } from '@/lib/api/agents';
-import { createDisplayJobAdapter } from './adapt';
-import { resumeAfter } from './threadHistory';
-import { useThreadHistory, type ThreadHistoryControl } from './useThreadHistory';
+import { createDisplayJobAdapter } from './adapt/jobAdapter';
+import { resumeAfter } from './conversation/threadHistory';
+import { useThreadHistory, type ThreadHistoryControl } from './conversation/useThreadHistory';
 import { useAgentReads } from './AgentReadProvider';
 import { announceAgentSessionsChanged, onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { projectKey } from '@/lib/temporaryWorkspace';

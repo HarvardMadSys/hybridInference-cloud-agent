@@ -1,0 +1,740 @@
+"""Synchronous runner client for the host's private Sandbox Manager."""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import threading
+from dataclasses import asdict, dataclass
+from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
+
+import httpx
+
+from cloud_agent_host.bounded_output import (
+    MAX_PROTOCOL_LINE_BYTES,
+    protocol_lines,
+)
+from cloud_agent_host.manager_api.models import (
+    EnvironmentSnapshotCaptureRequest,
+    SharedAbandonRequest,
+    SharedIdleStopRequest,
+    SharedLeaseRequest,
+    SharedResidencyLostRequest,
+    SharedSettleRequest,
+    SharedTurnRequest,
+)
+from cloud_agent_shared.environment import (
+    ENVIRONMENT_CAPABILITY,
+    ENVIRONMENT_INFERENCE_CAPABILITY,
+    environment_payload,
+    uses_inference_names,
+)
+from cloud_agent_shared.errors import SandboxError
+from cloud_agent_shared.sandbox_manager_compat import manager_env
+
+if TYPE_CHECKING:
+    import builtins
+    from collections.abc import Iterator
+
+    from pydantic import BaseModel
+
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxSpec
+    from cloud_agent_host.resident_transport import ResidentLaunch
+
+
+@dataclass
+class SharedTurnStream:
+    """One sandbox-manager-owned resident turn streamed as bounded NDJSON frames."""
+
+    _response: httpx.Response
+
+    def frames(self) -> Iterator[dict[str, Any]]:
+        """Yield validated object frames until result/error."""
+        # Frames include both normalized content and the raw CLI record, plus
+        # JSON escaping. Keep HTTP framing bounded before JSON parsing too.
+        for line in protocol_lines(
+            self._response.iter_text(),
+            max_bytes=MAX_PROTOCOL_LINE_BYTES * 4,
+        ):
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise SandboxManagerError(502, "shared turn returned invalid JSON") from exc
+            if not isinstance(value, dict):
+                raise SandboxManagerError(502, "shared turn returned an invalid frame")
+            yield value
+
+    def close(self) -> None:
+        """Release the streaming HTTP response."""
+        self._response.close()
+
+
+@dataclass
+class SandboxManagerError(RuntimeError):
+    """Bounded failure returned by the private host lifecycle service."""
+
+    status_code: int
+    message: str
+
+    def __str__(self) -> str:
+        return self.message
+
+
+#: Where a FastAPI validation error says a field came from. Dropped from the
+#: field path: every lifecycle field is in the body, so it only adds noise.
+_REQUEST_PARTS = frozenset({"body", "query", "path", "header", "cookie"})
+
+
+def _validation_problems(detail: Any) -> str:
+    """Name the fields a FastAPI validation error rejected, never their values.
+
+    The values stay out: the field most likely to exceed its bound is a
+    credential, and this text becomes an event the chat's owner reads.
+    """
+    if not isinstance(detail, list):
+        return ""
+    problems: list[str] = []
+    for item in detail[:3]:
+        if not isinstance(item, dict):
+            continue
+        location = item.get("loc")
+        parts = location if isinstance(location, list) else []
+        if parts and parts[0] in _REQUEST_PARTS:
+            parts = parts[1:]
+        field_path = ".".join(str(part) for part in parts)
+        message = str(item.get("msg") or "is invalid")[:200]
+        problems.append(f"{field_path}: {message}" if field_path else message)
+    return "; ".join(problems)
+
+
+def _error_detail(response: httpx.Response, refused: str) -> str:
+    """The sandbox manager's own reason for an error response, or the most a caller can say.
+
+    A refusal the sandbox manager anticipated carries its reason as a string
+    ``detail``. Anything else used to collapse into ``refused`` alone, which
+    named neither the call nor the cause: a request the sandbox manager's models
+    rejected, whose ``detail`` is a list, or a crash an older sandbox manager answered
+    as plain text. The status, and the fields a validation error names, are
+    what make that line findable in the sandbox manager's log.
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if isinstance(detail, str) and detail:
+        return detail
+    reason = f"{refused}: HTTP {response.status_code} {response.reason_phrase}".rstrip()
+    problems = _validation_problems(detail)
+    return f"{reason} ({problems})" if problems else reason
+
+
+def _body(model: BaseModel, *, exclude: set[str] | None = None) -> dict[str, Any]:
+    """The JSON body ``model`` describes, built from the model the route validates.
+
+    Built with ``model_construct``, so nothing is validated here: the sandbox
+    manager validates the body against this same model and answers a bad one
+    with 422, which the caller handles like any other refusal.
+    """
+    return model.model_dump(mode="json", exclude=exclude)
+
+
+def _group_identity(
+    spec: ChatSandboxSpec,
+    *,
+    members: builtins.list[dict[str, Any]],
+    expected_container_id: str | None,
+) -> dict[str, Any]:
+    """The wire identity of the group ``spec`` describes, with its member manifest.
+
+    The Sandbox Manager validates it as a
+    :class:`~cloud_agent_shared.sandbox_manager_wire.SharedGroupIdentity`.
+    """
+    return {
+        "sandbox_id": spec.sandbox_id,
+        "generation": spec.generation,
+        "origin_thread_id": spec.thread_id,
+        "runtime_id": spec.runtime_id,
+        "runtime_version": spec.runtime_version,
+        "sandbox_image_digest": spec.sandbox_image_digest,
+        "expected_container_id": expected_container_id,
+        "resident_slot_capacity": spec.resident_slot_capacity,
+        "memory_limit": spec.memory_limit,
+        "cpu_limit": spec.cpu_limit,
+        "disk_limit_mib": spec.disk_limit_mib,
+        "stop_timeout_s": spec.stop_timeout_s,
+        "members": members,
+    }
+
+
+class SandboxManagerClient:
+    """Use the sandbox manager credential without ever exposing it to a chat container."""
+
+    def __init__(self, base_url: str, token: str, *, timeout: float = 60) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._headers = {"X-Agent-Workspace-Token": token}
+        self._client = httpx.Client(timeout=timeout, headers=self._headers)
+
+    def prepare_environment(
+        self,
+        thread_id: str,
+        environment: Any,
+        *,
+        activation_owner: str | None = None,
+        cancelled: Any = None,
+    ) -> dict[str, Any]:
+        """Verify broker capability and prepare the exact bound workspace."""
+        health = self._client.get(f"{self._base_url}/health")
+        health.raise_for_status()
+        capabilities = [str(c) for c in health.json().get("capabilities", [])]
+        required = {ENVIRONMENT_CAPABILITY}
+        if uses_inference_names(environment):
+            required.add(ENVIRONMENT_INFERENCE_CAPABILITY)
+        if not required <= set(capabilities):
+            raise SandboxManagerError(
+                503, "Sandbox manager does not support environment configuration"
+            )
+        stop = threading.Event()
+
+        def monitor() -> None:
+            while not stop.wait(0.5):
+                if cancelled is not None and cancelled():
+                    with contextlib.suppress(Exception):
+                        self._client.post(
+                            f"{self._base_url}/workspaces/{quote(thread_id, safe='')}/environment/cancel",
+                            params={"activation_owner": activation_owner},
+                            timeout=10,
+                        )
+                    return
+
+        watcher = threading.Thread(target=monitor, daemon=True)
+        watcher.start()
+        try:
+            response = self._client.post(
+                f"{self._base_url}/workspaces/{quote(thread_id, safe='')}/environment/prepare",
+                json={
+                    # A sandbox manager a release behind refuses fields it lacks.
+                    "environment": environment_payload(environment, capabilities),
+                    "activation_owner": activation_owner,
+                },
+                timeout=1050,
+            )
+        finally:
+            stop.set()
+            watcher.join(timeout=11)
+        if response.is_error:
+            raise SandboxManagerError(
+                response.status_code, _error_detail(response, "Environment preparation failed")
+            )
+        return response.json()
+
+    def sync_ssh_access(
+        self, thread_id: str, access: Any, *, starting: bool = False
+    ) -> dict[str, Any]:
+        """Converge this member's group to the claim's SSH state before the agent runs.
+
+        ``starting`` says this member's turn starts with this state, so its keys
+        are written; they are the keys this runner masks. A sandbox manager
+        without the route answers 404/405, which fails the turn rather than
+        starting an agent its servers were promised to.
+        """
+        return self._request_object(
+            "PUT",
+            f"/workspaces/{quote(thread_id, safe='')}/ssh-access",
+            payload={"access": access.model_dump(mode="json"), "starting": starting},
+            timeout=120,
+            unavailable="sandbox manager is unavailable",
+            refused="SSH access could not be applied",
+            invalid="SSH access returned invalid data",
+        )
+
+    def close(self) -> None:
+        """Close the reusable private HTTP connection pool."""
+        self._client.close()
+
+    def _request_object(
+        self,
+        method: str,
+        path: str,
+        *,
+        payload: dict[str, Any] | None,
+        timeout: float | httpx.Timeout,
+        unavailable: str,
+        refused: str,
+        invalid: str,
+    ) -> dict[str, Any]:
+        """Run one ordinary request and return its JSON object.
+
+        Streaming turns and environment preparation have different ownership,
+        cancellation, and health-probe semantics and deliberately do not enter
+        this path.
+        """
+        try:
+            if payload is None:
+                response = self._client.request(method, f"{self._base_url}{path}", timeout=timeout)
+            else:
+                response = self._client.request(
+                    method, f"{self._base_url}{path}", json=payload, timeout=timeout
+                )
+        except httpx.HTTPError as exc:
+            raise SandboxManagerError(503, unavailable) from exc
+        if response.is_error:
+            raise SandboxManagerError(response.status_code, _error_detail(response, refused))
+        try:
+            body = response.json()
+        except ValueError as exc:
+            # This intentionally normalizes what used to escape as a raw
+            # JSONDecodeError/ValueError on successful malformed responses.
+            raise SandboxManagerError(502, invalid) from exc
+        if not isinstance(body, dict):
+            raise SandboxManagerError(502, invalid)
+        return body
+
+    def _shared_request(
+        self,
+        method: str,
+        thread_id: str,
+        suffix: str = "",
+        *,
+        payload: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        path = f"/shared-sandboxes/{quote(thread_id, safe='')}"
+        if suffix:
+            path += f"/{suffix}"
+        operation = suffix or "status"
+        return self._request_object(
+            method,
+            path,
+            payload=payload,
+            timeout=self._client.timeout if timeout is None else timeout,
+            unavailable="shared Session Supervisor is unavailable",
+            refused=f"shared Session Supervisor rejected the lifecycle transition ({operation})",
+            invalid="shared Session Supervisor returned invalid data",
+        )
+
+    def apply_profiling_policy(self, policy: dict[str, Any]) -> dict[str, Any]:
+        """Hand the sandbox manager one profiling policy and read back its confirmation.
+
+        The sandbox manager is a separate container, so it cannot inherit the runner's
+        policy the way a child process inherits one. It is told instead, over
+        the same authenticated channel every other lifecycle message uses --
+        the sandbox manager holds no host credential and never will, and the design
+        forbids widening that.
+
+        Returns what the sandbox manager says it applied, which is *not* the same as what
+        was sent: the control plane records the confirmation, so a sandbox manager that
+        rejected a newer revision must be visible rather than assumed.
+        """
+        return self._request_object(
+            "POST",
+            "/profiling-policy",
+            payload=policy,
+            timeout=self._client.timeout,
+            unavailable="sandbox manager is unavailable",
+            refused="sandbox manager rejected the profiling policy",
+            invalid="sandbox manager returned invalid data",
+        )
+
+    def apply_host_settings(
+        self, settings: dict[str, int], *, timeout: float = 5.0
+    ) -> dict[str, Any]:
+        """Hand the sandbox manager the runtime settings an admin set and read its answer.
+
+        ``settings`` is the sandbox manager's share of what the last heartbeat carried,
+        the whole set: a setting absent from it returns the sandbox manager to its own
+        value. The answer says what the sandbox manager now applies, which is what this
+        host reports — not what it sent. Bounded well under the heartbeat
+        interval, because it runs on the heartbeat thread.
+        """
+        return self._request_object(
+            "POST",
+            "/host-settings",
+            payload={"settings": settings},
+            timeout=timeout,
+            unavailable="sandbox manager is unavailable",
+            refused="sandbox manager rejected the runtime settings",
+            invalid="sandbox manager returned invalid data",
+        )
+
+    def apply_sandbox_archive_settings(
+        self, settings: dict[str, Any], *, timeout: float = 5.0
+    ) -> dict[str, Any]:
+        """Relay one complete DB archive policy and read its applied revision.
+
+        AWS credentials are intentionally absent: only the non-secret storage
+        policy crosses this channel, and the sandbox manager uses its own workload
+        identity. Re-sending an equal revision is idempotent and repairs a
+        sandbox manager that restarted since the previous heartbeat.
+        """
+        return self._request_object(
+            "POST",
+            "/sandbox-archive-settings",
+            payload={"settings": settings},
+            timeout=timeout,
+            unavailable="sandbox manager is unavailable",
+            refused="sandbox manager rejected sandbox archive settings",
+            invalid="sandbox manager returned invalid data",
+        )
+
+    def list(self) -> builtins.list[dict[str, Any]]:
+        """Observe every retained container owned by this host's sandbox manager."""
+        body = self._request_object(
+            "GET",
+            "/sandboxes",
+            payload=None,
+            timeout=self._client.timeout,
+            unavailable="chat Session Supervisor is unavailable",
+            refused="chat Session Supervisor rejected the lifecycle observation",
+            invalid="chat Session Supervisor returned invalid data",
+        )
+        rows = body.get("sandboxes")
+        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+            raise SandboxManagerError(502, "chat Session Supervisor returned invalid data")
+        return [dict(row) for row in rows]
+
+    def confirm_incidents(self, confirmed: dict[str, builtins.list[str]]) -> None:
+        """Tell the sandbox manager which incident rows the control plane stored."""
+        self._request_object(
+            "POST",
+            "/sandbox-incidents/confirm",
+            payload={"confirmed": confirmed},
+            timeout=self._client.timeout,
+            unavailable="chat Session Supervisor is unavailable",
+            refused="chat Session Supervisor rejected the incident confirmation",
+            invalid="chat Session Supervisor returned invalid data",
+        )
+
+    def acquire_shared(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        thread_id: str,
+        activation_generation: int,
+        owner: str,
+        has_settled_context: bool,
+        members: builtins.list[dict[str, Any]],
+        expected_container_id: str | None = None,
+        profiling: dict[str, Any] | None = None,
+        start_seq: int | None = None,
+        restore: dict[str, Any] | None = None,
+        environment_snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Lease one member without excluding turns on sibling members."""
+        return self._shared_request(
+            "POST",
+            thread_id,
+            "acquire",
+            payload={
+                **_group_identity(
+                    spec, members=members, expected_container_id=expected_container_id
+                ),
+                "owner": owner,
+                "activation_generation": activation_generation,
+                "has_settled_context": has_settled_context,
+                "profiling": profiling,
+                "start_seq": start_seq,
+                "restore": restore,
+                **(
+                    {"environment_snapshot": environment_snapshot}
+                    if environment_snapshot is not None
+                    else {}
+                ),
+            },
+        )
+
+    def _manager_post(
+        self, path: str, payload: dict[str, Any], *, timeout: float
+    ) -> dict[str, Any]:
+        return self._request_object(
+            "POST",
+            path,
+            payload=payload,
+            timeout=timeout,
+            unavailable="sandbox manager is unavailable",
+            refused=f"sandbox manager refused {path}",
+            invalid="sandbox manager returned invalid data",
+        )
+
+    def capture_environment_snapshot(
+        self,
+        *,
+        run_id: str,
+        lease_generation: int,
+        container_id: str,
+        sandbox_image_digest: str | None,
+        owner: str,
+        snapshot_id: str,
+    ) -> dict[str, Any]:
+        """Have the sandbox manager commit and upload a stopped environment run's container."""
+        return self._manager_post(
+            "/environment-snapshots/capture",
+            _body(
+                EnvironmentSnapshotCaptureRequest.model_construct(
+                    run_id=run_id,
+                    lease_generation=lease_generation,
+                    container_id=container_id,
+                    sandbox_image_digest=sandbox_image_digest,
+                    owner=owner,
+                    snapshot_id=snapshot_id,
+                )
+            ),
+            # Commit, export and upload of a large installation take a while.
+            timeout=1800,
+        )
+
+    def delete_environment_snapshots(
+        self, snapshots: builtins.list[dict[str, Any]]
+    ) -> builtins.list[str]:
+        """Drop retired snapshots here; return those whose stored object was deleted."""
+        body = self._manager_post(
+            "/environment-snapshots/delete", {"snapshots": snapshots}, timeout=300
+        )
+        deleted = body.get("deleted")
+        return [str(item) for item in deleted] if isinstance(deleted, list) else []
+
+    def environment_snapshot_images(self) -> builtins.list[str]:
+        """The snapshot ids of the installation snapshot images on this host."""
+        body = self._manager_post("/environment-snapshots/images", {}, timeout=150)
+        found = body.get("snapshot_ids")
+        if not isinstance(found, list):
+            raise SandboxManagerError(502, "sandbox manager returned invalid data")
+        return [str(item) for item in found]
+
+    def ensure_shared_resident(
+        self,
+        thread_id: str,
+        *,
+        token: str,
+        launch: ResidentLaunch,
+        profiling: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Open or reuse one member's supervisor-owned live process."""
+        return self._shared_request(
+            "POST",
+            thread_id,
+            "resident",
+            payload={
+                "token": token,
+                "launch": {
+                    **asdict(launch),
+                    "environment": launch.environment.model_dump(mode="json")
+                    if launch.environment
+                    else None,
+                    "sandbox_mcp_servers": [
+                        # Their keys too: the supervisor admits them for this member.
+                        server.model_dump(mode="json")
+                        for server in launch.sandbox_mcp_servers
+                    ],
+                },
+                "profiling": profiling,
+            },
+            # Native package installation runs before the resident is ready.
+            timeout=960.0 if launch.plugins else None,
+        )
+
+    def capture_initial_archive(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        thread_id: str,
+        token: str,
+        members: builtins.list[dict[str, Any]],
+        expected_container_id: str,
+        preparation_id: str,
+        base_sha: str,
+        defer_upload: bool = False,
+    ) -> dict[str, Any]:
+        """Persist the prepared pre-prompt workspace exactly once.
+
+        With ``defer_upload`` a sandbox manager that can returns once the bundle
+        is durable on its host (``upload: pending``) and uploads it after; an
+        older one ignores the field and stores it first.
+        """
+        return self._shared_request(
+            "POST",
+            thread_id,
+            "archive-initial",
+            timeout=900.0,
+            payload={
+                **_group_identity(
+                    spec, members=members, expected_container_id=expected_container_id
+                ),
+                "token": token,
+                "preparation_id": preparation_id,
+                "base_sha": base_sha,
+                "defer_upload": defer_upload,
+            },
+        )
+
+    def initial_archive_status(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        thread_id: str,
+        token: str,
+        members: builtins.list[dict[str, Any]],
+        expected_container_id: str,
+        preparation_id: str,
+    ) -> dict[str, Any]:
+        """Resolve a crash-committed baseline before any workspace reset."""
+        return self._shared_request(
+            "POST",
+            thread_id,
+            "archive-initial/status",
+            timeout=900.0,
+            payload={
+                **_group_identity(
+                    spec, members=members, expected_container_id=expected_container_id
+                ),
+                "token": token,
+                "preparation_id": preparation_id,
+            },
+        )
+
+    def start_shared_turn(
+        self,
+        thread_id: str,
+        *,
+        token: str,
+        prompt: str,
+        model: str,
+        reasoning_effort: str | None,
+        read_timeout_s: float,
+    ) -> SharedTurnStream:
+        """Start one resident turn and return its framed response stream."""
+        path = f"/shared-sandboxes/{quote(thread_id, safe='')}/turn"
+        # The sandbox manager emits CLI events, which may be silent throughout model
+        # thinking or a tool call. Let the runner's execution/interrupt budget
+        # bound that wait without extending ordinary lifecycle requests.
+        stream_timeout = httpx.Timeout(self._client.timeout)
+        stream_timeout.read = read_timeout_s
+        try:
+            request = self._client.build_request(
+                "POST",
+                f"{self._base_url}{path}",
+                json=_body(
+                    SharedTurnRequest.model_construct(
+                        token=token,
+                        prompt=prompt,
+                        model=model,
+                        reasoning_effort=reasoning_effort,
+                    )
+                ),
+                timeout=stream_timeout,
+            )
+            response = self._client.send(request, stream=True)
+        except httpx.HTTPError as exc:
+            raise SandboxManagerError(503, "shared Session Supervisor is unavailable") from exc
+        if response.is_error:
+            response.read()
+            detail = _error_detail(response, "shared Session Supervisor rejected the turn")
+            status_code = response.status_code
+            response.close()
+            raise SandboxManagerError(status_code, detail)
+        return SharedTurnStream(response)
+
+    def interrupt_shared(self, thread_id: str, *, token: str) -> None:
+        """Interrupt one exact member turn."""
+        self._shared_request(
+            "POST",
+            thread_id,
+            "interrupt",
+            payload=_body(SharedLeaseRequest.model_construct(token=token)),
+        )
+
+    def shared_residency_lost(self, thread_id: str, *, generation: int) -> dict[str, Any]:
+        """Close the exact member process whose renewable grant was rejected."""
+        return self._shared_request(
+            "POST",
+            thread_id,
+            "residency-lost",
+            payload=_body(SharedResidencyLostRequest.model_construct(generation=generation)),
+        )
+
+    def settle_shared(
+        self,
+        thread_id: str,
+        *,
+        token: str,
+        job_id: str,
+        context_status: str,
+    ) -> dict[str, Any]:
+        """Release a successful member activation while keeping its process."""
+        return self._shared_request(
+            "POST",
+            thread_id,
+            "settle",
+            timeout=10.0,
+            payload=_body(
+                SharedSettleRequest.model_construct(
+                    token=token, job_id=job_id, context_status=context_status
+                )
+            ),
+        )
+
+    def abandon_shared(self, thread_id: str, *, token: str, lost: bool) -> dict[str, Any]:
+        """Release one failed member without stopping healthy siblings."""
+        return self._shared_request(
+            "POST",
+            thread_id,
+            "abandon",
+            payload=_body(SharedAbandonRequest.model_construct(token=token, lost=lost)),
+        )
+
+    def stop_shared_idle(
+        self,
+        thread_id: str,
+        *,
+        generation: int,
+        activation_generation: int,
+        reason: str = "idle",
+        member_activation_generations: dict[str, int] | None = None,
+    ) -> dict[str, Any]:
+        """Apply a group- and activation-fenced shared idle stop."""
+        return self._shared_request(
+            "POST",
+            thread_id,
+            "stop-idle",
+            # A configured archive makes the clean stop synchronous: Docker
+            # exports bounded final roots and completes bounded S3 retries
+            # before this call can report success.
+            timeout=1800.0,
+            payload=_body(
+                SharedIdleStopRequest.model_construct(
+                    generation=generation,
+                    activation_generation=activation_generation,
+                    reason=reason,
+                    member_activation_generations=member_activation_generations,
+                ),
+                # Omitted, not null, when the stop names no member fence.
+                exclude=(
+                    {"member_activation_generations"}
+                    if member_activation_generations is None
+                    else None
+                ),
+            ),
+        )
+
+
+def sandbox_manager_from_env(*, timeout: float = 180) -> SandboxManagerClient:
+    """A client for this host's sandbox manager, at the address and token it was started with."""
+    url = (manager_env("AGENT_SANDBOX_MANAGER_URL") or "").strip()
+    token = (manager_env("AGENT_SANDBOX_MANAGER_TOKEN") or "").strip()
+    if not url or not token:
+        raise SandboxError(
+            "restartable chat execution needs AGENT_SANDBOX_MANAGER_URL and "
+            "AGENT_SANDBOX_MANAGER_TOKEN"
+        )
+    return SandboxManagerClient(url, token, timeout=timeout)
+
+
+__all__ = [
+    "SandboxManagerClient",
+    "SandboxManagerError",
+    "SharedTurnStream",
+    "sandbox_manager_from_env",
+]

@@ -13,12 +13,17 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
-from cloud_agent.admin_observability import decode_cursor
-from cloud_agent.admin_usage import MAX_USAGE_RESPONSE_BYTES
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage, require_store
+from cloud_agent.domain.cursors import decode_cursor
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.owner_usage import (
+from cloud_agent.ports.admin_queries import (
+    AdminUsageQueries,
+    UsageQueryTooLarge,
+    UsageQueryUnavailable,
+)
+from cloud_agent.usage.admin_usage import MAX_USAGE_RESPONSE_BYTES
+from cloud_agent.usage.owner_usage import (
     CONTAINER_CURSOR_SCOPE,
     DEFAULT_CONTAINER_PAGE,
     DEFAULT_HISTORY_DAYS,
@@ -29,13 +34,8 @@ from cloud_agent.owner_usage import (
     OwnerResourceHistory,
     OwnerTokenUsage,
 )
-from cloud_agent.storage.admin_usage_queries import (
-    AdminUsageQueries,
-    UsageQueryTooLarge,
-    UsageQueryUnavailable,
-)
-from cloud_agent.usage_batches import owner_usage
-from cloud_agent.usage_range import RangePreset, UsageRange, buckets, day_range, resolve_range
+from cloud_agent.usage.usage_batches import owner_usage
+from cloud_agent.usage.usage_range import RangePreset, UsageRange, buckets, day_range, resolve_range
 
 if TYPE_CHECKING:
     from cloud_agent.ports import OwnerUsageQueries
@@ -184,7 +184,7 @@ async def read_owner_tokens(
     """Agent-reported model usage of the owner's runs created in the range.
 
     A range larger than one bounded selection is summed in bounded batches
-    (:mod:`cloud_agent.usage_batches`), never narrowed.
+    (:mod:`cloud_agent.usage.usage_batches`), never narrowed.
 
     Raises:
         HTTPException: 422 when even a minimal batch exceeds the aggregation's

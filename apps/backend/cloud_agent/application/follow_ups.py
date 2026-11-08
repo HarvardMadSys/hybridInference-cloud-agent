@@ -9,16 +9,14 @@ copy of these rules would be a second place for them to drift.
 
 What comes back is the resolved form a store writes (model and connection,
 validated effort, skill snapshots and the upload manifest) and never the raw
-request. Refusals are the route's own ``HTTPException``s, with the same types and
-messages the route has always answered with.
+request. Refusals are ``Refused``, with the same types and messages the route
+has always answered with.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
-
-from fastapi import HTTPException
 
 from cloud_agent.application.job_admission import (
     model_connection_required,
@@ -27,8 +25,9 @@ from cloud_agent.application.job_admission import (
     resolve_attachment_selection,
     resolve_skill_selection,
 )
-from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
+from cloud_agent.domain.errors import Refused
 from cloud_agent.schemas import RESET_REASONING_EFFORT
+from cloud_agent.source_control.entitlement import RepoNotAllowed, require_entitled_repo
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -70,32 +69,22 @@ class PreparedFollowUp:
     model_connection_id: str | None = None
 
 
-def sandbox_context_lost_error() -> HTTPException:
+def sandbox_context_lost_error() -> Refused:
     """Return the stable owner-facing error for an unrunnable retained chat."""
-    return HTTPException(
-        status_code=409,
-        detail={
-            "error": {
-                "type": "sandbox_context_lost",
-                "message": (
-                    "This chat's retained sandbox has an indeterminate or lost "
-                    "context and cannot safely accept another message."
-                ),
-            }
-        },
+    return Refused(
+        "conflict",
+        "sandbox_context_lost",
+        "This chat's retained sandbox has an indeterminate or lost "
+        "context and cannot safely accept another message.",
     )
 
 
-def session_archived_error() -> HTTPException:
+def session_archived_error() -> Refused:
     """Require an explicit unarchive before accepting another conversation turn."""
-    return HTTPException(
-        status_code=409,
-        detail={
-            "error": {
-                "type": "session_archived",
-                "message": "Unarchive this session before continuing the conversation.",
-            }
-        },
+    return Refused(
+        "conflict",
+        "session_archived",
+        "Unarchive this session before continuing the conversation.",
     )
 
 
@@ -176,18 +165,12 @@ async def prepare_follow_up(
     if runtime is not None:
         require_registered_runtime(runtime)
         if runtime != parent["runtime"]:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "type": "invalid_request",
-                        "message": (
-                            f"this thread runs on {parent['runtime']!r} and a thread's "
-                            "harness is fixed; start a new chat to use "
-                            f"{runtime!r}"
-                        ),
-                    }
-                },
+            raise Refused(
+                "invalid",
+                "invalid_request",
+                f"this thread runs on {parent['runtime']!r} and a thread's "
+                "harness is fixed; start a new chat to use "
+                f"{runtime!r}",
             )
     canonical, effort, reset_effort = await _prepare_model(
         parent,
@@ -207,10 +190,7 @@ async def prepare_follow_up(
                 app_credentials=app_credentials,
             )
     except RepoNotAllowed as exc:
-        raise HTTPException(
-            status_code=403,
-            detail={"error": {"type": "repo_not_allowed", "message": str(exc)}},
-        ) from exc
+        raise Refused("forbidden", "repo_not_allowed", str(exc)) from exc
     # An unavailable account integration must not prevent unrelated conversation
     # work. The runner receives only usable servers, resolved when it claims
     # this turn, and Tools retains each connection's diagnosis.

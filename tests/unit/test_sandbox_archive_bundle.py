@@ -10,7 +10,7 @@ import tarfile
 
 import pytest
 
-from cloud_agent_host.sandbox_archive_bundle import (
+from cloud_agent_host.archive.sandbox_archive_bundle import (
     DEFAULT_ARCHIVE_COMPRESSION_LEVEL,
     BoundedDigestWriter,
     build_sandbox_archive_bundle,

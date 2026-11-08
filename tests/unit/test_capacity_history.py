@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 from tests.support.storage import AllCapabilities
 
-from cloud_agent.capacity_history import _prune, prune_host_capacity_history
+from cloud_agent.workers.capacity_history import _prune, prune_host_capacity_history
 
 
 class FakeStore(AllCapabilities):

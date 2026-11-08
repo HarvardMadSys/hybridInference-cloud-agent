@@ -51,7 +51,7 @@ class _FakeGitHubApp:
         login="octocat",
         pushable=None,
     ):
-        from cloud_agent.source_control import SourceControlCipher
+        from cloud_agent.source_control.source_control import SourceControlCipher
 
         self.installations = installations
         self.repos = repos_by_installation
@@ -66,7 +66,7 @@ class _FakeGitHubApp:
         self.cipher = SourceControlCipher("test-source-control-key")
 
     async def exchange_user_code(self, code: str) -> Any:
-        from cloud_agent.github_app import UserTokens
+        from cloud_agent.source_control.github_app import UserTokens
 
         if self.exchange_fails:
             raise RuntimeError("GitHub refused the code exchange")
@@ -83,7 +83,7 @@ class _FakeGitHubApp:
         return {"id": 583231, "login": self.login}
 
     async def writable_repositories_for_user(self, user_token: str, installation_id: int):
-        from cloud_agent.github_app import UserAuthorizationRevoked
+        from cloud_agent.source_control.github_app import UserAuthorizationRevoked
 
         if user_token in self.refused_tokens:
             raise UserAuthorizationRevoked("GitHub refused the user's token")
@@ -247,7 +247,7 @@ async def test_connecting_records_only_what_github_attests(store: FakeStorage, m
     """
     monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
     from cloud_agent.api.deps import get_agent_app_credentials, get_github_app_state
-    from cloud_agent.source_control_runtime import GitHubAppState
+    from cloud_agent.source_control.source_control_runtime import GitHubAppState
 
     app_creds = _FakeGitHubApp(
         installations=[{"installation_id": 77, "account_login": "acme"}],
@@ -313,7 +313,7 @@ async def test_a_failed_exchange_grants_nothing(store: FakeStorage, monkeypatch)
     """A code that does not verify must leave the user with no entitlement."""
     monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
     from cloud_agent.api.deps import get_agent_app_credentials, get_github_app_state
-    from cloud_agent.source_control_runtime import GitHubAppState
+    from cloud_agent.source_control.source_control_runtime import GitHubAppState
 
     app_creds = _FakeGitHubApp(
         installations=[{"installation_id": 77, "account_login": "acme"}],
@@ -343,7 +343,7 @@ async def test_disconnecting_removes_the_entitlement(store: FakeStorage, monkeyp
     """Revoking here is half of it; uninstalling on GitHub is the other half."""
     monkeypatch.delenv("AGENT_REPO_ALLOWLIST", raising=False)
     from cloud_agent.api.deps import get_agent_app_credentials, get_github_app_state
-    from cloud_agent.source_control_runtime import GitHubAppState
+    from cloud_agent.source_control.source_control_runtime import GitHubAppState
 
     app_creds = _FakeGitHubApp(
         installations=[{"installation_id": 77, "account_login": "acme"}],
@@ -377,7 +377,7 @@ _INSTALL_URL = "https://github.com/apps/agent-test/installations/new"
 def _connectable_app(store: FakeStorage, app_creds: _FakeGitHubApp) -> FastAPI:
     """An app where users can connect their own GitHub: App, OAuth and install URL."""
     from cloud_agent.api.deps import get_agent_app_credentials, get_github_app_state
-    from cloud_agent.source_control_runtime import GitHubAppState
+    from cloud_agent.source_control.source_control_runtime import GitHubAppState
 
     app = _build_app(store)
     app.dependency_overrides[get_agent_app_credentials] = lambda: app_creds
@@ -887,7 +887,7 @@ def _app_with_unloaded_github(
     ``minter``, so recovery needs no network.
     """
     from cloud_agent.api.deps import get_agent_app_credentials
-    from cloud_agent.source_control_runtime import (
+    from cloud_agent.source_control.source_control_runtime import (
         GitHubAppProvider,
         GitLabOAuthLoad,
         SourceControlRuntime,
@@ -1260,7 +1260,7 @@ class _HistoryApp(_FakeGitHubApp):
     async def require_commit_on_branch(
         self, repo: str, sha: str, *, branch: str | None = None
     ) -> str:
-        from cloud_agent.github_app import CommitNotOnBranch
+        from cloud_agent.source_control.github_app import CommitNotOnBranch
 
         self.checked.append((repo, sha, branch))
         if sha not in self.on_branch:

@@ -17,12 +17,15 @@ from tests.unit.test_agent_sandbox_manager import (
     _wait_for,
 )
 
-from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_client import (
+    SandboxManagerClient,
+    SandboxManagerError,
+)
 from cloud_agent_host import environment_tests
 from cloud_agent_host.action_receipts import ActionReceipts
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
-from cloud_agent_host.sandbox import SandboxError
-from cloud_agent_host.sandbox_manager import _TerminalManager
+from cloud_agent_host.manager_api.terminal_manager import _TerminalManager
 from cloud_agent_shared.environment import (
     BoundEnvironment,
     EnvironmentAction,
@@ -337,7 +340,9 @@ def test_a_poll_claims_with_the_loops_proof_on_the_workers_client(monkeypatch):
     def second_proof(*_args, **_kwargs):
         raise AssertionError("the poll built a proof of its own")
 
-    monkeypatch.setattr("cloud_agent_host.runner._claim_attestation", second_proof)
+    monkeypatch.setattr(
+        "cloud_agent_host.service.host_capabilities.claim_attestation", second_proof
+    )
     with httpx.Client(transport=httpx.MockTransport(handler), base_url="http://control") as client:
         claimed = environment_tests.claim_and_execute(
             base_url="http://control",
@@ -436,7 +441,7 @@ def _environment_worker(monkeypatch, tmp_path, prepare, status, *, environment=N
     monkeypatch.setattr(environment_tests, "RetainedChatBackend", lambda manager, spec: retained)
     monkeypatch.setattr(environment_tests, "EnvironmentPreparation", _Preparation)
     monkeypatch.setattr(environment_tests, "claim_and_execute", claim_and_execute)
-    monkeypatch.setattr("cloud_agent_host.runner._SourcePrefetch", _Source)
+    monkeypatch.setattr("cloud_agent_host.turn.source_preparation.GitSourcePrefetch", _Source)
     return environment_tests.EnvironmentTestWorker("http://control", backend), claims, reports
 
 
@@ -710,8 +715,8 @@ async def test_old_broker_receives_no_secret_bearing_payload():
 async def test_empty_binding_fork_reaches_coordination_without_environment_preparation(monkeypatch):
     from unittest.mock import AsyncMock
 
-    from fastapi import HTTPException
     from tests.support.owners import CONNECTION_ID, CONNECTION_MODEL, connection_row
+    from tests.support.refusals import raises_http
 
     from cloud_agent.application import session_fork
 
@@ -745,7 +750,7 @@ async def test_empty_binding_fork_reaches_coordination_without_environment_prepa
         },
         "group_members": [{"thread_id": "thread"}],
     }
-    with pytest.raises(HTTPException) as failure:
+    with raises_http() as failure:
         await session_fork.materialize_session_fork(operation, job_id="job", job_store=store)
     assert failure.value.detail["error"]["type"] == "fork_in_progress"
     broker.prepare_environment.assert_not_awaited()

@@ -82,6 +82,23 @@ class AgentWorkspaceResponse(BaseModel):
     profiling: AgentOperationProfilingFragment | None = None
 
 
+class AgentWorkspaceImage(BaseModel):
+    """One image saved under the workspace's artifacts directory."""
+
+    path: str
+    size: int
+    #: When it was last written, as a Unix time.
+    modified_at: float
+
+
+class AgentWorkspaceImagesResponse(BaseModel):
+    """The artifacts directory's images since a time, newest first."""
+
+    images: list[AgentWorkspaceImage]
+    #: Whether more images, or more entries to look through, were left out.
+    truncated: bool = False
+
+
 class AgentWorkspaceWriteRequest(BaseModel):
     """Replace one UTF-8 file in a retained workspace."""
 

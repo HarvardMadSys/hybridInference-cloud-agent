@@ -15,21 +15,21 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.context_dna import MAX_DNA_REQUESTS, DnaBands, bands_for, prepare_rows
-from cloud_agent.context_insights import InsightsFilters
-from cloud_agent.context_profile import (
+from cloud_agent.context.context_dna import MAX_DNA_REQUESTS, DnaBands, bands_for, prepare_rows
+from cloud_agent.context.context_insights import InsightsFilters
+from cloud_agent.context.context_profile import (
     CONTENT_CATEGORIES,
     CONTEXT_PROFILE_VERSION,
     TOTAL_FIELDS,
     ContextProfileAccumulator,
 )
-from cloud_agent.context_request import (
+from cloud_agent.context.context_request import (
     LocatedRequest,
     RequestComposition,
     assemble_request,
     locate_request,
 )
-from cloud_agent.context_view import assemble_thread_context
+from cloud_agent.context.context_view import assemble_thread_context
 from cloud_agent.storage._sql.context import (
     ASCII_CLASS,
     CJK_CLASS,
@@ -41,7 +41,7 @@ from cloud_agent.storage._sql.rows import load_json
 if TYPE_CHECKING:
     import asyncpg
 
-    from cloud_agent.context_insights import ContextInsightsCursor, ContextSort
+    from cloud_agent.context.context_insights import ContextInsightsCursor, ContextSort
 
 
 #: Events one page of a profile refresh reads.
@@ -498,6 +498,13 @@ _SNAPSHOT_SQL = """
       AND e.payload->>'phase' IN ('context_snapshot', 'init')
 """
 
+_PREFIX_SQL = """
+    SELECT e.payload->'prefix' AS prefix
+    FROM agent_job_events e
+    WHERE e.id = $1 AND e.attempt_id = $2 AND e.event_type = 'lifecycle'
+      AND e.payload->>'phase' = 'request_prefix'
+"""
+
 #: One stored event's text, only when it belongs to the caller's undeleted
 #: conversation that holds ``$3``.
 _EVENT_CONTENT_SQL = f"""
@@ -793,7 +800,7 @@ class PostgresContextQueries:
             conn.transaction(isolation="repeatable_read", readonly=True),
         ):
             await conn.execute("SET LOCAL statement_timeout = '10s'")
-            usage_id, events, prompts, superseded, snapshot = await _request_reads(
+            usage_id, events, prompts, superseded, snapshot, prefix = await _request_reads(
                 conn, located, event_id
             )
         return assemble_request(
@@ -805,6 +812,7 @@ class PostgresContextQueries:
             superseded=superseded,
             snapshot=snapshot if isinstance(snapshot, dict) else None,
             events_capped=len(events) >= MAX_REQUEST_EVENTS,
+            prefix_record=prefix if isinstance(prefix, dict) else None,
         )
 
     async def dna_bands(
@@ -914,7 +922,7 @@ def _thread_result(
 
 async def _request_reads(
     conn: Any, located: LocatedRequest, event_id: int
-) -> tuple[str | None, list[dict[str, Any]], list[dict[str, Any]], dict[str, int], Any]:
+) -> tuple[str | None, list[dict[str, Any]], list[dict[str, Any]], dict[str, int], Any, Any]:
     """The reads one request's composition needs, from one snapshot."""
     point = located.point
     usage_id = await conn.fetchval(_REQUEST_EVENT_SQL, event_id, point.attempt_id)
@@ -938,4 +946,8 @@ async def _request_reads(
         snapshot = load_json(
             await conn.fetchval(_SNAPSHOT_SQL, located.snapshot_event_id, point.attempt_id)
         )
-    return usage_id, events, prompts, superseded, snapshot
+    prefix = None
+    prefix_event = (located.prefix or {}).get("event_id")
+    if isinstance(prefix_event, int):
+        prefix = load_json(await conn.fetchval(_PREFIX_SQL, prefix_event, point.attempt_id))
+    return usage_id, events, prompts, superseded, snapshot, prefix

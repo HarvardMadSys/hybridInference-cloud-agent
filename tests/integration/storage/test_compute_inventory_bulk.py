@@ -8,7 +8,7 @@ from tests.integration.storage.test_host_pool_store import db as db
 from tests.support.db import assert_pool_idle
 
 from cloud_agent.storage._sql.compute_admission import host_compute_admission
-from cloud_agent.storage.repositories.compute_resources import PostgresComputeResourceRepository
+from cloud_agent.storage.repositories.compute import PostgresComputeResourceRepository
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

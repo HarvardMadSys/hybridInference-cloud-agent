@@ -72,11 +72,11 @@ relative to `apps/backend/`.
 | Job or conversation HTTP behavior | `cloud_agent/api/jobs.py`, `catalog.py`, `turns.py`, or `threads.py`. `api/routes.py` mounts every agent surface listed in `SURFACE_ROUTERS`. |
 | Request or response validation | The owning module in `cloud_agent/schemas/`; public imports use `cloud_agent.schemas`. |
 | A new caller of task creation | `cloud_agent/application/job_admission.py`; `api/jobs.py` is an existing caller. |
-| Workspace files, terminals, or Git views | `cloud_agent/api/workspace.py` and `sandbox_manager_client.py`; host handling is in `cloud_agent_host/sandbox_manager.py`. |
+| Workspace files, terminals, or Git views | `cloud_agent/api/workspace.py` and `sandbox_manager/sandbox_manager_client.py`; host handling is in `cloud_agent_host/manager_api/workspaces.py` and `terminals.py`, which `sandbox_manager.py` assembles into the app. |
 | A query or persistent field | The relevant `cloud_agent/ports/` interface and `storage/` implementation, plus an additive revision under `apps/backend/migrations/versions/` for schema changes. |
 | Compute-resource lifecycle | `cloud_agent/application/compute_resources.py`, `compute_reconcile.py`, `workers/compute_resources.py`, and `providers/compute/`. |
-| Host claims or worker HTTP calls | `cloud_agent_host/claimed_job.py`, `control_plane_client.py`, and the orchestration in `runner.py`. |
-| Retained-container values or lifecycle | `cloud_agent_host/chat_sandbox_models.py` for value types; `chat_sandbox.py` for Docker lifecycle. |
+| Host claims or worker HTTP calls | `cloud_agent_host/claimed_job.py`, `control_plane_client.py`, and the orchestration in `service/host_service.py` and `turn/turn_child.py`. |
+| Retained-container values or lifecycle | `cloud_agent_host/container/chat_sandbox_models.py` for value types; `container/chat_sandbox.py` for Docker lifecycle. |
 | CLI behavior or version compatibility | `cloud_agent_host/runtimes/` and `drivers.py`; discovery facts are in `cloud_agent_shared/runtime_catalog.py`, shared pins in `shared_protocol.py`, image pins in `deploy/sandbox/Dockerfile.agent-sandbox`. |
 | Browser UI or a BFF route | `apps/frontend/src/`; browser API clients are in `src/lib/api/agents/`, job-page components and hooks in `components/features/agents/job-detail/`. |
 
@@ -185,8 +185,9 @@ both server-only and runtime-site-config build guards.
 
 Each run saves logs in a fresh gitignored `.local-ci/<tier>.XXXXXX` directory.
 Set `CI_LOG_DIR` to choose an output directory. This local gate excludes external
-regressions, rolling upgrades, Gitleaks, Docker release-image builds, and Kata
-qualification; those remain part of the wider hosted CI gate.
+regressions, rolling upgrades, mixed-version protocol checks, Gitleaks, Docker
+release-image builds, and Kata qualification; those remain part of the wider
+hosted CI gate.
 
 Every pull request, from a fork or from a branch of this repository, runs on
 disposable GitHub-hosted VMs: ARM64 artifacts use `ubuntu-24.04-arm`, and

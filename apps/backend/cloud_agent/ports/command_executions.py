@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
-    from cloud_agent.command_executions import CommandFilter, CommandSort
+    from cloud_agent.domain.command_executions import CommandFilter, CommandSort
 
 
 class CommandExecutionQueries(Protocol):

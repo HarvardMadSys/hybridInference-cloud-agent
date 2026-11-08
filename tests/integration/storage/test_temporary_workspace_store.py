@@ -21,7 +21,7 @@ from tests.integration.storage.test_schema_upgrade import _db_config
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations, downgrade_to
 
-from cloud_agent.agent_memory import MemoryTask
+from cloud_agent.domain.agent_memory import MemoryTask
 from cloud_agent.storage.repositories.environments import EnvironmentNotFound
 from cloud_agent_shared.git.temporary_workspace import TEMPORARY_WORKSPACE_BASE_SHA
 

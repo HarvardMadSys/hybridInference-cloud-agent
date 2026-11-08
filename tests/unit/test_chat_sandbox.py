@@ -18,10 +18,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud_agent_host import chat_sandbox as chat_sandbox_mod, chat_sandbox_writers as writers
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container import (
+    chat_sandbox as chat_sandbox_mod,
+    chat_sandbox_markers,
+    chat_sandbox_writers as writers,
+    retained_backend,
+)
+from cloud_agent_host.container.chat_sandbox import (
     ACTIVATION_TMPFS,
-    ARCHIVE_IMPORT_TIMEOUT_PER_GIB_S,
     CHAT_BOOTSTRAP_NETWORK,
     CHAT_DISK_LIMIT_LABEL,
     CHAT_IMAGE_DIGEST_LABEL,
@@ -32,37 +36,29 @@ from cloud_agent_host.chat_sandbox import (
     CHAT_STATE_DIR,
     CHAT_THREAD_LABEL,
     CHAT_WORKDIR,
-    MEMBER_REAPER_TARGET,
     MEMBER_TMPFS_ROOT,
     MEMBER_UID_BASE,
-    TURN_NETWORK_PROOF_S,
     ChatSandboxInspection,
     ChatSandboxManager,
     ChatSandboxSpec,
     ChatSandboxStatus,
-    RetainedChatBackend,
     RetainedChatLost,
     SandboxActionFacts,
-    _RetainedTerminalProcess,
     claude_member_config_dir,
 )
-from cloud_agent_host.chat_sandbox_markers import (
-    FINAL_ARCHIVE_MARKER_NAME,
-    INITIAL_ARCHIVE_MARKER_ROOT,
+from cloud_agent_host.container.chat_sandbox_members import MEMBER_REAPER_TARGET
+from cloud_agent_host.container.chat_sandbox_terminal import _RetainedTerminalProcess
+from cloud_agent_host.container.chat_sandbox_workspace import ARCHIVE_IMPORT_TIMEOUT_PER_GIB_S
+from cloud_agent_host.container.retained_backend import TURN_NETWORK_PROOF_S, RetainedChatBackend
+from cloud_agent_host.container.sandbox import (
+    KATA_RUNTIME,
+    ContainerBackend,
+    SandboxError,
+    SandboxSpec,
 )
-from cloud_agent_host.chat_sandbox_network import ChatSandboxNetwork
-from cloud_agent_host.guest_observer import (
-    GUEST_OBSERVER_BINARY,
-    GUEST_OBSERVER_ROOT,
-    GUEST_OBSERVER_VERSION,
-    MAX_OBSERVATION_BYTES,
-    GuestObserverController,
-    GuestObserverCursor,
-    GuestObserverSnapshot,
-    GuestObserverStatus,
-)
+from cloud_agent_host.network.chat_sandbox_network import ChatSandboxNetwork
+from cloud_agent_host.observe import guest_observer
 from cloud_agent_host.runtimes import RuntimeMCPConfig, get_runtime, registered_runtimes
-from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError, SandboxSpec
 
 
 def _spec() -> ChatSandboxSpec:
@@ -146,7 +142,7 @@ def test_archive_export_is_stopped_exact_id_and_metadata_excludes_secrets(monkey
         def poll(self):
             return 0
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
     monkeypatch.setattr(chat_sandbox_mod.subprocess, "Popen", ExportProcess)
     with (tmp_path / "rootfs.tar").open("wb") as output:
         metadata = manager.export_stopped_archive(
@@ -183,8 +179,8 @@ def test_archive_fences_reject_nonstopped_unowned_or_changed_containers(monkeypa
         mounts=[{"Type": "volume", "Destination": "/agent-state"}] if change == "volume" else [],
     )
     monkeypatch.setattr(
-        manager,
-        "_run",
+        manager.exact,
+        "run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=payload, stderr=""),
     )
     with pytest.raises(SandboxError):
@@ -212,7 +208,7 @@ def test_archived_removal_never_stops_an_external_start_before_removal(monkeypat
         # after the stopped inspection. No generic stop may make it removable.
         return SimpleNamespace(returncode=1, stdout="", stderr="container is running")
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
     monkeypatch.setattr(
         manager, "stop", lambda *_args: pytest.fail("archive must never stop a new start")
     )
@@ -236,7 +232,7 @@ def test_archived_removal_rejects_start_at_second_identity_fence(monkeypatch):
             stderr="",
         )
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
     with pytest.raises(SandboxError, match="stopped or dead container"):
         manager.remove_stopped_archived(spec, container_id="sha256:container-one")
     assert len(calls) == 2
@@ -280,7 +276,7 @@ def test_dead_container_exports_and_removes_without_force(monkeypatch, tmp_path)
         def wait(self, timeout):
             return 0
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
     monkeypatch.setattr(chat_sandbox_mod.subprocess, "Popen", ExportProcess)
     with (tmp_path / "rootfs.tar").open("wb") as output:
         metadata = manager.export_stopped_archive(
@@ -314,7 +310,7 @@ def test_stop_accepts_a_running_container_that_lands_dead(monkeypatch):
         assert argv[1] == "stop"
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
     stopped = manager.stop(spec, release_networks=False)
     assert stopped.status is ChatSandboxStatus.DEAD
     assert stopped.running is False
@@ -344,7 +340,7 @@ def test_archive_export_rejects_oversize_and_changed_identity_after_export(monke
         def poll(self):
             return 0
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
     monkeypatch.setattr(chat_sandbox_mod.subprocess, "Popen", ExportProcess)
     with (
         (tmp_path / "rootfs.tar").open("wb") as output,
@@ -377,25 +373,25 @@ def _plain_group_network(monkeypatch):
     monkeypatch.setattr(
         ChatSandboxNetwork,
         "_require_group_network",
-        lambda self, spec, _current, *_snapshot: self._containers._require(spec),
+        lambda self, spec, _current, *_snapshot: self._containers.exact.require(spec),
     )
     monkeypatch.setattr(ChatSandboxNetwork, "_sync_kata_guest_network", lambda *_args: None)
     monkeypatch.setattr(ChatSandboxNetwork, "_verify_guest_network", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         ChatSandboxNetwork,
         "_release_sandbox_networks",
-        lambda self, spec, _current, *, expected_container_id: self._containers._require_exact(
+        lambda self, spec, _current, *, expected_container_id: self._containers.exact.require_exact(
             spec, expected_container_id
         ),
     )
 
 
-def _observer_snapshot_payload(snapshot: GuestObserverSnapshot) -> bytes:
+def _observer_snapshot_payload(snapshot: guest_observer.GuestObserverSnapshot) -> bytes:
     status = snapshot.status
     return json.dumps(
         {
             "status": {
-                "version": GUEST_OBSERVER_VERSION,
+                "version": guest_observer.GUEST_OBSERVER_VERSION,
                 "ready": True,
                 "pid": status.pid,
                 "poll_seq": status.poll_seq,
@@ -414,8 +410,8 @@ def _observer_snapshot_payload(snapshot: GuestObserverSnapshot) -> bytes:
 
 
 def _observer_drain_payload(
-    closing: GuestObserverSnapshot,
-    flushed: GuestObserverSnapshot,
+    closing: guest_observer.GuestObserverSnapshot,
+    flushed: guest_observer.GuestObserverSnapshot,
     payload: bytes = b"",
 ) -> bytes:
     """The drain script's output: both publications on one line, then the slice."""
@@ -503,7 +499,7 @@ def test_a_requested_disk_quota_is_not_dropped_when_docker_refuses_it(monkeypatc
             stderr="--storage-opt is supported only for overlay over xfs with pquota",
         )
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
 
     with pytest.raises(SandboxError, match="xfs with pquota"):
         manager.create(spec)
@@ -536,10 +532,10 @@ def test_retained_disk_policy_must_match_even_when_a_legacy_label_is_absent(
     manager = ChatSandboxManager(ContainerBackend(image="img"))
 
     if int(persisted_disk or 0) == requested_disk:
-        manager._verify_identity(inspection, spec)
+        manager.exact.verify_identity(inspection, spec)
     else:
         with pytest.raises(SandboxError, match="outside this chat/generation"):
-            manager._verify_identity(inspection, spec)
+            manager.exact.verify_identity(inspection, spec)
 
 
 def test_kata_create_command_reserves_a_root_only_guest_observer_journal():
@@ -554,7 +550,10 @@ def test_kata_create_command_reserves_a_root_only_guest_observer_journal():
     command = manager.build_create_command(spec)
     joined = " ".join(command)
 
-    assert f"{GUEST_OBSERVER_ROOT}:rw,nosuid,nodev,noexec,mode=0700,uid=0,gid=0" in joined
+    assert (
+        f"{guest_observer.GUEST_OBSERVER_ROOT}:rw,nosuid,nodev,noexec,mode=0700,uid=0,gid=0"
+        in joined
+    )
     assert "--cap-drop ALL" in joined
     assert "--cap-add BPF" in joined
     assert "--security-opt no-new-privileges" in joined
@@ -562,13 +561,13 @@ def test_kata_create_command_reserves_a_root_only_guest_observer_journal():
 
 
 def test_finishing_guest_observation_flushes_after_the_turn_end_fence():
-    closing = GuestObserverSnapshot(
-        status=GuestObserverStatus(91, 20, 8, 0, 0, 0, 7, 19),
+    closing = guest_observer.GuestObserverSnapshot(
+        status=guest_observer.GuestObserverStatus(91, 20, 8, 0, 0, 0, 7, 19),
         journal_size=0,
         guest_mono_ns=2_000_000_000,
     )
-    flushed = GuestObserverSnapshot(
-        status=GuestObserverStatus(91, 22, 8, 0, 0, 0, 7, 19),
+    flushed = guest_observer.GuestObserverSnapshot(
+        status=guest_observer.GuestObserverStatus(91, 22, 8, 0, 0, 0, 7, 19),
         journal_size=0,
         guest_mono_ns=2_050_000_000,
     )
@@ -583,11 +582,11 @@ def test_finishing_guest_observation_flushes_after_the_turn_end_fence():
             stderr=b"",
         )
 
-    controller = GuestObserverController(
+    controller = guest_observer.GuestObserverController(
         capture=capture,
         privileged=lambda *_args: SimpleNamespace(returncode=0, stdout=b"", stderr=b""),
     )
-    cursor = GuestObserverCursor(
+    cursor = guest_observer.GuestObserverCursor(
         uid=MEMBER_UID_BASE,
         offset=0,
         poll_seq=3,
@@ -607,7 +606,7 @@ def test_finishing_guest_observation_flushes_after_the_turn_end_fence():
     # full drain happened after that read: the one guest exec, fenced on this
     # cursor's journal, waits for it, and a drain reporting less is refused.
     assert len(drains) == 1
-    assert drains[0][-5:] == ["0", "7", "19", str(MAX_OBSERVATION_BYTES), "3.0"]
+    assert drains[0][-5:] == ["0", "7", "19", str(guest_observer.MAX_OBSERVATION_BYTES), "3.0"]
     published.append(replace(flushed, status=replace(flushed.status, poll_seq=21)))
     refused = controller.finish(cursor)
     assert refused.complete is False
@@ -621,12 +620,12 @@ def test_stale_guest_observer_cleanup_only_signals_the_trusted_binary():
         calls.append((list(argv), detach))
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    ready = GuestObserverSnapshot(
-        status=GuestObserverStatus(91, 1, 0, 0, 0, 0, 7, 19),
+    ready = guest_observer.GuestObserverSnapshot(
+        status=guest_observer.GuestObserverStatus(91, 1, 0, 0, 0, 0, 7, 19),
         journal_size=0,
         guest_mono_ns=1,
     )
-    controller = GuestObserverController(
+    controller = guest_observer.GuestObserverController(
         capture=lambda *_args: SimpleNamespace(
             returncode=0,
             stdout=_observer_snapshot_payload(ready),
@@ -639,11 +638,11 @@ def test_stale_guest_observer_cleanup_only_signals_the_trusted_binary():
 
     cleanup_argv, cleanup_detached = calls[0]
     assert cleanup_detached is False
-    assert cleanup_argv[-1] == GUEST_OBSERVER_BINARY
+    assert cleanup_argv[-1] == guest_observer.GUEST_OBSERVER_BINARY
     compile(cleanup_argv[3], "<guest-observer-cleanup>", "exec")
     assert "os.path.samefile" in cleanup_argv[3]
     assert "stale guest observer did not exit" in cleanup_argv[3]
-    assert calls[1] == ([GUEST_OBSERVER_BINARY], True)
+    assert calls[1] == ([guest_observer.GUEST_OBSERVER_BINARY], True)
 
 
 def test_guest_observer_snapshot_verifies_the_status_pid_binary(monkeypatch):
@@ -652,7 +651,7 @@ def test_guest_observer_snapshot_verifies_the_status_pid_binary(monkeypatch):
     payload = json.dumps(
         {
             "status": {
-                "version": GUEST_OBSERVER_VERSION,
+                "version": guest_observer.GUEST_OBSERVER_VERSION,
                 "ready": True,
                 "pid": 91,
                 "poll_seq": 22,
@@ -679,13 +678,13 @@ def test_guest_observer_snapshot_verifies_the_status_pid_binary(monkeypatch):
     assert snapshot.status.poll_seq == 22
     command = calls[0]
     compile(command[3], "<guest-observer-snapshot>", "exec")
-    assert command[-3:] == [GUEST_OBSERVER_BINARY, "21", "3.0"]
+    assert command[-3:] == [guest_observer.GUEST_OBSERVER_BINARY, "21", "3.0"]
     assert "os.path.samefile" in command[3]
 
 
 def test_short_guest_journal_read_is_unavailable_not_a_false_complete_census():
-    snapshot = GuestObserverSnapshot(
-        status=GuestObserverStatus(91, 21, 8, 0, 0, 10, 7, 19),
+    snapshot = guest_observer.GuestObserverSnapshot(
+        status=guest_observer.GuestObserverStatus(91, 21, 8, 0, 0, 10, 7, 19),
         journal_size=10,
         guest_mono_ns=2_050_000_000,
     )
@@ -695,11 +694,11 @@ def test_short_guest_journal_read_is_unavailable_not_a_false_complete_census():
         stdout = _observer_drain_payload(closing, snapshot, b"short")
         return SimpleNamespace(returncode=0, stdout=stdout, stderr=b"")
 
-    controller = GuestObserverController(
+    controller = guest_observer.GuestObserverController(
         capture=capture,
         privileged=lambda *_args: SimpleNamespace(returncode=0, stdout=b"", stderr=b""),
     )
-    cursor = GuestObserverCursor(
+    cursor = guest_observer.GuestObserverCursor(
         uid=MEMBER_UID_BASE,
         offset=0,
         observer_pid=91,
@@ -806,7 +805,7 @@ def test_foreign_namespace_is_not_inspected_during_sandbox_manager_startup(monke
             raise AssertionError("foreign inspect would hang on a wedged Kata shim")
         raise AssertionError(argv)
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
 
     assert manager.list() == []
 
@@ -843,7 +842,7 @@ def test_listing_keeps_owned_containers_and_leaves_unlabelled_ones(
             stderr="",
         )
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
     if not namespace:
         assert manager.list() == []
     elif inspect_fails:
@@ -861,7 +860,7 @@ def test_retained_storage_preflight_reads_daemon_root_without_mounting_it(monkey
         calls.append(list(argv))
         return SimpleNamespace(returncode=0, stdout="/mnt/agent-docker\n", stderr="")
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.run", fake_run)
 
     assert manager.require_docker_data_root("/mnt/agent-docker") == "/mnt/agent-docker"
     assert calls == [["docker", "info", "--format", "{{.DockerRootDir}}"]]
@@ -999,7 +998,7 @@ def test_inspect_rejects_a_tmpfs_over_chat_state(monkeypatch, tmpfs, mounts):
     payload = json.loads(_inspect_payload(spec, mounts=mounts))
     payload[0]["HostConfig"]["Tmpfs"] = {f"{ACTIVATION_TMPFS}": "rw,noexec", **tmpfs}
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.subprocess.run",
+        "cloud_agent_host.container.chat_sandbox.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(
             returncode=0, stdout=json.dumps(payload), stderr=""
         ),
@@ -1016,10 +1015,10 @@ def test_inspect_accepts_the_platforms_own_tmpfs_mounts(monkeypatch):
     payload[0]["HostConfig"]["Tmpfs"] = {
         ACTIVATION_TMPFS: "rw,noexec",
         f"{MEMBER_TMPFS_ROOT}/0": "rw,noexec",
-        GUEST_OBSERVER_ROOT: "rw,noexec",
+        guest_observer.GUEST_OBSERVER_ROOT: "rw,noexec",
     }
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.subprocess.run",
+        "cloud_agent_host.container.chat_sandbox.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(
             returncode=0, stdout=json.dumps(payload), stderr=""
         ),
@@ -1046,7 +1045,7 @@ def test_inspect_rejects_a_bind_or_volume_even_when_labels_match(monkeypatch):
         mounts=[{"Type": "bind", "Source": "/host", "Destination": CHAT_WORKDIR}],
     )
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.subprocess.run",
+        "cloud_agent_host.container.chat_sandbox.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=payload, stderr=""),
     )
 
@@ -1060,7 +1059,7 @@ def test_existing_container_must_have_been_created_from_the_pinned_image(monkeyp
     payload = json.loads(_inspect_payload(spec))
     payload[0]["Config"]["Image"] = "sha256:different"
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.subprocess.run",
+        "cloud_agent_host.container.chat_sandbox.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(
             returncode=0,
             stdout=json.dumps(payload),
@@ -1107,7 +1106,7 @@ def test_create_start_stop_retains_the_same_container(monkeypatch):
             return SimpleNamespace(returncode=0, stdout=spec.container_name, stderr="")
         raise AssertionError(argv)
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.run", fake_run)
 
     created = manager.create(spec)
     started = manager.start(spec)
@@ -1160,7 +1159,7 @@ def test_lifecycle_command_never_adopts_a_same_name_post_command_replacement(
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         raise AssertionError(argv)
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.run", fake_run)
 
     with pytest.raises(RetainedChatLost, match="identity changed during"):
         getattr(manager, operation)(spec)
@@ -1173,7 +1172,7 @@ def test_an_existing_name_with_other_ownership_is_never_adopted(monkeypatch):
     wrong[CHAT_THREAD_LABEL] = "athr_other"
     payload = _inspect_payload(spec, labels=wrong)
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.subprocess.run",
+        "cloud_agent_host.container.chat_sandbox.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=payload, stderr=""),
     )
 
@@ -1186,7 +1185,7 @@ def test_start_refuses_paused_state_instead_of_calling_it_stopped(monkeypatch):
     manager = ChatSandboxManager(ContainerBackend(image="img"))
     payload = _inspect_payload(spec, status="running", running=True, paused=True)
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.subprocess.run",
+        "cloud_agent_host.container.chat_sandbox.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=payload, stderr=""),
     )
 
@@ -1208,7 +1207,7 @@ def test_exec_is_bound_to_the_inspected_container_and_workspace(monkeypatch):
             return SimpleNamespace(returncode=0, stdout=b"ok\n", stderr=b"")
         raise AssertionError(argv)
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.run", fake_run)
 
     result = manager.exec_capture(
         spec,
@@ -1289,7 +1288,7 @@ def test_exec_delivers_named_values_through_the_docker_client_environment(monkey
         mounts=(),
         networks=("agent-net",),
     )
-    monkeypatch.setattr(manager, "_require", lambda _spec: current)
+    monkeypatch.setattr(manager.exact, "require", lambda _spec: current)
 
     result = manager.exec_capture(
         spec,
@@ -1318,7 +1317,7 @@ def _archive_export_failure(monkeypatch, detail: str) -> tuple[ChatSandboxManage
         mounts=(),
         networks=("agent-net",),
     )
-    monkeypatch.setattr(manager, "_require", lambda _spec: current)
+    monkeypatch.setattr(manager.exact, "require", lambda _spec: current)
     real_popen = subprocess.Popen
 
     def fake_popen(_argv, **kwargs):
@@ -1355,7 +1354,7 @@ def test_export_archive_normalizes_the_exact_missing_source_path(monkeypatch):
 
 @pytest.mark.parametrize("prefix", ["", "Error response from daemon: "])
 def test_optional_stopped_final_marker_accepts_exact_docker_path_absence(monkeypatch, prefix):
-    path = f"{INITIAL_ARCHIVE_MARKER_ROOT}/{FINAL_ARCHIVE_MARKER_NAME}"
+    path = f"{chat_sandbox_markers.INITIAL_ARCHIVE_MARKER_ROOT}/{chat_sandbox_markers.FINAL_ARCHIVE_MARKER_NAME}"
     detail = f"{prefix}Could not find the file {path} in container sha256:container-one"
     manager, spec = _archive_export_failure(monkeypatch, detail)
 
@@ -1381,7 +1380,7 @@ def test_optional_stopped_final_marker_accepts_exact_docker_path_absence(monkeyp
         ),
         (
             "Error response from daemon: Could not find the file "
-            f"{INITIAL_ARCHIVE_MARKER_ROOT}/{FINAL_ARCHIVE_MARKER_NAME} "
+            f"{chat_sandbox_markers.INITIAL_ARCHIVE_MARKER_ROOT}/{chat_sandbox_markers.FINAL_ARCHIVE_MARKER_NAME} "
             "in container sha256:another-container"
         ),
     ],
@@ -1469,7 +1468,7 @@ def test_member_process_wrapper_preserves_the_cli_argv(monkeypatch):
             return None
 
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.subprocess.run",
+        "cloud_agent_host.container.chat_sandbox.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=payload, stderr=""),
     )
 
@@ -1477,7 +1476,7 @@ def test_member_process_wrapper_preserves_the_cli_argv(monkeypatch):
         popen_calls.append((list(argv), kwargs))
         return Process()
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.Popen", fake_popen)
 
     pidfile = f"{MEMBER_TMPFS_ROOT}/0/resident-{'a' * 32}.pid"
     manager.spawn(
@@ -1548,7 +1547,7 @@ def test_every_runtime_credential_reaches_a_resident_exec_by_name_only(monkeypat
             return None
 
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.subprocess.run",
+        "cloud_agent_host.container.chat_sandbox.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=payload, stderr=""),
     )
 
@@ -1556,7 +1555,7 @@ def test_every_runtime_credential_reaches_a_resident_exec_by_name_only(monkeypat
         popen_calls.append((list(argv), kwargs))
         return Process()
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.Popen", fake_popen)
 
     manager.spawn(
         spec,
@@ -1656,7 +1655,7 @@ def test_a_member_pipe_joins_two_member_execs_without_a_shared_file(monkeypatch,
     docker.chmod(0o755)
     spec = replace(_spec(), shared_live=True, resident_slot_capacity=4)
     manager = ChatSandboxManager(ContainerBackend(image="img", docker_binary=str(docker)))
-    monkeypatch.setattr(manager, "_require", lambda _spec: _running(spec))
+    monkeypatch.setattr(manager.exact, "require", lambda _spec: _running(spec))
     received = tmp_path / "received"
 
     source, target = manager.pipe_member_exec(
@@ -1700,7 +1699,7 @@ def test_a_failed_member_pipe_reports_each_side(monkeypatch, tmp_path):
     docker.chmod(0o755)
     spec = replace(_spec(), shared_live=True, resident_slot_capacity=4)
     manager = ChatSandboxManager(ContainerBackend(image="img", docker_binary=str(docker)))
-    monkeypatch.setattr(manager, "_require", lambda _spec: _running(spec))
+    monkeypatch.setattr(manager.exact, "require", lambda _spec: _running(spec))
 
     source, target = manager.pipe_member_exec(
         spec,
@@ -1872,8 +1871,8 @@ def test_pre_upgrade_container_receives_the_root_owned_process_reaper(monkeypatc
     source.write_text("#!/usr/bin/env python3\n")
     monkeypatch.setenv("AGENT_MEMBER_PROCESS_REAPER_SOURCE", str(source))
     monkeypatch.setattr(
-        manager,
-        "_require",
+        manager.exact,
+        "require",
         lambda _spec: ChatSandboxInspection(
             container_id="old-container-id",
             name=spec.container_name,
@@ -1901,7 +1900,7 @@ def test_pre_upgrade_container_receives_the_root_owned_process_reaper(monkeypatc
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(manager, "exec_capture", fake_exec)
-    monkeypatch.setattr(manager, "_run", fake_run)
+    monkeypatch.setattr(manager.exact, "run", fake_run)
 
     manager.ensure_member_process_reaper(spec)
 
@@ -1925,7 +1924,7 @@ def test_shared_writer_freeze_runs_as_each_owner_without_cap_kill(monkeypatch):
         resident_slot_capacity=3,
     )
     manager = ChatSandboxManager(ContainerBackend(image="img"))
-    monkeypatch.setattr(manager, "_operation_writer_uids", lambda _spec: [])
+    monkeypatch.setattr(manager, "operation_writer_uids", lambda _spec: [])
     calls: list[tuple[list[str], dict]] = []
     receipts = {
         manager.backend.uid: b"31 10001 300\n",
@@ -1971,7 +1970,7 @@ def test_shared_writer_freeze_replacement_runs_exact_id_cleanup(monkeypatch):
         resident_slot_capacity=2,
     )
     manager = ChatSandboxManager(ContainerBackend(image="img"))
-    monkeypatch.setattr(manager, "_operation_writer_uids", lambda _spec: [])
+    monkeypatch.setattr(manager, "operation_writer_uids", lambda _spec: [])
     exact_id = "sha256:original"
     exact_checks = 0
     calls: list[tuple[list[str], dict]] = []
@@ -1997,7 +1996,7 @@ def test_shared_writer_freeze_replacement_runs_exact_id_cleanup(monkeypatch):
             )
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
-    monkeypatch.setattr(manager, "_require_exact", require_exact)
+    monkeypatch.setattr(manager.exact, "require_exact", require_exact)
     monkeypatch.setattr(manager, "exec_capture", fake_exec)
 
     with pytest.raises(RetainedChatLost, match="replacement"):
@@ -2024,7 +2023,7 @@ def test_shared_writer_thaw_reads_manifest_and_resumes_as_each_owner(monkeypatch
         resident_slot_capacity=2,
     )
     manager = ChatSandboxManager(ContainerBackend(image="img"))
-    monkeypatch.setattr(manager, "_operation_writer_uids", lambda _spec: [])
+    monkeypatch.setattr(manager, "operation_writer_uids", lambda _spec: [])
     calls: list[tuple[list[str], dict]] = []
     manifest = f"{ACTIVATION_TMPFS}/snapshot-{'b' * 32}.pids"
 
@@ -2107,7 +2106,7 @@ def _local_shared_writer_manager(monkeypatch, tmp_path, owned_processes):
             check=False,
         )
 
-    monkeypatch.setattr(manager, "_operation_writer_uids", lambda _spec: [])
+    monkeypatch.setattr(manager, "operation_writer_uids", lambda _spec: [])
     monkeypatch.setattr(manager, "exec_capture", local_exec)
     return manager
 
@@ -2573,7 +2572,7 @@ def test_shared_writer_thaw_detects_replacement_after_exact_id_cleanup(monkeypat
         resident_slot_capacity=2,
     )
     manager = ChatSandboxManager(ContainerBackend(image="img"))
-    monkeypatch.setattr(manager, "_operation_writer_uids", lambda _spec: [])
+    monkeypatch.setattr(manager, "operation_writer_uids", lambda _spec: [])
     exact_id = "sha256:original"
     exact_checks = 0
     calls: list[tuple[list[str], dict]] = []
@@ -2597,7 +2596,7 @@ def test_shared_writer_thaw_detects_replacement_after_exact_id_cleanup(monkeypat
             )
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
-    monkeypatch.setattr(manager, "_require_exact", require_exact)
+    monkeypatch.setattr(manager.exact, "require_exact", require_exact)
     monkeypatch.setattr(manager, "exec_capture", fake_exec)
 
     with pytest.raises(RetainedChatLost, match="replacement"):
@@ -2657,7 +2656,7 @@ def test_retained_terminal_keeps_the_shell_in_the_docker_tty_process_group(
             return 0
 
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.subprocess.run",
+        "cloud_agent_host.container.chat_sandbox.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=payload, stderr=""),
     )
 
@@ -2665,7 +2664,7 @@ def test_retained_terminal_keeps_the_shell_in_the_docker_tty_process_group(
         popen_calls.append((list(argv), kwargs))
         return Process()
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.Popen", fake_popen)
 
     terminal = manager.spawn_terminal(spec, rows=31, cols=101)
     assert terminal.wait() == 0
@@ -2741,7 +2740,7 @@ def test_stale_terminal_reaper_matches_pidfile_and_wrapper_argv(monkeypatch):
             return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
         raise AssertionError(argv)
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.run", fake_run)
 
     manager.reap_stale_terminal_processes(spec)
 
@@ -2768,7 +2767,7 @@ def test_unsettled_retry_reset_targets_only_the_two_container_owned_roots(monkey
             return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
         raise AssertionError(argv)
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.run", fake_run)
 
     manager.reset_unsettled_state(spec)
 
@@ -2794,7 +2793,7 @@ def test_base_bundle_import_uses_activation_tmpfs_and_preserves_git_state(monkey
             return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
         raise AssertionError(argv)
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.run", fake_run)
     commit = "a" * 40
 
     bundle = io.BytesIO(b"bundle bytes")
@@ -2826,7 +2825,7 @@ def test_archive_import_streams_a_file_to_docker_cp(monkeypatch, tmp_path):
             return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
         raise AssertionError(argv)
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.run", fake_run)
     archive_path = tmp_path / "checkout.tar"
     archive_path.write_bytes(b"\0" * 1024)
     # Sparse, so the test asserts the timeout for a 3 GiB archive without
@@ -2918,8 +2917,8 @@ def test_killing_a_bounded_command_signals_only_its_own_process_group(monkeypatc
         clients.append(client)
         return client
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", fake_run)
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.Popen", fake_popen)
     monkeypatch.setattr(manager, "require_network", lambda *_args, **_kwargs: None)
     backend = RetainedChatBackend(manager, spec)
 
@@ -2946,7 +2945,7 @@ def test_a_backend_without_a_proof_checks_the_bridge_before_every_command(monkey
 def test_a_turn_relies_on_its_activation_proof_for_a_minute(monkeypatch):
     """The sandbox manager proved the bridge when it acquired the turn; repeating it adds nothing."""
     clock = {"now": 1000.0}
-    monkeypatch.setattr(chat_sandbox_mod, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
+    monkeypatch.setattr(retained_backend, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
     backend, checks = _proving_backend(monkeypatch, proved_at=1000.0)
 
     clock["now"] = 1000.0 + TURN_NETWORK_PROOF_S - 1
@@ -2971,7 +2970,7 @@ def test_a_turn_relies_on_its_activation_proof_for_a_minute(monkeypatch):
 def test_a_failed_check_is_no_proof(monkeypatch):
     """Fail closed: nothing runs, and the next command checks again."""
     clock = {"now": 1000.0 + TURN_NETWORK_PROOF_S}
-    monkeypatch.setattr(chat_sandbox_mod, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
+    monkeypatch.setattr(retained_backend, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
     backend, checks = _proving_backend(
         monkeypatch,
         proved_at=1000.0,
@@ -3038,8 +3037,8 @@ def test_a_peer_that_vanished_mid_reconcile_is_simply_absent(monkeypatch):
         lambda name: {"Name": name, "Containers": {"gw": {}, "gone": {}}},
     )
     monkeypatch.setattr(
-        manager,
-        "_run",
+        manager.exact,
+        "run",
         lambda argv, **_kwargs: SimpleNamespace(
             returncode=1,
             stdout=json.dumps(
@@ -3095,7 +3094,7 @@ class TestSandboxActionFacts:
         that, because it supplies the spelling the classifier wants, so this one
         drives the real ``create`` and hands the result to the real classifier.
         """
-        from cloud_agent_host.runner import _classify_startup_path
+        from cloud_agent_host.turn.shared_live_attempt import _classify_startup_path
 
         spec = _spec()
         manager = ChatSandboxManager(ContainerBackend(image="img"))
@@ -3123,8 +3122,8 @@ class TestSandboxActionFacts:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
         monkeypatch.setattr(manager, "inspect", _inspect)
-        monkeypatch.setattr(manager, "_verify_identity", lambda *_args: None)
-        monkeypatch.setattr(manager, "_run", _run)
+        monkeypatch.setattr(manager.exact, "verify_identity", lambda *_args: None)
+        monkeypatch.setattr(manager.exact, "run", _run)
 
         facts = SandboxActionFacts()
         manager.create(spec, facts=facts)

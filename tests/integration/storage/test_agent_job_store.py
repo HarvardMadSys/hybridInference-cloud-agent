@@ -615,7 +615,7 @@ async def test_reaped_fork_does_not_poison_the_surviving_member_manifest(
     pool, store: Storage, next_action: str, claim_coordinator: bool
 ):
     """A failed hidden child remains history but cannot occupy the host manifest."""
-    from cloud_agent_host.runner import _shared_group_manifest
+    from cloud_agent_host.turn.shared_live_attempt import _shared_group_manifest
     from cloud_agent_shared.sandbox_manager_wire import SharedMember
 
     job, claim, sandbox = await _reserve_shared_chat(store)

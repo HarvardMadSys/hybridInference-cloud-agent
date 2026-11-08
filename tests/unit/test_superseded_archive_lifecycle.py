@@ -1,7 +1,7 @@
 """A left-behind container's removal, through the archive lifecycle that stopped it.
 
 Release asks a Host's Sandbox Manager for its containers, then discards the
-stopped ones the control plane proved superseded (``_remove_superseded``).
+stopped ones the control plane proved superseded (``ComputeRetirement.remove_superseded``).
 These tests run that exchange against the real Sandbox Manager app, the real
 shared supervisor, archive controller and service, checkpoint capture, and
 deletion receipts. Only Docker and S3 are stand-ins: the supervisor fakes'
@@ -32,24 +32,35 @@ from tests.unit.test_sandbox_archives import _Uploader
 from tests.unit.test_sandbox_checkpoints import BASE, NEW, _FakeDocker, _Image
 from tests.unit.test_shared_session_supervisor import _FinalMarkerManager, _members
 
-from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_client import (
+    SandboxManagerClient,
+    SandboxManagerError,
+)
 from cloud_agent.storage._sql.hosts import superseded_removal_request_id
-from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec, ChatSandboxStatus
-from cloud_agent_host.sandbox import ProcessBackend, SandboxError
-from cloud_agent_host.sandbox_archive_runtime import SandboxArchiveController
-from cloud_agent_host.sandbox_archive_s3 import (
+from cloud_agent_host.archive.sandbox_archive_runtime import SandboxArchiveController
+from cloud_agent_host.archive.sandbox_archive_s3 import (
     SandboxArchiveReceipt,
     SandboxArchiveS3Config,
     SandboxArchiveS3Uploader,
     checkpoint_object_key,
     lifecycle_object_key,
 )
-from cloud_agent_host.sandbox_archives import SandboxArchiveService
-from cloud_agent_host.sandbox_checkpoints import SandboxCheckpointCapture, SandboxCheckpointStore
-from cloud_agent_host.sandbox_deletion_backup import SandboxDeletionBackupService
+from cloud_agent_host.archive.sandbox_archives import SandboxArchiveService
+from cloud_agent_host.archive.sandbox_checkpoints import (
+    SandboxCheckpointCapture,
+    SandboxCheckpointStore,
+)
+from cloud_agent_host.archive.sandbox_deletion_backup import SandboxDeletionBackupService
+from cloud_agent_host.container.chat_sandbox import (
+    ChatSandboxManager,
+    ChatSandboxSpec,
+    ChatSandboxStatus,
+)
+from cloud_agent_host.container.sandbox import ProcessBackend, SandboxError
 from cloud_agent_host.sandbox_manager import create_app
 from cloud_agent_host.session_lifecycle import SessionLeaseLost
-from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+from cloud_agent_host.supervisor.group_archive_policy import ControllerArchivePolicy
+from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_shared.sandbox_archive_settings import SandboxArchivePolicy
 
 _TOKEN = "host-secret"
@@ -264,11 +275,8 @@ def _host(tmp_path, docker: _Docker, bucket: _Bucket) -> _Host:
         # The test sweeps itself; the background sweep never comes round.
         sweep_interval_s=3_600,
         clock=lambda: now[0],
-        stopped_archive_prepare_hook=controller.prepare_final,
-        stopped_archive_hook=controller.queue_final,
+        archive_policy=ControllerArchivePolicy(controller),
     )
-    capture.start_seq_for = supervisor.start_seq_for
-    supervisor.checkpoint_seq_for = capture.receipt_start_seq
     app = create_app(
         token=_TOKEN,
         backend=ProcessBackend(),

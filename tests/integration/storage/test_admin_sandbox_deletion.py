@@ -1,8 +1,8 @@
 """Real Postgres safety fences and ledger retention for archive-before-delete."""
 
 import asyncio
+import json
 
-import asyncpg
 import pytest
 from tests.integration.storage.test_admin_sandbox_queries import archive_request, member, seed
 from tests.integration.storage.test_agent_job_store import (
@@ -17,7 +17,7 @@ from tests.support.follow_ups import append_follow_up
 from tests.support.migrations import apply_migrations, downgrade_to
 from tests.support.usage import START
 
-from cloud_agent.storage.repositories.sandbox import _DELETION_RETRY_EXHAUSTION_BATCH
+from cloud_agent.storage.repositories.sandbox.admin_deletion import _DELETION_RETRY_EXHAUSTION_BATCH
 from cloud_agent.workers import sandbox_deletion
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -43,6 +43,19 @@ async def request_delete(store, sandbox_id, **overrides):
             | overrides
         )
     )
+
+
+async def final_result(conn, sandbox_request="agent.sandbox.delete.requested"):
+    """The final result the worker reported against the newest deletion request."""
+    row = await conn.fetchrow(
+        "SELECT r.outcome, r.reported_by, r.details FROM agent_admin_audit_outcomes r "
+        "JOIN agent_admin_audit_log l ON l.id = r.event_id "
+        "WHERE l.action = $1 ORDER BY l.id DESC LIMIT 1",
+        sandbox_request,
+    )
+    if row is None:
+        return None
+    return row["outcome"], row["reported_by"], json.loads(row["details"])
 
 
 def worker_fence(claim):
@@ -89,10 +102,10 @@ async def test_discard_deletes_without_an_archive_receipt(db, store):
     assert native is not None and native["native_state"] == "lost"
     async with db.acquire() as conn:
         actions = await conn.fetch("SELECT action FROM agent_admin_audit_log ORDER BY id")
-    assert [row["action"] for row in actions] == [
-        "agent.sandbox.delete.requested",
-        "agent.sandbox.delete.discarded",
-    ]
+        result = await final_result(conn)
+    # The administrator's request is the row; the worker reports its result.
+    assert [row["action"] for row in actions] == ["agent.sandbox.delete.requested"]
+    assert result == ("applied", "sandbox-deletion-worker", {"discarded": True})
 
 
 async def test_deletion_requires_verified_archive_and_retains_native_and_job_ledger(db, store):
@@ -127,12 +140,11 @@ async def test_deletion_requires_verified_archive_and_retains_native_and_job_led
             == "failed"
         )
         logs = await conn.fetch("SELECT action, actor_id FROM agent_admin_audit_log ORDER BY id")
-    assert [row["action"] for row in logs] == [
-        "agent.sandbox.delete.requested",
-        "agent.sandbox.delete.archived",
-        "agent.sandbox.delete.completed",
-    ]
+        result = await final_result(conn)
+    # Requested twice, recorded once; the steps stay in the sandbox's trajectory.
+    assert [row["action"] for row in logs] == ["agent.sandbox.delete.requested"]
     assert logs[0]["actor_id"] == "admin:operator"
+    assert result == ("applied", "sandbox-deletion-worker", {"archive_key": ARCHIVE_URI})
     assert await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600) is None
     assert await archive_request(store, "asbx_delete", archived=False) == "accepted"
     assert await archive_request(store, "asbx_delete", archived=True) == "accepted"
@@ -292,7 +304,8 @@ async def test_broker_confirmed_force_delete_keeps_all_busy_fences(db, store):
     assert detail.sandbox.state == "running" and detail.sandbox.deletion_state == "none"
 
 
-async def test_force_delete_audit_failure_rolls_back_repair_and_deletion_fence(db, store):
+async def test_a_force_delete_whose_audit_fails_still_repairs_and_fences(db, store):
+    """Recording never fails the action: the repair and the fence commit, the miss is counted."""
     origin = await seed(db, store, "asbx_force_audit", state="running")
     await member(db, "asbx_force_audit", origin, 0)
     async with db.acquire() as conn:
@@ -301,24 +314,33 @@ async def test_force_delete_audit_failure_rolls_back_repair_and_deletion_fence(d
             "CHECK (action <> 'agent.sandbox.delete.requested')"
         )
     try:
-        with pytest.raises(asyncpg.CheckViolationError):
+        assert (
             await request_delete(
                 store,
                 "asbx_force_audit",
                 sandbox_manager_confirmed_stopped=True,
                 confirmed_docker_status="stopped",
             )
+            == "accepted"
+        )
         detail = await store.admin_sandboxes.detail("asbx_force_audit")
         assert detail is not None
-        assert detail.sandbox.state == "running" and detail.sandbox.deletion_state == "none"
+        assert detail.sandbox.state == "stopped" and detail.sandbox.deletion_state == "pending"
         async with db.acquire() as conn:
             assert (
                 await conn.fetchval(
                     "SELECT resident_state FROM agent_thread_sandbox_memberships "
                     "WHERE sandbox_id='asbx_force_audit'"
                 )
-                == "starting"
+                == "stopped"
             )
+            assert await conn.fetchval("SELECT count(*) FROM agent_admin_audit_log") == 0
+            failures = await conn.fetch(
+                "SELECT action, error FROM agent_admin_audit_write_failures"
+            )
+            assert [tuple(row) for row in failures] == [
+                ("agent.sandbox.delete.requested", "CheckViolationError")
+            ]
     finally:
         async with db.acquire() as conn:
             await conn.execute(
@@ -489,6 +511,9 @@ async def test_safe_prearchive_failure_preserves_native_resume(db, store):
     detail = await store.admin_sandboxes.detail("asbx_failed")
     assert detail is not None and detail.sandbox.deletion_state == "failed"
     assert detail.sandbox.deletion_retry_exhausted_at is None
+    async with db.acquire() as conn:
+        # Not retained, so nothing runs again: the request has failed.
+        assert await final_result(conn) == ("failed", "sandbox-deletion-worker", {})
     assert await store.sandbox.thread_workspace_ready(thread_id=origin["thread_id"])
     assert await request_delete(store, "asbx_failed") == "accepted"
     replacement = await store.admin_sandboxes.detail("asbx_failed")
@@ -878,6 +903,14 @@ async def test_nontransient_failure_stops_retries_and_preserves_archive(
     assert retry is not None
     assert retry["deletion_request_id"] == claim["deletion_request_id"]
     assert retry["deletion_archive_key"] == ARCHIVE_URI
+
+    # The request keeps the failure that stopped it; the resumption gets its own result.
+    assert await store.sandbox.complete_admin_sandbox_deletion(**worker_fence(retry))
+    async with db.acquire() as conn:
+        requested = await final_result(conn)
+        resumed_result = await final_result(conn, "agent.sandbox.delete.retry_resumed")
+    assert requested == ("failed", "sandbox-deletion-worker", {})
+    assert resumed_result == ("applied", "sandbox-deletion-worker", {"archive_key": ARCHIVE_URI})
 
 
 async def test_automatic_retry_budget_exhaustion_preserves_receipt_and_resumes_same_request(
@@ -1294,8 +1327,7 @@ async def test_retry_exhaustion_is_batched_and_concurrent_passes_do_not_duplicat
             )
             assert (
                 await conn.fetchval(
-                    "SELECT COUNT(*) FROM agent_admin_audit_log "
-                    "WHERE action='agent.sandbox.delete.retry_exhausted'"
+                    "SELECT COUNT(*) FROM agent_admin_audit_outcomes WHERE outcome='failed'"
                 )
                 == _DELETION_RETRY_EXHAUSTION_BATCH
             )
@@ -1340,12 +1372,14 @@ async def test_retry_exhaustion_is_batched_and_concurrent_passes_do_not_duplicat
             )
     assert await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600) is None
     async with db.acquire() as conn:
+        # Each exhausted request's result is "failed" once, against its request.
         events = await conn.fetch(
             """
-            SELECT details->>'sandbox_id' AS sandbox_id, COUNT(*) AS count
-            FROM agent_admin_audit_log
-            WHERE action='agent.sandbox.delete.retry_exhausted'
-            GROUP BY details->>'sandbox_id'
+            SELECT l.details->>'sandbox_id' AS sandbox_id, COUNT(*) AS count
+            FROM agent_admin_audit_outcomes r
+            JOIN agent_admin_audit_log l ON l.id = r.event_id
+            WHERE r.outcome = 'failed'
+            GROUP BY l.details->>'sandbox_id'
             """
         )
     assert {row["sandbox_id"]: int(row["count"]) for row in events} == dict.fromkeys(
@@ -1374,40 +1408,39 @@ async def test_retry_window_expiry_is_durable_and_keeps_archive_receipt(db, stor
     assert detail.sandbox.deletion_archive_key == ARCHIVE_URI
 
 
-@pytest.mark.parametrize("transition", ["requested", "archived", "completed"])
-async def test_deletion_audit_failure_rolls_back_each_durable_transition(db, store, transition):
+@pytest.mark.parametrize("transition", ["requested", "completed"])
+async def test_a_record_that_cannot_be_written_never_stops_the_transition(db, store, transition):
+    """The request's row and the worker's result are both best effort."""
     await seed(db, store, "asbx_audit", state="stopped")
     claim = None
-    if transition != "requested":
+    if transition == "completed":
         assert await request_delete(store, "asbx_audit") == "accepted"
         claim = await store.sandbox.claim_due_admin_sandbox_deletion(ttl_seconds=3600)
         assert claim is not None
-    if transition == "completed":
         assert await checkpoint_archive(store, claim)
+    table, check = (
+        ("agent_admin_audit_log", "action <> 'agent.sandbox.delete.requested'")
+        if transition == "requested"
+        else ("agent_admin_audit_outcomes", "outcome <> 'applied'")
+    )
     async with db.acquire() as conn:
         await conn.execute(
-            "ALTER TABLE agent_admin_audit_log ADD CONSTRAINT reject_deletion_audit "
-            f"CHECK (action <> 'agent.sandbox.delete.{transition}')"
+            f"ALTER TABLE {table} ADD CONSTRAINT reject_deletion_audit CHECK ({check})"
         )
     try:
-        with pytest.raises(asyncpg.CheckViolationError):
-            if transition == "requested":
-                await request_delete(store, "asbx_audit")
-            elif transition == "archived":
-                await checkpoint_archive(store, claim)
-            else:
-                await store.sandbox.complete_admin_sandbox_deletion(**worker_fence(claim))
+        if transition == "requested":
+            assert await request_delete(store, "asbx_audit") == "accepted"
+        else:
+            assert await store.sandbox.complete_admin_sandbox_deletion(**worker_fence(claim))
         detail = await store.admin_sandboxes.detail("asbx_audit")
-        assert detail is not None and detail.sandbox.state == "stopped"
+        assert detail is not None
         assert (
             detail.sandbox.deletion_state
-            == {"requested": "none", "archived": "pending", "completed": "archived"}[transition]
+            == {"requested": "pending", "completed": "deleted"}[transition]
         )
     finally:
         async with db.acquire() as conn:
-            await conn.execute(
-                "ALTER TABLE agent_admin_audit_log DROP CONSTRAINT reject_deletion_audit"
-            )
+            await conn.execute(f"ALTER TABLE {table} DROP CONSTRAINT reject_deletion_audit")
 
 
 async def settled_group(db, store):

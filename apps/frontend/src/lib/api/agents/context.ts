@@ -185,32 +185,18 @@ export interface SessionTokensApi {
   reported_by: string;
 }
 
-export type TimingKind =
-  | 'ttft'
-  | 'reasoning'
-  | 'text'
-  | 'toolarg'
-  | 'gen'
-  | 'tools'
-  | 'unsplit'
-  | 'other';
+export type TimingKind = 'reasoning' | 'text' | 'toolarg' | 'tools' | 'unsplit';
 
 /** Where the executions' time went (GET …/thread/context/timing). */
 export interface ThreadTimingApi {
   active_ms: number;
   totals: Record<TimingKind, number>;
   executions: number;
-  executions_split: number;
-  model_requests: number;
   tool_calls: number;
   tool_calls_unpaired: number;
   blocks: Record<string, number>;
-  output_tps: number | null;
-  gateway: 'available' | 'partial' | 'unavailable' | 'not_recorded';
-  gateway_reason: string | null;
   segments: { kind: TimingKind; start_ms: number; end_ms: number }[];
   segments_merged: boolean;
-  requests: { response_id: string; ttft_ms: number | null; latency_ms: number | null }[];
 }
 
 /** The items requests carried, keyed by stored event (GET …/thread/context/dna). */
@@ -348,6 +334,30 @@ export interface ReconstructedCompositionApi {
   events_capped: boolean;
 }
 
+/**
+ * What the request's attempt sent ahead of the conversation, as the member's
+ * request meter measured it: the system prompt and each tool schema, by size
+ * only (estimates). Absent for a turn from before the meter.
+ */
+export interface MeasuredPrefixApi {
+  source: 'member_request_meter';
+  token_basis: string;
+  event_id: number | null;
+  protocol: string | null;
+  mode: string | null;
+  system_chars: number;
+  system_tokens: number;
+  system_parts: number;
+  tool_count: number;
+  tool_chars: number;
+  tool_tokens: number;
+  /** The largest tool schemas, by name. */
+  tools: { label: string; chars: number; tokens: number }[];
+  tools_omitted: number;
+  /** Other prefixes the attempt's requests sent: delegated agents', a title's. */
+  other_prefixes: number;
+}
+
 export interface RequestCompositionApi {
   thread_id: string;
   request: ContextPointApi;
@@ -360,6 +370,7 @@ export interface RequestCompositionApi {
     compacted_since: boolean;
   } | null;
   native_status: string;
+  prefix?: MeasuredPrefixApi | null;
   reconstructed: ReconstructedCompositionApi;
 }
 

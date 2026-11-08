@@ -7,7 +7,8 @@ from typing import Any
 
 import pytest
 
-from cloud_agent import deployment_setup, settings
+from cloud_agent import settings
+from cloud_agent.deployment import deployment_setup
 from cloud_agent.settings import SettingsEncryptionError
 
 ROOT = "sentinel-dedicated-root-key-of-32-bytes"

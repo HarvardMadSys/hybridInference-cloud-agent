@@ -6,7 +6,14 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
-from cloud_agent.admin_database import (
+from cloud_agent.api.deps import (
+    get_client_ip,
+    get_storage,
+    log_admin_action,
+    require_store,
+    verify_admin_access,
+)
+from cloud_agent.schemas.admin_database import (
     REVIEWED_TABLES,
     DatabaseQuery,
     DatabaseQueryInvalid,
@@ -15,17 +22,10 @@ from cloud_agent.admin_database import (
     DatabaseQueryUnavailable,
     DatabaseTables,
 )
-from cloud_agent.api.deps import (
-    get_client_ip,
-    get_storage,
-    log_admin_action,
-    require_store,
-    verify_admin_access,
-)
 
 if TYPE_CHECKING:
     from cloud_agent.ports import AuditRepository
-    from cloud_agent.storage.admin_database_queries import AdminDatabaseQueries
+    from cloud_agent.ports.admin_queries import AdminDatabaseQueries
 
 
 class _Storage(Protocol):

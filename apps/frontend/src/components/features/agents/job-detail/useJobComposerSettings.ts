@@ -3,17 +3,17 @@
 import { useT } from '@/components/providers';
 import { type AgentConfigApi, type AgentJobApi } from '@/lib/api/agents';
 import { useEffect, useMemo, useState } from 'react';
-import type { InheritedModel } from '../ConversationComposer';
-import { effortFits, effortOffer } from '../effort';
+import type { InheritedModel } from '../composer/ConversationComposer';
+import { effortFits, effortOffer } from '../composer/effort';
 import {
   choiceLabel,
   isModelUnavailable,
   turnChoice,
   turnModelPicker,
   type ModelChoice,
-} from '../modelSource';
+} from '../composer/modelSource';
 import type { AgentJob } from '../types';
-import { useComposerConfig } from '../useComposerConfig';
+import { useComposerConfig } from '../composer/useComposerConfig';
 
 /**
  * What a follow-up inherits when it names nothing: the thread's newest turn as

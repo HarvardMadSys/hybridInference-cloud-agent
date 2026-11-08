@@ -36,6 +36,19 @@ class PasswordLogin:
 
 
 @dataclass(frozen=True)
+class ImportedIdentity:
+    """One normalized sign-in identifier of an account copied from another service.
+
+    ``verified`` means the other service proved it; it is recorded as the
+    operator's, who vouched for the copy.
+    """
+
+    kind: IdentifierKind
+    value: str
+    verified: bool
+
+
+@dataclass(frozen=True)
 class SessionOwner:
     """The account a live session belongs to."""
 
@@ -246,6 +259,18 @@ class LocalAccountRepository(AccountBroadcasts, AccountTeams, Protocol):
         purpose: str | None,
     ) -> bool:
         """Create an account proven by a phone code; ``False`` if the number is taken."""
+        ...
+
+    async def import_account(
+        self,
+        *,
+        account_id: str,
+        identities: list[ImportedIdentity],
+        password_hash: str | None,
+        user_name: str | None,
+        actor_id: str,
+    ) -> bool:
+        """Create an approved, imported account; ``False`` if any of its identifiers is taken."""
         ...
 
     async def password_login(self, email_normalized: str) -> PasswordLogin | None:
@@ -624,6 +649,7 @@ __all__ = [
     "EmailTokenPurpose",
     "ErasureResult",
     "IdentifierKind",
+    "ImportedIdentity",
     "LocalAccountRepository",
     "OwnerWorkTermination",
     "PasswordLogin",

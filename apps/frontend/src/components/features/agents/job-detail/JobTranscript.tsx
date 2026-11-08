@@ -2,7 +2,7 @@
 
 import { useT } from '@/components/providers';
 import { memo, useCallback, useRef, type ComponentProps, type ReactNode } from 'react';
-import { AttemptTurnFooter } from '../AttemptTurnFooter';
+import { AttemptTurnFooter } from '../conversation/AttemptTurnFooter';
 import {
   CopyIcon,
   copyMessage,
@@ -14,12 +14,19 @@ import {
   MessageContent,
   RewindIcon,
   ThreadTurn,
-} from '../ChatMessages';
+} from '../conversation/ChatMessages';
 import { ownerRunNote } from '../conversationJob';
-import { messageBlockKey, type ConversationTurnDescription } from '../conversationTurnNavigation';
-import type { RecordedFileSelection, RecordedTurnOutputs } from '../recordedTurnOutputs';
-import type { TranscriptPresentation } from '../transcriptPresentation';
-import { TurnDeliverables } from '../TurnDeliverables';
+import {
+  messageBlockKey,
+  type ConversationTurnDescription,
+} from '../conversation/conversationTurnNavigation';
+import type {
+  RecordedFileSelection,
+  RecordedTurnOutputs,
+} from '../conversation/recordedTurnOutputs';
+import type { TranscriptPresentation } from '../conversation/transcriptPresentation';
+import { TurnDeliverables } from '../conversation/TurnDeliverables';
+import { TurnScreenshots } from '../conversation/TurnScreenshots';
 import type { AgentEvent, AgentJob } from '../types';
 import { OutcomeCard } from './RunOutcome';
 import type { JobDetailPanels } from './useJobDetailPanels';
@@ -28,20 +35,35 @@ import type { JobDetailPanels } from './useJobDetailPanels';
 function StoredTurnView({
   outputs,
   onOpenFile,
+  threadId,
   ...props
 }: Omit<ComponentProps<typeof HistoryTurn>, 'results'> & {
   outputs?: RecordedTurnOutputs | null;
   onOpenFile: (selection: RecordedFileSelection) => void;
+  /** The conversation, so every turn shares one listing of its images. */
+  threadId?: string;
 }) {
+  const { turn } = props;
   return (
     <HistoryTurn
       {...props}
       results={
-        <TurnDeliverables
-          job={{ id: props.turn.jobId, state: props.turn.state }}
-          outputs={outputs}
-          onOpenFile={onOpenFile}
-        />
+        <>
+          <TurnDeliverables
+            job={{ id: turn.jobId, state: turn.state }}
+            outputs={outputs}
+            onOpenFile={onOpenFile}
+          />
+          <TurnScreenshots
+            job={{
+              id: turn.jobId,
+              threadId,
+              state: turn.state,
+              startedAt: turn.startedAt,
+              finishedAt: turn.finishedAt,
+            }}
+          />
+        </>
       }
     />
   );
@@ -148,6 +170,7 @@ export function JobTranscript({
             onInspectEvent={hasStoredEvents ? inspectStoredEvent : undefined}
             outputs={recordedOutputs.get(turn.jobId)}
             onOpenFile={openStoredFile}
+            threadId={job.threadId}
             showActivityDetails={false}
             rewindAnchorJobId={rewindAnchorJobId}
             busy={forking}
@@ -318,11 +341,14 @@ export function JobTranscript({
 
         <AttemptTurnFooter job={job} attemptNo={attemptNo} />
         {selectedAttemptIsCurrent ? (
-          <TurnDeliverables
-            job={job}
-            outputs={recordedOutputs.get(job.id)}
-            onOpenFile={openRecordedFile}
-          />
+          <>
+            <TurnDeliverables
+              job={job}
+              outputs={recordedOutputs.get(job.id)}
+              onOpenFile={openRecordedFile}
+            />
+            <TurnScreenshots job={job} />
+          </>
         ) : null}
 
         {/* The inspector's Run details open on the turn the reader

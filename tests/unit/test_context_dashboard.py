@@ -11,13 +11,13 @@ from itertools import pairwise
 from types import SimpleNamespace
 from typing import Any
 
-from cloud_agent.context_dashboard import session_tokens, step_durations
-from cloud_agent.context_dna import bands_for, item_key, prepare_rows
-from cloud_agent.context_profile import ContextProfileAccumulator
-from cloud_agent.context_request import RequestScope, walk_composition
-from cloud_agent.context_running import POINT_CATEGORIES, bound_intervals, merge_intervals
-from cloud_agent.context_timing import assemble_timing
-from cloud_agent.context_view import assemble_thread_context
+from cloud_agent.context.context_dashboard import session_tokens, step_durations
+from cloud_agent.context.context_dna import bands_for, item_key, prepare_rows
+from cloud_agent.context.context_profile import ContextProfileAccumulator
+from cloud_agent.context.context_request import RequestScope, walk_composition
+from cloud_agent.context.context_running import POINT_CATEGORIES, bound_intervals, merge_intervals
+from cloud_agent.context.context_timing import assemble_timing
+from cloud_agent.context.context_view import assemble_thread_context
 
 T0 = datetime(2026, 10, 30, 9, tzinfo=UTC)
 CAT = {key: index for index, key in enumerate(POINT_CATEGORIES)}
@@ -238,7 +238,7 @@ def _timing_profile(rows) -> dict[str, Any]:
     return _profile(rows)
 
 
-def test_parallel_tools_unpaired_calls_and_no_gateway():
+def test_parallel_tools_unpaired_calls_and_unsplit_model_time():
     profile = _timing_profile(
         _events(
             ("lifecycle", {"phase": "init"}, 0),
@@ -250,20 +250,16 @@ def test_parallel_tools_unpaired_calls_and_no_gateway():
             ("message", {}, 40),
         )
     )
-    timing = assemble_timing(
-        [{"attempt_id": 1, "profile": profile}], [], gateway_gap=None, gateway_started=0
-    )
+    timing = assemble_timing([{"attempt_id": 1, "profile": profile}])
     assert timing.active_ms == 40_000
     assert timing.totals["tools"] == 15_000  # 10..25 once, not 10 + 13
     assert timing.totals["unsplit"] == 25_000  # model and harness, not split
-    assert timing.totals["ttft"] == 0 and timing.totals["other"] == 0
     assert timing.tool_calls == 3 and timing.tool_calls_unpaired == 1
-    assert timing.gateway == "not_recorded"
     assert sum(timing.totals.values()) == timing.active_ms
 
 
-def test_gateway_requests_split_model_time_and_tools_never_overlap_it():
-    profile = _timing_profile(
+def test_streamed_blocks_divide_the_unsplit_time_and_retries_wait_for_no_one():
+    first = _timing_profile(
         _events(
             ("lifecycle", {"phase": "init"}, 0),
             ("tool_use", {"tool_id": "task"}, 10),
@@ -272,66 +268,21 @@ def test_gateway_requests_split_model_time_and_tools_never_overlap_it():
             ("message", {}, 40),
         )
     )
-
-    def request(request_id: str, start: int, ttft: int, latency: int, out: int):
-        return SimpleNamespace(
-            request_id=request_id,
-            response_id=f"msg_{request_id}",
-            request_started_at=T0 + timedelta(seconds=start),
-            ttft_ms=ttft,
-            latency_ms=latency,
-            status_code=200,
-            tokens_out=out,
-        )
-
-    page = SimpleNamespace(
-        requests=[
-            request("r1", 1, 1000, 9000, 90),  # 1..10 s
-            request("r2", 15, 2000, 5000, 30),  # inside the task window: model wins
-            request("r2", 15, 2000, 5000, 30),  # a duplicate row is one request
-            request("failed", 31, 100, 200, 0),
-        ],
-        next_cursor=None,
-    )
-    page.requests[3].status_code = 500
+    retry = _timing_profile(_events(("message", {}, 100), ("message", {}, 130)))
     timing = assemble_timing(
-        [{"attempt_id": 1, "profile": profile}],
-        [({"attempt_id": 1}, page)],
-        gateway_gap=None,
-        gateway_started=1,
+        [{"attempt_id": 1, "profile": first}, {"attempt_id": 2, "profile": retry}]
     )
     totals = timing.totals
-    assert timing.model_requests == 2
-    assert totals["ttft"] == 3_000
-    # Generation 8 s + 3 s, of which the streamed answer block took 4 s.
-    assert totals["text"] == 4_000 and totals["gen"] == 7_000
-    assert totals["tools"] == 20_000 - 5_000  # the task window minus model time in it
-    assert totals["other"] == 40_000 - 3_000 - 11_000 - 15_000
+    # The retry's wait between 40 s and 100 s is no one's.
+    assert timing.active_ms == 40_000 + 30_000
+    assert totals["tools"] == 20_000
+    assert totals["text"] == 4_000
+    assert totals["unsplit"] == 70_000 - 20_000 - 4_000
     assert sum(totals.values()) == timing.active_ms
-    assert timing.gateway == "available"
-    assert timing.output_tps == (90 + 30) / 11
-    assert {r.response_id for r in timing.requests} == {"msg_r1", "msg_r2"}
     kinds = [segment.kind for segment in timing.segments]
-    assert kinds[0] == "other" and "ttft" in kinds
+    assert kinds == ["unsplit", "tools", "unsplit", "unsplit"]  # executions never join
+    assert timing.blocks == {"reasoning": 0, "text": 1, "toolarg": 0}
     assert all(a.end_ms <= b.start_ms for a, b in pairwise(timing.segments))
-
-
-def test_an_execution_the_gateway_did_not_cover_stays_unsplit():
-    covered = _timing_profile(_events(("message", {}, 0), ("message", {}, 10)))
-    uncovered = _timing_profile(_events(("message", {}, 100), ("message", {}, 130)))
-    timing = assemble_timing(
-        [
-            {"attempt_id": 1, "profile": covered},
-            {"attempt_id": 2, "profile": uncovered},
-        ],
-        [({"attempt_id": 1}, SimpleNamespace(requests=[], next_cursor=None))],
-        gateway_gap="sources_truncated",
-        gateway_started=2,
-    )
-    assert timing.gateway == "partial" and timing.executions_split == 1
-    # The retry's wait between 10 s and 100 s is no one's.
-    assert timing.active_ms == 40_000
-    assert timing.totals["other"] == 10_000 and timing.totals["unsplit"] == 30_000
 
 
 def test_dna_bands_select_exactly_what_the_composition_walk_carries():

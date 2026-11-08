@@ -331,12 +331,20 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
         </h1>
         <AdminNavigation current="sandboxes" />
         <div className="mt-6 flex flex-wrap items-center justify-between gap-4">
-          <Link
-            href="/admin/sandboxes"
-            className="text-sm text-crimson hover:underline dark:text-crimson-light"
-          >
-            ← All sandboxes
-          </Link>
+          <span className="flex flex-wrap items-center gap-4">
+            <Link
+              href="/admin/sandboxes"
+              className="text-sm text-crimson hover:underline dark:text-crimson-light"
+            >
+              ← All sandboxes
+            </Link>
+            <Link
+              href={`/admin/audit?${new URLSearchParams({ target_type: 'sandbox', target_id: sandboxId }).toString()}`}
+              className="text-sm text-muted hover:underline"
+            >
+              Audit history
+            </Link>
+          </span>
           <button
             type="button"
             className={BUTTON}

@@ -43,14 +43,14 @@ import re
 import threading
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent_host.chat_sandbox import MEMBER_TMPFS_ROOT
-from cloud_agent_host.chat_sandbox_models import MEMBER_UID_BASE
+from cloud_agent_host.container.chat_sandbox import MEMBER_TMPFS_ROOT
+from cloud_agent_host.container.chat_sandbox_models import MEMBER_UID_BASE
 from cloud_agent_shared.errors import SandboxError
 from cloud_agent_shared.ssh_access import HOST_KEY_ALGORITHMS
 
 if TYPE_CHECKING:
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager
-    from cloud_agent_host.chat_sandbox_models import ChatSandboxSpec
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
+    from cloud_agent_host.container.chat_sandbox_models import ChatSandboxSpec
     from cloud_agent_shared.ssh_access import SshAccess, SshServerAccess
 
 #: Root-owned, in a directory members cannot write, outside every member tmpfs.

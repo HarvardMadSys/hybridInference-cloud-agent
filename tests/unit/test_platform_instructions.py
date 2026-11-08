@@ -10,9 +10,18 @@ from pathlib import Path
 
 import pytest
 
-from cloud_agent_host.platform_instructions import with_platform_instructions
+from cloud_agent_host.runtimes.live import member_launch
 
 REPO = Path(__file__).resolve().parents[2]
+
+
+def with_platform_instructions(
+    runtime_id: str, argv: list[str], env: dict[str, str], instructions: str
+) -> tuple[list[str], dict[str, str]]:
+    """The runtime's own placement, as the transport factory calls it."""
+    return member_launch(runtime_id).with_platform_instructions(argv, env, instructions)
+
+
 _TEXT = 'Open the PR yourself.\nUse `gh api` and "REST".'
 
 
@@ -89,3 +98,32 @@ def test_the_wrapper_lists_the_instructions_file_in_the_config_it_writes(tmp_pat
     # A later run without instructions leaves neither the entry nor the file.
     assert "instructions" not in run({})
     assert not Path(listed).exists()
+
+
+def test_the_instructions_say_facts_and_no_way_of_working():
+    """How to work, and how to open a pull request, is the user's and the repository's to say."""
+    from types import SimpleNamespace
+
+    from cloud_agent_host.platform_instructions import platform_instructions
+
+    launch = SimpleNamespace(
+        github_credential="agh.placeholder", github_repo="owner/repo", git_coauthor="Bot <b@x>"
+    )
+    text = platform_instructions(launch, coauthor_trailer=True)
+
+    assert "a checkout of `owner/repo`" in text
+    assert "`Co-Authored-By: Bot <b@x>`" in text
+    assert "gh api repos/owner/repo/pulls -f title=" in text
+    assert "Deleting branches and pushing tags are refused" in text
+    for policy in (
+        "open it yourself",
+        "do not ask",
+        "use a button",
+        "as a draft unless",
+        "never push to the default branch",
+        "Read the repository's own instructions",
+        "-F draft=true -f body",
+    ):
+        assert policy not in text
+    without_repo = SimpleNamespace(github_credential=None, github_repo="o/r", git_coauthor=None)
+    assert platform_instructions(without_repo, coauthor_trailer=True) == ""

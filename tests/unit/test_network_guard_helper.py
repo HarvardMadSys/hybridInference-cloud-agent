@@ -40,14 +40,15 @@ from tests.unit.test_network_guard import (
     _update,
 )
 
-from cloud_agent_host import network_guard, network_guard_helper
-from cloud_agent_host.network_guard import (
+from cloud_agent_host.network import network_guard, network_guard_helper
+from cloud_agent_host.network.network_guard import (
     _NFT_BATCH,
     _NFT_SERVE,
     HostNetworkGuard,
     NetworkGuardError,
 )
-from cloud_agent_host.network_guard_helper import LongLivedHelper, serve_program
+from cloud_agent_host.network.network_guard_helper import LongLivedHelper, serve_program
+from cloud_agent_host.service import host_service
 from cloud_agent_shared.egress import render_ruleset
 
 if TYPE_CHECKING:
@@ -316,8 +317,8 @@ def test_a_helper_left_behind_is_stopped_when_its_object_is_collected(tmp_path) 
 #: must be reaped before the interpreter exits, not left to the parent.
 _GUARD_PROCESS = """\
 import json, subprocess, sys, time
-from cloud_agent_host.network_guard import _NFT_BATCH
-from cloud_agent_host.network_guard_helper import LongLivedHelper, serve_program
+from cloud_agent_host.network.network_guard import _NFT_BATCH
+from cloud_agent_host.network.network_guard_helper import LongLivedHelper, serve_program
 
 program = serve_program(_NFT_BATCH, idle_s=600)
 
@@ -1686,7 +1687,7 @@ _BACKEND_ENV = {**_ENV, "AGENT_SANDBOX_BACKEND": "container", "AGENT_SANDBOX_IMA
 
 def test_only_a_backend_built_to_keep_one_gives_its_guard_a_long_lived_helper() -> None:
     """A turn's own process builds its backend plainly, so its guard runs disposable helpers."""
-    from cloud_agent_host.sandbox import ContainerBackend, build_backend_from_env
+    from cloud_agent_host.container.sandbox import ContainerBackend, build_backend_from_env
 
     plain = build_backend_from_env(dict(_BACKEND_ENV))
     kept = build_backend_from_env(dict(_BACKEND_ENV), keep_network_helper=True)
@@ -1710,14 +1711,14 @@ def _builder(calls: list[dict[str, Any]]) -> Callable[..., Any]:
 
 def test_the_runners_host_service_and_the_sandbox_manager_keep_one(monkeypatch) -> None:
     """They outlive their steps; a turn's child, which the host service starts, does not."""
-    from cloud_agent_host import runner as runner_mod, sandbox_manager
+    from cloud_agent_host import sandbox_manager
 
     calls: list[dict[str, Any]] = []
-    monkeypatch.setattr(runner_mod, "build_backend_from_env", _builder(calls))
+    monkeypatch.setattr(host_service, "build_backend_from_env", _builder(calls))
     monkeypatch.setattr(sandbox_manager, "build_backend_from_env", _builder(calls))
 
     with pytest.raises(_Built):
-        runner_mod.run_forever(base_url="http://control", worker_id="worker-1")
+        host_service.run_forever(base_url="http://control", worker_id="worker-1")
     with pytest.raises(_Built):
         sandbox_manager.create_app(token="token")
 

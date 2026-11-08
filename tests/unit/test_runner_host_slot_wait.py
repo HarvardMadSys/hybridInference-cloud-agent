@@ -26,8 +26,10 @@ from tests.unit.test_runner_host_service import (
     service as service,
 )
 
-from cloud_agent_host import environment_tests, runner as runner_mod
-from cloud_agent_host.host_runtime import LAUNCH_STARTED, LaunchResult, TurnPool
+from cloud_agent_host import claimed_job, environment_tests
+from cloud_agent_host.container import sandbox
+from cloud_agent_host.service import host_service, runner_stop
+from cloud_agent_host.service.host_runtime import LAUNCH_STARTED, LaunchResult, TurnPool
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -142,7 +144,7 @@ def _serve(
 ) -> threading.Thread:
     """Run the host service on a thread of its own, so a test can act while it waits."""
     thread = threading.Thread(
-        target=runner_mod.run_forever,
+        target=host_service.run_forever,
         kwargs={
             "base_url": "http://control",
             "worker_id": "runner-a",
@@ -159,7 +161,7 @@ def _serve(
 
 def _stop(thread: threading.Thread, children: _Children) -> None:
     """Stop the service as ``docker stop`` does, ending every turn so the drain finishes."""
-    runner_mod._STOPPING.set()
+    runner_stop.STOPPING.set()
     deadline = time.monotonic() + 10
     while thread.is_alive() and time.monotonic() < deadline:
         # Again on every pass: a launch in flight adds a child after the others ended.
@@ -183,7 +185,7 @@ def _pools(monkeypatch: pytest.MonkeyPatch) -> list[TurnPool]:
         pools.append(TurnPool(**kwargs))
         return pools[-1]
 
-    monkeypatch.setattr(runner_mod, "TurnPool", pool)
+    monkeypatch.setattr(host_service, "TurnPool", pool)
     return pools
 
 
@@ -195,18 +197,18 @@ def test_freed_slots_are_detected_without_faster_empty_queue_polling(service, mo
 
     def sleep(seconds):
         waits.append(seconds)
-        runner_mod._STOPPING.set()
+        runner_stop.STOPPING.set()
 
     def launch(_payload):
         launched.append(FakeHandle())
         return LaunchResult(LAUNCH_STARTED, launched[-1])
 
-    monkeypatch.setattr(runner_mod.time, "sleep", sleep)
+    monkeypatch.setattr(time, "sleep", sleep)
     monkeypatch.setattr(
-        runner_mod, "claim_payload", lambda **_k: _job(len(launched)) if full else None
+        host_service, "claim_payload", lambda **_k: _job(len(launched)) if full else None
     )
     assert (
-        runner_mod.run_forever(
+        host_service.run_forever(
             base_url="http://control",
             worker_id="runner-a",
             backend=backend,
@@ -227,7 +229,7 @@ def test_a_turn_that_ends_at_capacity_is_followed_by_the_next_claim_at_once(serv
     _identity, backend, _released = service
     loop = _Loop(monkeypatch)
     children = _Children()
-    monkeypatch.setattr(runner_mod, "claim_payload", _full_queue(loop, children))
+    monkeypatch.setattr(host_service, "claim_payload", _full_queue(loop, children))
     thread = _serve(backend, children.launch, tick_s=5.0)
     try:
         loop.until(loop.waiting)
@@ -251,7 +253,7 @@ def test_a_wake_that_frees_no_slot_claims_nothing(service, monkeypatch):
     loop = _Loop(monkeypatch)
     pools = _pools(monkeypatch)
     children = _Children()
-    monkeypatch.setattr(runner_mod, "claim_payload", _full_queue(loop, children))
+    monkeypatch.setattr(host_service, "claim_payload", _full_queue(loop, children))
     thread = _serve(backend, children.launch, tick_s=5.0)
     try:
         loop.until(loop.waiting)
@@ -267,7 +269,7 @@ def test_with_nothing_freed_the_fallback_tick_still_runs(service, monkeypatch):
     identity, backend, _released = service
     loop = _Loop(monkeypatch)
     children = _Children()
-    monkeypatch.setattr(runner_mod, "claim_payload", _full_queue(loop, children))
+    monkeypatch.setattr(host_service, "claim_payload", _full_queue(loop, children))
     thread = _serve(backend, children.launch, tick_s=0.2)
     try:
         loop.until(loop.waiting)
@@ -305,7 +307,7 @@ class _HeldTest:
 def test_an_environment_test_that_ends_at_capacity_frees_its_slot_at_once(service, monkeypatch):
     """Below its limit but full with a test, the loop waited a whole interval for it."""
     _identity, _process_backend, _released = service
-    backend = runner_mod.ContainerBackend(image="img")
+    backend = sandbox.ContainerBackend(image="img")
     monkeypatch.setattr(backend, "preflight", lambda **_kw: None)
     monkeypatch.setattr(
         backend, "version_stamp", lambda: {"sandbox_image_digest": "sha256:" + "a" * 64}
@@ -319,7 +321,7 @@ def test_an_environment_test_that_ends_at_capacity_frees_its_slot_at_once(servic
     monkeypatch.setattr("cloud_agent_host.environment_tests.EnvironmentTestWorker", worker)
     loop = _Loop(monkeypatch)
     children = _Children()
-    monkeypatch.setattr(runner_mod, "claim_payload", _full_queue(loop, children))
+    monkeypatch.setattr(host_service, "claim_payload", _full_queue(loop, children))
     thread = _serve(backend, children.launch, tick_s=30.0)
     try:
         loop.until(loop.waiting)
@@ -345,11 +347,11 @@ def test_a_slot_freed_after_an_empty_or_failed_claim_adds_no_claim(service, monk
     signal or its own interval, whatever ends meanwhile.
     """
     _identity, backend, _released = service
-    monkeypatch.setattr(runner_mod.time, "sleep", _REAL_SLEEP)
+    monkeypatch.setattr(time, "sleep", _REAL_SLEEP)
     if after == "long_poll":
         # A wait the control plane answers only at its timeout: nothing was queued.
         monkeypatch.setattr(
-            runner_mod, "wait_for_work", lambda **kw: _REAL_SLEEP(kw["timeout_s"]) or "token"
+            host_service, "wait_for_work", lambda **kw: _REAL_SLEEP(kw["timeout_s"]) or "token"
         )
     loop = _Loop(monkeypatch)
     pools = _pools(monkeypatch)
@@ -367,12 +369,12 @@ def test_a_slot_freed_after_an_empty_or_failed_claim_adds_no_claim(service, monk
         if len(loop.claims) == 2:
             threading.Timer(_TICK / 3, free).start()
         if len(loop.claims) == 4:
-            runner_mod._STOPPING.set()
+            runner_stop.STOPPING.set()
         elif after == "unreachable":
-            raise runner_mod.ClaimUnreachable("connection refused")
+            raise claimed_job.ClaimUnreachable("connection refused")
         return None
 
-    monkeypatch.setattr(runner_mod, "claim_payload", claim)
+    monkeypatch.setattr(host_service, "claim_payload", claim)
     thread = _serve(backend, children.launch, tick_s=_TICK)
     try:
         thread.join(timeout=10)

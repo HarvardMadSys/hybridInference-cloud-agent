@@ -582,16 +582,8 @@ class WorkerResourcesRequest(BaseModel):
         max_length=4096,
     )
 
-    @model_validator(mode="after")
-    def completeness_flags_match_their_evidence(self) -> WorkerResourcesRequest:  # noqa: PLR0912 complexity baseline, #771
-        """Refuse combinations that would make a gap render as certainty."""
-        call_seqs = [call.call_seq for call in self.tool_calls]
-        if len(call_seqs) != len(set(call_seqs)):
-            raise ValueError("tool call sequence numbers must be unique")
-        process_seqs = [process.process_seq for process in self.processes]
-        if len(process_seqs) != len(set(process_seqs)):
-            raise ValueError("process sequence numbers must be unique")
-
+    def _check_process_references(self, call_seqs: list[int]) -> None:
+        """Refuse process rows that do not match the tool calls they name."""
         known_call_seqs = set(call_seqs)
         observed_process_counts = dict.fromkeys(known_call_seqs, 0)
         for process in self.processes:
@@ -607,6 +599,8 @@ class WorkerResourcesRequest(BaseModel):
         ):
             raise ValueError("tool process_count must match the attached process rows")
 
+    def _check_shared_member_counters(self) -> None:
+        """Refuse sampled container counters a shared member cannot own."""
         if self.sampler_version == SHARED_MEMBER_ACCOUNTING_VERSION:
             aggregates = (
                 self.cpu_usec,
@@ -635,6 +629,20 @@ class WorkerResourcesRequest(BaseModel):
                 raise ValueError(
                     "shared-member-v1 cannot attribute sampled container counters to one member"
                 )
+
+    @model_validator(mode="after")
+    def completeness_flags_match_their_evidence(self) -> WorkerResourcesRequest:
+        """Refuse combinations that would make a gap render as certainty."""
+        call_seqs = [call.call_seq for call in self.tool_calls]
+        if len(call_seqs) != len(set(call_seqs)):
+            raise ValueError("tool call sequence numbers must be unique")
+        process_seqs = [process.process_seq for process in self.processes]
+        if len(process_seqs) != len(set(process_seqs)):
+            raise ValueError("process sequence numbers must be unique")
+
+        self._check_process_references(call_seqs)
+
+        self._check_shared_member_counters()
         if self.tool_calls_truncated:
             has_call_measurement = any(
                 call.sample_count > 0

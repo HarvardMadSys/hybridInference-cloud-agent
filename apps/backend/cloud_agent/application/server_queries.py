@@ -6,14 +6,15 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.ports.external.compute_provider import UNCHECKED_CLOUDLAB_HOST_KEY_REF
-from cloud_agent.schemas_compute import RenewalPolicy
+from cloud_agent.schemas.compute import RenewalPolicy
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from cloud_agent.compute_registry import ComputeProviderRegistry
-    from cloud_agent.compute_secrets import ComputeSecretStore
     from cloud_agent.ports.compute_resources import ComputeResourceRepository
+    from cloud_agent.ports.external.compute_provider import ProviderCapabilities
+    from cloud_agent.providers.compute.compute_registry import ComputeProviderRegistry
+    from cloud_agent.providers.compute.compute_secrets import ComputeSecretStore
 
 
 class ServerQueries:
@@ -38,7 +39,43 @@ class ServerQueries:
         inventory["allocations"] = [self.allocation_view(row) for row in inventory["allocations"]]
         return inventory
 
-    def allocation_view(self, row: dict[str, Any]) -> dict[str, Any]:  # noqa: PLR0912 complexity baseline, #771
+    def _lifecycle_actions(
+        self,
+        row: dict[str, Any],
+        caps: ProviderCapabilities,
+        actions: list[str],
+        reasons: list[dict[str, str]],
+        *,
+        autoscaling_owned: bool,
+    ) -> None:
+        """Add the lifecycle actions a live, capable allocation supports, or why not."""
+        if caps.can_extend and not autoscaling_owned:
+            actions.append("policy")
+        if autoscaling_owned:
+            reasons.append(
+                {
+                    "code": "autoscaling_managed",
+                    "message": "Renewal policy and node replacement are managed by CloudLab autoscaling.",
+                }
+            )
+        if row.get("management_mode") == "manage" and self.secrets.configured:
+            if row.get("external_id") and caps.can_extend:
+                actions.append("extend")
+            if caps.can_release and row.get("deployment_profile"):
+                actions.append("retire")
+            elif caps.can_release:
+                reasons.append(
+                    {
+                        "code": "inventory_unavailable",
+                        "message": "Attach a deployment profile and configured SSH connection before release.",
+                    }
+                )
+        else:
+            reasons.append(
+                {"code": "unmanaged_scope", "message": "Resource lifecycle is not managed."}
+            )
+
+    def allocation_view(self, row: dict[str, Any]) -> dict[str, Any]:
         """Project supported actions and distinguish current resource observations."""
         entry = self.registry.entries.get(row["provider_id"])
         caps = entry.provider.capabilities() if entry else None
@@ -63,31 +100,9 @@ class ServerQueries:
                 {"code": "observation_stale", "message": "Resource observation needs refresh."}
             )
         if not terminal and caps:
-            if caps.can_extend and not autoscaling_owned:
-                actions.append("policy")
-            if autoscaling_owned:
-                reasons.append(
-                    {
-                        "code": "autoscaling_managed",
-                        "message": "Renewal policy and node replacement are managed by CloudLab autoscaling.",
-                    }
-                )
-            if row.get("management_mode") == "manage" and self.secrets.configured:
-                if row.get("external_id") and caps.can_extend:
-                    actions.append("extend")
-                if caps.can_release and row.get("deployment_profile"):
-                    actions.append("retire")
-                elif caps.can_release:
-                    reasons.append(
-                        {
-                            "code": "inventory_unavailable",
-                            "message": "Attach a deployment profile and configured SSH connection before release.",
-                        }
-                    )
-            else:
-                reasons.append(
-                    {"code": "unmanaged_scope", "message": "Resource lifecycle is not managed."}
-                )
+            self._lifecycle_actions(
+                row, caps, actions, reasons, autoscaling_owned=autoscaling_owned
+            )
         hosts = row.get("hosts") or []
         policy = RenewalPolicy.model_validate(row.get("policy") or {})
         rotation: dict[str, Any] | None = row.get("rotation") or None

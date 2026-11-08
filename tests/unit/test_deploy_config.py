@@ -1073,7 +1073,7 @@ def test_target_commit_readiness_cannot_be_bypassed() -> None:
         assert "AGENT_SHARED_LIVE_SANDBOX" not in script
 
     control_script = (REPO_ROOT / "deploy/control-plane/deploy.sh").read_text()
-    assert "cloud_agent.deploy_readiness" in control_script
+    assert "cloud_agent.deployment.deploy_readiness" in control_script
     assert "--expected-deployment-sha" in control_script
 
 
@@ -1131,7 +1131,7 @@ def test_the_sandbox_uid_matches_what_the_runner_chowns_to():
     Drift here does not fail loudly: the agent simply cannot write to its own
     working tree, and git refuses to run at all with "dubious ownership".
     """
-    from cloud_agent_host.sandbox import SANDBOX_GID, SANDBOX_UID
+    from cloud_agent_host.container.sandbox import SANDBOX_GID, SANDBOX_UID
 
     text = _DOCKERFILE.read_text()
     assert f"--uid {SANDBOX_UID}" in text

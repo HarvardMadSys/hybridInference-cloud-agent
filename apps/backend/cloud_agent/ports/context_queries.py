@@ -7,9 +7,13 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from cloud_agent.context_dna import DnaBands
-    from cloud_agent.context_insights import ContextInsightsCursor, ContextSort, InsightsFilters
-    from cloud_agent.context_request import RequestComposition
+    from cloud_agent.context.context_dna import DnaBands
+    from cloud_agent.context.context_insights import (
+        ContextInsightsCursor,
+        ContextSort,
+        InsightsFilters,
+    )
+    from cloud_agent.context.context_request import RequestComposition
 
 
 class ContextQueries(Protocol):

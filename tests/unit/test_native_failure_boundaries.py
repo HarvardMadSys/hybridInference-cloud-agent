@@ -5,7 +5,8 @@ import json
 import pytest
 from tests.unit.test_live_sessions import _LiveProcess, _protocol_context
 
-from cloud_agent_host.drivers import DriverError, get_driver
+from cloud_agent_host.drivers import DriverError
+from cloud_agent_host.runtimes.live import get_driver
 
 
 def _turn(tmp_path, runtime, frames):

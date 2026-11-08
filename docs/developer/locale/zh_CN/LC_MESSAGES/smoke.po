@@ -109,11 +109,11 @@ msgstr "记下确切的发布 SHA。API、主机、sandbox manager 和沙箱都�
 #: ../developer/smoke.md:46
 msgid ""
 "Start from a new, empty Agent database. Run     `python -m "
-"cloud_agent.identity_namespace --check` against it first; it     must "
+"cloud_agent.deployment.identity_namespace --check` against it first; it     must "
 "report an empty database and change nothing     ([cutover](upgrade-"
 "notes.md#independent-accounts-cutover))."
 msgstr ""
-"从一个新的空 Agent 数据库开始。先针对它运行 `python -m cloud_agent.identity_namespace "
+"从一个新的空 Agent 数据库开始。先针对它运行 `python -m cloud_agent.deployment.identity_namespace "
 "--check`；它必须报告这是空数据库，并且不做任何改动（[切换说明](upgrade-notes.md#independent-"
 "accounts-cutover)）。"
 
@@ -360,12 +360,12 @@ msgstr "确认事件能实时推送到浏览器，至少有一次模型或工具
 msgid ""
 "Confirm the turn succeeds with the expected file change. Then ask the"
 "     agent in the conversation to open a pull request, and open the real"
-"     **draft pull request** it links. Check that you are the author of "
-"the     pull request and its commits, the target branch and the diff; "
-"record its     URL. Execution success alone is insufficient."
+"     **pull request** it links. Check that you are the author of the     "
+"pull request and its commits, the target branch and the diff; record its"
+"     URL. Execution success alone is insufficient."
 msgstr ""
-"确认这一轮成功了，文件改动符合预期。然后在对话里让 agent 开一个 pull request，打开它给出链接的那个真实的 **draft "
-"pull request**。检查 pull request 和其中 commit 的作者都是你，再检查目标分支和 diff，记下它的 "
+"确认这一轮成功了，文件改动符合预期。然后在对话里让 agent 开一个 pull request，打开它给出链接的那个真实的 **pull "
+"request**。检查 pull request 和其中 commit 的作者都是你，再检查目标分支和 diff，记下它的 "
 "URL。光是执行成功是不够的。"
 
 #: ../developer/smoke.md:149

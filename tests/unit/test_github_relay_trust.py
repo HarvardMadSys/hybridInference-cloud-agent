@@ -15,12 +15,13 @@ from types import SimpleNamespace
 import pytest
 from tests.unit.test_chat_sandbox import _inspect_payload
 
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     MEMBER_UID_BASE,
     ChatSandboxManager,
     ChatSandboxSpec,
 )
-from cloud_agent_host.chat_sandbox_exec import ProvenContainers
+from cloud_agent_host.container.exact_container import ExactContainer
+from cloud_agent_host.container.sandbox import ContainerBackend
 from cloud_agent_host.github_relay_trust import (
     _INSTALL,
     CA_BUNDLE_PATH,
@@ -30,7 +31,6 @@ from cloud_agent_host.github_relay_trust import (
     install_github_relay_trust,
     trust_env,
 )
-from cloud_agent_host.sandbox import ContainerBackend
 from cloud_agent_shared.errors import SandboxError
 
 _CA = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
@@ -56,9 +56,11 @@ def _fake_manager(exec_results):
         returncode, stderr = exec_results.pop(0) if exec_results else (0, b"")
         return subprocess.CompletedProcess(argv, returncode, b"", stderr)
 
-    proven = ProvenContainers()
-    manager = SimpleNamespace(_proven=proven, exec_capture=exec_capture)
-    return manager, proven, execs
+    # Its proofs are recorded straight into the store: these stand-ins are no
+    # container an inspection could verify.
+    exact = ExactContainer(SimpleNamespace(), state_roots=("/workspace",))  # type: ignore[arg-type]
+    manager = SimpleNamespace(exact=exact, exec_capture=exec_capture)
+    return manager, exact._proven, execs
 
 
 def _relay(monkeypatch, tmp_path, pem=_CA):
@@ -180,11 +182,11 @@ def _spawn_harness(monkeypatch):
             return None
 
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.subprocess.run",
+        "cloud_agent_host.container.chat_sandbox.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=payload, stderr=""),
     )
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.subprocess.Popen",
+        "cloud_agent_host.container.chat_sandbox.subprocess.Popen",
         lambda argv, **kwargs: popens.append((list(argv), kwargs)) or Process(),
     )
     return spec, manager, popens
@@ -204,7 +206,7 @@ def _exec_env(command: list[str], client_env: dict[str, str]) -> dict[str, str]:
 def test_every_spawned_process_trusts_the_relay_and_its_own_value_wins(monkeypatch):
     spec, manager, popens = _spawn_harness(monkeypatch)
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox_exec.ensure_github_relay_trust",
+        "cloud_agent_host.container.chat_sandbox_exec.ensure_github_relay_trust",
         lambda _manager, _spec: trust_env(),
     )
 
@@ -227,7 +229,7 @@ def test_every_spawned_process_trusts_the_relay_and_its_own_value_wins(monkeypat
 def test_a_terminal_trusts_the_relay(monkeypatch):
     spec, manager, popens = _spawn_harness(monkeypatch)
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox_exec.ensure_github_relay_trust",
+        "cloud_agent_host.container.chat_sandbox_exec.ensure_github_relay_trust",
         lambda _manager, _spec: trust_env(),
     )
 

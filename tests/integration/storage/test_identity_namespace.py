@@ -25,7 +25,7 @@ from scripts.convert_legacy_database_copy import fingerprints
 from tests.support.migrations import apply_migrations
 
 from cloud_agent.accounts.config import CUTOVER_RUNBOOK
-from cloud_agent.identity_namespace import (
+from cloud_agent.deployment.identity_namespace import (
     GATEWAY_BOUND,
     UNBOUND_OWNER_DATA,
     IdentityNamespaceError,
@@ -161,7 +161,7 @@ def namespace_cli():
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "-m",
-            "cloud_agent.identity_namespace",
+            "cloud_agent.deployment.identity_namespace",
             *args,
             # A stale Gateway issuer in the environment decides nothing.
             env={**os.environ, "AGENT_DATABASE_URL": dsn, "GATEWAY_ISSUER": ISSUER},

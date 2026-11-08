@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.host_pool import hash_secret, new_enroll_token
-from cloud_agent.sandbox_manager_routing import retire_sandbox_manager_hosts
+from cloud_agent.domain.host_pool import hash_secret, new_enroll_token
+from cloud_agent.sandbox_manager.sandbox_manager_routing import retire_sandbox_manager_hosts
 from cloud_agent_shared.runtime_catalog import downloadable_runtimes
 
 if TYPE_CHECKING:

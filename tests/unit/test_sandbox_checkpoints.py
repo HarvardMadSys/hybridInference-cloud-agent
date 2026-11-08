@@ -16,9 +16,9 @@ from typing import Any
 
 import pytest
 
-from cloud_agent_host import sandbox_checkpoints as checkpoints_module
-from cloud_agent_host.sandbox_archive_s3 import SandboxArchiveReceipt
-from cloud_agent_host.sandbox_checkpoints import (
+from cloud_agent_host.archive import sandbox_checkpoints as checkpoints_module
+from cloud_agent_host.archive.sandbox_archive_s3 import SandboxArchiveReceipt
+from cloud_agent_host.archive.sandbox_checkpoints import (
     CHECKPOINT_IMAGE_REPOSITORY,
     CheckpointContentUnavailable,
     ContainerdContentStore,

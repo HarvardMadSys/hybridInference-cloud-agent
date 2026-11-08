@@ -8,8 +8,8 @@ from tests.unit.test_agent_runner import (  # noqa: F401 - the autouse pytest fi
     _stamp,
 )
 
-from cloud_agent_host import runner as runner_mod
-from cloud_agent_host.sandbox import ContainerBackend
+from cloud_agent_host.container.sandbox import ContainerBackend
+from cloud_agent_host.service import host_capabilities
 
 
 def test_shared_live_is_the_only_capability_without_feature_switches(monkeypatch):
@@ -20,7 +20,9 @@ def test_shared_live_is_the_only_capability_without_feature_switches(monkeypatch
     monkeypatch.setenv("AGENT_SHARED_LIVE_SANDBOX", "0")
     monkeypatch.setenv("AGENT_RESTARTABLE_RUNTIMES", "claude-code")
 
-    assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), _stamp()) == [
+    assert host_capabilities._shared_live_host_capabilities(
+        ContainerBackend(image="img"), _stamp()
+    ) == [
         "shared-sandbox-v1",
         "native-fork-at-anchor-v1",
         "goal_report_v1",
@@ -40,7 +42,9 @@ def test_exact_deployment_capability_requires_the_completed_marker(monkeypatch, 
     monkeypatch.setenv("AGENT_SHARED_LIVE_READY_FILE", str(ready_file))
 
     ready_file.write_text("pending:target-sha\n")
-    assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), _stamp()) == [
+    assert host_capabilities._shared_live_host_capabilities(
+        ContainerBackend(image="img"), _stamp()
+    ) == [
         "shared-sandbox-v1",
         "native-fork-at-anchor-v1",
         "goal_report_v1",
@@ -53,7 +57,9 @@ def test_exact_deployment_capability_requires_the_completed_marker(monkeypatch, 
     ]
 
     ready_file.write_text("different-sha\n")
-    assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), _stamp()) == [
+    assert host_capabilities._shared_live_host_capabilities(
+        ContainerBackend(image="img"), _stamp()
+    ) == [
         "shared-sandbox-v1",
         "native-fork-at-anchor-v1",
         "goal_report_v1",
@@ -66,7 +72,9 @@ def test_exact_deployment_capability_requires_the_completed_marker(monkeypatch, 
     ]
 
     ready_file.write_text("target-sha\n")
-    assert runner_mod._shared_live_host_capabilities(ContainerBackend(image="img"), _stamp()) == [
+    assert host_capabilities._shared_live_host_capabilities(
+        ContainerBackend(image="img"), _stamp()
+    ) == [
         "shared-sandbox-v1",
         "native-fork-at-anchor-v1",
         "goal_report_v1",
@@ -85,7 +93,7 @@ def test_a_claim_attests_the_shared_live_capabilities(monkeypatch):
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(backend, "version_stamp", _stamp)
 
-    assert runner_mod._claim_attestation(backend)["runner_capabilities"] == [
+    assert host_capabilities.claim_attestation(backend)["runner_capabilities"] == [
         "shared-sandbox-v1",
         "native-fork-at-anchor-v1",
         "goal_report_v1",

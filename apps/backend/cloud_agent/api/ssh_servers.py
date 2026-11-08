@@ -31,7 +31,7 @@ from cloud_agent.application.ssh_servers import (
     scan_host_keys,
     ssh_key_cipher,
 )
-from cloud_agent.credential_cipher import CredentialCipherError
+from cloud_agent.crypto.credential_cipher import CredentialCipherError
 from cloud_agent.domain.ssh_servers import (
     CHECKS_PER_HOUR,
     MAX_ADDRESS_CHARS,

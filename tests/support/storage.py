@@ -25,7 +25,9 @@ from cloud_agent.ports.sandbox import TerminalControlRoute
 
 _PORTS = pathlib.Path(__file__).resolve().parents[2] / "apps" / "backend" / "cloud_agent" / "ports"
 
-#: One name per port module, which is also the assembly's attribute name.
+#: One name per port module, which is also the assembly's attribute name. A
+#: capability whose mirror port was removed is not here: its fake is a
+#: ``create_autospec`` of the caller's Protocol (see ``tests.support.narrow_fakes``).
 CAPABILITIES = frozenset(p.stem for p in _PORTS.glob("*.py") if p.name != "__init__.py") | {
     "admin_conversations",
     "admin_runs",
@@ -63,6 +65,17 @@ class AllCapabilities:
     async def scan_key_ciphertexts(self, *, sandbox_id: str, limit: int) -> list[str]:
         """Legacy fixtures' sandbox groups were never handed a model connection key."""
         return []
+
+    async def record_sandbox_incidents(self, **_kwargs: Any) -> list[dict[str, Any]]:
+        """Legacy fixtures store no sandbox incident."""
+        return []
+
+    async def untold_incidents(self, **_kwargs: Any) -> dict[str, Any] | None:
+        """Legacy fixtures' sandboxes have no incident to tell."""
+        return None
+
+    async def mark_attempt_incidents(self, **_kwargs: Any) -> None:
+        """Legacy fixtures keep no told-through cursor."""
 
     async def owns_job(self, *, job_id: str, user_id: str) -> bool:
         """Ownership as a fake's full job read answers it, as the routes once asked it."""

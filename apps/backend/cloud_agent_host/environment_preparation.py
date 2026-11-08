@@ -12,8 +12,8 @@ import time
 from typing import TYPE_CHECKING, Any, Literal
 
 from cloud_agent_host.atomic_file import atomic_replace_bytes
-from cloud_agent_host.enrollment import credential_path
-from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.container.sandbox import SandboxError
+from cloud_agent_host.service.enrollment import credential_path
 from cloud_agent_host.setup import run_setup
 from cloud_agent_shared.secret_redaction import SecretRedactor
 
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from cloud_agent_host.chat_sandbox import RetainedChatBackend
+    from cloud_agent_host.container.retained_backend import RetainedChatBackend
     from cloud_agent_host.setup import SetupResult
     from cloud_agent_shared.environment import BoundEnvironment
 
@@ -160,7 +160,7 @@ class EnvironmentPreparation:
         self._inspections: dict[str, tuple[float, Any]] = {}
         self._inspection_lock = threading.Lock()
 
-    def prepare(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+    def prepare(
         self,
         backend: RetainedChatBackend,
         environment: BoundEnvironment,
@@ -203,13 +203,7 @@ class EnvironmentPreparation:
                 ("update", environment.update_script, 900),
                 ("start", environment.start_script, 120),
             ):
-                if phase == "update":
-                    done = not receipt.get("update_pending")
-                elif phase == "setup":
-                    done = bool(receipt.get("setup_done"))
-                else:
-                    done = bool(receipt.get("start_done") and receipt.get("boot_id") == boot_id)
-                if done:
+                if self._phase_done(phase, receipt, boot_id):
                     continue
                 if phase == "start" and environment.skip_start:
                     skipped = {
@@ -225,56 +219,98 @@ class EnvironmentPreparation:
                     if callback:
                         callback(dict(skipped))
                     continue
-                step: dict[str, Any] = {
-                    "phase": phase,
-                    "state": "running",
-                    "output": "",
-                    "duration_seconds": 0,
-                }
-                receipt["steps"] = [s for s in receipt["steps"] if s.get("phase") != phase] + [step]
-
-                self._save(path, receipt)
-                last_saved = [time.monotonic()]
-
-                def output(step: dict[str, Any], last_saved: list[float] = last_saved) -> None:
-                    now = time.monotonic()
-                    if now - last_saved[0] >= RUNNING_PROGRESS_INTERVAL_S:
-                        self._save(path, receipt)
-                        last_saved[0] = now
-                    if callback:
-                        callback(dict(step))
-
-                result = run_step(
+                self._run_phase(
                     backend,
                     environment,
-                    step,
+                    phase,
                     script=script,
-                    values="runtime" if phase == "start" else "setup",
-                    timeout_s=timeout,
-                    on_output=output,
+                    timeout=timeout,
+                    path=path,
+                    receipt=receipt,
+                    boot_id=boot_id,
+                    container_id=container_id,
+                    redactor=redactor,
+                    callback=callback,
                     cancel=cancel,
-                    cleanup_background=phase != "start",
                 )
-                step.update(ran=result.ran, detail=redactor.text(result.detail))
-                receipt[phase + "_done"] = result.exit_code == 0
-                receipt["boot_id"] = boot_id
-                if phase == "update" and result.exit_code == 0:
-                    receipt["update_pending"] = False
-                if phase in ("setup", "update") and result.exit_code == 0:
-                    self._mark_installed(backend, environment, container_id)
-                self._save(path, receipt)
-                if callback:
-                    callback(dict(step))
-                if result.exit_code:
-                    raise SandboxError(
-                        f"Environment {phase} failed ({result.exit_code}): {step['detail']}"
-                    )
             return {
                 "binding_id": environment.binding_id,
                 "container_id": container_id,
                 "boot_id": boot_id,
                 "steps": receipt["steps"],
             }
+
+    @staticmethod
+    def _phase_done(phase: str, receipt: dict[str, Any], boot_id: str) -> bool:
+        """Whether the receipt already records this phase for this boot."""
+        if phase == "update":
+            return not receipt.get("update_pending")
+        if phase == "setup":
+            return bool(receipt.get("setup_done"))
+        return bool(receipt.get("start_done") and receipt.get("boot_id") == boot_id)
+
+    def _run_phase(
+        self,
+        backend: RetainedChatBackend,
+        environment: BoundEnvironment,
+        phase: str,
+        *,
+        script: str,
+        timeout: int,
+        path: Path,
+        receipt: dict[str, Any],
+        boot_id: str,
+        container_id: str,
+        redactor: SecretRedactor,
+        callback: Callable[[dict[str, Any]], None] | None,
+        cancel: threading.Event | None,
+    ) -> None:
+        """Run one phase's script and record its step, failing on a non-zero exit.
+
+        The caller holds the receipt's file lock.
+        """
+        step: dict[str, Any] = {
+            "phase": phase,
+            "state": "running",
+            "output": "",
+            "duration_seconds": 0,
+        }
+        receipt["steps"] = [s for s in receipt["steps"] if s.get("phase") != phase] + [step]
+
+        self._save(path, receipt)
+        last_saved = [time.monotonic()]
+
+        def output(step: dict[str, Any], last_saved: list[float] = last_saved) -> None:
+            now = time.monotonic()
+            if now - last_saved[0] >= RUNNING_PROGRESS_INTERVAL_S:
+                self._save(path, receipt)
+                last_saved[0] = now
+            if callback:
+                callback(dict(step))
+
+        result = run_step(
+            backend,
+            environment,
+            step,
+            script=script,
+            values="runtime" if phase == "start" else "setup",
+            timeout_s=timeout,
+            on_output=output,
+            cancel=cancel,
+            cleanup_background=phase != "start",
+        )
+        step.update(ran=result.ran, detail=redactor.text(result.detail))
+        receipt[phase + "_done"] = result.exit_code == 0
+        receipt["boot_id"] = boot_id
+        if phase == "update" and result.exit_code == 0:
+            receipt["update_pending"] = False
+        if phase in ("setup", "update") and result.exit_code == 0:
+            self._mark_installed(backend, environment, container_id)
+        self._save(path, receipt)
+        if callback:
+            callback(dict(step))
+        if result.exit_code:
+            raise SandboxError(f"Environment {phase} failed ({result.exit_code}): {step['detail']}")
 
     @staticmethod
     def _adopt_installation(

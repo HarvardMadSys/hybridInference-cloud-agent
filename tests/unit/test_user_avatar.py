@@ -5,8 +5,8 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
-from cloud_agent.user_avatar import UserAvatar, generate_user_avatar
-from cloud_agent.work_insights import _FOCUS_AREAS
+from cloud_agent.insights.work_insights import _FOCUS_AREAS
+from cloud_agent.profile.user_avatar import UserAvatar, generate_user_avatar
 
 _SVG_NAMESPACE = "{http://www.w3.org/2000/svg}"
 _WORK_AREAS = tuple(area for area, _ in _FOCUS_AREAS)

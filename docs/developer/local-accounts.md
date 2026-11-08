@@ -51,7 +51,7 @@ issuer, or one that holds owner data without a binding, as every Gateway-era
 database does, and names the cutover runbook. Both checks take the same table
 lock, so two listeners starting together cannot each bind the database. No
 setting skips these checks, and nothing adopts, maps or migrates Gateway
-owners. `python -m cloud_agent.identity_namespace --check` answers the same
+owners. `python -m cloud_agent.deployment.identity_namespace --check` answers the same
 question read-only, on any schema revision.
 
 Startup also refuses any configuration left from the Gateway integration
@@ -135,6 +135,53 @@ reset. The list stays in charge: withdrawing a listed account's
 administration or access, or declining it, is refused with 409
 `listed_admin_address` until the address is removed from the list (or the
 account is suspended), because the next sign-in would grant it back.
+
+### Importing accounts from FreeInference
+
+A deployment can be seeded once with FreeInference's active users. Each
+becomes an approved account that signs in here with the same email, login
+name or phone and the same password: both services hash passwords with the
+same Argon2id parameters, so the copied hash verifies unchanged. Nothing
+links the two accounts afterwards; a later change on either side does not
+reach the other.
+
+Export on the FreeInference database, read-only. Users waiting for approval,
+rejected, suspended or deleted there are left out:
+
+```bash
+(umask 077; psql "$FREEINFERENCE_DATABASE_URL" -At -c "
+  SELECT json_build_object(
+    'email', email, 'email_verified', coalesce(email_verified, false),
+    'login_name', login_name, 'phone', phone, 'phone_verified', phone_verified,
+    'user_name', user_name, 'password_hash', password_hash)
+  FROM users WHERE status = 'active' AND NOT hard_delete_pending
+  ORDER BY created_at, id" > users.jsonl)
+```
+
+The file holds password hashes. Keep it readable by its owner only, copy it
+over SSH, and delete it after the import. Then, on the control plane:
+
+```bash
+python -m cloud_agent.accounts.import_accounts users.jsonl          # dry run
+python -m cloud_agent.accounts.import_accounts users.jsonl --apply
+```
+
+Without `--apply` nothing is written. Both report how many accounts are (or
+would be) imported, which input lines were skipped and why, and what was left
+out of imported accounts. The report names line numbers, never an identifier.
+
+- An account any of whose identifiers already belongs to someone here is
+  skipped whole, and the existing account is not changed. A second run
+  imports nothing twice.
+- An email FreeInference verified counts as proven, like one the operator
+  creates, so the administrator email list applies to it; an unverified one
+  is imported unverified. A phone is imported only if it was verified. A
+  login name needs a password, and a hash in another format is dropped,
+  leaving its holder to reset the password by email.
+- Each account is created and approved in one transaction, audited as
+  `agent.local_account.import` with the actor `operator:account-import`. No mail is
+  sent, no model connection is created, and the Terms are not recorded as
+  accepted.
 
 ## The HTTP surface
 
@@ -225,9 +272,13 @@ access; the `ADMIN_TOKEN` can.
 Every account or admission change increments the account's `version`, which is
 `WaitlistEntry.version`. An administrator action names the version it read and
 is refused with 409 `version_conflict` when the account has changed since. The
-change and its `agent_admin_audit_log` row commit in one transaction. The
-audit row records the states, the version and whether a reason was given; it
-never records an email address, password, hash or token. The acting
+change and its `agent_admin_audit_log` row are written in one transaction; a
+row that cannot be written never fails the change, which commits without it
+and is counted on the Audit log page. The audit row records the states, the
+version and the administrator's reason, and keeps the names of the
+administrator and the account as they were (the login name, else the email
+or phone number), so the trail still says who decided what about whom after
+either is renamed or erased. It never records a password, hash or token. The acting
 administrator's own permission is checked again inside that transaction, so
 an administrator who is suspended while a request is in flight changes
 nothing (`actor_not_admin`).
@@ -331,7 +382,8 @@ Erasure then removes every row of the account's Agent data, walking the
 foreign keys from the catalog (children first), and never touches another
 owner's row: a row of another owner that refers to the account's data
 blocks the erasure. Its identifiers, password, sessions, tokens, codes,
-sign-in events, mail recipients and earlier audit rows go too. The account row
+sign-in events and mail recipients go too. The admin audit trail keeps every
+row about the account, names included. The account row
 stays as a tombstone, erased, which every gate keeps denying and which can
 never be resumed. The erasure's own audit row records the rows removed, the
 teams deleted, the team environments handed over and the sandbox deletion

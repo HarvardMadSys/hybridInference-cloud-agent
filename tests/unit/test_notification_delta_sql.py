@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from cloud_agent.notification_state import NotificationStateCursor
+from cloud_agent.schemas.notification_state import NotificationStateCursor
 from cloud_agent.storage.notification_state import _change_rows
 
 

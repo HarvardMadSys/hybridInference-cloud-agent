@@ -25,14 +25,15 @@ from tests.integration.storage.test_agent_job_store import _create_job
 from tests.integration.storage.test_attempt_ledger import db as db
 from tests.support.owners import SESSIONS, use_session_secret
 
-from cloud_agent.admin_usage import MAX_USAGE_RUNS
 from cloud_agent.api import context as context_api, owner_usage as owner_usage_api
 from cloud_agent.api.deps import get_owner_directory, get_storage
-from cloud_agent.context_insights import ContextInsightsCursor, context_cursor_scope
-from cloud_agent.context_profile import CONTEXT_PROFILE_VERSION
+from cloud_agent.context.context_insights import ContextInsightsCursor, context_cursor_scope
+from cloud_agent.context.context_profile import CONTEXT_PROFILE_VERSION
+from cloud_agent.domain.thread_stats import ATTEMPT_ROLLUP_VERSION
 from cloud_agent.storage.assembly import Storage
-from cloud_agent.thread_stats import ATTEMPT_ROLLUP_VERSION
-from cloud_agent.usage_batches import owner_usage
+from cloud_agent.usage.admin_usage import MAX_USAGE_RUNS
+from cloud_agent.usage.usage_batches import owner_usage
+from cloud_agent_shared.request_prefix import measure
 from cloud_agent_shared.text_tokens import estimate_text_tokens
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -397,6 +398,10 @@ async def _bulk_history(
 
 
 async def test_all_sums_every_run_beyond_one_selections_bound(db, store, monkeypatch):
+    # This is about the sums across selections, not their speed: locally the
+    # read takes about 0.6 s of each statement's 5 s, and a busy CI database
+    # ran one past it.
+    monkeypatch.setattr("cloud_agent.storage.repositories.admin.usage.STATEMENT_TIMEOUT_MS", 60_000)
     runs = MAX_USAGE_RUNS + 250
     expected = await _bulk_history(
         db, store, user_id=OWNER, runs=runs, span_days=400, reported=True
@@ -580,6 +585,33 @@ async def test_request_composition_reads_carried_content_and_the_cli_account(db,
         )
         is None
     )
+
+
+async def test_request_composition_names_the_tools_its_meter_measured(db, store):
+    [job] = await _thread(db, store, "athr_prefix")
+    body = {
+        "system": "You are a coding agent.",
+        "tools": [{"name": "Bash", "input_schema": {}}, {"name": "mcp__session__x", "d": "y" * 99}],
+    }
+    record = measure("anthropic_messages", body, mode="passthrough")
+    assert record is not None
+    await _events(
+        db,
+        job,
+        [
+            ("lifecycle", {"phase": "request_prefix", "prefix": record}),
+            _claude("msg_1", 1000),
+        ],
+    )
+    composition = await store.context_queries.request_composition(
+        job_id=job, user_id=OWNER, event_id=await _event_id(db, job, 2)
+    )
+    assert composition is not None and composition.prefix is not None
+    prefix = composition.prefix
+    assert prefix.system_chars == len("You are a coding agent.") and prefix.tool_count == 2
+    # The stored record names the tools, the largest first.
+    assert [tool.label for tool in prefix.tools] == ["mcp__session__x", "Bash"]
+    assert prefix.mode == "passthrough" and prefix.event_id == await _event_id(db, job, 1)
 
 
 async def test_event_content_is_windowed_and_owner_scoped(db, store):

@@ -23,7 +23,11 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from cloud_agent_host.network_guard import GUARD_RECHECK_S, HostNetworkGuard, NetworkGuardError
+from cloud_agent_host.network.network_guard import (
+    GUARD_RECHECK_S,
+    HostNetworkGuard,
+    NetworkGuardError,
+)
 from cloud_agent_shared.egress import SandboxNetwork, network_from_env
 
 if TYPE_CHECKING:
@@ -234,7 +238,7 @@ def test_ensure_installs_both_tables_and_trusts_the_result_for_a_while() -> None
 
 def test_activation_after_an_idle_gap_rechecks_routes_and_refuses_overlap(monkeypatch) -> None:
     """Skipping empty-host sweeps never carries an expired proof into a start."""
-    from cloud_agent_host import network_guard
+    from cloud_agent_host.network import network_guard
 
     nft = FakeNft()
     guard = _guard(nft)
@@ -547,7 +551,7 @@ def test_a_missing_relay_set_in_either_family_prevents_updates() -> None:
 
 
 def test_batch_helper_installs_then_reads_without_a_shell(monkeypatch) -> None:
-    from cloud_agent_host.network_guard import _NFT_BATCH
+    from cloud_agent_host.network.network_guard import _NFT_BATCH
 
     commands = [["list", "table", "inet", "example"], ["list", "tables", "inet"]]
     calls: list[tuple[list[str], str | None]] = []
@@ -574,7 +578,7 @@ def test_batch_helper_installs_then_reads_without_a_shell(monkeypatch) -> None:
 
 
 def test_batch_helper_fails_without_partial_output_when_a_read_fails(monkeypatch) -> None:
-    from cloud_agent_host.network_guard import _NFT_BATCH
+    from cloud_agent_host.network.network_guard import _NFT_BATCH
 
     calls: list[list[str]] = []
 
@@ -599,7 +603,7 @@ def test_batch_helper_fails_without_partial_output_when_a_read_fails(monkeypatch
 
 
 def test_a_failed_install_ends_the_helper_before_any_read(monkeypatch) -> None:
-    from cloud_agent_host.network_guard import _NFT_BATCH
+    from cloud_agent_host.network.network_guard import _NFT_BATCH
 
     calls: list[list[str]] = []
 
@@ -688,7 +692,7 @@ def test_a_sweep_that_cannot_reinstall_the_rules_raises_and_trusts_nothing() -> 
 
 
 def test_a_verification_past_its_minute_takes_the_full_check(monkeypatch) -> None:
-    from cloud_agent_host import network_guard
+    from cloud_agent_host.network import network_guard
 
     nft = FakeNft()
     guard = _guard(nft)
@@ -715,7 +719,7 @@ def _aged(monkeypatch, guard: HostNetworkGuard, age_s: float) -> None:
     still trusted on a few hosts' uptimes. Step the clock up to the first
     reading the guard sees as ``age_s`` old.
     """
-    from cloud_agent_host import network_guard
+    from cloud_agent_host.network import network_guard
 
     assert guard._verified_at is not None
     made = guard._verified_at
@@ -727,7 +731,7 @@ def _aged(monkeypatch, guard: HostNetworkGuard, age_s: float) -> None:
 
 def test_an_activations_read_back_leaves_the_renewal_to_the_sweep(monkeypatch) -> None:
     """Inside the minute an activation trusts, it reads the kernel and installs nothing."""
-    from cloud_agent_host import network_guard
+    from cloud_agent_host.network import network_guard
 
     nft = FakeNft()
     guard = _guard(nft)
@@ -750,7 +754,7 @@ def test_an_activations_read_back_leaves_the_renewal_to_the_sweep(monkeypatch) -
 
 
 def test_an_activations_read_back_still_repairs_a_changed_table(monkeypatch) -> None:
-    from cloud_agent_host import network_guard
+    from cloud_agent_host.network import network_guard
 
     nft = FakeNft()
     guard = _guard(nft)
@@ -793,7 +797,7 @@ def test_an_activations_read_back_past_the_minute_takes_the_full_check(
 def test_the_managers_host_rule_check_reads_the_kernel_every_time() -> None:
     from types import SimpleNamespace
 
-    from cloud_agent_host.chat_sandbox import ChatSandboxManager
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
 
     nft = FakeNft()
     guard = _guard(nft)
@@ -835,7 +839,7 @@ def _steps(calls: list[tuple[list[str], str | None]]) -> list[str]:
 
 def test_a_handover_reuses_a_recent_verification_and_renews_an_older_one(monkeypatch) -> None:
     """Never one per turn, and never one so old that the child's start would outlast it."""
-    from cloud_agent_host import network_guard
+    from cloud_agent_host.network import network_guard
 
     nft, guard = _host_guard(monkeypatch)
     handed = guard.handover()
@@ -893,7 +897,7 @@ def test_a_child_adopts_its_hosts_verification_and_starts_no_helper_for_it(monke
 
 def test_an_adopted_verification_lapses_when_the_hosts_own_does(monkeypatch) -> None:
     """A minute after the host made it, as for every activation; not after the child took it."""
-    from cloud_agent_host import network_guard
+    from cloud_agent_host.network import network_guard
 
     host_nft, host = _host_guard(monkeypatch)
     handed = host.handover()
@@ -948,7 +952,7 @@ _NOW = 10_000.0
 def test_a_child_refuses_a_verification_it_cannot_trust_and_holds_nothing(
     monkeypatch, verification, reason
 ) -> None:
-    from cloud_agent_host import network_guard
+    from cloud_agent_host.network import network_guard
 
     monkeypatch.setattr(network_guard.time, "monotonic", lambda: _NOW)
     monkeypatch.setenv("HOSTNAME", "runner-1")
@@ -974,7 +978,7 @@ def test_a_child_slow_to_start_adopts_nothing_of_a_sound_verification_and_says_w
     Neither its time nor its helper image is adopted, so the child's own check
     is the full one every child made before the host handed its check over.
     """
-    from cloud_agent_host import network_guard
+    from cloud_agent_host.network import network_guard
 
     monkeypatch.setattr(network_guard.time, "monotonic", lambda: _NOW)
     monkeypatch.setenv("HOSTNAME", "runner-1")
@@ -1145,7 +1149,7 @@ def test_an_unreadable_relay_element_in_a_read_back_forgets_and_fails_nothing() 
 
 
 def test_a_remembered_update_is_trusted_no_longer_than_the_rules_are(monkeypatch) -> None:
-    from cloud_agent_host import network_guard
+    from cloud_agent_host.network import network_guard
 
     nft, guard, bridge = _synced_guard()
     start = network_guard.time.monotonic()
@@ -1160,7 +1164,7 @@ def test_a_remembered_update_is_trusted_no_longer_than_the_rules_are(monkeypatch
 
 
 def test_the_sweeps_renewal_keeps_a_held_update_trusted(monkeypatch) -> None:
-    from cloud_agent_host import network_guard
+    from cloud_agent_host.network import network_guard
 
     nft, guard, bridge = _synced_guard()
     start = network_guard.time.monotonic()
@@ -1189,7 +1193,7 @@ def test_a_flushed_table_refuses_an_activation_once_the_sweep_falls_behind(monke
     remembered update for two sweep passes (a final-archive upload holds the
     sweep back), so the update reads the kernel and finds the table gone.
     """
-    from cloud_agent_host import network_guard
+    from cloud_agent_host.network import network_guard
 
     nft, guard, bridge = _synced_guard()
     start = network_guard.time.monotonic()
@@ -1875,7 +1879,7 @@ def test_updates_that_start_before_the_image_is_known_inspect_this_container_onc
 
 def test_the_helper_lock_nests_only_its_exclusive_side() -> None:
     """Re-entrant where a handover needs it; any other nesting raises rather than deadlock."""
-    from cloud_agent_host.network_guard import _HelperLock
+    from cloud_agent_host.network.network_guard import _HelperLock
 
     lock = _HelperLock()
     helpers = _HeldHelpers(run=None)

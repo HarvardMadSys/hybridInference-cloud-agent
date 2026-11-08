@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
 from cloud_agent.storage.repositories import attempt_commands
+from cloud_agent.storage.repositories.attempt_commands import claims
 
 if TYPE_CHECKING:
     import pytest
@@ -77,15 +78,15 @@ async def test_claim_encodes_capabilities_for_the_jsonb_job_filter(
     """Decoded capability membership must not leak a Python list into asyncpg."""
     declared = ["shared-sandbox-v1", "git"]
     connection = _Connection(declared)
-    monkeypatch.setattr(attempt_commands, "lock_compute_topology", AsyncMock())
+    monkeypatch.setattr(claims, "lock_compute_topology", AsyncMock())
     monkeypatch.setattr(
-        attempt_commands,
+        claims,
         "host_compute_admission",
         AsyncMock(return_value=(True, True)),
     )
-    monkeypatch.setattr(attempt_commands, "shared_sandbox_claim_attested", lambda *a, **k: True)
+    monkeypatch.setattr(claims, "shared_sandbox_claim_attested", lambda *a, **k: True)
     monkeypatch.setattr(
-        attempt_commands,
+        claims,
         "compatible_shared_sandbox_followup_attested",
         lambda *a, **k: True,
     )

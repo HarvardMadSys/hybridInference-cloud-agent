@@ -5,9 +5,13 @@ delegate -- it holds one Postgres implementation per capability and names each
 one, so that a caller asks for the capability it needs rather than for the
 whole persistence surface.
 
-Each attribute is annotated with its *port*, so what a caller can reach through
-this object is the narrow Protocol and not the class behind it; swapping an
-implementation is an edit to one line here and to nothing else.
+Most attributes are annotated with their *port*, so what a caller can reach
+through this object is the narrow Protocol and not the class behind it;
+swapping an implementation is an edit to one line here and to nothing else.
+An aggregate whose port only mirrored its repository has lost that port: its
+attribute names the repository class, and each caller declares the narrow
+Protocol it uses, which the class satisfies structurally. Callers still never
+import the class.
 
 The repositories share the pool they are handed. A capability is therefore a
 second view of one connection pool, never a second pool, and the transaction
@@ -18,11 +22,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cloud_agent.storage.admin_conversation_queries import AdminConversationQueries
-from cloud_agent.storage.admin_database_queries import AdminDatabaseQueries
-from cloud_agent.storage.admin_queries import AdminRunQueries
-from cloud_agent.storage.admin_sandbox_queries import AdminSandboxQueries
-from cloud_agent.storage.admin_usage_queries import AdminUsageQueries
 from cloud_agent.storage.repositories import (
     PostgresAgentMemoryRepository,
     PostgresAttachmentRepository,
@@ -55,6 +54,7 @@ from cloud_agent.storage.repositories import (
     PostgresPendingMessageRepository,
     PostgresProfilingControlRepository,
     PostgresResidencyRepository,
+    PostgresSandboxIncidentRepository,
     PostgresSandboxRepository,
     PostgresSessionForkRepository,
     PostgresSettingsRepository,
@@ -67,6 +67,13 @@ from cloud_agent.storage.repositories import (
     PostgresWebSearchRepository,
     PostgresWorkInsightsRepository,
 )
+from cloud_agent.storage.repositories.admin.conversations import (
+    PostgresAdminConversationQueries,
+)
+from cloud_agent.storage.repositories.admin.database import PostgresAdminDatabaseQueries
+from cloud_agent.storage.repositories.admin.runs import PostgresAdminRunQueries
+from cloud_agent.storage.repositories.admin.sandboxes import PostgresAdminSandboxQueries
+from cloud_agent.storage.repositories.admin.usage import PostgresAdminUsageQueries
 from cloud_agent.storage.repositories.environment_snapshots import (
     PostgresEnvironmentSnapshotRepository,
 )
@@ -99,8 +106,6 @@ if TYPE_CHECKING:
         McpCatalogRepository,
         McpConnectionRepository,
         ModelConnectionRepository,
-        ModelPreferenceRepository,
-        NotificationMaintenanceRepository,
         OperationMeasurements,
         OwnerUsageQueries,
         OwnerWorkTermination,
@@ -117,10 +122,17 @@ if TYPE_CHECKING:
         TeamRepository,
         UserProfileRepository,
         WebSearchRepository,
-        WorkInsightsRepository,
+    )
+    from cloud_agent.ports.admin_queries import (
+        AdminConversationQueries,
+        AdminDatabaseQueries,
+        AdminRunQueries,
+        AdminSandboxQueries,
+        AdminUsageQueries,
     )
     from cloud_agent.ports.environment_snapshots import EnvironmentSnapshotRepository
     from cloud_agent.ports.environments import EnvironmentRepository
+    from cloud_agent.ports.sandbox_incidents import SandboxIncidentRepository
 
 
 class Storage:
@@ -128,16 +140,7 @@ class Storage:
 
     def __init__(self, pool: asyncpg.Pool) -> None:
         """Build one implementation per capability against the caller's pool."""
-        #: Admin read models. Still concrete: they are bounded projections for
-        #: one console, not a capability any other caller asks for, and they
-        #: have no port yet. Named here so that the routes which need them
-        #: stop reaching into another object's pool to build one.
-        self.admin_conversations = AdminConversationQueries(pool)
-        self.admin_database = AdminDatabaseQueries(pool)
-        self.admin_runs = AdminRunQueries(pool)
-        self.admin_sandboxes = AdminSandboxQueries(pool)
-        self.admin_usage = AdminUsageQueries(pool)
-
+        self._admin_read_models(pool)
         self.environments: EnvironmentRepository = PostgresEnvironmentRepository(pool)
         self.environment_snapshots: EnvironmentSnapshotRepository = (
             PostgresEnvironmentSnapshotRepository(pool)
@@ -162,8 +165,10 @@ class Storage:
             pool
         )
         self.mcp_catalog: McpCatalogRepository = PostgresMcpCatalogRepository(pool)
-        self.model_preferences: ModelPreferenceRepository = PostgresModelPreferenceRepository(pool)
-        self.notification_maintenance: NotificationMaintenanceRepository = (
+        self.model_preferences: PostgresModelPreferenceRepository = (
+            PostgresModelPreferenceRepository(pool)
+        )
+        self.notification_maintenance: PostgresNotificationMaintenanceRepository = (
             PostgresNotificationMaintenanceRepository(pool)
         )
         self.owner_usage: OwnerUsageQueries = PostgresOwnerUsageRepository(pool)
@@ -173,6 +178,7 @@ class Storage:
         self.profiling_control: ProfilingControl = PostgresProfilingControlRepository(pool)
         self.residency: ResidencyRepository = PostgresResidencyRepository(pool)
         self.sandbox: SandboxRepository = PostgresSandboxRepository(pool)
+        self.sandbox_incidents: SandboxIncidentRepository = PostgresSandboxIncidentRepository(pool)
         self.session_fork: SessionForkRepository = PostgresSessionForkRepository(pool)
         self.settings: SettingsRepository = PostgresSettingsRepository(pool)
         self.skills: SkillRepository = PostgresSkillRepository(pool)
@@ -180,7 +186,7 @@ class Storage:
         self.source_control: SourceControlRepository = PostgresSourceControlRepository(pool)
         self.ssh_servers: SshServerRepository = PostgresSshServerRepository(pool)
         self.model_connections: ModelConnectionRepository = PostgresModelConnectionRepository(pool)
-        self.work_insights: WorkInsightsRepository = PostgresWorkInsightsRepository(pool)
+        self.work_insights: PostgresWorkInsightsRepository = PostgresWorkInsightsRepository(pool)
         self.agent_memory: AgentMemoryRepository = PostgresAgentMemoryRepository(pool)
         self.user_profile: UserProfileRepository = PostgresUserProfileRepository(pool)
         self.teams: TeamRepository = PostgresTeamRepository(pool)
@@ -189,3 +195,16 @@ class Storage:
         #: Accounts and the work ended with them.
         self.local_accounts: LocalAccountRepository = PostgresLocalAccountRepository(pool)
         self.owner_work: OwnerWorkTermination = PostgresOwnerWorkRepository(pool)
+
+    def _admin_read_models(self, pool: asyncpg.Pool) -> None:
+        """The admin read models.
+
+        Bounded projections for one console, behind the ports in
+        :mod:`cloud_agent.ports.admin_queries`. Named here so that the routes
+        which need them stop reaching into another object's pool to build one.
+        """
+        self.admin_conversations: AdminConversationQueries = PostgresAdminConversationQueries(pool)
+        self.admin_database: AdminDatabaseQueries = PostgresAdminDatabaseQueries(pool)
+        self.admin_runs: AdminRunQueries = PostgresAdminRunQueries(pool)
+        self.admin_sandboxes: AdminSandboxQueries = PostgresAdminSandboxQueries(pool)
+        self.admin_usage: AdminUsageQueries = PostgresAdminUsageQueries(pool)

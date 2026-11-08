@@ -12,8 +12,6 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-import pytest
-from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
 from tests.servers.test_agent_jobs_api import (  # noqa: F401 -- autouse fixtures
     _api_key_secret,
@@ -39,6 +37,7 @@ from tests.servers.test_model_connections_api import (  # noqa: F401 -- autouse 
     _TurnStorage,
     provider,
 )
+from tests.support.refusals import raises_http
 
 from cloud_agent.api import model_connections as api
 from cloud_agent.api.deps import get_owner_directory
@@ -193,7 +192,7 @@ async def test_a_follow_up_inherits_its_level_and_rechecks_it_against_a_new_mode
     assert changed.reasoning_effort == "high"
 
     # o4-mini declares nothing: the inherited ``max`` is refused, not dropped.
-    with pytest.raises(HTTPException) as refused:
+    with raises_http() as refused:
         await _follow_up(connections, parent, model="o4-mini", model_connection_id=row["id"])
     assert refused.value.detail["error"]["reason"] == "effort_unknown"
     switched = await _follow_up(

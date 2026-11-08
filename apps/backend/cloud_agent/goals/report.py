@@ -22,8 +22,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
+
+from cloud_agent.domain.goals import GoalReport, ParsedGoalReport
 
 #: The fence that opens and closes the block. A model that emits one of these
 #: has made a report attempt, whether or not the JSON inside is valid — which is
@@ -40,32 +41,6 @@ MAX_EVIDENCE_CHARS = 1000
 MAX_REPORT_BYTES = 8 * 1024
 MAX_REASON_CHARS = 2000
 
-GoalReportOutcome = Literal["complete", "needs_input"]
-#: ``absent`` and ``valid`` are the two answers the platform acts on directly.
-#: ``invalid`` earns one repair round; ``unavailable`` pauses, because a report
-#: that could not be read is not the same fact as a report that was not made.
-GoalReportParse = Literal["absent", "valid", "invalid", "unavailable"]
-
-
-@dataclass(frozen=True)
-class GoalReport:
-    """What one turn said about the goal, and why."""
-
-    outcome: GoalReportOutcome
-    reason: str
-    evidence: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class ParsedGoalReport:
-    """The outcome of reading one final message, with a reason when it failed."""
-
-    result: GoalReportParse
-    report: GoalReport | None = None
-    #: Machine-readable, one of :data:`REPORT_INVALID_REASONS`. Only set when
-    #: ``result`` is ``invalid``.
-    detail: str | None = None
-
 
 def source_digest(text: str | None) -> str | None:
     """A short, stable name for the message a report was read out of.
@@ -76,46 +51,6 @@ def source_digest(text: str | None) -> str | None:
     if text is None:
         return None
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
-
-
-@dataclass(frozen=True)
-class GoalReportEnvelope:
-    """One turn's answer about its goal, as the control plane stores it.
-
-    The same four facts the runtime adapter produces, plus the provenance of the
-    message they were read out of. It crosses one boundary — the finish request —
-    and everything on the far side reads it as *what the model said*, never as
-    something the platform verified. The identity fields (job, attempt, lease,
-    goal, revision) are deliberately absent: they are bound by the authenticated
-    execution context, and a model's own claim about which goal it was working
-    on is not evidence about anything.
-    """
-
-    parse_result: GoalReportParse
-    outcome: GoalReportOutcome | None = None
-    reason: str | None = None
-    #: A list, not a tuple: this is the value that goes into a JSONB column, and
-    #: the driver will not encode a tuple into one.
-    evidence: list[str] | None = None
-    detail: str | None = None
-    #: Which final message this was read from. The audit trail points at it; the
-    #: report's content is not republished here.
-    source_digest: str | None = None
-
-    @classmethod
-    def from_parsed(
-        cls, parsed: ParsedGoalReport, *, source_digest: str | None
-    ) -> GoalReportEnvelope:
-        """The envelope for one parsed final message."""
-        report = parsed.report
-        return cls(
-            parse_result=parsed.result,
-            outcome=report.outcome if report is not None else None,
-            reason=report.reason if report is not None else None,
-            evidence=list(report.evidence) if report is not None else None,
-            detail=parsed.detail,
-            source_digest=source_digest,
-        )
 
 
 #: Every way a report can be refused. Machine-readable because the pause detail
@@ -304,11 +239,6 @@ __all__ = [
     "MAX_REPORT_BYTES",
     "REPORT_INVALID_REASONS",
     "REPORT_VERSION",
-    "GoalReport",
-    "GoalReportEnvelope",
-    "GoalReportOutcome",
-    "GoalReportParse",
-    "ParsedGoalReport",
     "absent",
     "invalid",
     "parse_goal_report",

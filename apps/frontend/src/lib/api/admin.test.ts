@@ -50,6 +50,12 @@ describe('admin runner host API client', () => {
     await removeAgentRunnerHost('host/a', true, true);
     await listAdminAuditLog();
     await listAdminAuditLog({ category: 'servers', before: 120 });
+    await listAdminAuditLog({
+      category: 'accounts',
+      actors: 'all',
+      user: 'acct-7',
+      target: { type: 'sandbox', id: 'asbx_1' },
+    });
     expectRequestsMatchContract();
   });
 
@@ -103,8 +109,20 @@ describe('admin runner host API client', () => {
     );
     await listAdminAuditLog();
     expect(lastCall().path).toBe('/admin/agent/audit-log');
-    await listAdminAuditLog({ category: 'database', before: 41 });
-    expect(lastCall().path).toBe('/admin/agent/audit-log?category=database&before=41');
+    await listAdminAuditLog({ category: 'sensitive_access', before: 41 });
+    expect(lastCall().path).toBe('/admin/agent/audit-log?category=sensitive_access&before=41');
+  });
+
+  it('asks for everyone, one account or one object only when told to', async () => {
+    vi.mocked(fetchWithAuth).mockImplementation(
+      async () => new Response(JSON.stringify({ entries: [], next_before: null })),
+    );
+    await listAdminAuditLog({ actors: 'people', user: null, target: null });
+    expect(lastCall().path).toBe('/admin/agent/audit-log');
+    await listAdminAuditLog({ actors: 'all', user: 'acct 7' });
+    expect(lastCall().path).toBe('/admin/agent/audit-log?actors=all&user=acct+7');
+    await listAdminAuditLog({ target: { type: 'host', id: 'rtx6000b' } });
+    expect(lastCall().path).toBe('/admin/agent/audit-log?target_type=host&target_id=rtx6000b');
   });
 
   it('surfaces a refused removal with its code', async () => {

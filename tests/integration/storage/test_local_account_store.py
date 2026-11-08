@@ -27,12 +27,12 @@ from tests.support.local_accounts import (
 
 from cloud_agent.accounts import config, tokens
 from cloud_agent.accounts.passwords import hash_password
+from cloud_agent.deployment.identity_namespace import IdentityNamespaceError, ensure_local_namespace
 from cloud_agent.domain.accounts import (
     AccountTransitionRefused,
     AccountVersionConflict,
     permissions_for,
 )
-from cloud_agent.identity_namespace import IdentityNamespaceError, ensure_local_namespace
 from cloud_agent.storage.assembly import Storage
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]

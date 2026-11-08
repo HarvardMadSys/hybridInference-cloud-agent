@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cloud_agent.domain.execution import JobStreamState
+from cloud_agent.domain.thread_stats import summarize_thread_rollups
 from cloud_agent.storage._sql.attempt_rollups import (
     THREAD_STATS_EVENT_PAGE_SIZE,
     partition_attempt_rollups,
@@ -18,7 +19,6 @@ from cloud_agent.storage._sql.attempt_rollups import (
 )
 from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage._sql.sandbox import THREAD_SANDBOX_SOURCE
-from cloud_agent.thread_stats import summarize_thread_rollups
 
 if TYPE_CHECKING:
     from typing import Any

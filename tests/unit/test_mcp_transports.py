@@ -60,8 +60,8 @@ from cloud_agent.mcp.transports import (
 pytestmark = pytest.mark.asyncio
 
 #: A literal loopback address, so the egress guard needs no resolver. The
-#: private rule is widened for it the way a deployment with a private connector
-#: bridge widens it; the scheme rule stays at its https default because the
+#: private rule is widened for it the way a deployment with MCP servers on a
+#: private network widens it; the scheme rule stays at its https default because the
 #: mocked transport never opens a socket.
 _URL = "https://127.0.0.1:9/mcp"
 

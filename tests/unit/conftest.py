@@ -1,6 +1,6 @@
 """No unit test reaches real Docker through the network guard's long-lived helper,
-or a package registry through an import, and every unit test starts on a host
-that has just started."""
+or a package registry through an import, every unit test starts on a host that
+has just started, and a group lifecycle violation fails the test."""
 
 from __future__ import annotations
 
@@ -8,12 +8,15 @@ from typing import TYPE_CHECKING
 
 import httpx
 import pytest
+from tests.support.group_lifecycle import set_flags
 
 from cloud_agent.mcp import package_pins
-from cloud_agent_host import network_guard_helper, sandbox_mcp
+from cloud_agent_host import sandbox_mcp
+from cloud_agent_host.network import network_guard_helper
+from cloud_agent_host.supervisor.group_lifecycle_state import set_strict_checks
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 
 @pytest.fixture(autouse=True)
@@ -63,3 +66,17 @@ def _no_package_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     unreachable = httpx.MockTransport(lambda _request: httpx.Response(503))
     monkeypatch.setattr(package_pins, "releases", package_pins.Releases(transport=unreachable))
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _strict_group_lifecycle() -> Iterator[None]:
+    """Make every group lifecycle violation fail its test instead of only being logged."""
+    set_strict_checks(True)
+    yield
+    set_strict_checks(False)
+
+
+@pytest.fixture
+def lifecycle_flags() -> Callable[..., None]:
+    """Set a group's lifecycle by its flag names (``tests.support.group_lifecycle``)."""
+    return set_flags

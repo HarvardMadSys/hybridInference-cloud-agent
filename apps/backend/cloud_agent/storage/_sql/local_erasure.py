@@ -43,6 +43,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from cloud_agent.domain.sandbox_group import DeletionState
+
 #: Tables erased by the account flow itself, not by this walk.
 _SKIP_PREFIX = "agent_local_"
 #: Walks over the owner tables before the erasure gives up on a moving target.
@@ -283,7 +285,7 @@ async def erase_owner_rows(conn: Any, account_id: str) -> dict[str, int]:
     """
     if await conn.fetchval(
         "SELECT EXISTS (SELECT 1 FROM agent_sandboxes WHERE user_id = $1 "
-        "AND deletion_state <> 'deleted')",
+        f"AND deletion_state <> {DeletionState.DELETED.sql})",
         account_id,
     ):
         raise ErasureBlocked(
@@ -301,7 +303,8 @@ async def erase_owner_rows(conn: Any, account_id: str) -> dict[str, int]:
             break
     else:
         raise ErasureBlocked("The account's data kept changing while it was being erased.")
-    await conn.execute("DELETE FROM agent_admin_audit_log WHERE target_user_id = $1", account_id)
+    # The admin audit trail is kept whole, names included: who approved,
+    # promoted or suspended an account is still answerable after it is gone.
     return walk.deleted
 
 

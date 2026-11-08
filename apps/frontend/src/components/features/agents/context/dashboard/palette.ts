@@ -71,12 +71,9 @@ export function labelOf(key: string): TranslationKey {
 
 /** Timing kinds; hues from dsh-context `timingStrip.tsx` `TIMING_COLOR`. */
 export const TIMING_SWATCH: Record<string, Swatch> = {
-  ttft: swatch('bg-blue-500', 'fill-blue-500', 'stroke-blue-500'),
   reasoning: swatch('bg-violet-500', 'fill-violet-500', 'stroke-violet-500'),
   text: swatch('bg-pink-500', 'fill-pink-500', 'stroke-pink-500'),
   toolarg: swatch('bg-amber-500', 'fill-amber-500', 'stroke-amber-500'),
-  gen: swatch('bg-fuchsia-400', 'fill-fuchsia-400', 'stroke-fuchsia-400'),
   tools: swatch('bg-teal-500', 'fill-teal-500', 'stroke-teal-500'),
   unsplit: swatch('bg-slate-500 dark:bg-slate-400', 'fill-slate-500', 'stroke-slate-500'),
-  other: swatch('bg-slate-300 dark:bg-slate-600', 'fill-slate-300', 'stroke-slate-300'),
 };

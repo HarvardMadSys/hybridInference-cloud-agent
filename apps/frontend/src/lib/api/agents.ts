@@ -100,6 +100,7 @@ export type {
   ContextEventKind,
   ContextPointApi,
   LatestContextApi,
+  MeasuredPrefixApi,
   EventCapabilityApi,
   DnaBandsApi,
   SessionTokensApi,
@@ -232,12 +233,16 @@ export type {
   AgentJobFilesApi,
   AgentGitWorkspaceApi,
   AgentGitWorkspaceMetadataApi,
+  AgentWorkspaceImageApi,
+  AgentWorkspaceImagesApi,
 } from './agents/workspace';
 
 export {
   getAgentJobFiles,
   getAgentJobGitMetadata,
   getAgentJobGit,
+  getAgentJobImage,
+  listAgentJobArtifactImages,
   downloadAgentWorkspace,
 } from './agents/workspace';
 

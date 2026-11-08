@@ -167,9 +167,9 @@ def test_control_plane_imports_no_host_package() -> None:
     ("source", "pairs", "modules"),
     [
         (
-            "import cloud_agent_host.sandbox as host_impl\n",
+            "import cloud_agent_host.container.sandbox as host_impl\n",
             set(),
-            {"cloud_agent_host.sandbox"},
+            {"cloud_agent_host.container.sandbox"},
         ),
         (
             "from cloud_agent_host.runtimes import get_runtime\n",

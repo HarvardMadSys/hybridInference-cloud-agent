@@ -177,7 +177,7 @@ async def _run(args: argparse.Namespace) -> str:
         refuse_retired_configuration,
     )
     from cloud_agent.application.accounts import normalize_email
-    from cloud_agent.identity_namespace import ensure_local_namespace
+    from cloud_agent.deployment.identity_namespace import ensure_local_namespace
     from cloud_agent.storage.assembly import Storage
 
     refuse_retired_configuration()

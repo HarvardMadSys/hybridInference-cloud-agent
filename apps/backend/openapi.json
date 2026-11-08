@@ -740,12 +740,30 @@
         "type": "object"
       },
       "AdminAuditLogEntry": {
-        "description": "One recorded admin action, as the Audit log page shows it.",
+        "description": "One recorded action, as the Audit log page shows it.",
         "properties": {
           "action": {
             "description": "Dotted action name, e.g. ``agent.runner_host.drain``.",
             "title": "Action",
             "type": "string"
+          },
+          "actor_account_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The acting account, for ``admin`` and ``user`` actors.",
+            "title": "Actor Account Id"
+          },
+          "actor_deleted": {
+            "default": false,
+            "description": "The acting account has since been deleted.",
+            "title": "Actor Deleted",
+            "type": "boolean"
           },
           "actor_id": {
             "anyOf": [
@@ -756,10 +774,36 @@
                 "type": "null"
               }
             ],
-            "description": "The administrator who acted; null on rows older than the column.",
+            "description": "Who acted, as recorded: ``admin:<account id>``, ``admin-token`` ...",
             "title": "Actor Id"
           },
+          "actor_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The acting account's name when the row was written.",
+            "title": "Actor Label"
+          },
+          "actor_type": {
+            "description": "``admin`` (an administrator's session), ``break_glass`` (access belonging to no account: ADMIN_TOKEN, first-run setup, the bootstrap command), ``service``, ``system``, ``user`` (an account acting on itself) or ``anonymous``.",
+            "enum": [
+              "admin",
+              "break_glass",
+              "service",
+              "system",
+              "user",
+              "anonymous"
+            ],
+            "title": "Actor Type",
+            "type": "string"
+          },
           "admin_ip": {
+            "description": "The caller's address, best effort.",
             "title": "Admin Ip",
             "type": "string"
           },
@@ -767,11 +811,13 @@
             "anyOf": [
               {
                 "enum": [
+                  "accounts",
                   "settings",
                   "servers",
+                  "sandboxes",
                   "measurements",
-                  "content",
-                  "database"
+                  "sensitive_access",
+                  "access_control"
                 ],
                 "type": "string"
               },
@@ -803,9 +849,119 @@
             "title": "Id",
             "type": "integer"
           },
+          "kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "change",
+                  "access",
+                  "self_service"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "``change`` altered the platform or someone else's account or data, ``access`` opened someone's data to the actor, ``self_service`` is an account changing itself; null for an action this release does not know.",
+            "title": "Kind"
+          },
+          "outcome": {
+            "description": "What the request did. ``requested`` was accepted and runs later; ``refused`` and ``replayed`` changed nothing.",
+            "enum": [
+              "applied",
+              "requested",
+              "refused",
+              "failed",
+              "replayed"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why, in the administrator's words.",
+            "title": "Reason"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "enum": [
+                  "applied",
+                  "failed",
+                  "cancelled"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A ``requested`` row's final result; null while it still runs.",
+            "title": "Result"
+          },
+          "result_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result At"
+          },
+          "subject_deleted": {
+            "default": false,
+            "description": "The affected user has since been deleted.",
+            "title": "Subject Deleted",
+            "type": "boolean"
+          },
+          "subject_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The affected user's name when the row was written.",
+            "title": "Subject Label"
+          },
           "success": {
             "title": "Success",
             "type": "boolean"
+          },
+          "target_id": {
+            "description": "Its id: an account id, a host name, a sandbox id ...",
+            "title": "Target Id",
+            "type": "string"
+          },
+          "target_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Its name when the row was written.",
+            "title": "Target Label"
+          },
+          "target_type": {
+            "description": "What was acted on: ``account``, ``host``, ``sandbox`` ...",
+            "title": "Target Type",
+            "type": "string"
           },
           "target_user_id": {
             "anyOf": [
@@ -816,15 +972,19 @@
                 "type": "null"
               }
             ],
-            "description": "The user acted upon, such as the owner of content an admin read.",
+            "description": "The user affected: the account acted on, or the owner of what was.",
             "title": "Target User Id"
           }
         },
         "required": [
           "id",
           "action",
+          "actor_type",
           "admin_ip",
+          "target_type",
+          "target_id",
           "success",
+          "outcome",
           "created_at"
         ],
         "title": "AdminAuditLogEntry",
@@ -851,6 +1011,9 @@
             ],
             "description": "Pass as ``before`` for the next, older page; null when there is none.",
             "title": "Next Before"
+          },
+          "write_failures": {
+            "$ref": "#/components/schemas/AuditWriteFailures"
           }
         },
         "required": [
@@ -1741,6 +1904,30 @@
             "format": "date-time",
             "title": "Last Activity At",
             "type": "string"
+          },
+          "last_incident": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Incident"
+          },
+          "last_incident_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Incident At"
           },
           "member_count": {
             "minimum": 0.0,
@@ -8481,6 +8668,52 @@
         "title": "AgentWorkspaceEntry",
         "type": "object"
       },
+      "AgentWorkspaceImage": {
+        "description": "One image saved under the workspace's artifacts directory.",
+        "properties": {
+          "modified_at": {
+            "title": "Modified At",
+            "type": "number"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path",
+          "size",
+          "modified_at"
+        ],
+        "title": "AgentWorkspaceImage",
+        "type": "object"
+      },
+      "AgentWorkspaceImagesResponse": {
+        "description": "The artifacts directory's images since a time, newest first.",
+        "properties": {
+          "images": {
+            "items": {
+              "$ref": "#/components/schemas/AgentWorkspaceImage"
+            },
+            "title": "Images",
+            "type": "array"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "images"
+        ],
+        "title": "AgentWorkspaceImagesResponse",
+        "type": "object"
+      },
       "AgentWorkspaceResponse": {
         "description": "A directory listing or bounded file payload from a job workspace.",
         "properties": {
@@ -8906,6 +9139,33 @@
           }
         },
         "title": "AttemptResources",
+        "type": "object"
+      },
+      "AuditWriteFailures": {
+        "description": "Audit writes that failed recently. Recording never fails the action itself.",
+        "properties": {
+          "count": {
+            "description": "Failed writes in the last seven days.",
+            "title": "Count",
+            "type": "integer"
+          },
+          "latest_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest At"
+          }
+        },
+        "required": [
+          "count"
+        ],
+        "title": "AuditWriteFailures",
         "type": "object"
       },
       "AuthConfigResponse": {
@@ -10857,17 +11117,6 @@
             "title": "Config Revision",
             "type": "integer"
           },
-          "connector_id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Connector Id"
-          },
           "created_at": {
             "anyOf": [
               {
@@ -12529,17 +12778,6 @@
             "default": "none",
             "title": "Auth Kind",
             "type": "string"
-          },
-          "connector_id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Connector Id"
           },
           "env_secrets": {
             "additionalProperties": {
@@ -15402,6 +15640,19 @@
             "title": "Host",
             "type": "string"
           },
+          "incidents": {
+            "anyOf": [
+              {
+                "const": "accepted",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`accepted` when every sandbox incident this beat carried is stored: the host forgets those rows only then. Absent from a control plane that does not store incidents, or when one could not be stored.",
+            "title": "Incidents"
+          },
           "residencies_lost": {
             "description": "The reported beats whose generation no longer holds its residency — echoed back with the generation, so a late answer to an old beat cannot end the successor the host has since established. The host fences those member processes; the retained container still owns their native session files.",
             "items": {
@@ -16929,7 +17180,7 @@
         "type": "object"
       },
       "McpBindingInput": {
-        "description": "One connection's use by a session, as the caller asks for it.\n\nThe policy map is name to ``deny`` / ``confirm`` / ``allow``. A name that\nis absent is denied: a session means what it says, and a capability the\nserver adds later is not covered by what its owner chose earlier.",
+        "description": "One connection's use by a session, as the caller asks for it.\n\nThe policy map is name to ``deny`` / ``confirm`` / ``allow``. A name that\nis absent is denied: a session means what it says, and a capability the\nserver adds later is not covered by what its owner chose earlier.\n\n``use_defaults`` turns the server on before its tools are known: every\ntool it lists asks first, as a server the owner connected later does. A\nprogram in the chat's sandbox needs it, because it lists its tools only\nonce a chat has started it.",
         "properties": {
           "alias": {
             "anyOf": [
@@ -16973,6 +17224,11 @@
             },
             "title": "Tools",
             "type": "object"
+          },
+          "use_defaults": {
+            "default": false,
+            "title": "Use Defaults",
+            "type": "boolean"
           }
         },
         "required": [
@@ -17143,6 +17399,116 @@
           "label"
         ],
         "title": "McpIntegrationResponse",
+        "type": "object"
+      },
+      "MeasuredPrefix": {
+        "additionalProperties": false,
+        "description": "What the request's attempt sent ahead of the conversation, as its meter measured it.",
+        "properties": {
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode"
+          },
+          "other_prefixes": {
+            "minimum": 0.0,
+            "title": "Other Prefixes",
+            "type": "integer"
+          },
+          "protocol": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Protocol"
+          },
+          "source": {
+            "const": "member_request_meter",
+            "default": "member_request_meter",
+            "title": "Source",
+            "type": "string"
+          },
+          "system_chars": {
+            "minimum": 0.0,
+            "title": "System Chars",
+            "type": "integer"
+          },
+          "system_parts": {
+            "minimum": 0.0,
+            "title": "System Parts",
+            "type": "integer"
+          },
+          "system_tokens": {
+            "minimum": 0.0,
+            "title": "System Tokens",
+            "type": "integer"
+          },
+          "token_basis": {
+            "default": "chars_cjk_v1",
+            "title": "Token Basis",
+            "type": "string"
+          },
+          "tool_chars": {
+            "minimum": 0.0,
+            "title": "Tool Chars",
+            "type": "integer"
+          },
+          "tool_count": {
+            "minimum": 0.0,
+            "title": "Tool Count",
+            "type": "integer"
+          },
+          "tool_tokens": {
+            "minimum": 0.0,
+            "title": "Tool Tokens",
+            "type": "integer"
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/PrefixTool"
+            },
+            "title": "Tools",
+            "type": "array"
+          },
+          "tools_omitted": {
+            "minimum": 0.0,
+            "title": "Tools Omitted",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "system_chars",
+          "system_tokens",
+          "system_parts",
+          "tool_count",
+          "tool_chars",
+          "tool_tokens",
+          "tools",
+          "tools_omitted",
+          "other_prefixes"
+        ],
+        "title": "MeasuredPrefix",
         "type": "object"
       },
       "MemoryProjects": {
@@ -18574,6 +18940,33 @@
         "title": "PhoneVerifyRequest",
         "type": "object"
       },
+      "PrefixTool": {
+        "additionalProperties": false,
+        "description": "One tool schema a request sent, by its name.",
+        "properties": {
+          "chars": {
+            "minimum": 0.0,
+            "title": "Chars",
+            "type": "integer"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "tokens": {
+            "minimum": 0.0,
+            "title": "Tokens",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "label",
+          "chars",
+          "tokens"
+        ],
+        "title": "PrefixTool",
+        "type": "object"
+      },
       "ProcessObservation": {
         "description": "One process created during a turn, observed by the Kata guest kernel.",
         "properties": {
@@ -19367,6 +19760,16 @@
             "title": "Native Status",
             "type": "string"
           },
+          "prefix": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MeasuredPrefix"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "reconstructed": {
             "$ref": "#/components/schemas/ReconstructedComposition"
           },
@@ -19420,43 +19823,6 @@
           "version"
         ],
         "title": "RequestRuntimeUpgradeRequest",
-        "type": "object"
-      },
-      "RequestTiming": {
-        "additionalProperties": false,
-        "description": "One model request the Gateway timed, by the id the CLI reported for it.",
-        "properties": {
-          "latency_ms": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Latency Ms"
-          },
-          "response_id": {
-            "title": "Response Id",
-            "type": "string"
-          },
-          "ttft_ms": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Ttft Ms"
-          }
-        },
-        "required": [
-          "response_id"
-        ],
-        "title": "RequestTiming",
         "type": "object"
       },
       "ResetPasswordRequest": {
@@ -19665,6 +20031,13 @@
             ],
             "description": "Remaining settled-idle delay observed from the host monotonic clock. Null is unknown or currently active, not an immediate deadline.",
             "title": "Idle Remaining Seconds"
+          },
+          "incidents": {
+            "items": {
+              "$ref": "#/components/schemas/SandboxIncident"
+            },
+            "title": "Incidents",
+            "type": "array"
           },
           "members": {
             "items": {
@@ -20625,6 +20998,90 @@
           "thread_id"
         ],
         "title": "SandboxCheckpointMember",
+        "type": "object"
+      },
+      "SandboxIncident": {
+        "additionalProperties": false,
+        "description": "One final incident row, as a host sends it.",
+        "properties": {
+          "count": {
+            "default": 1,
+            "maximum": 1000000.0,
+            "minimum": 1.0,
+            "title": "Count",
+            "type": "integer"
+          },
+          "details": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "maxProperties": 8,
+            "title": "Details",
+            "type": "object"
+          },
+          "incident_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[!-~]+$",
+            "title": "Incident Id",
+            "type": "string"
+          },
+          "kind": {
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Kind",
+            "type": "string"
+          },
+          "observed_at": {
+            "minimum": 0.0,
+            "title": "Observed At",
+            "type": "number"
+          },
+          "scope": {
+            "enum": [
+              "sandbox",
+              "member"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "thread_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thread Id"
+          }
+        },
+        "required": [
+          "incident_id",
+          "kind",
+          "scope",
+          "observed_at"
+        ],
+        "title": "SandboxIncident",
         "type": "object"
       },
       "SandboxMcpServer": {
@@ -23501,7 +23958,7 @@
       },
       "ThreadTiming": {
         "additionalProperties": false,
-        "description": "Where the executions' time went, and how much of it could be split.",
+        "description": "Where the executions' time went.",
         "properties": {
           "active_ms": {
             "minimum": 0.0,
@@ -23521,17 +23978,13 @@
             "type": "integer"
           },
           "executions_split": {
-            "minimum": 0.0,
+            "default": 0,
             "title": "Executions Split",
             "type": "integer"
           },
           "gateway": {
-            "enum": [
-              "available",
-              "partial",
-              "unavailable",
-              "not_recorded"
-            ],
+            "const": "not_recorded",
+            "default": "not_recorded",
             "title": "Gateway",
             "type": "string"
           },
@@ -23547,7 +24000,7 @@
             "title": "Gateway Reason"
           },
           "model_requests": {
-            "minimum": 0.0,
+            "default": 0,
             "title": "Model Requests",
             "type": "integer"
           },
@@ -23564,7 +24017,8 @@
           },
           "requests": {
             "items": {
-              "$ref": "#/components/schemas/RequestTiming"
+              "additionalProperties": true,
+              "type": "object"
             },
             "title": "Requests",
             "type": "array"
@@ -23597,14 +24051,11 @@
             },
             "propertyNames": {
               "enum": [
-                "ttft",
                 "reasoning",
                 "text",
                 "toolarg",
-                "gen",
                 "tools",
-                "unsplit",
-                "other"
+                "unsplit"
               ]
             },
             "title": "Totals",
@@ -23615,11 +24066,8 @@
           "active_ms",
           "totals",
           "executions",
-          "executions_split",
-          "model_requests",
           "tool_calls",
           "tool_calls_unpaired",
-          "gateway",
           "segments"
         ],
         "title": "ThreadTiming",
@@ -23635,14 +24083,11 @@
           },
           "kind": {
             "enum": [
-              "ttft",
               "reasoning",
               "text",
               "toolarg",
-              "gen",
               "tools",
-              "unsplit",
-              "other"
+              "unsplit"
             ],
             "title": "Kind",
             "type": "string"
@@ -24330,6 +24775,13 @@
               }
             ],
             "title": "Auth Kind"
+          },
+          "env_secrets": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Env Secrets",
+            "type": "object"
           },
           "expected_config_revision": {
             "minimum": 1.0,
@@ -27400,7 +27852,7 @@
   "paths": {
     "/admin/agent/audit-log": {
       "get": {
-        "description": "Return recorded admin actions, newest first, a page at a time.",
+        "description": "Return recorded actions, newest first, a page at a time.",
         "operationId": "list_admin_audit_log_admin_agent_audit_log_get",
         "parameters": [
           {
@@ -27411,11 +27863,13 @@
               "anyOf": [
                 {
                   "enum": [
+                    "accounts",
                     "settings",
                     "servers",
+                    "sandboxes",
                     "measurements",
-                    "content",
-                    "database"
+                    "sensitive_access",
+                    "access_control"
                   ],
                   "type": "string"
                 },
@@ -27424,6 +27878,75 @@
                 }
               ],
               "title": "Category"
+            }
+          },
+          {
+            "description": "``people``: administrators' sessions and break-glass access. ``all`` adds services, the control plane's own policy and accounts changing themselves.",
+            "in": "query",
+            "name": "actors",
+            "required": false,
+            "schema": {
+              "default": "people",
+              "description": "``people``: administrators' sessions and break-glass access. ``all`` adds services, the control plane's own policy and accounts changing themselves.",
+              "enum": [
+                "people",
+                "all"
+              ],
+              "title": "Actors",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Only rows about this account or what it owns.",
+            "in": "query",
+            "name": "user",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only rows about this account or what it owns.",
+              "title": "User"
+            }
+          },
+          {
+            "in": "query",
+            "name": "target_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Target Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "target_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 512,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Target Id"
             }
           },
           {
@@ -28268,7 +28791,7 @@
     },
     "/admin/agent/compute-connections/{connection_id}/validate": {
       "post": {
-        "description": "Validate a configured connection without allocating resources.",
+        "description": "Validate a configured connection without allocating resources.\n\nA check changes nothing an administrator would look for later, so it is\nnot audited, as the reads above are not.",
         "operationId": "validate_connection_admin_agent_compute_connections__connection_id__validate_post",
         "parameters": [
           {
@@ -37344,6 +37867,73 @@
         "summary": "Archive Agent Thread"
       }
     },
+    "/v1/agent/jobs/{job_id}/artifacts/images": {
+      "get": {
+        "description": "The images saved under the workspace's artifacts directory since ``since``.\n\n``since`` is a Unix time; the newest images come first. This is how a turn\nshows the screenshots its tools saved without the agent having to say so.",
+        "operationId": "list_agent_job_artifact_images_v1_agent_jobs__job_id__artifacts_images_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "default": 0.0,
+              "minimum": 0.0,
+              "title": "Since",
+              "type": "number"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentWorkspaceImagesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Agent Job Artifact Images"
+      }
+    },
     "/v1/agent/jobs/{job_id}/attempts/{attempt_id}/telemetry": {
       "get": {
         "description": "Read measurements for one attempt belonging to the caller's job.",
@@ -37687,6 +38277,71 @@
           }
         },
         "summary": "Write Agent Job Workspace File"
+      }
+    },
+    "/v1/agent/jobs/{job_id}/files/image": {
+      "get": {
+        "description": "One PNG, JPEG, GIF or WebP file from the chat's workspace, as its own bytes.\n\nA file preview is bounded for text; a full-page screenshot is usually past\nthat bound, so an image has its own, larger one.",
+        "operationId": "get_agent_job_workspace_image_v1_agent_jobs__job_id__files_image_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Agent Job Workspace Image"
       }
     },
     "/v1/agent/jobs/{job_id}/fork": {
@@ -39039,7 +39694,7 @@
     },
     "/v1/agent/jobs/{job_id}/thread/context/timing": {
       "get": {
-        "description": "Where the caller's conversation's execution time went.\n\nRead when the dashboard asks, never at settlement: the attempts' recorded\nspans and tool windows. No request log is recorded for an owner's own\nmodel connection, so TTFT and generation stay \"not recorded\" and each\nexecution's model and harness time is reported together, not split.\nNothing is asked of a CLI.",
+        "description": "Where the caller's conversation's execution time went.\n\nRead when the dashboard asks, never at settlement: the attempts' recorded\nspans and tool windows. No request log is recorded for an owner's own\nmodel connection, so each execution's model and harness time is reported\ntogether, not split. Nothing is asked of a CLI.",
         "operationId": "get_thread_context_timing_v1_agent_jobs__job_id__thread_context_timing_get",
         "parameters": [
           {
@@ -46261,7 +46916,7 @@
     },
     "/v1/agent/usage/tokens": {
       "get": {
-        "description": "Agent-reported model usage of the owner's runs created in the range.\n\nA range larger than one bounded selection is summed in bounded batches\n(:mod:`cloud_agent.usage_batches`), never narrowed.\n\nRaises:\n    HTTPException: 422 when even a minimal batch exceeds the aggregation's\n        bounds or the response would, 503 when it cannot be read in time.\n        Neither returns a partial sum.",
+        "description": "Agent-reported model usage of the owner's runs created in the range.\n\nA range larger than one bounded selection is summed in bounded batches\n(:mod:`cloud_agent.usage.usage_batches`), never narrowed.\n\nRaises:\n    HTTPException: 422 when even a minimal batch exceeds the aggregation's\n        bounds or the response would, 503 when it cannot be read in time.\n        Neither returns a partial sum.",
         "operationId": "read_owner_tokens_v1_agent_usage_tokens_get",
         "parameters": [
           {

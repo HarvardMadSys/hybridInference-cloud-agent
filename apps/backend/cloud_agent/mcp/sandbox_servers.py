@@ -8,7 +8,9 @@ under, and the gateway refuses anything the policy would.
 
 Its keys (``secret://NAME`` values, stored sealed) are opened here, for this
 claim only, and travel with it to the host, which hands them to the slot's
-runner alone.
+runner alone. A new key shorter than an environment Secret may be is refused
+when it is saved (`short_key_refusal`); one stored before that rule still
+opens here, and runs unmasked.
 """
 
 from __future__ import annotations
@@ -17,17 +19,24 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
-from cloud_agent.credential_cipher import CredentialCipherError
+from cloud_agent.crypto.credential_cipher import CredentialCipherError
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.launch import LaunchPlanError, build_launch_plan
-from cloud_agent.mcp.models import AuthKind, ConnectionStatus, ExecutionLocation, Transport
-from cloud_agent.mcp.registry import mcp_cipher
+from cloud_agent.mcp.models import (
+    AuthKind,
+    ConnectionErrorKind,
+    ConnectionStatus,
+    ExecutionLocation,
+    Transport,
+)
+from cloud_agent.mcp.registry import mcp_cipher, resolve_connection
 from cloud_agent_shared.sandbox_mcp import (
     ARTIFACTS_DIR,
     BROWSER_CDP_PLACEHOLDER,
     SECRET_PREFIX,
     SandboxMcpServer,
 )
+from cloud_agent_shared.secret_redaction import MIN_SECRET_CHARS
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -92,6 +101,37 @@ TEMPLATES: tuple[dict[str, Any], ...] = (
 #: What testing a sandbox connection says: it starts in a chat's sandbox, so
 #: it is checked there, when a chat first lists its tools.
 TEST_MESSAGE = "This server starts with a chat. Its tools appear here once a chat has used it."
+#: What testing one says when its launch no longer passes the sandbox policy.
+REFUSED_MESSAGE = "This command can no longer run in a chat: pin an exact npx or uvx package."
+
+
+async def checked_in_place(store: Any, row: Mapping[str, Any], *, record: bool) -> tuple[bool, str]:
+    """Test a sandbox connection the only way the control plane can; whether it passed.
+
+    Nothing here can reach a server that starts in a chat's sandbox. What can
+    be checked is what a claim checks: its launch against the sandbox policy,
+    and that its sealed keys open. A connection that passes is ready to turn on
+    in a chat (``active``), which a saved one never was: ``draft`` means never
+    tested, and nothing else would ever test it. One that fails is ``error``
+    and says why. ``record`` publishes the verdict, fenced to the revisions
+    read, as every other test does.
+    """
+    resolved = await resolve_connection(store, row=row, load_snapshot=False)
+    passed = sandbox_mcp_server(resolved.connection, "check") is not None
+    if record:
+        await store.set_mcp_connection_status(
+            connection_id=int(row["id"]),
+            status=(ConnectionStatus.ACTIVE if passed else ConnectionStatus.ERROR).value,
+            error_kind=(
+                ConnectionErrorKind.NONE if passed else ConnectionErrorKind.LAUNCH_FAILED
+            ).value,
+            error_detail=None if passed else REFUSED_MESSAGE,
+            expected_config_revision=int(row["config_revision"]),
+            expected_authorization_epoch=int(row["authorization_epoch"]),
+            expected_credential_version=int(row["credential_version"]),
+            expected_capability_revision=int(row["capability_revision"]),
+        )
+    return passed, TEST_MESSAGE if passed else REFUSED_MESSAGE
 
 
 def sandbox_mcp_server(connection: McpConnection, alias: str) -> SandboxMcpServer | None:
@@ -183,4 +223,24 @@ def refusal(location: ExecutionLocation, auth_kind: AuthKind | str) -> str | Non
         return None
     if AuthKind(auth_kind) is not AuthKind.NONE:
         return "a command takes its keys as environment values, not a sign-in"
+    return None
+
+
+def short_key_refusal(location: ExecutionLocation, keys: Mapping[str, str]) -> str | None:
+    """Why a program's keys, about to be sealed, cannot be saved, or ``None``.
+
+    The runner masks a program's keys in the turn's durable output only from
+    ``MIN_SECRET_CHARS`` up (``SandboxMcpServer.secrets``), as it masks an
+    environment Secret, so a shorter key is refused on the same terms. Asked
+    only when a key is saved: a short key stored before this rule still runs.
+    """
+    if location is not ExecutionLocation.SANDBOX:
+        return None
+    for name in sorted(keys):
+        value = keys[name]
+        if value and len(value.strip()) < MIN_SECRET_CHARS:
+            return (
+                f"Secret {name} must contain at least {MIN_SECRET_CHARS} characters; "
+                "a shorter value cannot be masked in the chat's output"
+            )
     return None

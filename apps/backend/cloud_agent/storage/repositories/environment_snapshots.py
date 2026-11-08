@@ -13,15 +13,16 @@ import re
 import secrets
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.execution_profiles import default_execution_profile
-from cloud_agent.sandbox_archive_credentials import stored_archive_policy
+from cloud_agent.domain.execution_profiles import default_execution_profile
+from cloud_agent.sandbox_archive.sandbox_archive_credentials import stored_archive_policy
 from cloud_agent.storage._sql.environment_runs import env_run_holds_slot
+from cloud_agent.storage._sql.fences import leased_attempt_sql
 from cloud_agent.storage._sql.hosts import LIVE_ATTEMPT_HOST
 from cloud_agent.storage._sql.rows import load_json
-from cloud_agent.storage.repositories.environments import (
+from cloud_agent.storage.repositories.environments import retire_changed_snapshots
+from cloud_agent.storage.repositories.environments.installations import (
     lock_environment_snapshots,
     lock_team_environment_snapshots,
-    retire_changed_snapshots,
 )
 from cloud_agent_shared.environment_snapshots import (
     SNAPSHOT_MAX_AGE_DAYS,
@@ -447,8 +448,7 @@ class PostgresEnvironmentSnapshotRepository:
                 FROM agent_attempts a
                 JOIN agent_jobs j ON j.id = a.job_id
                 JOIN agent_threads t ON t.id = j.thread_id
-                WHERE a.id = $2 AND a.lease_generation = $3 AND a.status = 'running'
-                  AND a.lease_expires_at > clock_timestamp()
+                WHERE {leased_attempt_sql("$2", "$3")}
                   AND j.id = $1 AND j.current_attempt_id = a.id AND j.state = 'running'
                   AND {LIVE_ATTEMPT_HOST}
                 FOR SHARE OF a

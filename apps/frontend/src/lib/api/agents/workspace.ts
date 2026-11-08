@@ -66,6 +66,53 @@ export async function getAgentJobFiles(jobId: string, path = ''): Promise<AgentJ
   return jsonOrThrow<AgentJobFilesApi>(resp);
 }
 
+/** One image saved under the workspace's artifacts directory. */
+export interface AgentWorkspaceImageApi {
+  path: string;
+  size: number;
+  /** When it was last written, as a Unix time in seconds. */
+  modified_at: number;
+}
+
+export interface AgentWorkspaceImagesApi {
+  /** Newest first. */
+  images: AgentWorkspaceImageApi[];
+  /** More images, or more entries to look through, were left out. */
+  truncated: boolean;
+}
+
+/** The images the chat's tools saved under the artifacts directory since `since` (Unix seconds). */
+export async function listAgentJobArtifactImages(
+  jobId: string,
+  since = 0,
+  signal?: AbortSignal,
+): Promise<AgentWorkspaceImagesApi> {
+  const resp = await fetchWithAuth(
+    API_BASE,
+    `/v1/agent/jobs/${encodeURIComponent(jobId)}/artifacts/images?since=${encodeURIComponent(String(since))}`,
+    { signal },
+  );
+  return jsonOrThrow<AgentWorkspaceImagesApi>(resp);
+}
+
+/**
+ * One PNG, JPEG, GIF or WebP file from the workspace, as its own bytes. Its
+ * bound is larger than a file preview's, which a full-page screenshot is past.
+ */
+export async function getAgentJobImage(
+  jobId: string,
+  path: string,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  const resp = await fetchWithAuth(
+    API_BASE,
+    `/v1/agent/jobs/${encodeURIComponent(jobId)}/files/image?path=${encodeURIComponent(path)}`,
+    { signal },
+  );
+  if (!resp.ok) await jsonOrThrow<never>(resp);
+  return resp.blob();
+}
+
 export interface AgentGitWorkspaceMetadataApi {
   available: boolean;
   /** Opaque fingerprint of the base-relative workspace view. */

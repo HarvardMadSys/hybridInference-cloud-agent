@@ -44,7 +44,7 @@ Use [deployment reliability](deployment-reliability.md) and
 - [ ] Record the exact release SHA. API, host, sandbox manager and sandbox must
       satisfy the shared deployment/version checks.
 - [ ] Start from a new, empty Agent database. Run
-      `python -m cloud_agent.identity_namespace --check` against it first; it
+      `python -m cloud_agent.deployment.identity_namespace --check` against it first; it
       must report an empty database and change nothing
       ([cutover](upgrade-notes.md#independent-accounts-cutover)).
 - [ ] Have a mail transport the deployment may use for test addresses you
@@ -143,7 +143,7 @@ activation after the host publishes readiness in section 4.
       the provider bills it.
 - [ ] Confirm the turn succeeds with the expected file change. Then ask the
       agent in the conversation to open a pull request, and open the real
-      **draft pull request** it links. Check that you are the author of the
+      **pull request** it links. Check that you are the author of the
       pull request and its commits, the target branch and the diff; record its
       URL. Execution success alone is insufficient.
 - [ ] List files and open a terminal on the retained workspace through the app.

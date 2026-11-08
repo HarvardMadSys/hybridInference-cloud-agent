@@ -54,21 +54,21 @@ database stamped with the chain that predates it.
 | `apps/backend/cloud_agent/bootstrap/` | Internal assembly: the resources the listeners are built from, and the lifespan that starts and stops them |
 | `apps/backend/cloud_agent/workers/` | The background loops — attempt reaping, queue and goal recovery, sandbox deletion, notifications and maintenance |
 | `apps/backend/cloud_agent/ports/`, `apps/backend/cloud_agent/storage/` | Narrow capability contracts and Postgres repositories: claims, fences, residency, pull-request records |
-| `apps/backend/cloud_agent/runtime_usage.py`, `ledger.py`, `admin_usage.py`, `grant_usage.py` | What agents reported about their model calls, per job and summed for the Usage pages; no cost or quota ([usage](docs/developer/operations.md#usage)) |
-| `apps/backend/cloud_agent/agent_access.py` | The admission decision (`agent.use`, `agent.admin`) every protected request reads |
-| `apps/backend/cloud_agent/identity_namespace.py` | Binds an empty database to the account system once, and refuses a Gateway-era one (`--check` reads it without writing) |
+| `apps/backend/cloud_agent/usage/` (`runtime_usage.py`, `turn_report.py`, `admin_usage.py`, `sums.py`) | What agents reported about their model calls, per job and summed for the Usage pages; no cost or quota ([usage](docs/developer/operations.md#usage)) |
+| `apps/backend/cloud_agent/accounts/agent_access.py` | The admission decision (`agent.use`, `agent.admin`) every protected request reads |
+| `apps/backend/cloud_agent/deployment/identity_namespace.py` | Binds an empty database to the account system once, and refuses a Gateway-era one (`--check` reads it without writing) |
 | `apps/backend/cloud_agent/accounts/`, `application/owner_termination.py` | The account system: sign-in, sessions, the waiting list, the account directory, retired-configuration refusal, and stopping a revoked account's work ([guide](docs/developer/local-accounts.md)) |
 | `apps/backend/cloud_agent/mcp/`, `api/mcp_connections.py`, `api/mcp_relay.py` | Per-user connections, protocol hosting, authorization and the MCP relay |
 | `apps/backend/cloud_agent/mcp/runtime.py` | Process-local MCP host, fenced session maintenance, and shutdown |
-| `apps/backend/cloud_agent/github_relay_policy.py`, `api/github_relay.py`, `source_control.py` | The GitHub relay and its policy, and the GitHub/GitLab credentials behind them |
-| `apps/backend/cloud_agent/admin_observability.py` | The cross-user admin reading surface and its audit |
-| `apps/backend/cloud_agent_host/enrollment.py` | Host registration and the persisted host credential |
-| `apps/backend/cloud_agent_host/runner.py` | Claims, executes one turn, heartbeats, drains on SIGTERM |
+| `apps/backend/cloud_agent/source_control/` (`github_relay_policy.py`, `source_control.py`), `api/github_relay.py` | The GitHub relay and its policy, and the GitHub/GitLab credentials behind them |
+| `apps/backend/cloud_agent/schemas/admin_observability.py` | The cross-user admin reading surface and its audit |
+| `apps/backend/cloud_agent_host/service/enrollment.py` | Host registration and the persisted host credential |
+| `apps/backend/cloud_agent_host/service/host_service.py`, `turn/turn_child.py` | The host service that claims, heartbeats and drains on SIGTERM, and the child process that executes one turn (`runner.py` is their command line) |
 | `apps/backend/cloud_agent_host/claimed_job.py`, `control_plane_client.py` | Claim payloads, lease errors, and attempt-scoped worker HTTP calls |
-| `apps/backend/cloud_agent_host/chat_sandbox.py`, `sandbox.py` | Retained group lifecycle and the Docker/Kata boundary |
-| `apps/backend/cloud_agent_host/chat_sandbox_network.py` | Per-group bridge and relay lifecycle, guest network proof, and exact network release |
-| `apps/backend/cloud_agent_host/chat_sandbox_models.py` | Retained-container specs, inspection/status values, and identity vocabulary |
-| `apps/backend/cloud_agent_shared/egress.py`, `apps/backend/cloud_agent_host/network_guard.py` | The one sandbox network: its configuration and host rules, and the helper that installs and verifies them |
+| `apps/backend/cloud_agent_host/container/chat_sandbox.py`, `sandbox.py` | Retained group lifecycle and the Docker/Kata boundary |
+| `apps/backend/cloud_agent_host/network/chat_sandbox_network.py` | Per-group bridge and relay lifecycle, guest network proof, and exact network release |
+| `apps/backend/cloud_agent_host/container/chat_sandbox_models.py` | Retained-container specs, inspection/status values, and identity vocabulary |
+| `apps/backend/cloud_agent_shared/egress.py`, `apps/backend/cloud_agent_host/network/network_guard.py` | The one sandbox network: its configuration and host rules, and the helper that installs and verifies them |
 | `apps/backend/cloud_agent_host/runtimes/`, `cloud_agent_shared/runtime_catalog.py`, `shared_protocol.py` | The five Agent CLI adapters, shared discovery facts, and version pins |
 
 [Code structure](docs/developer/code-structure.md) maps module responsibilities and
@@ -182,10 +182,15 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
 
 ## 6. Key concepts
 
-- **Job / attempt / lease.** A job is the user's task; an attempt is one
-  execution of it on one host. Attempts carry a lease with a fencing
-  generation — a superseded attempt's writes are rejected by the store, which
-  is what makes retries safe and stops duplicate pull requests.
+- **Conversation / job / attempt / lease.** A conversation (`thread_id` in
+  code, a chat or task in the UI) is made of turns, and a job is one turn of
+  it: one user message and the agent's work on it (`turn_no`; every turn
+  after the first names its `parent_job_id`). An attempt is one execution of
+  a turn on one host. Attempts carry a lease with a fencing generation — a
+  superseded attempt's writes are rejected by the store, which is what makes
+  retries safe and stops duplicate pull requests. [Code
+  structure](docs/developer/code-structure.md#vocabulary) has the full
+  glossary.
 - **Model connection.** Every turn runs on one of its owner's model
   connections: a provider Base URL, the owner's own API key and verified
   model ids (FreeInference is one such provider, used with the owner's key).
@@ -218,7 +223,7 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   ([design](docs/agents/specs/2026-09-23-agent-public-egress-design.zh-CN.md)).
   Each group gets its own routable bridge, and before anything joins one the
   host installs this deployment's nftables table (`cloud_agent_shared/egress.py`
-  renders it, `cloud_agent_host/network_guard.py` installs and verifies it):
+  renders it, `cloud_agent_host/network/network_guard.py` installs and verifies it):
   - public IPv4 on TCP 80/443, so curl, pip, npm and Git over HTTPS work;
   - the one named resolver on TCP/UDP 53;
   - the MCP relay's service port on the group's own bridge, which reaches the
@@ -362,6 +367,19 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   every gate accepts, the same per-model paths. A claim and its residency must
   agree on both the credential revision and the plan. See the
   [protocol compatibility design](docs/agents/specs/2026-10-28-model-protocol-compatibility.zh-CN.md).
+  A direct plan's CLI starts behind the same launcher, its loopback service
+  in *passthrough* (2026-11-05): bound to the connection's one upstream origin,
+  it forwards the CLI's own requests and credentials unchanged, holds no key
+  and issues no token, and adds only a size record per model request on the
+  CLI's stderr -- the system prompt's and tool schemas' characters, never their
+  text -- which the host reports as a `request_prefix` lifecycle event. It is
+  not a network proxy: the member's egress, and the network rules, are the
+  same. A sibling that reaches its port can do nothing through it that the
+  public egress does not already allow. A CLI pointed at its vendor's own host
+  (Claude Code on `api.anthropic.com`) is not metered, so no CLI sees another
+  host than it would; a meter that cannot start leaves its CLI pointed at the
+  provider directly. See the
+  [request meter design](docs/agents/specs/2026-11-05-request-prefix-meter.zh-CN.md).
   Listing a provider's model ids to fill in the form writes nothing and
   proves nothing; it uses the key just entered, or a saved key only at the
   exact Base URL it was saved with, and spends one hourly check.

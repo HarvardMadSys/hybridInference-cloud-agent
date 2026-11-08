@@ -35,8 +35,9 @@ from cloud_agent.api.deps import (
 )
 from cloud_agent.application.job_admission import create_job_as
 from cloud_agent.application.pending_messages import settle_queue_when_possible
+from cloud_agent.application.terminal_coordination import resume_settled_terminal
 from cloud_agent.domain.execution import TERMINAL_STATES
-from cloud_agent.entitlement import REPO_PATTERN
+from cloud_agent.domain.source_control import REPO_PATTERN
 from cloud_agent.goals.models import GoalConflict
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.schemas import (
@@ -59,10 +60,9 @@ from cloud_agent.schemas import (
     GoalResponse,
     GoalRevisionRequest,
 )
-from cloud_agent.source_control_runtime import (
+from cloud_agent.source_control.source_control_runtime import (
     SourceControlRuntime,  # noqa: TC001 — FastAPI resolves it.
 )
-from cloud_agent.terminal_coordination import resume_settled_terminal
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -80,10 +80,11 @@ if TYPE_CHECKING:
         SkillRepository,
         SourceControlRepository as SourceControlPort,
     )
-    from cloud_agent.source_control_runtime import GitHubAppSource
+    from cloud_agent.source_control.source_control_runtime import GitHubAppSource
 
 
 from cloud_agent.api._environment_route_policy import EnvironmentSensitiveRoute
+from cloud_agent.api.errors import typed_error
 
 router = APIRouter(prefix="/v1/agent")
 
@@ -383,10 +384,7 @@ async def _set_agent_thread_archived(
         archived=archived,
     )
     if result is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"type": "not_found", "message": f"No such agent job: {job_id}"}},
-        )
+        raise typed_error(404, "not_found", f"No such agent job: {job_id}")
     return AgentThreadArchiveResponse(
         thread_id=result["thread_id"],
         archived=archived,
@@ -426,10 +424,7 @@ async def rename_agent_thread(
         job_id=job_id, user_id=user["user_id"], title=body.title
     )
     if result is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"type": "not_found", "message": f"No such agent job: {job_id}"}},
-        )
+        raise typed_error(404, "not_found", f"No such agent job: {job_id}")
     return AgentThreadRenameResponse(**result)
 
 
@@ -448,10 +443,7 @@ async def _set_agent_thread_pinned(
         pinned=pinned,
     )
     if result is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"type": "not_found", "message": f"No such agent job: {job_id}"}},
-        )
+        raise typed_error(404, "not_found", f"No such agent job: {job_id}")
     return AgentThreadPinResponse(
         thread_id=result["thread_id"],
         pinned=pinned,
@@ -461,35 +453,22 @@ async def _set_agent_thread_pinned(
 
 def _no_such_thread_error(thread_id: str) -> HTTPException:
     """A goal read or write against a conversation this owner does not have."""
-    return HTTPException(
-        status_code=404,
-        detail={"error": {"type": "not_found", "message": f"No such task: {thread_id}"}},
-    )
+    return typed_error(404, "not_found", f"No such task: {thread_id}")
 
 
 def _no_such_goal_error() -> HTTPException:
     """A goal write against a conversation that no longer has one."""
-    return HTTPException(
-        status_code=409,
-        detail={
-            "error": {
-                "type": "goal_missing",
-                "message": "This conversation has had its goal cleared. Set a new one first.",
-            }
-        },
+    return typed_error(
+        409, "goal_missing", "This conversation has had its goal cleared. Set a new one first."
     )
 
 
 def _goal_conflict_error() -> HTTPException:
     """A goal write made against a revision the goal has already moved past."""
-    return HTTPException(
-        status_code=409,
-        detail={
-            "error": {
-                "type": "goal_revision_conflict",
-                "message": "This goal changed while you were editing it. Reload and try again.",
-            }
-        },
+    return typed_error(
+        409,
+        "goal_revision_conflict",
+        "This goal changed while you were editing it. Reload and try again.",
     )
 
 

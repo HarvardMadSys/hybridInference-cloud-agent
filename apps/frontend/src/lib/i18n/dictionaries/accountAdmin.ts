@@ -140,6 +140,7 @@ export const accountAdminEn = {
   'adminAccounts.notes.message': 'Message shown when a suspended account signs in',
   'adminAccounts.notes.save': 'Save notes',
   'adminAccounts.history.show': 'Show sign-in history',
+  'adminAccounts.history.audit': 'Show audit history',
   'adminAccounts.history.purge': 'Purge this account’s history',
   'adminAccounts.history.none': 'No sign-in attempts recorded.',
   'adminAccounts.history.confirm':
@@ -342,6 +343,7 @@ export const accountAdminZh: Record<keyof typeof accountAdminEn, string> = {
   'adminAccounts.notes.message': '停用账号登录时显示的消息',
   'adminAccounts.notes.save': '保存备注',
   'adminAccounts.history.show': '显示登录记录',
+  'adminAccounts.history.audit': '查看审计记录',
   'adminAccounts.history.purge': '清除该账号的登录记录',
   'adminAccounts.history.none': '没有登录记录。',
   'adminAccounts.history.confirm': '删除该账号的全部登录记录？此操作无法撤销。',

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent.domain.sandbox_group import GroupState, sql_list
 from cloud_agent.ports.sandbox import TerminalControlRoute
 from cloud_agent.storage._sql.hosts import (
     JOB_HOST_SQL,
@@ -149,7 +150,7 @@ THREAD_SANDBOX_SOURCE = f"""
                 'format_version', c.format_version
             )
             FROM agent_sandbox_checkpoints c
-            WHERE g.state = 'restoring' AND c.id = g.restore_checkpoint_id
+            WHERE g.state = {GroupState.RESTORING.sql} AND c.id = g.restore_checkpoint_id
         ) AS restore
     FROM agent_thread_sandbox_memberships m
     JOIN agent_sandboxes g ON g.id = m.sandbox_id
@@ -233,7 +234,8 @@ WORKSPACE_READY_SQL = f"""(
     m.context_status <> 'lost'
     AND m.native_state <> 'lost'
     AND g.state NOT IN (
-        'provisioning', 'stopping', 'stopped_dirty', 'lost'
+        {GroupState.PROVISIONING.sql}, {GroupState.STOPPING.sql},
+        {GroupState.STOPPED_DIRTY.sql}, {GroupState.LOST.sql}
     )
     AND g.stop_requested_at IS NULL
     AND {UNDELETED_GROUP_SQL}
@@ -258,7 +260,8 @@ WORKSPACE_READY_SQL = f"""(
 # the checkpoint it is recreated from.
 FENCE_START_SQL = (
     "start_seq = start_seq + 1, "
-    "restore_checkpoint_id = CASE WHEN state IN ('cold', 'restoring') "
+    "restore_checkpoint_id = CASE WHEN state IN "
+    f"{sql_list(GroupState.COLD, GroupState.RESTORING)} "
     "THEN restore_checkpoint_id ELSE NULL END"
 )
 
@@ -416,13 +419,13 @@ async def release_failed_restore(conn: Any, attempt_id: int, detail: str) -> str
     # Memberships before their group, the order every writer keeps. The
     # restoring member may already hold the attempt from its reservation.
     await conn.execute(
-        """
+        f"""
         UPDATE agent_thread_sandbox_memberships
         SET active_attempt_id = NULL, updated_at = NOW()
         WHERE active_attempt_id = $1
           AND sandbox_id IN (
               SELECT id FROM agent_sandboxes
-              WHERE restore_attempt_id = $1 AND state = 'restoring'
+              WHERE restore_attempt_id = $1 AND state = {GroupState.RESTORING.sql}
           )
         """,
         attempt_id,
@@ -431,11 +434,12 @@ async def release_failed_restore(conn: Any, attempt_id: int, detail: str) -> str
         f"""
         UPDATE agent_sandboxes
         SET state = CASE
-                WHEN restore_attempts >= {MAX_RESTORE_ATTEMPTS} THEN 'lost' ELSE 'cold'
+                WHEN restore_attempts >= {MAX_RESTORE_ATTEMPTS} THEN {GroupState.LOST.sql}
+                ELSE {GroupState.COLD.sql}
             END,
             container_id = NULL, restore_attempt_id = NULL,
             last_error = $2, last_activity_at = NOW(), updated_at = NOW()
-        WHERE restore_attempt_id = $1 AND state = 'restoring'
+        WHERE restore_attempt_id = $1 AND state = {GroupState.RESTORING.sql}
         RETURNING state
         """,
         attempt_id,
@@ -458,11 +462,11 @@ async def release_unstarted_restore(conn: Any, attempt_id: int) -> bool:
     """
     return (
         await conn.fetchval(
-            """
+            f"""
             UPDATE agent_sandboxes g
-            SET state = 'cold', restore_attempt_id = NULL,
+            SET state = {GroupState.COLD.sql}, restore_attempt_id = NULL,
                 restore_attempts = g.restore_attempts - 1, updated_at = NOW()
-            WHERE g.restore_attempt_id = $1 AND g.state = 'restoring'
+            WHERE g.restore_attempt_id = $1 AND g.state = {GroupState.RESTORING.sql}
               AND NOT EXISTS (
                   SELECT 1 FROM agent_thread_sandbox_memberships m
                   WHERE m.sandbox_id = g.id AND m.active_attempt_id = $1
