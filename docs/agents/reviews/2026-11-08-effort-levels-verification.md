@@ -35,4 +35,9 @@ guards) and `make docs-verify`. Results: all tiers pass -- ruff, mypy (834 files
 
 - The gateway's side (public level -> upstream value) is verified in the
   gateway repository; here the agent only ever sends the public level.
-- `default_level` is read by nothing: Auto still sends no level.
+- `default_level` is read by nothing. At Auto Cloud Agent adds no effort
+  flag or field; Codex and the translated helper then send no level, while
+  Claude Code direct on Messages still sends its own implicit `high` (pinned
+  capture `test_pinned_claude_code_direct_sends_the_level_as_output_config[None]`). On the example gateway map that is upstream `xhigh` --
+  75 on the reference engine, against 50 with no parameter, per the
+  operator-supplied captures for that one engine, not measured here.

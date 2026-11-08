@@ -30,8 +30,11 @@ definition. `domain/model_efforts.effort_levels` reads it:
   for Chat Completions; otherwise Chat Completions is `unknown`
   (`conflicting_declarations`).
 
-`default_level` is not used: Auto stays "send no level", so the provider's own
-default applies, as before.
+`default_level` is not used. Auto is unchanged: Cloud Agent adds no effort
+flag or field of its own at Auto. What then reaches the upstream depends on
+the CLI and plan: Codex, and every request through the translation helper,
+carries no effort, so the server's own default applies; Claude Code on a
+direct Messages plan still sends its own implicit `output_config.effort: high`.
 
 ## A gateway's mapped route
 
@@ -43,3 +46,12 @@ Messages (`output_config.effort`) and translated Chat (`reasoning_effort`).
 Claude Code and Codex are offered Auto, low, high, max; `xhigh`/`medium` are
 refused with the offered levels. Persistence across tasks, follow-ups, queued
 messages and claims is the 2026-11-05 mechanism, unchanged.
+
+At Auto on such a route the two paths differ. Claude Code direct on Messages
+sends its implicit `high`, which that example map sends upstream as `xhigh`;
+the translated helper and Codex send no level, so the server's default
+applies. For the reference self-hosted engine the operator supplied captures
+for (DeepSeek-V4.1-Flash on vLLM `0.1.dev20904+g179dd0fa9`), that is a
+thinking effort of 75 versus 50 (its default with no parameter). Those numbers
+come from that engine's captures, not from these tests, and hold only for it
+and that map.
