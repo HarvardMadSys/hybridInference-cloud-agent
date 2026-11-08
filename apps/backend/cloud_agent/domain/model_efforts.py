@@ -18,6 +18,15 @@ each for the API family it describes:
   ``none`` must not be sent. It describes the OpenAI-shaped parameter of both
   OpenAI APIs at that Base URL: Chat Completions' ``reasoning_effort`` and
   Responses' ``reasoning.effort``.
+- an OpenAI-style ``GET /models`` may instead (or also) carry, per model, an
+  ``effort`` object, as DeepSeek's List Models API documents it:
+  ``supported_levels`` lists the values its Chat Completions
+  ``reasoning_effort`` accepts while thinking is on (``none``, which turns
+  thinking off, is deliberately not listed, so it is never inferred), and
+  ``default_level`` names the server's default. It describes Chat
+  Completions only: nothing in it speaks for Responses or Messages, so those
+  APIs are not read from it. When one entry carries both objects and they
+  disagree, Chat Completions is unknown rather than either one's levels.
 
 Anything else -- a listing that is missing, refused or unreadable, a model it
 does not list, an entry that declares nothing, a connection whose facts were
@@ -62,6 +71,7 @@ EFFORT_STATUSES = (EFFORT_SUPPORTED, EFFORT_UNSUPPORTED, EFFORT_UNKNOWN)
 #: Where a fact came from.
 SOURCE_ANTHROPIC = "anthropic_models_api"
 SOURCE_OPENAI_LISTING = "models_listing_reasoning"
+SOURCE_EFFORT_LEVELS = "models_listing_effort"
 
 #: Why a fact is ``unknown`` (or why a declared model offers an agent nothing).
 REASON_NOT_READ = "not_read"
@@ -69,6 +79,7 @@ REASON_LISTING_UNAVAILABLE = "listing_unavailable"
 REASON_NOT_LISTED = "not_listed"
 REASON_NOT_DECLARED = "not_declared"
 REASON_AGENT_CANNOT_EXPRESS = "agent_cannot_express"
+REASON_CONFLICTING = "conflicting_declarations"
 
 #: The levels the Anthropic Models API describes, in its own words.
 ANTHROPIC_LEVELS = ("low", "medium", "high", "xhigh", "max")
@@ -78,6 +89,8 @@ OPENAI_LISTING_ALL_LEVELS = ("none", "minimal", "low", "medium", "high", "xhigh"
 #: Which listing describes which API.
 _ANTHROPIC_PROTOCOLS = (ANTHROPIC_MESSAGES,)
 _OPENAI_PROTOCOLS = (CHAT_COMPLETIONS, RESPONSES)
+#: The one API an ``effort.supported_levels`` declaration describes.
+_EFFORT_LEVELS_PROTOCOLS = (CHAT_COMPLETIONS,)
 #: A level is a short lower-case word; anything else in a listing is ignored.
 _MAX_LEVEL_CHARS = 16
 
@@ -160,6 +173,45 @@ def listing_effort(entry: dict[str, Any]) -> dict[str, Any]:
     return fact(EFFORT_SUPPORTED, levels=levels, source=SOURCE_OPENAI_LISTING)
 
 
+def effort_levels(entry: dict[str, Any]) -> dict[str, Any]:
+    """What one OpenAI-style ``/models`` entry's ``effort`` object declares.
+
+    ``supported_levels`` is required by that shape: without a list, nothing is
+    declared. An empty list declares no level; a list with nothing readable in
+    it declares nothing. ``none`` is never added: the shape excludes it by
+    definition, so its absence says nothing about the thinking switch.
+    """
+    effort = entry.get("effort")
+    declared = effort.get("supported_levels") if isinstance(effort, dict) else None
+    if not isinstance(declared, list):
+        return unknown(REASON_NOT_DECLARED, source=SOURCE_EFFORT_LEVELS)
+    if not declared:
+        return fact(EFFORT_UNSUPPORTED, source=SOURCE_EFFORT_LEVELS)
+    levels: list[str] = []
+    for value in declared:
+        level = _level(value)
+        if level is not None and level not in levels:
+            levels.append(level)
+    if not levels:
+        return unknown(REASON_NOT_DECLARED, source=SOURCE_EFFORT_LEVELS)
+    return fact(EFFORT_SUPPORTED, levels=levels, source=SOURCE_EFFORT_LEVELS)
+
+
+def _chat_effort(entry: dict[str, Any]) -> dict[str, Any]:
+    """Chat Completions' fact from both OpenAI-style shapes one entry may carry."""
+    reasoning = listing_effort(entry)
+    levels = effort_levels(entry)
+    if levels["status"] == EFFORT_UNKNOWN:
+        return reasoning
+    if reasoning["status"] == EFFORT_UNKNOWN:
+        return levels
+    if reasoning["status"] == levels["status"] and set(reasoning["levels"]) == set(
+        levels["levels"]
+    ):
+        return reasoning
+    return unknown(REASON_CONFLICTING, source=SOURCE_OPENAI_LISTING)
+
+
 @dataclass(frozen=True)
 class ListingRead:
     """One listing's outcome: its parsed body, or the category it failed with."""
@@ -191,10 +243,11 @@ def effort_facts(
         per_protocol: dict[str, dict[str, Any]] = {}
         messages = _from_listing(anthropic, model, SOURCE_ANTHROPIC, anthropic_effort)
         listed = _from_listing(openai, model, SOURCE_OPENAI_LISTING, listing_effort)
+        chat = _from_listing(openai, model, SOURCE_OPENAI_LISTING, _chat_effort)
         for protocol in _ANTHROPIC_PROTOCOLS:
             per_protocol[protocol] = messages
         for protocol in _OPENAI_PROTOCOLS:
-            per_protocol[protocol] = dict(listed)
+            per_protocol[protocol] = dict(chat if protocol in _EFFORT_LEVELS_PROTOCOLS else listed)
         facts[model] = per_protocol
     return facts
 
@@ -275,16 +328,19 @@ __all__ = [
     "EFFORT_UNSUPPORTED",
     "OPENAI_LISTING_ALL_LEVELS",
     "REASON_AGENT_CANNOT_EXPRESS",
+    "REASON_CONFLICTING",
     "REASON_LISTING_UNAVAILABLE",
     "REASON_NOT_DECLARED",
     "REASON_NOT_LISTED",
     "REASON_NOT_READ",
     "SOURCE_ANTHROPIC",
+    "SOURCE_EFFORT_LEVELS",
     "SOURCE_OPENAI_LISTING",
     "EffortOffer",
     "ListingRead",
     "anthropic_effort",
     "effort_facts",
+    "effort_levels",
     "effort_offer",
     "facts_view",
     "listing_effort",

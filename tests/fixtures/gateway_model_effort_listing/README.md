@@ -12,3 +12,7 @@ The registry is a test configuration. `deepseek-like-reasoner` imitates a
 DeepSeek-like model behind an OpenAI-compatible route, but its domain
 (`high`, `max`) is declared by that test, not taken from DeepSeek or from any
 deployment. Nothing here was read from a real provider or deployment.
+
+`mapped-reasoner` is a route with a `reasoning_effort_map` (`low -> high`,
+`high -> xhigh`, `max -> max`, also declared by that test): the listings show
+only its public levels, `low`, `high` and `max`.

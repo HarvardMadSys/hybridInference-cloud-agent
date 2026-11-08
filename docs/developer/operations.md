@@ -4234,10 +4234,14 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
   saved connection (one hourly check), the control plane reads the provider's
   two model listings once, under the same address rules: `GET <Base URL>/models`
   with the bearer key, read for each model's `reasoning.supported_efforts`
-  (OpenRouter's and the HybridInference gateway's field), and
-  `GET /v1/models?limit=1000` at the Anthropic base with `x-api-key`, read for
-  `capabilities.effort` (the Anthropic Models API's, also answered by the
-  gateway). That is at most two requests per read and no inference. Per model
+  (OpenRouter's and the HybridInference gateway's field) and its
+  `effort.supported_levels` (DeepSeek's List Models field, which describes
+  Chat Completions only and never lists `none`, so `none` is never inferred;
+  where an entry carries both fields and they disagree, Chat Completions is
+  unknown), and `GET /v1/models?limit=1000` at the Anthropic base with
+  `x-api-key`, read for `capabilities.effort` (the Anthropic Models API's,
+  also answered by the gateway). That is at most two requests per read and no
+  inference. Per model
   and API it stores `supported` with the levels, `unsupported` (declared: none)
   or `unknown` (the listing failed, does not list the model, or declares
   nothing or something malformed); unknown is never read as unsupported, and

@@ -55,13 +55,15 @@ from cloud_agent_host.runtimes import (
     ResponsesViaChatUrl,
     compat_effort_env,
 )
-from cloud_agent_host.runtimes.codex import NATIVE_LAUNCHER
+from cloud_agent_host.runtimes.codex.adapter import NATIVE_LAUNCHER
 from cloud_agent_shared.model_connections import PROTOCOLS
 
 pytestmark = pytest.mark.external
 
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "gateway_model_effort_listing"
 _DEEPSEEK_LIKE = "deepseek-like-reasoner"
+#: The gateway's route with a reasoning_effort_map (public low/high/max).
+_MAPPED = "mapped-reasoner"
 _TIMEOUT_S = 120.0
 
 
@@ -119,20 +121,20 @@ def _record(name: str, requests: list[dict[str, Any]]) -> None:
         (Path(directory) / f"{name}.json").write_text(json.dumps(requests, indent=1))
 
 
-def _gateway_offer(runtime: str, protocols: list[str]) -> list[str]:
-    """What Cloud Agent offers ``runtime`` for the gateway's DeepSeek-like model."""
+def _gateway_offer(runtime: str, protocols: list[str], model: str = _DEEPSEEK_LIKE) -> list[str]:
+    """What Cloud Agent offers ``runtime`` for one of the gateway's listed models."""
     facts = effort_facts(
-        [_DEEPSEEK_LIKE],
+        [model],
         anthropic=ListingRead(body=json.loads((_FIXTURES / "anthropic.json").read_text())),
         openai=ListingRead(body=json.loads((_FIXTURES / "openai.json").read_text())),
-    )[_DEEPSEEK_LIKE]
+    )[model]
     row = {
         "enabled": True,
         "deleted_at": None,
-        "models": [_DEEPSEEK_LIKE],
+        "models": [model],
         "config_revision": 1,
         "model_checks": {
-            _DEEPSEEK_LIKE: {
+            model: {
                 "revision": 1,
                 "protocols": {
                     p: {"status": "supported" if p in protocols else "unsupported"}
@@ -142,7 +144,7 @@ def _gateway_offer(runtime: str, protocols: list[str]) -> list[str]:
             }
         },
     }
-    offer = model_effort_offer(row, _DEEPSEEK_LIKE, runtime)
+    offer = model_effort_offer(row, model, runtime)
     assert offer is not None and offer.status == "supported", offer
     return offer.levels
 
@@ -214,6 +216,16 @@ def test_the_screenshots_pairing_sends_every_level_the_gateway_declares(tmp_path
         assert {body["model"] for body in bodies} == {_DEEPSEEK_LIKE}
 
 
+def test_a_configured_gateway_route_is_sent_each_public_level_by_claude_code(tmp_path):
+    """Claude Code direct on the gateway's Messages endpoint: low/high/max, exactly."""
+    levels = _gateway_offer("claude-code", ["anthropic_messages", "chat_completions"], _MAPPED)
+    assert levels == ["low", "high", "max"]
+    for level in levels:
+        bodies = _claude_direct(tmp_path / level, level, _MAPPED)
+        assert {body["output_config"]["effort"] for body in bodies} == {level}
+        assert {body["model"] for body in bodies} == {_MAPPED}
+
+
 def _claude_translated(tmp_path: Path, effort: str | None) -> list[dict[str, Any]]:
     binary = _pinned("claude")
     upstream = FakeChatUpstream(_KEY)
@@ -257,7 +269,7 @@ def _claude_translated(tmp_path: Path, effort: str | None) -> list[dict[str, Any
     return [request["body"] for request in requests]
 
 
-@pytest.mark.parametrize("effort", ["high", None])
+@pytest.mark.parametrize("effort", ["low", "high", "max", None])
 def test_pinned_claude_code_translated_sends_the_level_on_every_chat_request(tmp_path, effort):
     bodies = _claude_translated(tmp_path, effort)
     if effort is None:
@@ -290,7 +302,7 @@ def _codex_turn(process: subprocess.Popen[str], lines: _Lines, tmp_path: Path, e
     return lines.until(lambda v: v.get("method") == "turn/completed", timeout=_TIMEOUT_S)
 
 
-@pytest.mark.parametrize("effort", ["low", "xhigh", None])
+@pytest.mark.parametrize("effort", ["low", "high", "xhigh", "max", None])
 def test_pinned_codex_direct_sends_the_level_as_reasoning_effort(tmp_path, effort):
     binary = _pinned("codex")
     capture = _Capture()
@@ -318,7 +330,7 @@ def test_pinned_codex_direct_sends_the_level_as_reasoning_effort(tmp_path, effor
     assert {(body.get("reasoning") or {}).get("effort") for body in bodies} == {effort}
 
 
-@pytest.mark.parametrize("effort", ["medium", None])
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "max", None])
 def test_pinned_codex_translated_sends_the_level_on_every_chat_request(tmp_path, effort):
     binary = _pinned("codex")
     upstream = FakeChatUpstream(_KEY)

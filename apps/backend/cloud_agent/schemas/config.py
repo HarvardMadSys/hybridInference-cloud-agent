@@ -31,11 +31,11 @@ class ModelEffortOffer(BaseModel):
     status: Literal["supported", "unsupported", "unknown"]
     levels: list[str] = Field(default_factory=list)
     #: Why, for ``unknown`` or an agent that cannot send a declared level:
-    #: ``not_read``, ``listing_unavailable``, ``not_listed``, ``not_declared``
-    #: or ``agent_cannot_express``.
+    #: ``not_read``, ``listing_unavailable``, ``not_listed``, ``not_declared``,
+    #: ``conflicting_declarations`` or ``agent_cannot_express``.
     reason: str = ""
-    #: Which declaration it came from: ``anthropic_models_api`` or
-    #: ``models_listing_reasoning``; empty when none.
+    #: Which declaration it came from: ``anthropic_models_api``,
+    #: ``models_listing_reasoning`` or ``models_listing_effort``; empty when none.
     source: str = ""
 
 

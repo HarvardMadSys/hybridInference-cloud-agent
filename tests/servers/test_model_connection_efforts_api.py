@@ -240,3 +240,78 @@ async def test_config_offers_each_agent_the_declared_levels_it_can_send():
         "pi": ["minimal", "high"],
     }
     assert {offer["status"] for offer in offers.values()} == {"supported"}
+
+
+#: As a refresh stores a configured HybridInference gateway route's listing
+#: (``tests/fixtures/gateway_model_effort_listing``, model ``mapped-reasoner``):
+#: three public levels, the same in both listing shapes.
+_GATEWAY_MAPPED = {
+    protocol: {
+        "status": "supported",
+        "levels": ["low", "high", "max"],
+        "source": "anthropic_models_api"
+        if protocol == "anthropic_messages"
+        else "models_listing_reasoning",
+        "reason": "",
+    }
+    for protocol in PROTOCOLS
+}
+
+
+def _gateway_row() -> dict[str, Any]:
+    row = _connection_row()
+    for entry in row["model_checks"].values():
+        entry["efforts"] = copy.deepcopy(_GATEWAY_MAPPED)
+    return row
+
+
+async def test_a_configured_gateway_connection_offers_auto_low_high_max_and_stores_the_choice():
+    store = _TurnStorage()
+    row = _gateway_row()
+    store.connections.rows[row["id"]] = row
+    app = _build_app(store)
+    app.dependency_overrides[get_owner_directory] = _FakeOwners
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        config = (await client.get("/v1/agent/config")).json()
+    offers = config["model_connections"][0]["model_efforts"]["gpt-4.1"]
+    for runtime in ("claude-code", "codex"):
+        assert offers[runtime] == {
+            "status": "supported",
+            "levels": ["low", "high", "max"],
+            "reason": "",
+            "source": offers[runtime]["source"],
+        }
+
+    async with AsyncClient(transport=ASGITransport(app=_turn_app(store)), base_url="http://t") as c:
+        stored = {}
+        for level in ("low", "high", "max"):
+            created = await _create_job(
+                c, model="gpt-4.1", model_connection_id=row["id"], reasoning_effort=level
+            )
+            assert created.status_code == 201, created.text
+            stored[level] = store.jobs[created.json()["id"]]["reasoning_effort"]
+        refused = await _create_job(
+            c, model="gpt-4.1", model_connection_id=row["id"], reasoning_effort="xhigh"
+        )
+    # Stored as the public level chosen; the gateway translates it, not the agent.
+    assert stored == {"low": "low", "high": "high", "max": "max"}
+    assert refused.status_code == 400
+    error = refused.json()["detail"]["error"]
+    assert (error["reason"], error["offered_efforts"]) == (
+        "effort_level_unsupported",
+        ["low", "high", "max"],
+    )
+
+
+async def test_a_follow_up_on_a_configured_gateway_keeps_low():
+    connections = FakeModelConnections()
+    row = _gateway_row()
+    connections.rows[row["id"]] = row
+    parent = _parent(reasoning_effort="low")
+    inherited = await _follow_up(connections, parent)
+    assert (inherited.reasoning_effort, inherited.reset_reasoning_effort) == (None, False)
+    changed = await _follow_up(connections, parent, reasoning_effort="max")
+    assert changed.reasoning_effort == "max"
+    with raises_http() as refused:
+        await _follow_up(connections, parent, reasoning_effort="medium")
+    assert refused.value.detail["error"]["offered_efforts"] == ["low", "high", "max"]

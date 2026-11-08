@@ -55,3 +55,25 @@ async def test_a_queued_message_keeps_its_declared_level_until_it_runs(api: Api)
         ("fix it", "high"),
         ("think harder", "max"),
     ]
+
+
+async def test_a_configured_gateways_low_is_kept_by_a_queued_message(api: Api):
+    """A gateway route mapped to three public levels: ``low`` survives the queue."""
+    await _declare_levels(api, ["low", "high", "max"])
+    job = await api.create(reasoning_effort="max")
+    thread_id = job["thread_id"]
+    running = await api.start(job)
+    queued = await api.send(thread_id, "lighter now", reasoning_effort="low")
+    assert queued.status_code == 201, queued.text
+    inherited = await api.send(thread_id, "and the next")
+    assert inherited.status_code == 201, inherited.text
+    refused = await api.send(thread_id, "too deep", reasoning_effort="xhigh")
+    assert refused.status_code == 400, refused.text
+
+    await api.finish(running)
+
+    turns = await api.turns(thread_id)
+    assert [(t["task_prompt"], t["reasoning_effort"]) for t in turns[:2]] == [
+        ("fix it", "max"),
+        ("lighter now", "low"),
+    ]

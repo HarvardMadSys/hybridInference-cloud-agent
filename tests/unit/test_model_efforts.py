@@ -33,6 +33,7 @@ from cloud_agent.domain.model_efforts import (
     ListingRead,
     anthropic_effort,
     effort_facts,
+    effort_levels,
     listing_effort,
     stored_fact,
 )
@@ -40,8 +41,12 @@ from cloud_agent_shared.model_connections import PROTOCOLS
 
 GATEWAY = Path(__file__).resolve().parents[1] / "fixtures" / "gateway_model_effort_listing"
 DEEPSEEK_LIKE = "deepseek-like-reasoner"
+#: The gateway's route with a reasoning_effort_map: public low/high/max (it
+#: sends other names upstream, which the listing never shows).
+MAPPED = "mapped-reasoner"
 _GATEWAY_MODELS = [
     DEEPSEEK_LIKE,
+    MAPPED,
     "plain-chat",
     "undeclared-reasoner",
     "malformed-domain",
@@ -92,6 +97,8 @@ def test_the_gateways_listings_read_as_declared():
     # The gateway does not know: unknown, never unsupported.
     for model in ("undeclared-reasoner", "malformed-domain", "native-anthropic"):
         assert _statuses(facts[model]) == [("unknown", [], "not_declared")]
+    # A mapped route lists its public levels in both shapes, the same three.
+    assert _statuses(facts[MAPPED]) == [("supported", ["low", "high", "max"], "")]
     # Levels the Anthropic shape cannot name stay on the OpenAI APIs only.
     minimal = facts["minimal-only"]
     assert _status(minimal["chat_completions"]) == ("supported", ["none", "minimal"], "")
@@ -162,6 +169,69 @@ def test_anthropic_capabilities(entry, expected):
 )
 def test_listing_reasoning(entry, expected):
     assert _status(listing_effort(entry)) == expected
+
+
+#: DeepSeek's List Models entry, as its API reference documents the shape.
+_EFFORT_ENTRY = {
+    "id": "m",
+    "object": "model",
+    "effort": {"supported_levels": ["low", "high", "max"], "default_level": "high"},
+}
+
+
+@pytest.mark.parametrize(
+    ("entry", "expected"),
+    [
+        (_EFFORT_ENTRY, ("supported", ["low", "high", "max"], "")),
+        # ``none`` turns thinking off and is excluded by the shape: never inferred.
+        ({"id": "m", "effort": {"supported_levels": ["high"]}}, ("supported", ["high"], "")),
+        ({"id": "m", "effort": {"supported_levels": []}}, ("unsupported", [], "")),
+        ({"id": "m"}, ("unknown", [], "not_declared")),
+        ({"id": "m", "effort": None}, ("unknown", [], "not_declared")),
+        # Without the required list nothing is declared -- not "every level".
+        ({"id": "m", "effort": {"default_level": "high"}}, ("unknown", [], "not_declared")),
+        ({"id": "m", "effort": {"supported_levels": "high"}}, ("unknown", [], "not_declared")),
+        (
+            {"id": "m", "effort": {"supported_levels": [7, "", "x y"]}},
+            ("unknown", [], "not_declared"),
+        ),
+        (
+            {"id": "m", "effort": {"supported_levels": ["max", 7, "max", "low"]}},
+            ("supported", ["max", "low"], ""),
+        ),
+    ],
+)
+def test_listing_effort_levels(entry, expected):
+    assert _status(effort_levels(entry)) == expected
+
+
+def _listed(entry: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return effort_facts(
+        [entry["id"]],
+        anthropic=ListingRead(failure="not_found"),
+        openai=ListingRead(body={"object": "list", "data": [entry]}),
+    )[entry["id"]]
+
+
+def test_an_effort_levels_listing_speaks_for_chat_completions_only():
+    facts = _listed(_EFFORT_ENTRY)
+    assert _status(facts["chat_completions"]) == ("supported", ["low", "high", "max"], "")
+    assert facts["chat_completions"]["source"] == "models_listing_effort"
+    # Nothing in it describes Responses or Messages; neither is assumed.
+    assert _status(facts["responses"]) == ("unknown", [], "not_declared")
+    assert _status(facts["anthropic_messages"]) == ("unknown", [], "listing_unavailable")
+
+
+def test_both_shapes_in_one_entry_must_agree():
+    agreeing = {**_EFFORT_ENTRY, "reasoning": {"supported_efforts": ["max", "high", "low"]}}
+    facts = _listed(agreeing)
+    assert _status(facts["chat_completions"]) == ("supported", ["max", "high", "low"], "")
+    assert _status(facts["responses"]) == ("supported", ["max", "high", "low"], "")
+    conflicting = {**_EFFORT_ENTRY, "reasoning": {"supported_efforts": ["high", "xhigh"]}}
+    facts = _listed(conflicting)
+    assert _status(facts["chat_completions"]) == ("unknown", [], "conflicting_declarations")
+    # Responses reads only the reasoning object, which is not in conflict with itself.
+    assert _status(facts["responses"]) == ("supported", ["high", "xhigh"], "")
 
 
 def test_a_failed_or_silent_listing_is_unknown_with_its_reason():
@@ -255,6 +325,39 @@ def test_the_screenshots_pairing_reads_the_gateways_anthropic_declaration_direct
     direct = _row(["chat_completions", "anthropic_messages"], facts)
     assert _offer(direct, "claude-code") == ("supported", ["high", "max"], "")
     assert _offer(direct, "opencode") == ("supported", ["high", "max"], "")
+
+
+@pytest.mark.parametrize(
+    "protocols",
+    [
+        pytest.param(["anthropic_messages", "chat_completions"], id="direct-messages"),
+        pytest.param(["chat_completions"], id="translated-onto-chat"),
+    ],
+)
+def test_a_configured_gateway_route_offers_its_three_public_levels(protocols):
+    """The gateway's mapped route: Auto plus low/high/max on either plan, never xhigh."""
+    facts = _gateway_facts([MAPPED])[MAPPED]
+    row = _row(protocols, facts, model=MAPPED)
+    for runtime in ("claude-code", "codex"):
+        assert _offer(row, runtime, model=MAPPED) == ("supported", ["low", "high", "max"], "")
+        for level in (None, "low", "high", "max"):
+            require_usable(row, runtime=runtime, model=MAPPED, reasoning_effort=level)
+        for level in ("xhigh", "medium", "none"):
+            with pytest.raises(ModelConnectionUnusable) as refused:
+                require_usable(row, runtime=runtime, model=MAPPED, reasoning_effort=level)
+            assert refused.value.reason == "effort_level_unsupported"
+            assert refused.value.offered == ["low", "high", "max"]
+
+
+def test_a_deepseek_style_listing_offers_chat_levels_without_none():
+    facts = _listed(_EFFORT_ENTRY)
+    row = _row(["chat_completions"], facts, model="m")
+    # Codex's CLI can send ``none``; the declaration does not list it, so it is not offered.
+    assert _offer(row, "codex", model="m") == ("supported", ["low", "high", "max"], "")
+    assert _offer(row, "claude-code", model="m") == ("supported", ["low", "high", "max"], "")
+    # A Responses plan reads nothing from it.
+    responses = _row(["responses"], facts, model="m")
+    assert _offer(responses, "codex", model="m")[0] == "unknown"
 
 
 def test_a_translated_plan_is_offered_what_its_chat_upstream_declares():

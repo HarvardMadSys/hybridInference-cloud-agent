@@ -33,7 +33,7 @@ export interface AgentPath {
  * What the provider's model listing declared about one API's reasoning levels
  * for a model: `supported` with `levels`, `unsupported`, or `unknown` with a
  * `reason` (`not_read`: never read; `listing_unavailable`; `not_listed`;
- * `not_declared`).
+ * `not_declared`; `conflicting_declarations`: two shapes in one entry disagree).
  */
 export interface EffortFact {
   status: 'supported' | 'unsupported' | 'unknown';

@@ -34,7 +34,10 @@ export interface ModelConnectionOptionApi {
 export interface ModelEffortOfferApi {
   status: 'supported' | 'unsupported' | 'unknown';
   levels: string[];
-  /** `not_read`, `listing_unavailable`, `not_listed`, `not_declared`, `agent_cannot_express`. */
+  /**
+   * `not_read`, `listing_unavailable`, `not_listed`, `not_declared`,
+   * `conflicting_declarations`, `agent_cannot_express`.
+   */
   reason?: string;
   source?: string;
 }
