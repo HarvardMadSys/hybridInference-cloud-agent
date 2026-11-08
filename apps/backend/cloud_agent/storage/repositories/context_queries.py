@@ -355,6 +355,11 @@ _TOTAL_SUMS_SQL = ",\n           ".join(
 #: nested loop that rescanned one set for every row of the other: on 10,250
 #: runs, 4 s with no profile stored and over a minute with every attempt
 #: profiled, where these lookups take a quarter of a second either way.
+#: Each profile is read by its key behind ``OFFSET 0``, as the conversations
+#: are: joined freely, a profiles table counted while it was being written
+#: (by autovacuum, before the rows committed) is believed empty, and the
+#: planner then scanned every profile for every attempt and again for every
+#: run (12 M rows for 3,000 runs).
 #:
 #: Each run costs what it must and no more, because the read runs on small,
 #: busy machines too: one scan of the run's attempts yields both the kept one
@@ -389,12 +394,16 @@ _COMPOSITION_SQL = f"""
         SELECT (ARRAY_AGG(a.id ORDER BY a.attempt_no DESC, a.id DESC))[1] AS attempt_id,
                {_RUN_TOTALS_SQL}
         FROM agent_attempts a
-        LEFT JOIN agent_attempt_context_profiles rp
-            ON rp.attempt_id = a.id AND rp.reducer_version = $4
+        LEFT JOIN LATERAL (
+            SELECT rp.profile FROM agent_attempt_context_profiles rp
+            WHERE rp.attempt_id = a.id AND rp.reducer_version = $4 OFFSET 0
+        ) rp ON TRUE
         WHERE a.job_id = r.id
     ) k
-    LEFT JOIN agent_attempt_context_profiles p
-        ON p.attempt_id = k.attempt_id AND p.reducer_version = $4
+    LEFT JOIN LATERAL (
+        SELECT p.attempt_id, p.profile FROM agent_attempt_context_profiles p
+        WHERE p.attempt_id = k.attempt_id AND p.reducer_version = $4 OFFSET 0
+    ) p ON TRUE
     CROSS JOIN LATERAL (
         SELECT CASE WHEN prompt_text !~ '{ASCII_CLASS}' THEN CEIL(length(prompt_text) / 4.0)
                     ELSE CEIL(ascii / 4.0) + cjk + CEIL(GREATEST(chars - ascii - cjk, 0) / 2.0)
