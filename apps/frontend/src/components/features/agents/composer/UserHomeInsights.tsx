@@ -45,17 +45,32 @@ export function UserHomeInsights({
   const headingId = useId();
 
   return (
-    <section aria-labelledby={headingId} className="mt-8 border-t border-border pt-6">
-      <h2 id={headingId} className="text-sm font-semibold text-foreground">
-        {t('home.suggestions.title')}
-      </h2>
-      <p className="mt-2 text-xs leading-relaxed text-muted">{t('home.suggestions.description')}</p>
+    <section aria-labelledby={headingId} className="mt-10">
+      <div className="flex items-start gap-3">
+        <span
+          aria-hidden="true"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent-subtle text-accent ring-1 ring-inset ring-accent/10"
+        >
+          <svg className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+            <path d="m8 1 1.8 5.2L15 8l-5.2 1.8L8 15l-1.8-5.2L1 8l5.2-1.8L8 1Z" />
+            <circle cx="16.5" cy="16.5" r="1.5" opacity=".55" />
+          </svg>
+        </span>
+        <div className="min-w-0">
+          <h2 id={headingId} className="text-sm font-semibold text-foreground">
+            {t('home.suggestions.title')}
+          </h2>
+          <p className="mt-0.5 text-xs leading-relaxed text-muted">
+            {t('home.suggestions.description')}
+          </p>
+        </div>
+      </div>
       {loading ? (
-        <p role="status" className="mt-3 text-sm text-muted">
+        <p role="status" className="mt-4 text-sm text-muted">
           {t('home.suggestions.loading')}
         </p>
       ) : error ? (
-        <div role="status" className="mt-3 text-sm text-muted">
+        <div role="status" className="mt-4 text-sm text-muted">
           <p>{t('home.suggestions.error')}</p>
           <button
             type="button"
@@ -68,7 +83,10 @@ export function UserHomeInsights({
       ) : view?.suggestions.length ? (
         <ul className="mt-4 grid gap-3 sm:grid-cols-2">
           {view.suggestions.map((suggestion) => (
-            <li key={suggestion.id} className="rounded-xl border border-border bg-surface p-4">
+            <li
+              key={suggestion.id}
+              className="rounded-xl border border-border bg-surface-raised p-4 shadow-xs transition-[border-color,box-shadow] hover:border-border-control hover:shadow-sm"
+            >
               <h3 className="break-words text-sm font-medium text-foreground">
                 {suggestion.title}
               </h3>
@@ -82,11 +100,23 @@ export function UserHomeInsights({
           ))}
         </ul>
       ) : (
-        <p className="mt-3 text-sm leading-relaxed text-muted">{t('home.suggestions.empty')}</p>
+        <p className="mt-4 rounded-xl border border-dashed border-border-control bg-surface-muted/50 px-4 py-5 text-center text-sm leading-relaxed text-muted">
+          {t('home.suggestions.empty')}
+        </p>
       )}
 
-      <details className="mt-5 rounded-xl border border-border bg-surface">
-        <summary className="cursor-pointer rounded-xl px-4 py-3 text-sm font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
+      <details className="group mt-3 rounded-xl border border-border bg-surface-raised shadow-xs">
+        <summary className="flex cursor-pointer list-none items-center gap-2 rounded-xl px-4 py-3 text-sm font-medium text-foreground transition-colors hover:bg-surface-hover/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent [&::-webkit-details-marker]:hidden">
+          <svg
+            aria-hidden="true"
+            className="h-4 w-4 shrink-0 text-muted transition-transform group-open:rotate-90"
+            viewBox="0 0 20 20"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+          >
+            <path d="m8 5 5 5-5 5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
           {t('home.avatar.title')}
         </summary>
         <div className="border-t border-border p-4">

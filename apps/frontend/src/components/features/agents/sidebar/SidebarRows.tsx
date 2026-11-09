@@ -42,6 +42,14 @@ function DropIndicator({ position }: { position?: 'before' | 'after' }) {
 /** Mouse actions reveal on hover; touch actions stay visible and easy to reach. */
 const ROW_ACTION =
   'ui-focus-ring absolute top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface-hover hover:text-foreground focus:opacity-100 disabled:cursor-wait disabled:opacity-60 max-md:h-11 max-md:w-11 max-md:opacity-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 [@media(pointer:coarse)]:opacity-100';
+/**
+ * The room a row keeps at its end. At rest it shows only its time, so the title
+ * may use the width the hover actions take; a pinned row's pin always shows.
+ */
+function rowEndPadding(pinned: boolean): string {
+  return pinned ? 'pr-24' : 'pr-12 group-hover:pr-24 group-focus-within:pr-24';
+}
+
 export interface RowActions {
   activeKey: string | null;
   isUnread: (row: SidebarConversation) => boolean;
@@ -90,6 +98,7 @@ export function TaskRow({
   // with the same truncated title apart. A pinned row already has its pin
   // sitting in this corner, so it goes without.
   const activity = job.pinnedAt ? null : activityLabel(row.lastActivityAt, Date.now(), t);
+  const endPadding = rowEndPadding(Boolean(job.pinnedAt));
   return (
     <div className="group relative" {...reorderProps}>
       <DropIndicator position={reorderProps?.['data-drop-position']} />
@@ -104,9 +113,9 @@ export function TaskRow({
         aria-current={isActive ? 'page' : undefined}
         data-search-result={search ? 'true' : undefined}
         title={`${projectTitle(job.repo, t)} · ${job.title}`}
-        className={`ui-focus-ring flex min-h-8 w-full items-center gap-2 rounded-lg py-1 pl-2 pr-24 text-left text-[13px] transition-colors max-md:min-h-12 max-md:pr-36 [@media(pointer:coarse)]:min-h-12 [@media(pointer:coarse)]:pr-36 ${
+        className={`ui-focus-ring flex min-h-8 w-full items-center gap-2 rounded-lg py-1 pl-2 text-left text-[13px] transition-colors max-md:min-h-12 max-md:pr-36 [@media(pointer:coarse)]:min-h-12 [@media(pointer:coarse)]:pr-36 ${endPadding} ${
           isActive
-            ? 'bg-surface-hover font-medium text-foreground ring-1 ring-inset ring-border/70'
+            ? 'bg-surface-raised font-medium text-foreground shadow-xs ring-1 ring-inset ring-border/80'
             : 'text-muted hover:bg-surface-hover hover:text-foreground'
         }`}
       >

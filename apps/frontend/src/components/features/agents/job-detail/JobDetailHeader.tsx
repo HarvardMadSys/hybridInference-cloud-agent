@@ -95,7 +95,7 @@ export function JobDetailHeader({
         <div className="agent-conversation-controls flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 pb-1.5">
           <nav
             aria-label="Run views"
-            className="flex shrink-0 items-center gap-0.5 rounded-md bg-surface-muted p-0.5 text-xs"
+            className="flex shrink-0 items-center gap-0.5 rounded-lg bg-surface-muted p-0.5 text-xs ring-1 ring-inset ring-border/70"
           >
             {(['chat', 'trajectory', 'context'] as const).map((view) => (
               <button
@@ -105,8 +105,8 @@ export function JobDetailHeader({
                 aria-current={tab === view ? 'page' : undefined}
                 className={`ui-focus-ring min-h-7 rounded-md px-1.5 py-1 capitalize sm:px-2.5 transition-colors [@media(pointer:coarse)]:min-h-11 ${
                   tab === view
-                    ? 'bg-surface font-semibold text-foreground shadow-sm ring-1 ring-border'
-                    : 'text-muted hover:bg-surface-hover hover:text-foreground'
+                    ? 'bg-surface-raised font-semibold text-foreground shadow-xs ring-1 ring-border/80'
+                    : 'text-muted hover:bg-surface-hover/70 hover:text-foreground'
                 }`}
               >
                 {view}

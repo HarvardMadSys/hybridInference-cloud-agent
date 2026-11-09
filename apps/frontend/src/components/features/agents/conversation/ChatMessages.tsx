@@ -910,28 +910,18 @@ export function UserMessage({
   blockKey,
   busy,
   onRewind,
-  presentation,
 }: {
   text: string;
   blockKey?: string;
   busy?: boolean;
   onRewind?: () => void;
-  presentation?: TranscriptPresentation;
 }) {
   return (
-    <div data-block-key={blockKey} className="group my-2 ml-auto w-fit max-w-[88%]">
-      <div className="flex min-w-0 items-start gap-2 rounded-xl bg-gray-100 px-3 py-2 text-sm leading-6 text-gray-800 dark:bg-white/5 dark:text-gray-200">
-        <div className="min-w-0 flex-1">
-          <MessageContent text={text} presentation={presentation} />
-        </div>
-        {presentation !== 'compact' ? (
-          <MessageActions align="end" className="!mt-0 shrink-0">
-            <MessageActionButton label="Copy message" onClick={() => void copyMessage(text)}>
-              <CopyIcon />
-              Copy
-            </MessageActionButton>
-          </MessageActions>
-        ) : null}
+    <div data-block-key={blockKey} className="group my-3 ml-auto w-fit max-w-[88%]">
+      {/* Copy rides inside the bubble as an icon, so the bubble is only as tall
+          and as wide as what was sent. */}
+      <div className="min-w-0 rounded-2xl rounded-tr-md bg-gray-100 py-2 pl-3.5 pr-2 text-sm leading-6 text-gray-900 ring-1 ring-inset ring-gray-900/[0.04] dark:bg-white/[0.07] dark:text-gray-100 dark:ring-white/[0.06]">
+        <MessageContent text={text} presentation="compact" />
       </div>
       {onRewind ? (
         <MessageActions align="end" className="mt-0">
@@ -974,9 +964,9 @@ function ReasoningMessage({
         open={states?.get(disclosureKey)?.expanded}
         data-block-key={blockKey}
         aria-label="Agent reasoning"
-        className="group my-2 rounded-lg border border-gray-200 bg-gray-50 dark:border-white/10 dark:bg-white/[0.025]"
+        className="group my-2 w-fit max-w-full rounded-lg border border-gray-200 bg-gray-50 transition-colors hover:border-gray-300 open:w-full dark:border-white/10 dark:bg-white/[0.025] dark:hover:border-white/20"
       >
-        <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-[13px] text-gray-500 dark:text-gray-400">
+        <summary className="flex cursor-pointer list-none items-center gap-2 py-1.5 pl-2.5 pr-3 text-[13px] text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200">
           <Chevron className="transition-transform group-open:rotate-90" />
           Reasoning
         </summary>
@@ -1052,8 +1042,7 @@ export function EventRow({
       />
     );
   }
-  if (event.kind === 'user_message')
-    return <UserMessage text={event.text} blockKey={blockKey} presentation={presentation} />;
+  if (event.kind === 'user_message') return <UserMessage text={event.text} blockKey={blockKey} />;
   if (event.kind === 'tool_use')
     return (
       <RichToolActivity
@@ -1133,11 +1122,7 @@ export function HistoryTurn({
   return (
     <section aria-label={`Turn ${turn.displayNo}`} data-turn-key={turn.key}>
       {turn.promptCard !== null ? (
-        <UserMessage
-          text={turn.promptCard}
-          blockKey={`${jobId}:prompt`}
-          presentation={presentation}
-        />
+        <UserMessage text={turn.promptCard} blockKey={`${jobId}:prompt`} />
       ) : null}
       {/* The prompt opens the turn; a message sent into it reads where it arrived. */}
       {turn.messages

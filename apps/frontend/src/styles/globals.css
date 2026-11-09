@@ -12,6 +12,7 @@
     --ui-muted: 107 107 116;
     --ui-border: 228 228 231;
     --ui-border-strong: 161 161 170;
+    --ui-border-control: 212 212 216;
     --ui-accent: 165 28 48;
     --ui-accent-hover: 139 23 41;
     --ui-accent-subtle: 252 236 239;
@@ -24,6 +25,19 @@
     --ui-duration-fast: 160ms;
     --ui-duration-enter: 240ms;
     --ui-ease: cubic-bezier(0.22, 1, 0.36, 1);
+    /* Elevation, lowest first. `card` is the floating level: menus, popovers
+       and dialogs. Each theme defines its own, because a shadow must darken
+       the ground it falls on. */
+    --ui-shadow-xs: 0 1px 2px 0 rgb(24 24 27 / 0.05);
+    --ui-shadow-sm: 0 1px 3px 0 rgb(24 24 27 / 0.07), 0 1px 2px -1px rgb(24 24 27 / 0.05);
+    --ui-shadow-md: 0 4px 10px -2px rgb(24 24 27 / 0.08), 0 2px 4px -2px rgb(24 24 27 / 0.05);
+    --ui-shadow-lg: 0 14px 28px -8px rgb(24 24 27 / 0.14), 0 4px 10px -4px rgb(24 24 27 / 0.06);
+    --ui-shadow-xl: 0 28px 56px -14px rgb(24 24 27 / 0.24), 0 10px 20px -10px rgb(24 24 27 / 0.1);
+    --ui-shadow-card:
+      0 12px 32px -10px rgb(24 24 27 / 0.18), 0 3px 8px -3px rgb(24 24 27 / 0.07),
+      0 0 0 1px rgb(24 24 27 / 0.02);
+    /* The top light on a filled button. */
+    --ui-highlight: inset 0 1px 0 rgb(255 255 255 / 0.16);
   }
 
   .dark {
@@ -35,6 +49,7 @@
     --ui-muted: 161 161 170;
     --ui-border: 48 48 54;
     --ui-border-strong: 113 113 122;
+    --ui-border-control: 63 63 70;
     --ui-accent: 241 139 155;
     --ui-accent-hover: 245 172 183;
     --ui-accent-subtle: 57 36 45;
@@ -44,6 +59,15 @@
     --ui-status-error: 248 113 113;
     --ui-status-warning: 252 211 77;
     --ui-status-info: 147 197 253;
+    --ui-shadow-xs: 0 1px 2px 0 rgb(0 0 0 / 0.4);
+    --ui-shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.45), 0 1px 2px -1px rgb(0 0 0 / 0.35);
+    --ui-shadow-md: 0 4px 12px -2px rgb(0 0 0 / 0.5), 0 2px 4px -2px rgb(0 0 0 / 0.35);
+    --ui-shadow-lg: 0 16px 32px -8px rgb(0 0 0 / 0.55), 0 4px 10px -4px rgb(0 0 0 / 0.4);
+    --ui-shadow-xl: 0 32px 64px -14px rgb(0 0 0 / 0.65), 0 10px 20px -10px rgb(0 0 0 / 0.45);
+    --ui-shadow-card:
+      0 18px 44px -12px rgb(0 0 0 / 0.7), 0 4px 12px -4px rgb(0 0 0 / 0.45),
+      inset 0 1px 0 rgb(255 255 255 / 0.04);
+    --ui-highlight: inset 0 1px 0 rgb(255 255 255 / 0.22);
   }
 
   html {
@@ -63,6 +87,25 @@
     background: rgb(var(--ui-accent) / 0.18);
   }
 
+  /* Native controls take the theme's accent rather than the browser's blue. */
+  :where(input[type='checkbox'], input[type='radio'], input[type='range'], progress) {
+    accent-color: rgb(var(--ui-accent));
+  }
+
+  /* A disclosure's default triangle, quieted to the muted ink. */
+  summary {
+    cursor: pointer;
+  }
+
+  summary::marker {
+    color: rgb(var(--ui-muted));
+    font-size: 0.8em;
+  }
+
+  summary::-webkit-details-marker {
+    color: rgb(var(--ui-muted));
+  }
+
   /* A fallback for controls that have not yet adopted the shared UI classes. */
   :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
     outline: 2px solid rgb(var(--ui-focus));
@@ -76,26 +119,25 @@
   .ui-button:focus-visible,
   .ui-icon-button:focus-visible,
   .ui-tab:focus-visible,
-  .ui-tool-row:focus-visible,
-  .ui-input:focus-visible {
+  .ui-tool-row:focus-visible {
     @apply outline outline-2 outline-offset-2 outline-focus;
   }
 
   .ui-button,
   .ui-icon-button {
     @apply inline-flex items-center justify-center gap-1.5 rounded-md text-sm font-medium transition-colors duration-150;
-    transition-property: color, background-color, border-color, box-shadow, transform;
+    transition-property: color, background-color, border-color, box-shadow, transform, opacity;
     transition-duration: var(--ui-duration-fast);
     transition-timing-function: var(--ui-ease);
   }
 
   .ui-button:active:not(:disabled),
   .ui-icon-button:active:not(:disabled) {
-    transform: scale(0.98);
+    transform: scale(0.97);
   }
 
   .ui-button {
-    @apply min-h-8 px-2.5 py-1;
+    @apply min-h-8 px-3 py-1;
   }
 
   .ui-icon-button {
@@ -108,16 +150,27 @@
     @apply cursor-not-allowed opacity-50;
   }
 
+  /* Filled buttons carry a top light and a soft drop, so they read as
+     pressable rather than as a coloured rectangle. */
   .ui-button-primary {
     @apply bg-accent text-accent-foreground;
+    background-image: linear-gradient(180deg, rgb(255 255 255 / 0.1), rgb(255 255 255 / 0));
+    box-shadow:
+      var(--ui-highlight),
+      0 1px 2px 0 rgb(var(--ui-accent) / 0.3),
+      0 0 0 1px rgb(var(--ui-accent-hover) / 0.6);
   }
 
   .ui-button-primary:hover:not(:disabled) {
     @apply bg-accent-hover;
+    box-shadow:
+      var(--ui-highlight),
+      0 3px 8px -2px rgb(var(--ui-accent) / 0.4),
+      0 0 0 1px rgb(var(--ui-accent-hover) / 0.7);
   }
 
   .ui-button-secondary {
-    @apply border border-border-strong bg-surface text-foreground;
+    @apply border border-border-control bg-surface-raised text-foreground shadow-xs;
   }
 
   .ui-button-ghost {
@@ -126,10 +179,31 @@
 
   .ui-button-danger {
     @apply bg-red-600 text-white;
+    background-image: linear-gradient(180deg, rgb(255 255 255 / 0.1), rgb(255 255 255 / 0));
+    box-shadow:
+      var(--ui-highlight),
+      0 1px 2px 0 rgb(185 28 28 / 0.3),
+      0 0 0 1px rgb(185 28 28 / 0.6);
   }
 
   .ui-button-danger:hover:not(:disabled) {
     @apply bg-red-700;
+  }
+
+  /* A filled button that cannot act yet goes neutral instead of fading: a
+     half-transparent accent reads as a washed-out pink, not as "not yet". */
+  .ui-button-primary:disabled,
+  .ui-button-danger:disabled {
+    @apply bg-surface-hover text-muted opacity-100;
+    background-image: none;
+    box-shadow: inset 0 0 0 1px rgb(var(--ui-border));
+  }
+
+  /* Working, not unavailable: a busy filled button keeps its colour, so the
+     spinner it holds stays visible. */
+  .ui-button-primary[aria-busy='true']:disabled {
+    @apply bg-accent text-accent-foreground opacity-80;
+    box-shadow: var(--ui-highlight);
   }
 
   .ui-button-secondary:hover:not(:disabled),
@@ -137,8 +211,26 @@
     @apply bg-surface-hover text-foreground;
   }
 
+  .ui-button-secondary:hover:not(:disabled) {
+    border-color: rgb(var(--ui-border-strong) / 0.75);
+  }
+
+  /* The brand's lit tile: the accent under a top light, as on the app mark. */
+  .ui-brand-tile {
+    @apply bg-accent text-accent-foreground;
+    background-image: linear-gradient(180deg, rgb(255 255 255 / 0.15), rgb(255 255 255 / 0));
+    box-shadow:
+      var(--ui-highlight),
+      0 1px 2px rgb(var(--ui-accent) / 0.35);
+  }
+
+  /* A small heading over a group of rows: a sidebar section, a menu group. */
+  .ui-section-label {
+    @apply text-[11px] font-semibold uppercase tracking-[0.06em] text-muted/80;
+  }
+
   .ui-card {
-    @apply rounded-lg border border-border bg-surface-raised text-foreground shadow-subtle;
+    @apply rounded-xl border border-border bg-surface-raised text-foreground shadow-xs;
   }
 
   .ui-tab {
@@ -146,7 +238,8 @@
   }
 
   .ui-tab:hover {
-    @apply bg-surface-hover text-foreground;
+    @apply text-foreground;
+    border-bottom-color: rgb(var(--ui-border-strong) / 0.45);
   }
 
   .ui-tab[aria-selected='true'] {
@@ -166,12 +259,28 @@
     @apply border-border-strong bg-surface-hover text-foreground;
   }
 
+  /* Fields: a light frame that firms up under the pointer and takes an accent
+     border and halo while focused. The transparent outline is what forced
+     colours mode draws, since it removes box shadows. */
   .ui-input {
-    @apply min-h-8 rounded-md border border-border-strong bg-surface px-2.5 py-1 text-sm text-foreground placeholder:text-muted disabled:cursor-not-allowed disabled:opacity-50;
+    @apply min-h-8 rounded-md border border-border-control bg-surface px-2.5 py-1 text-sm text-foreground shadow-xs placeholder:text-muted disabled:cursor-not-allowed disabled:opacity-50;
+    transition:
+      border-color var(--ui-duration-fast) var(--ui-ease),
+      box-shadow var(--ui-duration-fast) var(--ui-ease),
+      background-color var(--ui-duration-fast) var(--ui-ease);
+  }
+
+  .ui-input:hover:not(:disabled):not(:focus-visible) {
+    border-color: rgb(var(--ui-border-strong) / 0.75);
   }
 
   .ui-input:focus-visible {
-    @apply border-accent;
+    outline: 2px solid transparent;
+    outline-offset: 0;
+    border-color: rgb(var(--ui-accent) / 0.8);
+    box-shadow:
+      0 0 0 3px rgb(var(--ui-accent) / 0.16),
+      var(--ui-shadow-xs);
   }
 
   /* The signed-out account pages: the home page's larger, softer controls. */
@@ -213,24 +322,55 @@
 
   .ui-select[aria-expanded='true'] {
     @apply border-accent/60;
+    box-shadow: 0 0 0 3px rgb(var(--ui-accent) / 0.12);
   }
 
   .ui-select:focus-visible {
     @apply outline outline-2 outline-offset-2 outline-focus;
   }
 
+  /* The prompt box: a raised card that lifts and takes the accent while the
+     caret is inside it. */
   .ui-composer {
     @apply relative rounded-xl border border-border bg-surface text-foreground;
-    box-shadow: 0 1px 2px rgb(var(--ui-foreground) / 0.05);
+    box-shadow: var(--ui-shadow-sm);
     transition:
       border-color var(--ui-duration-fast) ease,
       box-shadow var(--ui-duration-fast) ease,
       background-color var(--ui-duration-fast) ease;
   }
 
+  .ui-composer:hover {
+    border-color: rgb(var(--ui-border-control));
+  }
+
   .ui-composer:focus-within {
-    border-color: rgb(var(--ui-accent) / 0.4);
-    box-shadow: 0 0 0 2px rgb(var(--ui-accent) / 0.08);
+    border-color: rgb(var(--ui-accent) / 0.45);
+    box-shadow:
+      0 0 0 4px rgb(var(--ui-accent) / 0.08),
+      var(--ui-shadow-md);
+  }
+
+  /* The new-task page's prompt box is the page's subject: it sits higher. */
+  .ui-composer-hero {
+    box-shadow: var(--ui-shadow-md);
+  }
+
+  .ui-composer-hero:focus-within {
+    box-shadow:
+      0 0 0 4px rgb(var(--ui-accent) / 0.08),
+      var(--ui-shadow-lg);
+  }
+
+  /* A soft accent light behind the home page's avatar. */
+  .ui-avatar-glow::before {
+    content: '';
+    position: absolute;
+    inset: -56px;
+    z-index: -1;
+    border-radius: 9999px;
+    background: radial-gradient(closest-side, rgb(var(--ui-accent) / 0.13), transparent);
+    pointer-events: none;
   }
 
   /* Opacity-only entrances keep measured menus and resizable panes stable. */

@@ -614,11 +614,11 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
         <UserAvatar view={userProfile.view} />
         <h1
           id={headingId}
-          className="text-balance text-center text-xl font-semibold leading-tight tracking-tight text-foreground sm:text-2xl"
+          className="text-balance text-center text-2xl font-semibold leading-tight tracking-[-0.02em] text-foreground sm:text-[1.75rem]"
         >
           {t('composer.heading')}
         </h1>
-        <p className="mx-auto mt-1.5 max-w-md text-balance text-center text-[13px] leading-5 text-muted">
+        <p className="mx-auto mt-2 max-w-md text-balance text-center text-sm leading-5 text-muted">
           {temporary && firstVisit
             ? t('composer.subheadingTemporary')
             : firstVisit
@@ -677,7 +677,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
             })
             .finally(() => setReadingDrops((count) => count - 1));
         }}
-        className={`ui-composer ${
+        className={`ui-composer ui-composer-hero ${
           dropping ? 'border-accent/40 ring-4 ring-accent/[0.08]' : ''
         } ${locked || noRepositories ? 'mt-3' : 'mt-5'} ${locked ? 'bg-surface-muted' : ''}`}
       >
@@ -745,7 +745,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
             composer's own width, so nothing scrolls sideways or hides behind
             Run. The rows stay unpositioned so the repository menu anchors to
             the composer itself. */}
-        <div className="space-y-1 rounded-b-xl border-t border-border bg-surface-muted/50 p-2">
+        <div className="space-y-1 rounded-b-xl border-t border-border/70 bg-surface-muted/60 p-2">
           <div className="flex min-w-0 flex-wrap items-center gap-1">
             <RepositoryPicker
               repos={selectableRepos(config)}
@@ -837,7 +837,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
                     ? t('composer.chooseModel')
                     : t('composer.runTitle')
               }
-              className="ui-button ui-button-primary ml-auto shrink-0 px-3 text-xs"
+              className="ui-button ui-button-primary ml-auto shrink-0 rounded-lg px-3.5 text-[13px]"
             >
               {submitting || goalCommand.busy ? t('composer.starting') : t('composer.run')}
               <svg
@@ -1004,7 +1004,7 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
         </p>
       ) : null}
       {firstVisit && (
-        <div className="mt-6 grid gap-3 border-t border-border pt-4 sm:grid-cols-3">
+        <div className="mt-8 grid gap-3 sm:grid-cols-3">
           {(
             [
               ['composer.repository', 'composer.workflowRepository'],
@@ -1012,10 +1012,10 @@ function TaskComposerContent({ initialRepo, userId }: { initialRepo?: string; us
               ['composer.workflowReviewTitle', 'composer.workflowReview'],
             ] as const
           ).map(([title, description], index) => (
-            <div key={title} className="flex gap-3 px-1">
+            <div key={title} className="ui-card flex gap-3 p-3.5">
               <span
                 aria-hidden="true"
-                className="mt-0.5 text-xs font-medium tabular-nums text-muted"
+                className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-accent-subtle text-[11px] font-semibold tabular-nums text-accent"
               >
                 0{index + 1}
               </span>
