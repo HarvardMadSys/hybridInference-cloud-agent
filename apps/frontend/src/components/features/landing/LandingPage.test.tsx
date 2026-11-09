@@ -54,7 +54,13 @@ describe('the signed-out home page', () => {
     render(<LandingPage />);
     await advance(0);
 
-    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Your agents.At work.');
+    const hero = screen.getByRole('region', { name: /Run a task/ });
+    expect(within(hero).getByRole('heading', { level: 1 })).toHaveTextContent(
+      'Run a task.See the diff.',
+    );
+    expect(within(hero).getByRole('link', { name: 'Sign up' })).toHaveAccessibleDescription(
+      'An admin reviews access after sign-up.',
+    );
     const nav = screen.getByRole('navigation', { name: 'Account' });
     expect(within(nav).getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', '/login');
     expect(within(nav).getByRole('link', { name: 'Sign up' })).toHaveAttribute('href', '/signup');
@@ -69,6 +75,7 @@ describe('the signed-out home page', () => {
     await advance(0);
 
     expect(screen.queryByRole('link', { name: 'Sign up' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/reviews access after sign-up/)).not.toBeInTheDocument();
     expect(screen.getAllByRole('link', { name: 'Sign in' }).length).toBeGreaterThan(0);
   });
 
@@ -90,7 +97,7 @@ describe('the signed-out home page', () => {
     );
     await advance(0);
 
-    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('你的 Agent，在云端开工。');
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('云端跑任务，回来审代码。');
     expect(screen.getAllByRole('link', { name: '注册' })[0]).toHaveAttribute('href', '/signup');
     expect(message()).toHaveTextContent('给 CSV 导出补上测试，包括空文件的情况。');
   });

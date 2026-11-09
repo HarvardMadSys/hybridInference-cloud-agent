@@ -46,7 +46,7 @@ test('independent login reaches the waiting list without mounting protected Agen
   });
   await page.route('**/api/v1/waitlist', (route) => route.fulfill({ json: pending }));
   await page.goto('/login');
-  await page.getByLabel('Email', { exact: true }).fill('applicant@example.test');
+  await page.getByLabel('Email or username', { exact: true }).fill('applicant@example.test');
   await page.getByLabel('Password', { exact: true }).fill('Example123');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
   await expect(page).toHaveURL(/\/waiting-list$/);

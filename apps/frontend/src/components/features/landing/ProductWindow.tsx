@@ -556,7 +556,7 @@ export function ProductWindow({ example, frame, instant }: WindowProps) {
   return (
     <>
       <div className={styles.shadow} />
-      <div className={styles.app}>
+      <div className={styles.app} data-demo="window">
         <div aria-hidden="true" className={styles.top}>
           <div className={styles.crumb}>
             <span className={styles.crumbRepo}>your-org/web</span>

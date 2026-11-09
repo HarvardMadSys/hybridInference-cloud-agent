@@ -130,7 +130,7 @@ describe('independent account forms', () => {
       new APIError('email_not_verified', 'Verify your email.', 403),
     );
     render(<LocalLogin signupEnabled />);
-    fill('Email', 'user@example.test');
+    fill('Email or username', 'user@example.test');
     fill('Password', 'Goodpass123');
     fireEvent.submit(screen.getByRole('button', { name: 'Sign in' }).closest('form')!);
     await screen.findByRole('alert');

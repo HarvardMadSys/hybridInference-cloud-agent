@@ -16,12 +16,16 @@ export const accountParityEn = {
   'accounts.signOutAll': 'Sign out of all accounts',
 
   'login.addAccount': 'Add another account',
+  'login.addDescription': 'Sign in with another account on this browser.',
+  'auth.artworkTitle': 'From prompt to pull request.',
+  'auth.artworkDescription': 'Run coding agents against your repositories.',
+  'login.newAccount': 'New here?',
   'login.method': 'Sign-in method',
   'login.withPassword': 'Password',
   'login.withPhone': 'Phone code',
-  'login.usernameHint': 'An account created without an email signs in with its username.',
+  'login.identifier': 'Email or username',
   'login.setupRequired': 'This deployment has no administrator yet.',
-  'login.chooseAccount': 'Use an account already signed in here ({count})',
+  'login.chooseAccount': 'Accounts on this browser',
 
   'phone.number': 'Phone number',
   'phone.code': 'Verification code',
@@ -32,14 +36,15 @@ export const accountParityEn = {
   'phone.sentHint': 'If this number can use the code, it is on its way.',
 
   'signup.description':
-    'Agree to the Terms, tell us how you will use Cloud Agent, then create your account. An administrator reviews Agent access.',
+    'Create your account and tell us how you plan to use Cloud Agent. An administrator reviews requests for access.',
+  'signup.credentials': 'Sign-in details',
+  'signup.application': 'Access request',
   'signup.name': 'Name',
   'signup.method': 'Sign-up method',
-  'signup.agreeFirst': 'Agree to the Terms of Service (and complete the check) to continue.',
   'signup.createdVerified': 'Your account is ready. Sign in to see your application.',
   'signup.phoneWaiting':
     'Your account is created and waits for an administrator. Sign in to follow it.',
-  'signup.haveAccount': 'Already have an account? Sign in',
+  'signup.haveAccount': 'Already have an account?',
 
   'terms.title': 'Terms of Service',
   'terms.none': 'This deployment has not published its terms here. Ask its operator.',
@@ -113,12 +118,16 @@ export const accountParityZh: Record<keyof typeof accountParityEn, string> = {
   'accounts.signOutAll': '退出所有账号',
 
   'login.addAccount': '添加其他账号',
+  'login.addDescription': '在此浏览器上登录另一个账号。',
+  'auth.artworkTitle': '从一句指令到一个拉取请求',
+  'auth.artworkDescription': '让编码 Agent 在你的代码仓库中工作。',
+  'login.newAccount': '还没有账号？',
   'login.method': '登录方式',
   'login.withPassword': '密码',
   'login.withPhone': '手机验证码',
-  'login.usernameHint': '没有邮箱的账号请使用用户名登录。',
+  'login.identifier': '邮箱或用户名',
   'login.setupRequired': '本部署还没有管理员。',
-  'login.chooseAccount': '使用本浏览器上已登录的账号（{count}）',
+  'login.chooseAccount': '本浏览器上的账号',
 
   'phone.number': '手机号',
   'phone.code': '验证码',
@@ -128,14 +137,14 @@ export const accountParityZh: Record<keyof typeof accountParityEn, string> = {
   'phone.resendIn': '{seconds} 秒后可重新发送',
   'phone.sentHint': '如果该号码可以使用验证码，它已在发送中。',
 
-  'signup.description':
-    '同意服务条款并说明你将如何使用 Cloud Agent，然后创建账号。Agent 权限由管理员审核。',
+  'signup.description': '创建账号，并告诉我们你打算如何使用 Cloud Agent。使用权限由管理员审核。',
+  'signup.credentials': '登录资料',
+  'signup.application': '权限申请',
   'signup.name': '名称',
   'signup.method': '注册方式',
-  'signup.agreeFirst': '请先同意服务条款（并完成人机验证）后继续。',
   'signup.createdVerified': '账号已创建。登录后即可查看你的申请。',
   'signup.phoneWaiting': '账号已创建，正在等待管理员审核。登录后可查看进度。',
-  'signup.haveAccount': '已有账号？去登录',
+  'signup.haveAccount': '已有账号？',
 
   'terms.title': '服务条款',
   'terms.none': '本部署尚未在此发布条款，请联系运营方。',

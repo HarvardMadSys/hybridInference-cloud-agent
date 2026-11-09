@@ -202,6 +202,18 @@
     font-size: 15px;
   }
 
+  .auth-method-tabs {
+    @apply grid grid-cols-2 gap-1 rounded-xl border border-border bg-surface-muted p-1;
+  }
+
+  .auth-method-tab {
+    @apply min-h-9 border border-transparent text-muted hover:text-foreground;
+  }
+
+  .auth-method-tab[aria-selected='true'] {
+    @apply border-border bg-surface-raised text-foreground shadow-sm;
+  }
+
   /* The shared select trigger; its caller's classes set the field's frame. */
   .ui-select {
     @apply cursor-pointer text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50;

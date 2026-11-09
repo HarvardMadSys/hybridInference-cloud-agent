@@ -15,13 +15,8 @@ import {
   type SignupDetails,
 } from '@/lib/api/accounts';
 import { getErrorMessage } from '@/lib/utils/errors';
-import {
-  AccountField,
-  AccountFrame,
-  AccountNotice,
-  AccountSteps,
-  BackToLogin,
-} from './AccountFrame';
+import { AccountField, AccountNotice, AccountSteps, BackToLogin } from './AccountFrame';
+import { AuthFormFrame } from './AuthFormFrame';
 import { NewPasswordFields } from './NewPasswordFields';
 import { PhoneCodeFields } from './PhoneCodeFields';
 import { TermsConsent, useTermsConsent } from './TermsConsent';
@@ -41,14 +36,14 @@ function MethodTabs({
 }) {
   const t = useT();
   return (
-    <div role="tablist" aria-label={t('signup.method')} className="flex gap-2">
+    <div role="tablist" aria-label={t('signup.method')} className="auth-method-tabs">
       {(['email', 'phone'] as const).map((value) => (
         <button
           key={value}
           type="button"
           role="tab"
           aria-selected={method === value}
-          className={`ui-button ${method === value ? 'ui-button-primary' : 'ui-button-secondary'}`}
+          className="ui-button auth-method-tab"
           onClick={() => onMethod(value)}
         >
           {value === 'email' ? t('account.email') : t('phone.number')}
@@ -80,10 +75,10 @@ function signupDetails(
 function SignupClosed() {
   const t = useT();
   return (
-    <AccountFrame title={t('account.unavailable')}>
+    <AuthFormFrame title={t('account.unavailable')}>
       <p className="text-sm text-muted">{t('account.registrationClosed')}</p>
       <BackToLogin />
-    </AccountFrame>
+    </AuthFormFrame>
   );
 }
 
@@ -220,7 +215,7 @@ function ProfileFields({
 function SignupUnavailable() {
   const t = useT();
   return (
-    <AccountFrame title={t('account.signup')}>
+    <AuthFormFrame title={t('account.signup')}>
       <AccountNotice error>{t('signup.optionsFailed')}</AccountNotice>
       <button
         type="button"
@@ -230,7 +225,7 @@ function SignupUnavailable() {
         {t('common.retry')}
       </button>
       <BackToLogin />
-    </AccountFrame>
+    </AuthFormFrame>
   );
 }
 
@@ -268,8 +263,6 @@ function ActiveSignupForm({
   }, []);
   const needsCaptcha = Boolean(options.turnstile_site_key);
   const details = signupDetails(userName, useCase, accepted, captcha);
-  const ready = accepted && (!needsCaptcha || Boolean(captcha));
-  const submitDisabled = busy || (chosen === 'email' ? !ready : !accepted || code.length !== 6);
 
   async function submitEmail() {
     if (!validNewPassword(password)) {
@@ -326,10 +319,11 @@ function ActiveSignupForm({
     return null;
   }
 
+  const problem = submitProblem();
+
   function handleSubmit(event: FormEvent) {
     event.preventDefault();
     if (submitting.current) return;
-    const problem = submitProblem();
     if (problem) {
       setError(problem);
       if (!consent.agreed) consent.show();
@@ -349,38 +343,44 @@ function ActiveSignupForm({
           }}
         />
       )}
-      <form className="space-y-4" onSubmit={handleSubmit}>
+      <form className="space-y-5" onSubmit={handleSubmit}>
         {error && <AccountNotice error>{error}</AccountNotice>}
-        {chosen === 'email' ? (
-          <EmailCredentialFields
-            email={email}
-            password={password}
-            confirm={confirm}
-            onEmail={setEmail}
-            onPassword={setPassword}
-            onConfirm={setConfirm}
-          />
-        ) : (
-          <PhoneCodeFields
-            purpose="signup"
-            phone={phone}
-            code={code}
-            onPhone={setPhone}
-            onCode={setCode}
-            onError={setError}
-            defaultCountryCode={options.phone.default_country_code}
-            siteKey={options.turnstile_site_key}
-            captchaToken={details.turnstile_token ?? null}
-            onCaptchaUsed={resetCaptcha}
-          />
-        )}
-        <ProfileFields
-          userName={userName}
-          useCase={useCase}
-          onUserName={setUserName}
-          onUseCase={setUseCase}
-        />
         <TermsConsent consent={consent} />
+        <fieldset className="min-w-0 space-y-3">
+          <legend className="text-sm font-semibold">{t('signup.credentials')}</legend>
+          {chosen === 'email' ? (
+            <EmailCredentialFields
+              email={email}
+              password={password}
+              confirm={confirm}
+              onEmail={setEmail}
+              onPassword={setPassword}
+              onConfirm={setConfirm}
+            />
+          ) : (
+            <PhoneCodeFields
+              purpose="signup"
+              phone={phone}
+              code={code}
+              onPhone={setPhone}
+              onCode={setCode}
+              onError={setError}
+              defaultCountryCode={options.phone.default_country_code}
+              siteKey={options.turnstile_site_key}
+              captchaToken={details.turnstile_token ?? null}
+              onCaptchaUsed={resetCaptcha}
+            />
+          )}
+        </fieldset>
+        <fieldset className="min-w-0 space-y-3">
+          <legend className="text-sm font-semibold">{t('signup.application')}</legend>
+          <ProfileFields
+            userName={userName}
+            useCase={useCase}
+            onUserName={setUserName}
+            onUseCase={setUseCase}
+          />
+        </fieldset>
         {needsCaptcha && (
           <TurnstileWidget
             siteKey={options.turnstile_site_key}
@@ -388,10 +388,10 @@ function ActiveSignupForm({
             resetKey={captchaReset}
           />
         )}
-        {!ready && <p className="text-xs text-muted">{t('signup.agreeFirst')}</p>}
+        {!error && problem && <p className="text-xs text-muted">{problem}</p>}
         <button
           className="ui-button ui-button-primary w-full"
-          disabled={submitDisabled}
+          disabled={busy || Boolean(problem)}
           aria-busy={busy}
         >
           {busy ? t('account.saving') : t('account.signup')}
@@ -411,9 +411,9 @@ export function SignupPage() {
   if (!options && !loading) return <SignupUnavailable />;
   if (!options)
     return (
-      <AccountFrame title={t('account.signup')}>
+      <AuthFormFrame title={t('account.signup')}>
         <p role="status">{t('common.loading')}</p>
-      </AccountFrame>
+      </AuthFormFrame>
     );
   if (!options.signup_enabled && !options.phone_signup_enabled) return <SignupClosed />;
   const chosen = chooseMethod(method, options.signup_enabled, options.phone_signup_enabled);
@@ -423,9 +423,10 @@ export function SignupPage() {
       : 'account.signup';
 
   return (
-    <AccountFrame
+    <AuthFormFrame
       title={t(titleKey)}
       description={done ? undefined : t('signup.description')}
+      longForm={!done}
       steps={
         <SignupSteps method={chosen} done={done} verifyEmail={options.require_email_verification} />
       }
@@ -447,11 +448,15 @@ export function SignupPage() {
           }}
         />
       )}
-      <p className="text-sm">
-        <Link className="text-accent underline" href="/login">
-          {t('signup.haveAccount')}
+      <p className="border-t border-border pt-5 text-center text-sm text-muted">
+        {t('signup.haveAccount')}{' '}
+        <Link
+          className="ui-focus-ring rounded-sm font-medium text-accent hover:underline"
+          href="/login"
+        >
+          {t('account.login')}
         </Link>
       </p>
-    </AccountFrame>
+    </AuthFormFrame>
   );
 }
