@@ -75,7 +75,8 @@ export function ComposerSendButton({
     <button
       type="submit"
       disabled={disabled}
-      className="ui-icon-button ui-button-primary ml-auto rounded-xl shadow-sm"
+      className="ui-icon-button ui-button-primary ml-auto rounded-xl"
+      aria-busy={busy || undefined}
       aria-label={label}
       title={title}
     >
@@ -140,7 +141,7 @@ export function ComposerMessageActions({
         aria-label={label}
         aria-busy={busy || undefined}
         title={title}
-        className="ui-focus-ring ui-button-primary inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full shadow-sm transition-colors disabled:cursor-not-allowed disabled:opacity-40 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
+        className="ui-focus-ring ui-button-primary inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
       >
         {busy ? (
           <span

@@ -3,7 +3,7 @@ export function BrandMark({ className = 'h-[22px] w-[22px]' }: { className?: str
   return (
     <span
       aria-hidden="true"
-      className={`flex shrink-0 items-center justify-center rounded-md bg-accent text-accent-foreground ${className}`}
+      className={`ui-brand-tile flex shrink-0 items-center justify-center rounded-md ${className}`}
     >
       <svg
         className="h-3.5 w-3.5"

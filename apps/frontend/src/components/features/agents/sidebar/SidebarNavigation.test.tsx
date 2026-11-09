@@ -1124,29 +1124,23 @@ describe('sidebar navigation interactions', () => {
   it('keeps manual task and project movement accessible and remembered across modes', async () => {
     render(<AgentsSidebar />);
     await screen.findByText('Task a');
+    const taskOrder = () =>
+      screen
+        .getAllByRole('link', { name: /^Task / })
+        .map((link) => link.getAttribute('aria-label'));
     fireEvent.click(screen.getByRole('button', { name: 'View options' }));
     fireEvent.click(screen.getByRole('menuitemradio', { name: 'Manual' }));
     const row = screen.getByRole('link', { name: 'Task b' });
     row.focus();
     fireEvent.keyDown(row, { key: 'ArrowUp', altKey: true });
-    expect(
-      screen
-        .getAllByRole('link')
-        .filter((link) => link.textContent?.startsWith('Task'))
-        .map((link) => link.textContent),
-    ).toEqual(['Task b', 'Task a']);
+    expect(taskOrder()).toEqual(['Task b', 'Task a']);
     const saved = JSON.parse(localStorage.getItem(sidebarPreferencesKey('alice'))!);
     expect(saved.tasks['repo:owner/repo']).toEqual(['thread-b', 'thread-a']);
     fireEvent.click(screen.getByRole('button', { name: 'View options' }));
     fireEvent.click(screen.getByRole('menuitemradio', { name: 'Last updated' }));
     fireEvent.click(screen.getByRole('button', { name: 'View options' }));
     fireEvent.click(screen.getByRole('menuitemradio', { name: 'Manual' }));
-    expect(
-      screen
-        .getAllByRole('link')
-        .filter((link) => link.textContent?.startsWith('Task'))
-        .map((link) => link.textContent),
-    ).toEqual(['Task b', 'Task a']);
+    expect(taskOrder()).toEqual(['Task b', 'Task a']);
     await act(async () => {});
   });
   it('supports drag ordering within a repository and refuses cross-repository drops', async () => {

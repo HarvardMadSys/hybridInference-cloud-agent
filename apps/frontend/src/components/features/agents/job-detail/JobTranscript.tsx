@@ -4,16 +4,11 @@ import { useT } from '@/components/providers';
 import { memo, useCallback, useRef, type ComponentProps, type ReactNode } from 'react';
 import { AttemptTurnFooter } from '../conversation/AttemptTurnFooter';
 import {
-  CopyIcon,
-  copyMessage,
   EventList,
   EventRow,
   HistoryTurn,
-  MessageActionButton,
-  MessageActions,
-  MessageContent,
-  RewindIcon,
   ThreadTurn,
+  UserMessage,
 } from '../conversation/ChatMessages';
 import { ownerRunNote } from '../conversationJob';
 import {
@@ -218,37 +213,16 @@ export function JobTranscript({
         })}
 
         {job.historyIncludesPrompt ? null : (
-          <div
-            data-block-key={`${job.id}:prompt`}
-            className="group my-2 flex items-start gap-2 rounded-xl border border-gray-200/90 dark:border-white/10 bg-white dark:bg-gray-900 px-3 py-2.5 shadow-subtle"
-          >
-            <div className="min-w-0 flex-1">
-              <MessageContent text={job.prompt || job.title} presentation={presentation} />
-            </div>
-            {presentation !== 'compact' || (currentRewindAnchor && canForkWorkspace) ? (
-              <MessageActions align="end" className="!mt-0 max-w-[45%] shrink-0">
-                {presentation !== 'compact' ? (
-                  <MessageActionButton
-                    label="Copy message"
-                    onClick={() => void copyMessage(job.prompt || job.title)}
-                  >
-                    <CopyIcon />
-                    Copy
-                  </MessageActionButton>
-                ) : null}
-                {currentRewindAnchor && canForkWorkspace ? (
-                  <MessageActionButton
-                    label="Edit & rewind"
-                    onClick={() => void forkFrom(currentRewindAnchor, job.prompt || job.title)}
-                    disabled={forking}
-                  >
-                    <RewindIcon />
-                    Edit & rewind
-                  </MessageActionButton>
-                ) : null}
-              </MessageActions>
-            ) : null}
-          </div>
+          <UserMessage
+            text={job.prompt || job.title}
+            blockKey={`${job.id}:prompt`}
+            busy={forking}
+            onRewind={
+              currentRewindAnchor && canForkWorkspace
+                ? () => void forkFrom(currentRewindAnchor, job.prompt || job.title)
+                : undefined
+            }
+          />
         )}
 
         {runNote && job.state !== 'failed' ? (

@@ -62,7 +62,7 @@
     },
     {
       "files": ["src/components/features/agents/sidebar/SidebarNavigation.test.tsx"],
-      "rules": { "max-lines": ["error", { "max": 1356 }] }
+      "rules": { "max-lines": ["error", { "max": 1350 }] }
     },
     {
       "files": ["src/app/(agents)/admin/sandboxes/page.test.tsx"],

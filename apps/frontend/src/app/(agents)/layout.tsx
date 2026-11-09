@@ -16,6 +16,7 @@ import { AgentReadProvider } from '@/components/features/agents/AgentReadProvide
 import { useAuth, useT } from '@/components/providers';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import { useSiteConfig } from '@/components/providers/SiteConfigProvider';
+import { BrandMark } from '@/components/BrandMark';
 import { DeploymentFooter } from '@/components/DeploymentFooter';
 import { McpApprovalsProvider } from '@/components/features/agents/mcp/McpApprovalsProvider';
 import { McpApprovalsLink } from '@/components/features/agents/mcp/McpApprovalsView';
@@ -39,10 +40,11 @@ const loadLandingPage = () =>
   import('@/components/features/landing/LandingPage').then((module) => module.LandingPage);
 const LandingPage = dynamic(loadLandingPage, { ssr: false });
 
+// The sections sit in one segmented track; the current one is the raised tab.
 const NAV_ITEM =
-  'ui-focus-ring inline-flex min-h-8 shrink-0 items-center rounded-md px-2 py-1 text-muted transition-colors hover:bg-surface-hover hover:text-foreground [@media(pointer:coarse)]:min-h-11';
+  'ui-focus-ring inline-flex min-h-7 shrink-0 items-center rounded-md px-2 py-1 text-muted transition-colors hover:bg-surface-hover/70 hover:text-foreground sm:px-2.5 [@media(pointer:coarse)]:min-h-11';
 const NAV_ITEM_CURRENT =
-  'ui-focus-ring inline-flex min-h-8 shrink-0 items-center rounded-md bg-surface-hover px-2 py-1 text-foreground transition-colors [@media(pointer:coarse)]:min-h-11';
+  'ui-focus-ring inline-flex min-h-7 shrink-0 items-center rounded-md bg-surface-raised px-2 py-1 text-foreground shadow-xs ring-1 ring-border/80 transition-colors sm:px-2.5 [@media(pointer:coarse)]:min-h-11';
 
 // App-mode shell (same fixed-overlay pattern as the playground): slim header +
 // repo/task sidebar + main pane. Deep links keep working — /agents/* are real
@@ -81,22 +83,9 @@ function AgentsHeader({
         {sidebarToggle}
         <Link
           href="/"
-          className="ui-focus-ring flex min-w-0 items-center gap-1.5 rounded-md text-sm font-semibold tracking-tight text-foreground transition-colors hover:text-accent"
+          className="ui-focus-ring group flex min-w-0 items-center gap-2 rounded-md text-sm font-semibold tracking-tight text-foreground"
         >
-          <span
-            aria-hidden="true"
-            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-accent-subtle text-accent"
-          >
-            <svg
-              className="h-3.5 w-3.5"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={1.8}
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" d="m5 7 5 5-5 5m8 0h6" />
-            </svg>
-          </span>
+          <BrandMark className="h-6 w-6 transition-transform duration-200 group-hover:-rotate-6" />
           <span className="truncate">{branding.appName}</span>
         </Link>
         {branding.orgName && (
@@ -117,7 +106,7 @@ function AgentsHeader({
       </div>
       <nav
         aria-label={t('nav.aria')}
-        className="col-start-2 row-start-1 flex min-w-0 max-w-full items-center gap-1 overflow-x-auto justify-self-end text-xs font-medium"
+        className="col-start-2 row-start-1 flex min-w-0 max-w-full items-center gap-0.5 overflow-x-auto justify-self-end rounded-lg bg-surface-muted p-0.5 text-xs font-medium ring-1 ring-inset ring-border/70"
       >
         {/* Guarded like every other external link here, and for a sharper
             reason than tidiness: an anchor with an empty `href` resolves to the

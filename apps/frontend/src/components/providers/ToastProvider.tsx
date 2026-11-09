@@ -5,18 +5,20 @@ import { useTheme } from './ThemeProvider';
 
 // `react-hot-toast` takes a style object rather than class names, so — like the
 // terminal — it is one of the two surfaces a `dark:` variant cannot reach.
+// The values mirror the theme tokens in globals.css: the raised surface, the
+// foreground, the border and the floating (`card`) elevation.
 const PALETTE = {
   light: {
     background: '#fff',
-    color: '#363636',
-    boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)',
-    border: '1px solid #e5e7eb',
+    color: '#18181b',
+    boxShadow: 'var(--ui-shadow-card)',
+    border: '1px solid #e4e4e7',
   },
   dark: {
     background: '#1e1e22',
     color: '#f4f4f5',
-    boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.4), 0 2px 4px -2px rgb(0 0 0 / 0.3)',
-    border: '1px solid rgba(255,255,255,0.1)',
+    boxShadow: 'var(--ui-shadow-card)',
+    border: '1px solid rgba(255,255,255,0.08)',
   },
 } as const;
 
@@ -30,8 +32,10 @@ export function ToastProvider() {
         duration: 4000,
         style: {
           ...palette,
-          borderRadius: '0.5rem',
-          padding: '12px 16px',
+          borderRadius: '0.875rem',
+          padding: '10px 14px',
+          fontSize: '14px',
+          fontWeight: 500,
         },
         success: {
           iconTheme: {
