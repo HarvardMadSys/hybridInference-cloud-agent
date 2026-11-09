@@ -32,6 +32,7 @@ def _context(runtime_id="claude-code", **changes):
         ensure_mcp_helpers=lambda *_args: None,
         ensure_kilo_mcp_runtime=lambda *_args: None,
         spawn=lambda spec, argv, **kwargs: calls.append({"argv": argv, **kwargs}),
+        await_member_launch=lambda spec, **kwargs: None,
         install_tool_hooks=lambda spec, update, **kwargs: calls.append({"hooks": update}),
         exact=HELPER_IN_PLACE,
     )

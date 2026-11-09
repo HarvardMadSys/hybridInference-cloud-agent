@@ -53,6 +53,7 @@ from cloud_agent_host.member_setup.member_preparation import (
 )
 from cloud_agent_host.request_prefixes import TurnPrefixes
 from cloud_agent_host.runtimes import RuntimeMCPConfig, connection_base_url, meter_launch
+from cloud_agent_host.runtimes.base import COMPAT_LAUNCHER
 from cloud_agent_host.runtimes.claude import member as claude_member
 from cloud_agent_host.runtimes.codex import member as codex_member
 from cloud_agent_host.runtimes.codex.fork_state import CODEX_REBASE_ROLLOUT_PATHS
@@ -659,7 +660,7 @@ class ResidentTransportFactory:
             argv, env = steps.with_platform_instructions(argv, env, instructions)
             if model_base_url.metered:
                 argv, env = meter_launch(argv, env, launch.inference_base_url)
-            return self._manager.spawn(
+            process = self._manager.spawn(
                 spec,
                 argv,
                 env=env,
@@ -669,6 +670,23 @@ class ResidentTransportFactory:
                 user_gid=self._manager.backend.gid,
                 process_pidfile=pidfile,
             )
+            if tuple(argv[: len(COMPAT_LAUNCHER)]) == COMPAT_LAUNCHER:
+                # The launcher forks the member's meter, then becomes the CLI.
+                # A turn's census taken before that misses the meter, and the
+                # turn's reap then kills it as a leftover of the turn.
+                try:
+                    self._manager.await_member_launch(
+                        spec,
+                        pidfile=pidfile,
+                        launcher=COMPAT_LAUNCHER[-1],
+                        user_uid=uid,
+                        user_gid=self._manager.backend.gid,
+                    )
+                except Exception:
+                    with contextlib.suppress(Exception):
+                        process.kill()
+                    raise
+            return process
 
         mcp_enabled = bool(launch.mcp_server_ids)
         return LaunchContext(

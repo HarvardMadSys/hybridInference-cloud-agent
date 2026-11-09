@@ -156,6 +156,7 @@ def _launch_context(environment: BoundEnvironment | None):
             ("write", script, kwargs)
         ),
         spawn=spawn,
+        await_member_launch=lambda spec, **kwargs: None,
         exact=HELPER_IN_PLACE,
     )
     spec = ChatSandboxSpec(
@@ -267,6 +268,7 @@ def test_a_launch_without_them_leaves_no_earlier_credentials_in_the_slot(tmp_pat
         ensure_member_process_reaper=lambda spec: None,
         backend=SimpleNamespace(gid=10001, base_env=lambda: {}),
         spawn=lambda spec, argv, **kwargs: object(),
+        await_member_launch=lambda spec, **kwargs: None,
         exact=HELPER_IN_PLACE,
     )
     manager.reap_member_processes = partial(ChatSandboxManager.reap_member_processes, manager)
