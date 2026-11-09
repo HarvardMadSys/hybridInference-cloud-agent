@@ -22,8 +22,6 @@ export const modelSourcesEn = {
     'A different model is selected, so this message runs as the next turn instead of joining the running one.',
   'modelSource.sendNowMismatch':
     'This message uses a different model or source than the running turn, so it runs as its own next turn.',
-  'settings.model.lastPersonal':
-    'Your last task ran on {model} through your own connection. New tasks offer it again while that connection is enabled and lists it; a default chosen here uses platform models instead.',
 } as const;
 
 export const modelSourcesZhCN: Record<keyof typeof modelSourcesEn, string> = {
@@ -44,6 +42,4 @@ export const modelSourcesZhCN: Record<keyof typeof modelSourcesEn, string> = {
   'modelSource.steerQueued': '已选择其他模型，此消息将作为下一轮运行，不会加入正在运行的这一轮。',
   'modelSource.sendNowMismatch':
     '此消息使用的模型或来源与正在运行的这一轮不同，将作为单独的下一轮运行。',
-  'settings.model.lastPersonal':
-    '你上一个任务通过自己的连接使用了 {model}。只要该连接仍启用并列出此模型，新任务会继续提供它；在此选择默认模型则改用平台模型。',
 };
