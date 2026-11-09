@@ -57,6 +57,24 @@ test.describe('on a phone', () => {
     // About 180 px today; the strip this guards against was under 10.
     expect(reading).toBeGreaterThanOrEqual(568 / 4);
   });
+
+  test('a conversation row keeps room for its touch actions when touched', async ({ page }) => {
+    await page.goto('/source');
+    await expect(page.getByLabel('Add a follow-up', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Expand task list', exact: true }).click();
+    const row = page
+      .locator('#agents-sidebar')
+      .getByRole('link', { name: 'Other conversation', exact: true });
+    await expect(row).toBeVisible();
+    const padding = () => row.evaluate((element) => getComputedStyle(element).paddingRight);
+    // Pin, archive and delete always show on a touch screen, so a hovered or
+    // focused title must not run underneath them.
+    expect(await padding()).toBe('144px');
+    await row.hover();
+    expect(await padding()).toBe('144px');
+    await row.focus();
+    expect(await padding()).toBe('144px');
+  });
 });
 
 test('a desktop window keeps the footer and the activity label', async ({ page }) => {
@@ -64,4 +82,20 @@ test('a desktop window keeps the footer and the activity label', async ({ page }
   await expect(page.getByLabel('Add a follow-up', { exact: true })).toBeVisible();
   await expect(page.locator('footer')).toBeVisible();
   await expect(page.getByText('Activity: Standard', { exact: true })).toBeVisible();
+});
+
+test('a desktop row lends its title the room of its hover actions until hovered', async ({
+  page,
+}) => {
+  await page.goto('/source');
+  await expect(page.getByLabel('Add a follow-up', { exact: true })).toBeVisible();
+  const row = page
+    .locator('#agents-sidebar')
+    .getByRole('link', { name: 'Other conversation', exact: true });
+  await expect(row).toBeVisible();
+  const padding = () => row.evaluate((element) => getComputedStyle(element).paddingRight);
+  await page.mouse.move(0, 0);
+  expect(await padding()).toBe('48px');
+  await row.hover();
+  expect(await padding()).toBe('96px');
 });
