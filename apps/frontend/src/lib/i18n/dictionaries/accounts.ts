@@ -14,7 +14,7 @@ export const accountsEn = {
   'signup.stepAccount': 'Account',
   'signup.stepVerify': 'Verify email',
   'signup.stepAccess': 'Get access',
-  'account.loginDescription': 'Sign in to your Cloud Agent account.',
+  'account.loginDescription': 'Continue to your workspace.',
   'account.signup': 'Create account',
   'account.signupDescription':
     'Create an account, verify your email, then apply for Cloud Agent access.',
@@ -89,7 +89,7 @@ export const accountsZh: Record<keyof typeof accountsEn, string> = {
   'signup.stepAccount': '账号',
   'signup.stepVerify': '验证邮箱',
   'signup.stepAccess': '获得权限',
-  'account.loginDescription': '登录你的 Cloud Agent 账号。',
+  'account.loginDescription': '登录后进入你的工作区。',
   'account.signup': '创建账号',
   'account.signupDescription': '创建账号并验证邮箱后，即可申请使用 Cloud Agent。',
   'account.email': '邮箱',

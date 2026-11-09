@@ -93,18 +93,23 @@ export function AccountField({
   id,
   label,
   hint,
+  action,
   children,
 }: {
   id: string;
   label: string;
   hint?: string;
+  action?: ReactNode;
   children: ReactNode;
 }) {
   return (
     <div className="space-y-1.5">
-      <label className="block text-sm font-medium" htmlFor={id}>
-        {label}
-      </label>
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+        <label className="block text-sm font-medium" htmlFor={id}>
+          {label}
+        </label>
+        {action}
+      </div>
       {children}
       {hint && (
         <p className="text-xs leading-5 text-muted" id={`${id}-hint`}>

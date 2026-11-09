@@ -15,7 +15,8 @@ import {
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 import { safeReturnTo } from '@/lib/auth/signin';
 import { announceSession } from '@/lib/auth/sessionSync';
-import { AccountField, AccountFrame, AccountNotice } from './AccountFrame';
+import { AccountField, AccountNotice } from './AccountFrame';
+import { AuthFormFrame } from './AuthFormFrame';
 import { PasswordInput } from './PasswordInput';
 import { PhoneCodeFields } from './PhoneCodeFields';
 import { useAuthOptions } from './useAuthOptions';
@@ -70,7 +71,18 @@ function PhoneLogin({ countryCode, siteKey }: { countryCode: string; siteKey?: s
   );
 }
 
-function PasswordLogin() {
+const LOGIN_LINK = 'ui-focus-ring rounded-sm font-medium text-accent hover:underline';
+
+function ForgotPassword() {
+  const t = useT();
+  return (
+    <Link className={`${LOGIN_LINK} text-[13px]`} href="/forgot-password">
+      {t('account.forgot')}
+    </Link>
+  );
+}
+
+function PasswordLogin({ canResetPassword }: { canResetPassword: boolean }) {
   const t = useT();
   const signedIn = useSignedIn();
   const [email, setEmail] = useState('');
@@ -102,7 +114,7 @@ function PasswordLogin() {
     <>
       <form onSubmit={submit} className="space-y-4">
         {error && <AccountNotice error>{error}</AccountNotice>}
-        <AccountField id="email" label={t('account.email')}>
+        <AccountField id="email" label={t('login.identifier')}>
           <input
             className="ui-input w-full"
             id="email"
@@ -112,15 +124,15 @@ function PasswordLogin() {
             spellCheck={false}
             required
             maxLength={255}
-            aria-describedby="email-hint"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
           />
-          <p id="email-hint" className="mt-1 text-xs text-muted">
-            {t('login.usernameHint')}
-          </p>
         </AccountField>
-        <AccountField id="password" label={t('account.password')}>
+        <AccountField
+          id="password"
+          label={t('account.password')}
+          action={canResetPassword && <ForgotPassword />}
+        >
           <PasswordInput
             className="ui-input w-full"
             id="password"
@@ -136,7 +148,7 @@ function PasswordLogin() {
         </button>
       </form>
       {unverified && (
-        <Link className="block text-sm text-accent underline" href="/resend-verification">
+        <Link className={`${LOGIN_LINK} inline-block text-sm`} href="/resend-verification">
           {t('account.resend')}
         </Link>
       )}
@@ -160,6 +172,49 @@ function useBrowserAccountCount(): number {
   return count;
 }
 
+function AccountChooserLink({ count }: { count: number }) {
+  const t = useT();
+  return (
+    <Link
+      className="ui-focus-ring flex min-h-12 items-center gap-2.5 rounded-xl border border-border bg-surface-muted px-3 py-2 text-sm font-medium transition-colors hover:bg-surface-hover"
+      href="/accounts"
+    >
+      <svg
+        className="h-4 w-4 shrink-0 text-muted"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={1.6}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <circle cx="9" cy="8" r="3" />
+        <path d="M3 19v-1a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v1m2-13a3 3 0 0 1 0 6m4 7v-1a4 4 0 0 0-3-3.9" />
+      </svg>
+      <span className="min-w-0 flex-1">{t('login.chooseAccount')}</span>
+      <span
+        className="min-w-6 rounded-full bg-surface-hover px-1.5 py-0.5 text-center text-xs text-muted"
+        aria-hidden="true"
+      >
+        {count}
+      </span>
+      <svg
+        className="h-4 w-4 shrink-0 text-muted"
+        viewBox="0 0 16 16"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={1.5}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
+      >
+        <path d="m6 4 4 4-4 4" />
+      </svg>
+    </Link>
+  );
+}
+
 export function LocalLogin({ signupEnabled }: { signupEnabled: boolean }) {
   const t = useT();
   const params = useSearchParams();
@@ -168,10 +223,11 @@ export function LocalLogin({ signupEnabled }: { signupEnabled: boolean }) {
   const phone = options?.phone.enabled === true;
   const adding = params?.get('add') === '1';
   const others = useBrowserAccountCount();
+  const canResetPassword = options?.email_delivery !== false;
   return (
-    <AccountFrame
+    <AuthFormFrame
       title={adding ? t('login.addAccount') : t('account.login')}
-      description={t('account.loginDescription')}
+      description={adding ? t('login.addDescription') : t('account.loginDescription')}
     >
       {options?.setup_required && (
         <AccountNotice>
@@ -181,20 +237,15 @@ export function LocalLogin({ signupEnabled }: { signupEnabled: boolean }) {
           </Link>
         </AccountNotice>
       )}
-      {others > 0 && (
-        <Link className="block text-sm text-accent underline" href="/accounts">
-          {t('login.chooseAccount', { count: others })}
-        </Link>
-      )}
       {phone && (
-        <div role="tablist" aria-label={t('login.method')} className="flex gap-2">
+        <div role="tablist" aria-label={t('login.method')} className="auth-method-tabs">
           {(['password', 'phone'] as const).map((value) => (
             <button
               key={value}
               type="button"
               role="tab"
               aria-selected={method === value}
-              className={`ui-button ${method === value ? 'ui-button-primary' : 'ui-button-secondary'}`}
+              className="ui-button auth-method-tab"
               onClick={() => setMethod(value)}
             >
               {value === 'password' ? t('login.withPassword') : t('login.withPhone')}
@@ -203,25 +254,25 @@ export function LocalLogin({ signupEnabled }: { signupEnabled: boolean }) {
         </div>
       )}
       {phone && method === 'phone' ? (
-        <PhoneLogin
-          countryCode={options?.phone.default_country_code ?? ''}
-          siteKey={options?.turnstile_site_key}
-        />
+        <>
+          <PhoneLogin
+            countryCode={options?.phone.default_country_code ?? ''}
+            siteKey={options?.turnstile_site_key}
+          />
+          {canResetPassword && <ForgotPassword />}
+        </>
       ) : (
-        <PasswordLogin />
+        <PasswordLogin canResetPassword={canResetPassword} />
       )}
-      <div className="flex flex-wrap justify-between gap-3 text-sm text-accent">
-        {options?.email_delivery !== false && (
-          <Link className="underline" href="/forgot-password">
-            {t('account.forgot')}
-          </Link>
-        )}
-        {(signupEnabled || options?.phone_signup_enabled) && (
-          <Link className="underline" href="/signup">
+      {others > 0 && <AccountChooserLink count={others} />}
+      {(signupEnabled || options?.phone_signup_enabled) && (
+        <p className="border-t border-border pt-5 text-center text-sm text-muted">
+          {t('login.newAccount')}{' '}
+          <Link className={LOGIN_LINK} href="/signup">
             {t('account.signup')}
           </Link>
-        )}
-      </div>
-    </AccountFrame>
+        </p>
+      )}
+    </AuthFormFrame>
   );
 }

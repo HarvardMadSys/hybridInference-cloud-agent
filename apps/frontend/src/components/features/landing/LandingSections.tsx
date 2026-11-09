@@ -4,7 +4,7 @@ import { useState, type ReactNode } from 'react';
 import { useT } from '@/components/providers/LocaleProvider';
 import type { TranslationKey } from '@/lib/i18n/translate';
 import { AgentMark } from './AgentMarks';
-import { AGENT_IDS, AGENT_NAMES } from './demoScript';
+import { AGENT_IDS, AGENT_NAMES, EXAMPLES } from './demoScript';
 import { CheckIcon, PullRequestIcon } from './ProductWindow';
 
 const SECTION = 'mx-auto max-w-[1200px] px-[18px] pt-[72px] sm:px-7 md:pt-[84px] lg:pt-28';
@@ -73,7 +73,7 @@ const MODES: Record<
   },
 };
 
-/** 01: a conversation keeps its workspace; a fork shares it. */
+/** A conversation keeps its workspace; a fork shares it. */
 export function ContinuitySection() {
   const t = useT();
   const [mode, setMode] = useState<Mode>('follow');
@@ -84,7 +84,7 @@ export function ContinuitySection() {
       className={`${SECTION} grid items-center gap-10 min-[1101px]:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] min-[1101px]:gap-[72px]`}
     >
       <div>
-        <Eyebrow number="01">{t('landing.continueEyebrow')}</Eyebrow>
+        <Eyebrow number="02">{t('landing.continueEyebrow')}</Eyebrow>
         <h2 id="landing-continue" className={HEADING}>
           {t('landing.continueTitleLead')}
           <br />
@@ -126,7 +126,7 @@ export function ContinuitySection() {
         <div className={`${CARD} mt-5 flex max-w-[420px] flex-col gap-1.5 px-4 py-3.5`}>
           <span className="flex justify-between font-mono text-[11px] uppercase text-muted">
             <span>{t('landing.firstTask')}</span>
-            <span className="text-status-success">✓ 31s</span>
+            <span className="text-status-success">✓ {EXAMPLES[0].seconds}s</span>
           </span>
           <p className="text-[14.5px] text-foreground">{t('landing.firstTaskText')}</p>
         </div>
@@ -259,14 +259,14 @@ const STACK: { shot: ReactNode; title: TranslationKey; detail: TranslationKey }[
   { shot: <ToolsShot />, title: 'landing.stackTools', detail: 'landing.stackToolsDetail' },
 ];
 
-/** 02: the agent, the model key, the environment and the tools are the owner's own. */
+/** The agent, the model key, the environment and the tools are the owner's own. */
 export function StackSection() {
   const t = useT();
   return (
     <section aria-labelledby="landing-stack" className={SECTION}>
       <div className="flex flex-col items-start gap-3.5 md:flex-row md:items-end md:justify-between md:gap-10">
         <div>
-          <Eyebrow number="02">{t('landing.stackEyebrow')}</Eyebrow>
+          <Eyebrow number="03">{t('landing.stackEyebrow')}</Eyebrow>
           <h2 id="landing-stack" className={HEADING}>
             {t('landing.stackTitle')}
           </h2>
@@ -290,9 +290,10 @@ export function StackSection() {
   );
 }
 
-/** 03: the work is visible, and publishing is the owner's call. */
+/** The work is visible, and publishing is the owner's call. */
 export function ReviewSection() {
   const t = useT();
+  const { number, added, removed, files } = EXAMPLES[0].pr;
   const checks: TranslationKey[] = [
     'landing.reviewTests',
     'landing.reviewAgent',
@@ -314,19 +315,18 @@ export function ReviewSection() {
       >
         <p className="flex items-center gap-2 font-mono text-xs text-neutral-400 dark:text-muted">
           <PullRequestIcon />
-          {t('landing.demo.draftPr', { number: 128 })}
+          {t('landing.demo.draftPr', { number })}
         </p>
         <div className="mt-4 rounded-[10px] bg-surface px-[22px] py-5 text-foreground shadow-card">
-          <span className="font-mono text-[11.5px] text-muted">your-org/web · #128</span>
           <b className="mt-1.5 block text-[17px] font-semibold tracking-[-0.015em]">
             {t('landing.demo.example1.title')}
           </b>
           <span className="mt-2 flex gap-3 font-mono text-[11.5px] text-muted">
             <span>
-              <span className="text-status-success">+51</span>{' '}
-              <span className="text-accent">−1</span>
+              <span className="text-status-success">+{added}</span>{' '}
+              <span className="text-accent">−{removed}</span>
             </span>
-            <span>{t('landing.demo.fileCount', { count: 2 })}</span>
+            <span>{t('landing.demo.fileCount', { count: files })}</span>
           </span>
           <span className="mt-4 flex flex-col gap-2 border-t border-border pt-3.5">
             {checks.map((key) => (
@@ -352,7 +352,7 @@ export function ReviewSection() {
         </p>
       </div>
       <div>
-        <Eyebrow number="03">{t('landing.reviewEyebrow')}</Eyebrow>
+        <Eyebrow number="01">{t('landing.reviewEyebrow')}</Eyebrow>
         <h2 id="landing-review" className={HEADING}>
           {t('landing.reviewTitleLead')}
           <br />

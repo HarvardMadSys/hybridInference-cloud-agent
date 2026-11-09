@@ -44,37 +44,33 @@
 }
 
 .rig {
-  --rx: 12deg;
-  --ry: -30deg;
-  --rz: 2deg;
+  --rx: 6deg;
+  --ry: -9deg;
+  --rz: 1deg;
   --mx: 0deg;
   --my: 0deg;
   --ex: 0deg;
   --ty: 0px;
-  --fit: 1;
   position: relative;
-  width: 1000px;
-  margin-left: 70px;
+  width: 100%;
   transform-style: preserve-3d;
-  transform-origin: 0 50%;
-  transform: translateY(var(--ty)) scale(var(--fit))
-    rotateX(calc(var(--rx) + var(--my) + var(--ex))) rotateY(calc(var(--ry) + var(--mx)))
-    rotateZ(var(--rz));
+  transform: translateY(var(--ty)) rotateX(calc(var(--rx) + var(--my) + var(--ex)))
+    rotateY(calc(var(--ry) + var(--mx))) rotateZ(var(--rz));
 }
 
 .shadow {
   position: absolute;
   inset: 12% 6% -8% 3%;
   border-radius: 40px;
-  background: rgb(0 0 0 / 0.22);
-  filter: blur(46px);
+  background: rgb(0 0 0 / 0.16);
+  filter: blur(32px);
   transform: translateZ(-150px);
   transition: opacity 1.2s ease;
 }
 
 .app {
   position: relative;
-  width: 1000px;
+  width: 100%;
   overflow: hidden;
   border: 1px solid rgb(var(--ui-border-strong) / 0.55);
   border-radius: 12px;
@@ -176,8 +172,8 @@
 
 .grid {
   display: grid;
-  height: 520px;
-  grid-template-columns: 214px minmax(0, 1fr) 290px;
+  height: 480px;
+  grid-template-columns: minmax(0, 20%) minmax(0, 1fr) minmax(236px, 36%);
   grid-template-rows: minmax(0, 1fr);
 }
 
@@ -295,7 +291,7 @@
   min-height: 0;
   flex: 1;
   overflow: hidden;
-  padding: 20px 22px 6px;
+  padding: 16px 16px 6px;
   transition: opacity 0.3s ease;
 }
 
@@ -330,13 +326,13 @@
 .thread {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
 }
 
 .message {
   align-self: flex-end;
   max-width: 82%;
-  padding: 10px 13px;
+  padding: 8px 12px;
   border-radius: 12px;
   background: rgb(var(--ui-surface-hover));
   font-size: 13.5px;
@@ -397,7 +393,7 @@
 .steps {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   margin: 0 0 0 6px;
   padding: 0 0 0 14px;
   border-left: 1px solid rgb(var(--ui-border));
@@ -475,7 +471,7 @@
 
 .answer {
   font-size: 13.5px;
-  line-height: 1.6;
+  line-height: 1.5;
   opacity: 0;
   transform: translateY(6px);
   transition:
@@ -823,7 +819,8 @@ button.tab:hover,
   padding: 0 12px 0 6px;
   color: rgb(var(--ui-muted));
   text-overflow: ellipsis;
-  white-space: pre;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .pane .file,
@@ -882,8 +879,8 @@ button.tab:hover,
 }
 
 .picker {
-  --z: 150px;
-  left: 228px;
+  --z: 44px;
+  left: calc(20% + 14px);
   bottom: 74px;
   width: 210px;
   padding: 6px;
@@ -939,11 +936,11 @@ button.tab:hover,
 }
 
 .status {
-  --z: 190px;
-  top: -38px;
-  right: 40px;
+  --z: 38px;
+  right: 14px;
+  bottom: 16px;
   display: grid;
-  width: 300px;
+  width: 248px;
   overflow: hidden;
   padding: 14px 16px;
 }
@@ -988,9 +985,18 @@ button.tab:hover,
 
 .statusMeta {
   display: flex;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 4px 9px;
   color: rgb(var(--ui-muted));
   font-size: 11.5px;
+}
+
+.status .actions {
+  gap: 6px;
+}
+
+.status .button {
+  padding-inline: 8px;
 }
 
 .statusHint {
@@ -1102,36 +1108,14 @@ button.tab:hover,
 
 /* ---------- smaller screens ---------- */
 
-@media (max-width: 1100px) {
-  .floor {
-    perspective-origin: 50% 20%;
-  }
-
-  .rig {
-    --ry: -16deg;
-    --rx: 16deg;
-    width: 100%;
-    max-width: 1000px;
-    margin: 0 auto;
-    transform-origin: 50% 50%;
-  }
-
-  .app {
-    width: 100%;
-  }
-
-  .status {
-    right: -10px;
-  }
-}
-
 @media (max-width: 900px) {
   .rig {
     transform: none !important;
   }
 
   .floor,
-  .shadow {
+  .shadow,
+  .status {
     display: none;
   }
 
@@ -1146,13 +1130,6 @@ button.tab:hover,
   .picker {
     left: 214px;
     bottom: 58px;
-  }
-
-  .status {
-    top: -18px;
-    right: 14px;
-    width: 268px;
-    padding: 12px 14px;
   }
 
   .app {
@@ -1170,17 +1147,13 @@ button.tab:hover,
 
 @media (max-width: 640px) {
   .grid {
-    height: 440px;
+    height: 472px;
     grid-template-columns: minmax(0, 1fr);
   }
 
   .picker {
     left: 16px;
     bottom: 58px;
-  }
-
-  .status {
-    display: none;
   }
 
   .sidebar,
@@ -1207,50 +1180,41 @@ button.tab:hover,
 /* ---------- the hero around the window ---------- */
 
 .heroScene {
-  padding: 110px 0 90px;
+  padding: 0 12px 14px;
 }
 
 .flowStep {
   position: relative;
-  display: grid;
+  display: flex;
   width: 100%;
-  grid-template-columns: 28px minmax(0, 1fr);
-  column-gap: 6px;
-  padding: 11px 0 11px 20px;
+  min-height: 3.25rem;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  overflow: hidden;
+  padding: 6px 8px 8px;
+  border: 1px solid rgb(var(--ui-border));
+  border-radius: 8px;
+  background: rgb(var(--ui-surface));
   text-align: left;
 }
 
-.flowStep::before,
+.flowStep:hover,
+.flowStep[data-state='current'] {
+  background: rgb(var(--ui-surface-muted));
+}
+
 .flowBar {
   position: absolute;
-  top: 0;
-  left: 0;
-  width: 2px;
-  content: '';
-}
-
-.flowStep::before {
   bottom: 0;
-  background: rgb(var(--ui-border));
-}
-
-.flowStep:first-child::before,
-.flowStep:first-child .flowBar {
-  border-radius: 2px 2px 0 0;
-}
-
-.flowStep:last-child::before {
-  border-radius: 0 0 2px 2px;
-}
-
-.flowBar {
-  height: 0;
+  left: 0;
+  width: 0;
+  height: 2px;
   background: rgb(var(--ui-accent));
 }
 
-.flowStep[data-state='past'] .flowBar,
 .flowStep[data-state='current'] .flowBar {
-  height: 100%;
+  width: 100%;
 }
 
 .flowStep[data-state='current'] .flowBar[data-running='true'] {
@@ -1258,24 +1222,18 @@ button.tab:hover,
 }
 
 .flowNumber {
-  grid-row: span 2;
   color: rgb(var(--ui-muted));
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  line-height: 22px;
+  font-size: 11px;
+  line-height: 1;
   transition: color 0.3s ease;
 }
 
 .flowTitle {
   color: rgb(var(--ui-muted));
-  font-size: 15px;
+  font-size: 12px;
   font-weight: 500;
   transition: color 0.3s ease;
-}
-
-.flowDetail {
-  color: rgb(var(--ui-muted));
-  font-size: 13.5px;
 }
 
 .flowStep[data-state='past'] .flowTitle {
@@ -1293,28 +1251,16 @@ button.tab:hover,
 
 @keyframes grow {
   from {
-    height: 0;
+    width: 0;
   }
   to {
-    height: 100%;
-  }
-}
-
-@media (max-width: 1100px) {
-  .heroScene {
-    padding: 130px 0 100px;
+    width: 100%;
   }
 }
 
 @media (max-width: 900px) {
   .heroScene {
-    padding: 32px 0 40px;
-  }
-}
-
-@media (max-width: 640px) {
-  .heroScene {
-    padding-bottom: 8px;
+    padding: 0;
   }
 }
 

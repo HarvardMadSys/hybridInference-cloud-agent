@@ -3,7 +3,8 @@ import type { AuthConfig } from '@/lib/api/accounts';
 import { Suspense } from 'react';
 import { useAuthConfig } from '@/components/features/auth/useAuthConfig';
 import { LocalLogin } from '@/components/features/auth/LocalLogin';
-import { AccountFrame, AccountNotice } from '@/components/features/auth/AccountFrame';
+import { AccountNotice } from '@/components/features/auth/AccountFrame';
+import { AuthFormFrame } from '@/components/features/auth/AuthFormFrame';
 import { useT } from '@/components/providers/LocaleProvider';
 
 export default function LoginPageClient({
@@ -15,7 +16,7 @@ export default function LoginPageClient({
   const t = useT();
   if (!config)
     return (
-      <AccountFrame title={t('account.login')}>
+      <AuthFormFrame title={t('account.login')} description={t('account.loginDescription')}>
         {error ? (
           <>
             <AccountNotice error>{error}</AccountNotice>
@@ -26,7 +27,7 @@ export default function LoginPageClient({
         ) : (
           <p role="status">{t('common.loading')}</p>
         )}
-      </AccountFrame>
+      </AuthFormFrame>
     );
   return (
     <Suspense fallback={null}>

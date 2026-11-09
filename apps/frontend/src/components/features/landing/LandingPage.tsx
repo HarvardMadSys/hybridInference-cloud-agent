@@ -30,10 +30,12 @@ function AccountActions({
   signupOpen,
   loading = false,
   onDark = false,
+  describedBy,
 }: {
   signupOpen: boolean;
   loading?: boolean;
   onDark?: boolean;
+  describedBy?: string;
 }) {
   const t = useT();
   const secondary = onDark
@@ -57,7 +59,7 @@ function AccountActions({
     );
   return (
     <>
-      <Link href="/signup" className={PRIMARY}>
+      <Link href="/signup" className={PRIMARY} aria-describedby={describedBy}>
         {t('landing.signUp')}
       </Link>
       {onDark && (
@@ -74,6 +76,7 @@ export function LandingPage() {
   const { branding } = useSiteConfig();
   const { options, loading } = useAuthOptionsState();
   const signupOpen = Boolean(options?.signup_enabled || options?.phone_signup_enabled);
+  const signupHintId = signupOpen && !loading ? 'landing-signup-hint' : undefined;
   return (
     <div className="flex min-h-screen flex-col overflow-x-clip bg-surface text-foreground">
       <header className="relative z-[3] mx-auto flex h-16 w-full max-w-[1200px] items-center justify-between gap-4 px-[18px] sm:px-7">
@@ -102,11 +105,22 @@ export function LandingPage() {
         </nav>
       </header>
       <main className="flex-1">
-        <LandingHero actions={<AccountActions signupOpen={signupOpen} loading={loading} />} />
+        <LandingHero
+          actions={
+            <AccountActions signupOpen={signupOpen} loading={loading} describedBy={signupHintId} />
+          }
+          actionHint={
+            signupHintId && (
+              <p id={signupHintId} className="mt-2.5 max-w-[36ch] text-xs leading-5 text-muted">
+                {t('landing.signupHint')}
+              </p>
+            )
+          }
+        />
         <AgentStrip />
+        <ReviewSection />
         <ContinuitySection />
         <StackSection />
-        <ReviewSection />
         <ClosingSection
           signupOpen={signupOpen}
           actions={<AccountActions signupOpen={signupOpen} loading={loading} onDark />}
