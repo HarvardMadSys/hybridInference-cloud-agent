@@ -6,8 +6,9 @@ lists every tracked file that still mentions it, how often, and under which
 reason (``CATEGORIES`` in ``scripts/check_distribution_neutrality.py`` says
 what each reason covers). A new mention fails here: name the thing
 generically, or make it configurable. One that belongs to an allowed reason
-goes into the allowlist under that reason, where review sees it;
-``deployment-branding`` is debt and takes no new mentions.
+goes into the allowlist under that reason, where review sees it.
+``deployment-branding`` is debt: the failure message does not offer it for a
+new mention, but nothing stops ``--write`` raising it, so review must.
 
 The counts only move down, as in the test baseline of ``test_file_size_budget.py``:
 an entry above its file's count is stale, so removing mentions means lowering

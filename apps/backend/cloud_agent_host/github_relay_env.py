@@ -12,8 +12,9 @@ git-credential``, through invocation-only ``GIT_CONFIG_*`` settings that never
 touch the shared ``.git``.
 
 The owner is the author and committer of the member's commits; the agent adds
-itself as co-author (``FREEINFERENCE_GIT_COAUTHOR``, named in the platform
-instructions).
+itself as co-author with the trailer the platform instructions spell out. The
+host also sets ``FREEINFERENCE_GIT_COAUTHOR`` to the same value, which nothing
+reads.
 
 The variables a member's CLI gets for it are
 :class:`cloud_agent_host.launch.github_relay.GitHubRelayFacet`'s.

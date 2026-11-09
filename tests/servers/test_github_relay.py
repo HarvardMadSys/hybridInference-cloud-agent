@@ -228,6 +228,24 @@ async def test_an_owner_without_github_is_told_to_connect_it(monkeypatch, config
     assert github.requests == []
 
 
+@pytest.mark.parametrize("saved", ["", "   "])
+async def test_an_application_name_an_admin_cleared_still_reads_cloud_agent(monkeypatch, saved):
+    """An empty saved name shows as the web app shows it, not as a gap in the sentence."""
+    monkeypatch.setattr(github_relay, "text_setting", lambda _key: saved)
+    response = await _send(
+        _Store(connected=False),
+        _GitHub(),
+        "GET",
+        "https://api.github.com/repos/owner/repo",
+        auth=f"token {_placeholder()}",
+    )
+    assert response.status_code == 403
+    assert response.json() == {
+        "message": "The owner of this chat has not connected GitHub, or must reconnect it, "
+        "in Cloud Agent before this chat can act on GitHub as them."
+    }
+
+
 async def test_an_owner_s_own_credential_passes_through_untouched():
     github = _GitHub()
     await _send(

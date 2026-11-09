@@ -5,15 +5,15 @@
 - **Date:** 2026-11-09
 - **Scope:** every FreeInference-named identifier in `apps/`, `deploy/`,
   `scripts/`, `tests/` and `.github/` (`grep -rni freeinference`, which also
-  catches `FREEINFERENCE`): 117 lines in `apps/backend`, 60 in
+  catches `FREEINFERENCE`): 114 lines in `apps/backend`, 60 in
   `apps/frontend`, 150 in `deploy`, 0 in `scripts`, 310 in `tests`, 2 in
   `.github`.
-- **Out of scope:** user- and agent-visible text in
-  `cloud_agent_host/platform_instructions.py`,
-  `cloud_agent/source_control/github_relay_policy.py`, the descriptions in
-  `cloud_agent/settings.py` and `SandboxArchiveSettings.tsx`, and
-  `cloud_agent/accounts/import_accounts.py`. Another change owns them. This
-  spec lists the places where an identifier here depends on that text (§ 6.4).
+- **Out of scope:** user- and agent-visible text, which the change that adds
+  this spec makes neutral (`cloud_agent_host/platform_instructions.py`, the
+  GitHub relay's refusals, the archive-bucket examples in
+  `cloud_agent/settings.py` and `SandboxArchiveSettings.tsx`), and
+  `cloud_agent/accounts/import_accounts.py`. No identifier here depends on that
+  text: the platform instructions name no environment variable (§ 3.4).
 - **Supersedes:** the note in `deploy/release/README.md:210-212` that runtime
   labels "remain `org.freeinference.runtime.*`" until "a separate dual-read
   migration". This document describes that migration.
@@ -69,13 +69,11 @@ Reasons for the label form:
    smoke containers are labelled `io.hybridinference.smoke.run`
    (`.github/workflows/ci.yml:1318`).
 2. The downstream FreeInference deployment already reads this namespace and
-   nothing else from our images. Its resolver reads
-   `io.hybridinference.artifact.{role,base_path}`
-   (`freeinference/ops/resolve_agent_release.py:124-125`). No FreeInference code
-   reads any `org.freeinference.*` key that this repository writes. Its own
-   `org.freeinference.distribution.revision` and `.console.flavor` labels go on
-   its own images. Switching to this namespace therefore adds no new namespace
-   downstream.
+   nothing else from our images: its release resolver reads
+   `io.hybridinference.artifact.{role,base_path}`, the labels
+   `deploy/release/README.md` tells a downstream resolver to verify, and no
+   downstream code reads any `org.freeinference.*` key this repository writes.
+   Switching to this namespace therefore adds no new namespace downstream.
 3. Mapping a key is one mechanical prefix swap, so code that reads both forms
    only translates keys and can be tested against every key. None of the
    suffixes in use today collide: `artifact.*`, `deployment.*` and `smoke.*` on
@@ -237,7 +235,7 @@ images extend the image their source container ran.
 | `/etc/freeinference/` (`github-relay-ca.pem`, `ca-bundle.pem`) | `cloud_agent_host/github_relay_trust.py:36-40` | host installs it on each start → member environment points at it; **live member processes keep the path** | container |
 | `/home/agent/.freeinference-platform` (`PLATFORM_STATE_DIR`, fork journals) | `cloud_agent_host/resident_transport.py:89,899,930` | host ↔ host, exactly-once receipts in the writable layer | container, checkpoint |
 | `paths/freeinference-platform.tar` | `archive/sandbox_archive_bundle.py:84-87` | host → S3 final bundle (manifest names container and archive path) | archive (indefinite) |
-| `/var/lib/freeinference-broker` (initial/final archive markers) | `container/chat_sandbox_markers.py:40-41`; pinned by `tests/unit/test_sandbox_manager_compat.py:120` ("keep the on-disk path so existing retained containers keep their archive fences") | sandbox manager ↔ sandbox manager | container, checkpoint |
+| `/var/lib/freeinference-broker` (initial/final archive markers, and the environment setup marker beside them) | `container/chat_sandbox_markers.py:40-41,628-665`; pinned by `tests/unit/test_sandbox_manager_compat.py:120` ("keep the on-disk path so existing retained containers keep their archive fences") | sandbox manager ↔ sandbox manager | container, checkpoint, environment snapshot image (team-wide) |
 | `# BEGIN/END FREEINFERENCE RELAYS` in guest `/etc/hosts` | `container/guest_root_exec.py:34-35` | host rewrites the block in place; the first matching line wins name resolution | container (Kata guest) |
 | `.freeinference-member-state-v1` | `runtimes/codex/member.py:89`, `runtimes/http_bridge/member.py:102`, `resident_transport.py:518` | host → host (member home initialised or forked) | `/agent-state` |
 | `.freeinference-plugins.json`, `.freeinference-plugin-progress.json`, `.freeinference-plugins.lock`, `.freeinference-hooks.lock` | `runtimes/codex/plugins.py:24,27`, `runtimes/claude/plugins.py:23`, `member_setup/plugins.py:142`, `member_setup/member_preparation.py:312` | host scripts run in the member → same | `/agent-state` |
@@ -249,7 +247,7 @@ images extend the image their source container ran.
 |---|---|---|---|
 | `OPENCODE_FREEINFERENCE_CONFIG_DIR`, `KILO_FREEINFERENCE_CONFIG_DIR` | `runtimes/http_bridge/adapter.py:51` → `opencode-freeinference:135`, `kilo-freeinference:140` | host → image wrapper | process |
 | `OPENCODE_FREEINFERENCE_INSTRUCTIONS`, `KILO_FREEINFERENCE_INSTRUCTIONS` | `runtimes/http_bridge/member.py:76` → `opencode-freeinference:175`, `kilo-freeinference:178` | host → image wrapper | process |
-| `FREEINFERENCE_GIT_COAUTHOR` | `launch/github_relay.py:68`; `github_relay_env.py:15` | host → **the agent, guided by the platform instructions text** (out of scope) | live member process |
+| `FREEINFERENCE_GIT_COAUTHOR` | written at `launch/github_relay.py:68`; asserted in `tests/unit/test_sandbox_github_auth.py:85` | host → **nothing**: the platform instructions write the trailer value itself (`platform_instructions.py:51-54`) and no code reads the variable | live member process |
 | Reserved owner-variable prefix `FREEINFERENCE_` | `cloud_agent_shared/environment.py:85`, enforced by `validate_name` `:113-123` in a shared model that **both** the control plane and the host validate | control plane and host | stored environments |
 | Inventory of known names | `tests/support/env_inventory.py:572-577` | tests | — |
 
@@ -266,10 +264,10 @@ sets platform variables under it (`Dockerfile.agent-sandbox:491-498`).
 
 Downstream reads nothing in this table directly. The manifest exposes the
 normalized `runtime_catalog`. FreeInference pins the manifest's SHA-256 and
-reads only `io.hybridinference.artifact.*` from images. The only
-downstream mention is an operator runbook, which is a dated, one-off record:
-`freeinference/docs/maintainers/cloud-agent-production-accounts-cutover-20261108.zh.md:98`
-(`org.freeinference.sandbox-namespace`).
+reads only `io.hybridinference.artifact.*` from images. The only known
+downstream mention is a dated, one-off operator record that filters Docker
+objects on `org.freeinference.sandbox-namespace`; the release notes in
+§ 10.5 cover it.
 
 ### 3.6 Class (f): everything else
 
@@ -289,17 +287,17 @@ downstream mention is an operator runbook, which is a dated, one-off record:
 **Not identifiers (keep):**
 
 - References to FreeInference as a provider or an external product:
-  - `runtimes/base.py:330`, `frontend/.../modelSources.ts:7,32`,
-    `LandingSections.tsx:192`, `TeamPage.tsx:3`, `next.config.js:13`;
+  - `frontend/.../modelSources.ts:7,32`, `LandingSections.tsx:192`,
+    `TeamPage.tsx:3`, `next.config.js:13`;
   - `tests/unit/test_no_committed_credentials.py:34` (the gateway key format);
   - `test_local_byok_acceptance.py` (a provider fixture);
   - recorded CLI streams in `tests/fixtures/agent_runtime_streams/`;
   - `accounts/import_accounts.py` (out of scope).
-- User- and agent-visible text, owned by the other change:
-  - `platform_instructions.py:40`, `github_relay_policy.py:35`;
-  - `api/github_relay.py:112,329`, which is not on that change's list and
-    should go with it;
-  - `settings.py:548,551`, `SandboxArchiveSettings.tsx:457`.
+- User- and agent-visible text, made neutral by the change that adds this
+  spec: `platform_instructions.py:40`, `github_relay_policy.py:35`,
+  `api/github_relay.py:112,329`, `settings.py:548,551`,
+  `SandboxArchiveSettings.tsx:457`, and the docstring at
+  `runtimes/base.py:330`.
 
 **Tests.** 310 lines in 88 test files repeat the identifiers above, mostly as
 expected values. Each test moves in the same PR as the code it covers. § 9
@@ -363,8 +361,10 @@ can operate everything R1 created.
 ### 6.1 Class (a): no compatibility code
 
 The names never leave the process. The change is a rename, plus a guard test
-that rejects a `freeinference` prefix passed to any `tempfile` call under
-`apps/backend` (done on this branch). The C identifiers move with PR 9.
+that rejects a `tempfile` factory call under `apps/backend`, `deploy` or
+`scripts` whose `prefix=` or `suffix=` keyword names the deployment (done with
+this spec). It does not see positional arguments, aliased imports or a prefix
+held in a constant; review covers those. The C identifiers move with PR 9.
 
 ### 6.2 Class (b): Docker labels and names
 
@@ -508,17 +508,14 @@ that rejects a `freeinference` prefix passed to any `tempfile` call under
      rename them before the host-side model starts refusing them (H11).
    - The control plane refuses new saves first. The host-side validation
      follows one release later.
-2. **Set both names (host, PR 8 and PR 11b).** The host sets the legacy and
-   new wrapper variables, and both `FREEINFERENCE_GIT_COAUTHOR` and
-   `CLOUD_AGENT_GIT_COAUTHOR`.
-3. **Switch the instructions text (other owner).** The platform instructions
-   name the new variable only after step 2 has been released.
-4. **Drop the legacy names.**
-   - Wrapper variables go when layout 1 is gone (§ 6.3, step 4), because old
-     wrappers read only the legacy names.
-   - The coauthor variable carries
-     `COMPAT(remove-after=2027-01-31): every resident member was launched with instructions naming CLOUD_AGENT_GIT_COAUTHOR`.
-     A container restart relaunches every member.
+2. **Set both wrapper names (host, PR 8).** The host sets the legacy and new
+   wrapper variables.
+3. **Drop the legacy wrapper names** when layout 1 is gone (§ 6.3, step 4),
+   because old wrappers read only the legacy names.
+4. **`FREEINFERENCE_GIT_COAUTHOR` needs no compatibility step.** The host sets
+   it and nothing reads it: the platform instructions write the trailer value
+   itself. Rename it to `CLOUD_AGENT_GIT_COAUTHOR`, or drop it, in any release,
+   together with its assertion in `test_sandbox_github_auth.py` (PR 11).
 5. **Keep the `FREEINFERENCE_` reservation.** It is harmless and stops an
    owner from recreating a name an old image still reads.
 
@@ -563,8 +560,9 @@ that rejects a `freeinference` prefix passed to any `tempfile` call under
   - The symlink carries
     `COMPAT(remove-after=2027-01-31): every stack on each machine mounts the new path`.
 - **Defaults (PR 13).**
-  - The default image becomes `cloud-agent-sandbox:latest`, matching
-    `application/compute_setup.py:370`.
+  - The default image becomes `cloud-agent-sandbox:latest`, in the
+    `cloud-agent-sandbox` repository `application/compute_setup.py:370`
+    already uses (that line tags it by profile id).
   - The `DEPLOY_ROOT` default changes only for new installations:
     `deploy.sh` keeps `/srv/freeinference-cloud-agent` when that directory
     exists, and otherwise uses `/srv/cloud-agent`.
@@ -591,7 +589,6 @@ that rejects a `freeinference` prefix passed to any `tempfile` call under
 | Writing labels in both forms (container, network, image, runtime/helper labels) | `COMPAT(remove-after=2027-01-31): every host and control plane reads io.hybridinference.* labels (PR 3 and PR 4 released everywhere)` |
 | Reading legacy labels, names and repositories from Docker objects | `COMPAT(remove-after=2027-06-30): every host's sandbox inventory reports legacy_identifiers == 0` |
 | Layout-1 paths, legacy wrapper variables, legacy hard links, `freeinference` provider alias | `COMPAT(remove-after=2027-06-30): no container, checkpoint or snapshot image of sandbox layout 1 remains (inventory)` |
-| `FREEINFERENCE_GIT_COAUTHOR` | `COMPAT(remove-after=2027-01-31): every resident member was launched with instructions naming CLOUD_AGENT_GIT_COAUTHOR` |
 | Kata epoch symlink | `COMPAT(remove-after=2027-01-31): every stack on each machine mounts /var/lib/cloud-agent-kata-runtime` |
 
 Dates assume at least two production releases between steps. The rollback
@@ -607,7 +604,7 @@ released on every host and control plane, not just merged.
 | PR | Side | Content | Requires | Rollback-safe because |
 |---|---|---|---|---|
 | 1 | spec + host | This spec; class (a) tempfile prefixes, with a guard test | — | process-local |
-| 2 | shared | `cloud_agent_shared/runtime_identifiers.py`: namespaces, `legacy_key()`, `canonical_labels()`, `dual_labels()`, name prefixes; a per-file budget test for `freeinference` occurrences that may only fall, modelled on `tests/unit/test_file_size_budget.py` | — | no behavior change |
+| 2 | shared | `cloud_agent_shared/runtime_identifiers.py`: namespaces, `legacy_key()`, `canonical_labels()`, `dual_labels()`, name prefixes; (the per-file budget for `freeinference` occurrences that may only fall already exists: `tests/unit/test_distribution_neutrality.py`, added with this spec) | — | no behavior change |
 | 3 | control plane | Release scripts read both forms (§ 6.2, step 2) | — | only reads |
 | 4 | host | Host reads both forms of labels, names, image references and runtime/helper labels; inventory count (§ 6.2, step 1; § 6.5, step 2) | 2 merged | only reads |
 | 5 | host | Labels written in both forms (§ 6.2, step 3) | 4 merged | R0 still finds every legacy key |
@@ -616,7 +613,7 @@ released on every host and control plane, not just merged.
 | 8 | host | Layout-aware host and both sets of wrapper variables (§ 6.3, step 1) | 2 merged | still creates layout 1 |
 | 9 | image | Sandbox layout 2 (§ 6.3, step 2), C identifiers | 8 merged (same release or later) | legacy hard links; R0 hosts operate it as layout 1 |
 | 10 | host | Create layout-2 containers (§ 6.3, step 3) | 8, 9 | R0 = PR 8 operates layout 2 |
-| 11 | control plane, then host | Reserve `CLOUD_AGENT_`, after checking stored names; set both coauthor variables (§ 6.4) | — | additive |
+| 11 | control plane, then host | Reserve `CLOUD_AGENT_`, after checking stored names; rename or drop the unread coauthor variable (§ 6.4) | — | additive |
 | 12 | host + image | Write only the new form; set legacy keys empty | 3, 4, 5, 6 | every supported reader reads both forms |
 | 13 | deploy | Kata epoch path, defaults, local development, CI, CA name, User-Agent (§ 6.6) | — | symlink and legacy detection |
 | 14 | control plane | Archive bucket default (§ 6.6) | every host advertises `sandbox-archive-destination-v1` | migration stores the old default |
@@ -654,9 +651,10 @@ releases.
    session never changes image, because runtime downloads install CLIs, not
    wrappers. If that ever changes, keep the `freeinference` provider alias
    permanently.
-4. **Coordination with the visible-text change.** `FREEINFERENCE_GIT_COAUTHOR`
-   is named in the platform instructions. Both variables must be set
-   (PR 11) before that text names the new one.
+4. **No coordination with visible text.** The platform instructions name no
+   environment variable, so the visible-text change and these renames are
+   independent. An earlier draft assumed the instructions named
+   `FREEINFERENCE_GIT_COAUTHOR`; they write the trailer value itself.
 5. **Downstream.** Downstream code is unaffected (§ 3.5). Release notes should
    tell operators that `docker` commands filtering on
    `org.freeinference.sandbox-namespace` must use both namespaces from PR 5,

@@ -134,7 +134,7 @@ repository (`modelSources.ts:5-8`).
 `JobUsageResponse.external_provider` marks a turn that ran on a connection
 (`usage/turn_report.py:34-47`), and the UI says "your provider bills it"
 (`modelSources.ts:19-20`). There is no cost, no quota and no budget
-(AGENTS.md § 6, line 206).
+(AGENTS.md § 6).
 
 **Account revocation.** Revoking or suspending an account opens a termination
 record. `terminate_owner_access` cancels and stops turns, releases residencies,
@@ -161,10 +161,10 @@ per tool call (`providers/web_search.py:1-8`).
 
 **Boundaries any design must keep:**
 
-- AGENTS.md § 5 (line 178): no `serving.*` import, and no Gateway sign-in,
+- AGENTS.md § 5: no `serving.*` import, and no Gateway sign-in,
   admission, grant or catalog. Retired Gateway variables are refused at startup
   (`accounts/config.py:81-102`).
-- AGENTS.md § 7 (lines 252-258), SECURITY.md:29 and README.md:129: a sandbox
+- AGENTS.md § 7, SECURITY.md:29 and README.md:129: a sandbox
   holds its owner's own provider key and scoped tokens. Platform-held
   long-lived credentials never enter it.
 - The decision that Gateway inference, grant minting on claims and the
@@ -206,7 +206,7 @@ cannot be attributed to a user. One user cannot be revoked without rotating
 everyone's key, and rotation closes every running member on the deployment.
 The scan copies would store the operator key once per sandbox group. It
 plainly violates "never holds a platform credential" (SECURITY.md:29) and
-"platform-held … service credentials never enter the sandbox" (AGENTS.md:258).
+"platform-held … service credentials never enter the sandbox" (AGENTS.md § 7).
 Masking and short-lived environments do not help, because the CLI itself must
 hold the key.
 
@@ -517,7 +517,7 @@ holds without change.
 reads the new columns safely. It would, however, show a provided row as an
 editable personal one. So no provided row may be created until every
 control-plane replica runs the release. Operator connections are created
-disabled. The runbook, and free-agent's change order, enable or declare them
+disabled. The runbook, and a downstream distribution's change order, enable or declare them
 only after the rollout. Hosts need no change. The downgrade refuses while any
 operator connection or provided row exists, as `0106` does (`0106…:138-175`).
 
@@ -839,7 +839,7 @@ reported on the termination record's outcome.
 
 All of these are translated where the site includes them.
 
-### What free-agent sets for FreeInference
+### What a downstream distribution sets, with FreeInference as the example
 
 This is configuration only, and every value below is FreeInference's to
 choose.
@@ -878,9 +878,9 @@ The FreeInference side must:
 - decide the per-key limits and which reasoning domains its listings declare;
 - keep the provisioning credential unable to run inference.
 
-The free-agent side must add the file only after the release that reads it
-is fully rolled out, and keep `personal_model_connections_enabled` on, as the
-user requires.
+The distribution must add the file only after the release that reads it is
+fully rolled out, and keep `personal_model_connections_enabled` on so its
+users can still bring their own keys.
 
 ## Decisions needed
 
@@ -999,13 +999,6 @@ translating the changed site pages.
 
 ## Noted, out of scope
 
-The neutral repository still names FreeInference in user-visible text outside
-this feature:
-
-- `modelSources.ts:5-8`, which phase 1 fixes;
-- the GitHub relay's `documentation_url` and its "in FreeInference before…"
-  refusal (`api/github_relay.py:112`, `:329`);
-- the GraphQL refusal ("FreeInference sessions",
-  `source_control/github_relay_policy.py:35`).
-
-These belong to the neutrality cleanup, not to this design.
+The change that adds this design made the GitHub relay's refusals and the
+GraphQL refusal neutral. What still names FreeInference in user-visible text
+is the setup copy in `modelSources.ts:5-8`, which phase 1 replaces.

@@ -176,8 +176,8 @@
     "docs/agents/specs/2026-11-05-admin-audit-redesign.zh-CN.md": 10,
     "docs/agents/specs/2026-11-05-freeinference-account-import.zh-CN.md": 13,
     "docs/agents/specs/2026-11-05-upstream-reasoning-effort.md": 1,
-    "docs/agents/specs/2026-11-09-neutral-runtime-identifiers.md": 142,
-    "docs/agents/specs/2026-11-09-operator-provided-model-connections.md": 33,
+    "docs/agents/specs/2026-11-09-neutral-runtime-identifiers.md": 136,
+    "docs/agents/specs/2026-11-09-operator-provided-model-connections.md": 31,
     "docs/agents/specs/cutover.md": 1,
     "docs/agents/specs/gateway-removal.md": 3
   },

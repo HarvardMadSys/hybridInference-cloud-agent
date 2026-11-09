@@ -324,9 +324,14 @@ async def relay(  # noqa: PLR0912 — one decision per branch, read top to botto
             host,
             403,
             "The owner of this chat has not connected GitHub, or must reconnect it, "
-            f"in {text_setting('site.app_name')} before this chat can act on GitHub as them.",
+            f"in {_application_name()} before this chat can act on GitHub as them.",
         )
     return await _forward_as_owner(request, http, store, caller, decision, host, token)
+
+
+def _application_name() -> str:
+    """The deployment's application name, as the web app shows it when it is empty."""
+    return text_setting("site.app_name").strip() or "Cloud Agent"
 
 
 async def _forward_as_owner(
