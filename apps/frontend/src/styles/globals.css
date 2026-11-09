@@ -226,7 +226,7 @@
 
   /* A small heading over a group of rows: a sidebar section, a menu group. */
   .ui-section-label {
-    @apply text-[11px] font-semibold uppercase tracking-[0.06em] text-muted/80;
+    @apply text-[11px] font-semibold uppercase tracking-[0.06em] text-muted;
   }
 
   .ui-card {

@@ -1,4 +1,4 @@
-import { type APIRequestContext, type Page } from '@playwright/test';
+import { type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import { expect, test } from './network-change';
 
 // Only a real browser lays the page out, so how much of a phone's screen the
@@ -84,18 +84,44 @@ test('a desktop window keeps the footer and the activity label', async ({ page }
   await expect(page.getByText('Activity: Standard', { exact: true })).toBeVisible();
 });
 
-test('a desktop row lends its title the room of its hover actions until hovered', async ({
+test('a desktop row fits a long title beside a previous-year date and its actions', async ({
   page,
 }) => {
+  const longTitle = 'A long conversation title that fills the available sidebar width';
+  await page.clock.setFixedTime(new Date('2026-11-09T12:00:00Z'));
+  await page.route('**/api/v1/agent/conversations?*', async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    for (const row of body.conversations) {
+      if (row.job.id === 'other') {
+        row.job.title = row.title = longTitle;
+        row.last_activity_at = '2025-12-31T12:00:00Z';
+      }
+    }
+    await route.fulfill({ response, json: body });
+  });
   await page.goto('/source');
   await expect(page.getByLabel('Add a follow-up', { exact: true })).toBeVisible();
-  const row = page
-    .locator('#agents-sidebar')
-    .getByRole('link', { name: 'Other conversation', exact: true });
+  const row = page.locator('#agents-sidebar').getByRole('link', { name: longTitle, exact: true });
+  const title = row.getByText(longTitle, { exact: true });
+  const date = row.locator('..').getByText('12/31/2025', { exact: true });
+  const pin = row.locator('..').getByRole('button', { name: `Pin ${longTitle}`, exact: true });
   await expect(row).toBeVisible();
-  const padding = () => row.evaluate((element) => getComputedStyle(element).paddingRight);
   await page.mouse.move(0, 0);
-  expect(await padding()).toBe('48px');
+  const left = (locator: Locator) =>
+    locator.evaluate((element) => element.getBoundingClientRect().left);
+  const titleRight = () => title.evaluate((element) => element.getBoundingClientRect().right);
+  const restRight = await titleRight();
+  await expect(date).toBeVisible();
+  expect(restRight).toBeLessThan(await left(date));
+
   await row.hover();
-  expect(await padding()).toBe('96px');
+  await expect(date).toBeHidden();
+  expect(await titleRight()).toBeLessThan(restRight);
+  expect(await titleRight()).toBeLessThan(await left(pin));
+
+  await page.mouse.move(0, 0);
+  await row.focus();
+  await expect(date).toBeHidden();
+  expect(await titleRight()).toBeLessThan(await left(pin));
 });

@@ -43,14 +43,12 @@ function DropIndicator({ position }: { position?: 'before' | 'after' }) {
 const ROW_ACTION =
   'ui-focus-ring absolute top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-muted transition-colors hover:bg-surface-hover hover:text-foreground focus:opacity-100 disabled:cursor-wait disabled:opacity-60 max-md:h-11 max-md:w-11 max-md:opacity-100 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11 [@media(pointer:coarse)]:opacity-100';
 /**
- * With a desktop pointer an unpinned row shows only its time at rest, so its
- * title may use the width the hover actions take. Touch screens always show
- * those actions, and a `group-hover` utility would outrank their `pr-36`, so
- * the narrower padding stays scoped to fine pointers. A pinned row's pin always
- * shows.
+ * At rest an unpinned desktop row gives the timestamp its own flex item, so
+ * only reserve space for actions on hover or focus. Keep the narrower padding
+ * scoped to fine pointers because touch actions are always visible.
  */
 const DESKTOP_REST_PADDING =
-  'md:[@media(pointer:fine)]:pr-12 md:[@media(pointer:fine)]:group-hover:pr-24 md:[@media(pointer:fine)]:group-focus-within:pr-24';
+  'md:[@media(pointer:fine)]:pr-2 md:[@media(pointer:fine)]:group-hover:pr-24 md:[@media(pointer:fine)]:group-focus-within:pr-24';
 
 function rowEndPadding(pinned: boolean): string {
   return pinned ? 'pr-24' : `pr-24 ${DESKTOP_REST_PADDING}`;
@@ -166,15 +164,15 @@ export function TaskRow({
             className="h-1.5 w-1.5 shrink-0 rounded-full bg-status-info"
           />
         ) : null}
+        {activity && (
+          <span
+            aria-hidden="true"
+            className="shrink-0 whitespace-nowrap text-[11px] tabular-nums text-muted/80 group-hover:hidden group-focus-within:hidden max-md:hidden [@media(pointer:coarse)]:hidden"
+          >
+            {activity}
+          </span>
+        )}
       </Link>
-      {activity && (
-        <span
-          aria-hidden="true"
-          className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[11px] tabular-nums text-muted/80 transition-opacity group-hover:opacity-0 group-focus-within:opacity-0 max-md:hidden [@media(pointer:coarse)]:hidden"
-        >
-          {activity}
-        </span>
-      )}
       <button
         type="button"
         aria-label={
