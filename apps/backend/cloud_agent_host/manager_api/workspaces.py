@@ -156,12 +156,12 @@ class WorkspaceRoutes:
         """
         limit_mib = int(self._context.settings.applied["workspace_download_max_mib"])
         spool = tempfile.TemporaryFile(  # noqa: SIM115 — handed to the response body.
-            prefix="freeinference-workspace-download-"
+            prefix="cloud-agent-workspace-download-"
         )
 
         def export(retained: RetainedChatBackend, _call: SandboxManagerCall) -> dict[str, Any]:
             try:
-                with tempfile.TemporaryFile(prefix="freeinference-workspace-export-") as source:
+                with tempfile.TemporaryFile(prefix="cloud-agent-workspace-export-") as source:
                     retained.manager.export_archive(
                         retained.spec, CHAT_WORKDIR, source, max_bytes=limit_mib * 1024 * 1024
                     )

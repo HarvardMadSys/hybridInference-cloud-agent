@@ -28,7 +28,7 @@ def _spool() -> BinaryIO:
     The archive is spooled to disk, not held in this process, and outlives the
     thread that writes it: ``import_into`` or ``discard`` closes it.
     """
-    return tempfile.TemporaryFile(prefix="freeinference-source-", suffix=".tar")
+    return tempfile.TemporaryFile(prefix="cloud-agent-source-", suffix=".tar")
 
 
 class SourcePrefetch(abc.ABC):
@@ -81,7 +81,7 @@ class SourcePrefetch(abc.ABC):
     def _prepare(self) -> None:
         archive: Any = None
         try:
-            with tempfile.TemporaryDirectory(prefix="freeinference-source-") as source:
+            with tempfile.TemporaryDirectory(prefix="cloud-agent-source-") as source:
                 check_source_stop(self._stop)
                 base_sha = self._check_out(source, self._stop)
                 check_source_stop(self._stop)
