@@ -1,16 +1,16 @@
 # Design: Computer Use Base Capability for Cloud Agent
 
-Status: Phase 0 done, Phase 1 implemented · 2026-11-02, updated 2026-11-04 (review fixes)
+Status: Phase 0 done, Phase 1 implemented, Phase 3 not built · 2026-11-02, updated 2026-11-04 (review fixes), 2026-11-05 (Phase 3 dropped)
 
 ## Summary
 
 Cloud Agent should ship computer use as a **platform base capability**, not as a choice of tool. The platform provides a browser (later a desktop) inside each task sandbox, a stable environment and connection contract, lifecycle and isolation. Users pick the MCP server or CLI that drives it; we ship one tested default template.
 
-We land this in three phases:
+We planned three phases and built the first two:
 
 1. **Browser runtime in the sandbox image.** Agents can drive it right away through any browser CLI they install in their home directory. No MCP changes.
 2. **In-sandbox MCP servers.** A user-selected MCP server runs next to the browser, admitted per session by the trusted host, for all five runtimes.
-3. **Live view, takeover and recordings.** A session-scoped, authenticated channel from the UI to the sandbox browser.
+3. **Live view, takeover and recordings.** A session-scoped, authenticated channel from the UI to the sandbox browser. **Not built** (decided 2026-11-05). Neither Claude Code on the web nor Codex cloud gives the user a live view of, or control over, the agent's browser, and we follow them. A turn shows the screenshots its tools saved instead (PR #1121). Where this document still says what phase 3 would do, that is the plan as it stood, not work to come.
 
 The Phase 0 spike answered the main open risk: Chromium runs under our current limits (uid 10001, `--cap-drop ALL`, `no-new-privileges`, `--pids-limit 512`, 4 GiB memory), but only without its own sandbox, because Docker's default seccomp profile refuses unprivileged user namespaces. [Phase 0 findings](#phase-0-findings) has the measurements and the decision.
 
@@ -64,8 +64,8 @@ Each requirement names what the platform owns; everything else belongs to the us
 | R6 | Session continuity | Cookies, tabs and storage persist across turns, for a chat and its Forks | 1 |
 | R7 | Lifecycle | Start on demand, idle reclaim, crash recovery, kill with the sandbox | 1 |
 | R8 | Isolation | No browser shared between sandboxes; the browser outside every member's UID; no control endpoint reachable from outside the sandbox | 1 |
-| R9 | Evidence | Screenshots and traces land in the workspace and show in the UI | 1 (files), 3 (recordings) |
-| R10 | Live view and takeover | User watches, pauses and takes control of the browser | 3 |
+| R9 | Evidence | Screenshots and traces land in the workspace and show in the UI | 1 (files; a turn's screenshots since PR #1121); recordings not built |
+| R10 | Live view and takeover | User watches, pauses and takes control of the browser | Not built |
 
 ## Options considered
 
@@ -211,7 +211,9 @@ A user can run an MCP server *in the sandbox*, next to the agent, instead of beh
 - **Results.** Image results already flow through `protocol_compat/tool_images.py`. The Playwright preset writes snapshots and screenshots under `CLOUD_AGENT_ARTIFACTS_DIR`, kept out of Git, rather than into the repository.
 - **Known limit: downloads through Playwright MCP.** Playwright MCP 0.0.83 attached with `--cdp-endpoint` never sends `Browser.setDownloadBehavior`, so a link it clicks does not download at all. The same page downloads normally for plain Playwright run as a member or as `agent-mcp`, through the service's hand-off. This is the server's behavior, not the platform's; a later preset version, or a flag for it, can lift it.
 
-### Live view and takeover (phase 3)
+### Live view and takeover (phase 3, not built)
+
+Not built (2026-11-05): Neither Claude Code on the web nor Codex cloud gives the user a live view of, or control over, the agent's browser, and we follow them. The plan was:
 
 The launcher becomes a platform-owned browser supervisor. It streams frames over CDP `Page.startScreencast` to the UI through an authenticated, session-scoped channel, and forwards user input during takeover while the agent's turn is paused. The same channel can later carry option A (external CDP) and a desktop display.
 
@@ -266,13 +268,13 @@ Startup is paid once per sandbox per idle period, not per tool call, because the
 
 ## Evidence, observability and UX
 
-Phase 1 shows evidence as files; phase 3 adds a live view. No new UI is needed for phase 1.
+Phase 1 shows evidence as files, and a turn shows the screenshots its tools saved (PR #1121). Phase 3's live view is not built.
 
 - **Screenshots and traces.** Tools write into `CLOUD_AGENT_ARTIFACTS_DIR` (`/workspace/.cloud-agent-artifacts`). The workspace file listing walks the directory tree and skips only `.git`, and `WorkspaceFiles.tsx` already previews PNG, JPEG, GIF and WebP, so the user can open what the agent saw. `cloud-agent-browser start` creates the directory and adds it to `.git/info/exclude`, the way the environment tools directory is excluded, so it never enters a diff or a published branch. *Since 2026-11-05:* a turn also shows the images written there while it ran, under the turn, and an image past the 512 KiB preview bound opens through an image read of its own (up to 10 MiB). The agent is told nothing: the platform finds them.
 - **Inline images.** When a tool returns an image in a tool result, `protocol_compat/tool_images.py` already moves it into a user message for runtimes that need that.
 - **Operator signals.** The service logs Chromium's start, stop, crash and reclaim to its log in the state directory, and the host logs a service that could not start. We add counters for browser starts, crashes, OOM kills of sandboxes with a running browser, and peak threads.
-- **Live view (phase 3).** A browser pane in the chat shows the screencast. Takeover pauses the agent's turn, forwards the user's input, and hands control back with a short note to the agent about what changed.
-- **Recordings (phase 3).** Screencast frames or a Playwright trace, saved to the artifacts dir and linked from the turn.
+- **Live view (phase 3, not built).** A browser pane in the chat shows the screencast. Takeover pauses the agent's turn, forwards the user's input, and hands control back with a short note to the agent about what changed.
+- **Recordings (phase 3, not built).** Screencast frames or a Playwright trace, saved to the artifacts dir and linked from the turn.
 
 ## Rollout plan
 
@@ -286,7 +288,7 @@ flowchart TB
     g1{{"Gate: baseline acceptance passes (see below)"}}
     p2["<b>Phase 2 · In-sandbox MCP</b> (user picks the server)<br/>New sandbox location; host-admitted, pinned install<br/>Wiring for Claude Code, Codex, pi, OpenCode, Kilo<br/>Catalog templates bound to the CDP URL"]
     g2{{"Gate: security review passed; repository MCP configs still start nothing"}}
-    p3["<b>Phase 3 · Live view and takeover</b><br/>Platform browser supervisor; screencast to the UI<br/>Pause, take over, hand back; recordings<br/>Later: external CDP (option A) and a desktop"]
+    p3["<b>Phase 3 · Live view and takeover</b> (not built)<br/>Platform browser supervisor; screencast to the UI<br/>Pause, take over, hand back; recordings<br/>Later: external CDP (option A) and a desktop"]
     p0 --> g0 --> p1 --> g1 --> p2 --> g2 --> p3
 ```
 
@@ -322,7 +324,7 @@ Unit tests drive the service against a fake Chromium. They cover lazy start, two
 1. **Base capability** (this doc, Phase 0 findings, Phase 1): the sandbox image with Chromium, the `cloud-agent-browser` launcher and its per-sandbox service, the host starting it, contract v1, the artifacts dir, and the isolation, lifecycle and baseline acceptance tests.
 2. **In-sandbox MCP** (Phase 2): the `sandbox` connection location with its migration, catalog templates, MCP directory UI, host admission and change/revocation lifecycle, and wiring for all five runtimes. Branched from `dev` after PR 1 merges.
 
-Phase 3 gets its own design doc once both are in production.
+Phase 3 is not built (2026-11-05): Neither Claude Code on the web nor Codex cloud gives the user a live view of, or control over, the agent's browser, and we follow them.
 
 ## Evaluation plan for the default template
 
@@ -355,7 +357,7 @@ The default is the tool with the highest success rate on our own tasks; cost and
 - [ ] Login inheritance across sandboxes: should a user be able to opt a new chat into a saved login? Who approves it, and how is it scoped?
 - [x] Where does `CLOUD_AGENT_ARTIFACTS_DIR` live? `/workspace/.cloud-agent-artifacts`, excluded through `.git/info/exclude`.
 - [x] Phase 2: arbitrary in-sandbox servers, or only templates? Any exactly pinned `npx`/`uvx` package, plus two browser presets. (It may use credentials since 2026-11-04.)
-- [ ] Phase 3: is takeover input forwarded through the existing session channel, or a new one?
+- [x] ~~Phase 3: is takeover input forwarded through the existing session channel, or a new one?~~ Moot: phase 3 is not built.
 - [ ] When does a full desktop (display server, non-browser apps) become worth its cost?
 
 ## References
