@@ -481,7 +481,15 @@ def test_the_credential_probe_compares_without_disclosing(monkeypatch) -> None:
             return json.dumps(
                 [f"AGENT_DATABASE_URL=postgresql://cloudagent:{secret}@postgres:5432/x"]
             )
-        return json.dumps([f"POSTGRES_PASSWORD={secret}"])
+        if arguments[0] == "inspect":
+            return json.dumps([f"POSTGRES_PASSWORD_FILE={ac.KEYS_DIR}/AGENT_POSTGRES_PASSWORD"])
+        assert arguments == (
+            "exec",
+            "container-postgres",
+            "cat",
+            f"{ac.KEYS_DIR}/AGENT_POSTGRES_PASSWORD",
+        )
+        return secret
 
     monkeypatch.setattr(ac, "docker", fake_docker)
     findings = ac.database_credentials("p")
@@ -492,6 +500,42 @@ def test_the_credential_probe_compares_without_disclosing(monkeypatch) -> None:
     digest = hashlib.sha256(secret.encode()).hexdigest()[:12]
     assert joined.count(digest) == 2, "matching passwords report the same digest on both halves"
     assert f"{len(secret)} characters" in joined
+
+
+def test_the_probe_reads_a_connection_the_environment_leaves_to_the_keys_volume(
+    monkeypatch,
+) -> None:
+    secret = "from-the-volume"
+    read: list[tuple[str, ...]] = []
+
+    def fake_docker(*arguments: str, check: bool = True) -> str:
+        if arguments[0] == "ps":
+            service = arguments[arguments.index("--filter", 3) + 1].split("=")[-1]
+            return f"container-{service}"
+        if arguments[0] == "inspect" and "control-plane" in arguments[1]:
+            return json.dumps(["AGENT_DATABASE_URL="])
+        if arguments[0] == "inspect":
+            return json.dumps([f"POSTGRES_PASSWORD_FILE={ac.KEYS_DIR}/AGENT_POSTGRES_PASSWORD"])
+        read.append(arguments)
+        if arguments[1] == "container-control-plane":
+            return f"postgresql://cloudagent:{secret}@postgres:5432/x"
+        return ""
+
+    monkeypatch.setattr(ac, "docker", fake_docker)
+    findings = ac.database_credentials("p")
+
+    assert findings[0] == (
+        f"postgres: {ac.KEYS_DIR}/AGENT_POSTGRES_PASSWORD could not be read from the container"
+    )
+    assert f"{len(secret)} characters" in findings[1]
+    assert ("exec", "container-control-plane", "cat", f"{ac.KEYS_DIR}/AGENT_DATABASE_URL") in read
+
+
+def test_the_stack_generates_the_keys_a_new_installation_lacks() -> None:
+    """Accepted the way a deployment with no .env starts: `keys` makes these."""
+    environment = ac.synthetic_environment(COMPOSE, "root", "p")
+    for name in ac.GENERATED_KEYS:
+        assert name not in environment
 
 
 def test_the_probe_says_so_when_there_is_nothing_to_inspect(monkeypatch) -> None:

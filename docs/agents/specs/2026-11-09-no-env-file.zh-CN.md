@@ -2,7 +2,7 @@
 
 - 日期：2026-11-09
 - 依据：[精简 `.env`](2026-11-03-slim-env.zh-CN.md)、[首次安装自动生成密钥](2026-11-04-first-install-keys.zh-CN.md)
-- 实现：`apps/backend/cloud_agent/deployment/deployment_keys.py`、`deploy/control-plane/load-keys.sh`、
+- 实现：`apps/backend/cloud_agent/deployment/deployment_keys.py`、`apps/backend/cloud_agent/deployment/key_files.py`、
   `deploy/control-plane/docker-compose.yml` 的 `keys` 服务、`deploy/control-plane/deploy.sh`、
   `apps/frontend/src/components/features/auth/SiteAddressStep.tsx`
 
@@ -34,7 +34,9 @@
   只保留 `CHOWN` 和 `DAC_READ_SEARCH` 两个 capability。它维护 `agent-keys` volume，每个值一个文件：
   `AGENT_DATABASE_URL`、`AGENT_POSTGRES_PASSWORD`、`AGENT_LOCAL_SESSION_SECRET`、
   `AGENT_SETTINGS_ENCRYPTION_KEY`（老部署可能是 `AGENT_SESSION_SECRET`）。规则：
-  1. 环境变量（`.env` 或部署进程）里有值，就存进 volume——已有部署升级后启动一次，就可以删掉 `.env` 里这些行；
+  1. 环境变量（`.env` 或部署进程）里有值，就存进 volume——已有部署升级后启动一次，就可以删掉 `.env` 里这些行。
+     设置根密钥例外：环境里的根密钥和已存的不同时拒绝启动，不覆盖。删掉 `.env` 行之后 volume 里那份可能是唯一副本，
+     而仓库没有根密钥轮换工具，换根密钥本来就不是合法操作。确实要换成环境里的值，先手动删掉 volume 里的文件；
   2. volume 里已有的值保留；
   3. 缺的值只有在**能证明是全新安装**时才生成：数据库是自带的，而且它的 volume 里还没有数据库（没有
      `PG_VERSION`）。否则拒绝启动，并说明缺什么、为什么不生成。设置根密钥例外：缺了只警告，因为老部署的
@@ -45,7 +47,8 @@
   只有空串或全是空格才算"没设"。自带数据库的连接串里，口令做百分号编码，口令文件保留原值。
 - **文件权限**：每个文件 0400，只给读它的用户：数据库口令给 `postgres:16-alpine` 的 uid 70，其余给控制面镜像的
   uid 10001。
-- **读取**：控制面镜像的入口脚本 `load-keys.sh` 对每个变量，环境里为空时才从文件读，然后 `exec` 原命令。
+- **读取**：`cloud_agent` 包被导入时（`key_files.fill_environment`），对每个变量，环境里为空时才从文件读。
+  不用镜像入口脚本：`docker compose exec` 和 healthcheck 不经过入口脚本，`bootstrap_admin` 这类恢复命令会拿不到密钥。
   环境里有值就用环境的值，所以已有部署和手动执行的命令行为不变。Postgres 用官方的 `POSTGRES_PASSWORD_FILE`。
 - **启动顺序**：`postgres`、`migrate` 都依赖 `keys` 成功退出，`control-plane`、`mcp-relay`、`github-relay`
   经由它们间接依赖。每次 `up` 都会重新运行 `keys`（幂等）。
@@ -97,7 +100,7 @@ Codex、pi、opencode 都能下载；kilo 跑带隔离补丁的构建，本来�
 
 ## 5. 验证
 
-- `tests/unit/deploy/test_deployment_keys.py`：生成、保留、存储环境值、拒绝、导出与恢复、入口脚本、
+- `tests/unit/deploy/test_deployment_keys.py`：生成、保留、存储环境值、拒绝（含根密钥不同）、导出与恢复、进程导入时从 volume 补齐、
   没有 `.env` 时完成部署。
 - `tests/unit/test_control_plane_deploy.py`、`tests/unit/test_env_examples.py`：Compose 不再要求这些值、
   每个读取方都等 `keys`、`keys` 的隔离设置、server setup 写全主机必需的变量。

@@ -3,8 +3,8 @@
 `cloud_agent.deployment.deployment_keys` is what the Compose `keys` service
 runs before anything that needs a key: it stores what the environment sets,
 keeps what is stored, and generates what is missing only while the bundled
-database volume holds no database. `deploy/control-plane/load-keys.sh`, the
-control-plane image's entrypoint, reads the files back.
+database volume holds no database. `cloud_agent.deployment.key_files`, run
+when any control-plane process imports `cloud_agent`, reads the files back.
 
 See docs/agents/specs/2026-11-09-no-env-file.zh-CN.md.
 """
@@ -23,6 +23,7 @@ import pytest
 
 from cloud_agent.deployment import deployment_keys as keys_module
 from cloud_agent.deployment.deployment_keys import KeysRefused, export, main, prepare
+from cloud_agent.deployment.key_files import fill_environment
 
 REPO = Path(__file__).resolve().parents[3]
 _HEX = re.compile(r"[0-9a-f]{64}")
@@ -117,14 +118,45 @@ def test_an_upgrade_stores_its_env_values_and_can_then_drop_them(
 
 
 def test_the_environment_wins_over_a_stored_value(volumes: tuple[Path, Path]) -> None:
+    """The database connection and account key are rotated by setting them."""
     keys, database = volumes
     prepare({}, keys, database)
     _existing_database(database)
 
-    outcome = prepare({_ROOT: "a-key-the-operator-set-on-purpose-0123"}, keys, database)
+    outcome = prepare({_SESSION: "a-key-the-operator-set-on-purpose-0123"}, keys, database)
 
-    assert outcome.stored == [_ROOT]
-    assert _stored(keys)[_ROOT] == "a-key-the-operator-set-on-purpose-0123"
+    assert outcome.stored == [_SESSION]
+    assert _stored(keys)[_SESSION] == "a-key-the-operator-set-on-purpose-0123"
+
+
+@pytest.mark.parametrize("root", [_ROOT, _LEGACY])
+def test_a_different_settings_root_is_refused_not_stored_over_the_kept_one(
+    volumes: tuple[Path, Path], root: str
+) -> None:
+    """With the .env lines gone the stored root may be the only copy of the key."""
+    keys, database = volumes
+    _existing_database(database)
+    environment = {
+        _URL: "postgresql://cloudagent:chosen@postgres:5432/cloudagent",
+        _SESSION: "operator-chosen-session-key-0123456789abcdef",
+        root: "the-root-every-saved-secret-was-encrypted-under",
+    }
+    prepare(environment, keys, database)
+    before = _stored(keys)
+
+    with pytest.raises(KeysRefused, match=f"{root} in the environment differs") as refused:
+        prepare(
+            {_SESSION: "a-rotated-account-key-0123456789", root: "another-root-key-entirely"},
+            keys,
+            database,
+        )
+
+    assert "another-root-key-entirely" not in str(refused.value)
+    # Refused before anything is stored, the rotated account key included.
+    assert _stored(keys) == before
+    # The same root, or none, starts as before.
+    assert prepare({root: environment[root]}, keys, database).stored == []
+    assert prepare({}, keys, database).stored == []
 
 
 @pytest.mark.parametrize("new", [True, False])
@@ -391,53 +423,44 @@ def test_an_export_restored_through_compose_is_the_same_bytes(
         assert (restored / name).read_bytes() == (keys / name).read_bytes(), name
 
 
-@pytest.fixture
-def loader(tmp_path: Path) -> tuple[Path, Path]:
-    """The image's entrypoint, reading a test directory instead of the volume."""
+def test_a_process_fills_only_what_the_environment_leaves_unset(tmp_path: Path) -> None:
     keys = tmp_path / "mounted keys"
     keys.mkdir()
-    script = tmp_path / "load-keys.sh"
-    source = (REPO / "deploy/control-plane/load-keys.sh").read_text()
-    assert "keys=/run/cloud-agent/keys\n" in source
-    script.write_text(source.replace("keys=/run/cloud-agent/keys\n", f"keys='{keys}'\n"))
-    return script, keys
+    (keys / _URL).write_text("postgresql://stored@postgres/db")
+    (keys / _ROOT).write_text("  stored root  ")
+    (keys / _PASSWORD).write_text("the database user's alone")
+    environment = {_URL: "", _SESSION: "set-by-the-environment", _LEGACY: "   "}
 
+    filled = fill_environment(environment, keys)
 
-def _run_loader(script: Path, environment: dict[str, str]) -> dict[str, str]:
-    shell = shutil.which("sh")
-    assert shell
-    result = subprocess.run(
-        [shell, str(script), "env"],
-        env={"PATH": os.environ["PATH"], **environment},
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
-
-
-def test_the_entrypoint_fills_only_what_the_environment_leaves_empty(
-    loader: tuple[Path, Path],
-) -> None:
-    script, keys = loader
-    (keys / _URL).write_text("postgresql://stored@postgres/db\n")
-    (keys / _ROOT).write_text("stored-root\n")
-    (keys / _PASSWORD).write_text("the database user's alone\n")
-
-    seen = _run_loader(script, {_URL: "", _ROOT: "set-by-the-environment"})
-
-    assert seen[_URL] == "postgresql://stored@postgres/db"
-    assert seen[_ROOT] == "set-by-the-environment"
+    assert filled == [_URL, _ROOT]
+    assert environment == {
+        _URL: "postgresql://stored@postgres/db",
+        _SESSION: "set-by-the-environment",
+        _ROOT: "  stored root  ",
+        _LEGACY: "   ",
+    }
     # Only the control plane's own keys; the database password is Postgres's.
-    assert _PASSWORD not in seen
-    assert _SESSION not in seen
+    assert _PASSWORD not in environment
 
 
-def test_the_entrypoint_runs_its_command_without_a_volume(loader: tuple[Path, Path]) -> None:
-    script, keys = loader
-    shutil.rmtree(keys)
+def test_a_process_without_the_volume_or_its_files_changes_nothing(tmp_path: Path) -> None:
+    environment = {_URL: ""}
+    assert fill_environment(environment, tmp_path / "absent") == []
+    unreadable = tmp_path / "keys"
+    unreadable.mkdir()
+    (unreadable / _URL).mkdir()  # reading it fails, as a file of another user would
+    assert fill_environment(environment, unreadable) == []
+    assert environment == {_URL: ""}
 
-    assert _URL not in _run_loader(script, {})
+
+def test_every_control_plane_process_fills_its_keys_on_import() -> None:
+    """`compose exec` and healthchecks skip an image entrypoint; an import does not."""
+    import cloud_agent
+
+    source = Path(cloud_agent.__file__).read_text()
+    assert "_fill_environment(_os.environ)" in source
+    assert "ENTRYPOINT" not in (REPO / "deploy/control-plane/Dockerfile").read_text()
 
 
 def test_the_control_plane_deploys_without_a_dotenv(tmp_path: Path) -> None:

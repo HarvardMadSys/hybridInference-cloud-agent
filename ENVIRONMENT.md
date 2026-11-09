@@ -155,7 +155,9 @@ the user that reads it. The Compose `keys` service
 (`cloud_agent.deployment.deployment_keys`) runs before anything that needs one:
 
 - a value set in the environment or `.env` is stored there, so an existing
-  deployment can delete those lines after one start on this release;
+  deployment can delete those lines after one start on this release. A
+  settings root key that differs from the stored one stops the start instead:
+  the stored root may be the only copy of the key every saved secret needs;
 - a stored value is kept;
 - a missing value is generated only while the bundled database volume holds no
   database. With an existing database, or `AGENT_DATABASE_URL` naming another
@@ -163,9 +165,10 @@ the user that reads it. The Compose `keys` service
   A missing settings root is a warning instead, since a legacy
   `AGENT_SESSION_SECRET` may be supplied another way.
 
-The control-plane image's entrypoint (`deploy/control-plane/load-keys.sh`) fills
-each of those variables the environment leaves empty from its file, and
-Postgres reads `POSTGRES_PASSWORD_FILE`. Back the keys up apart from the
+Every control-plane process fills each of those variables the environment
+leaves empty from its file when it imports `cloud_agent`, so `docker compose exec`
+and `docker compose run` commands see them too, and Postgres reads
+`POSTGRES_PASSWORD_FILE`. Back the keys up apart from the
 database ([Disaster recovery](docs/developer/disaster-recovery.md)):
 `docker exec <project>-control-plane-1 python -m cloud_agent.deployment.deployment_keys export`
 prints them as `.env` lines that restore them on another machine. The values are stored and exported byte for byte, each

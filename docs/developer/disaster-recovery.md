@@ -54,7 +54,12 @@ Preserve all of the following privately:
   `docker exec "${COMPOSE_PROJECT:?}-control-plane-1" python -m
   cloud_agent.deployment.deployment_keys export > keys.env`, written only to the
   encrypted backup storage; on a replacement machine, that file as the
-  deployment's `.env` restores them on its first start. Also keep both deployment roots' `.env`, where they have one,
+  deployment's `.env` restores them on its first start. A settings root key
+  in the environment that differs from the stored one stops the start, because
+  the `keys` service never replaces a root. Only when the environment's key is
+  the one the settings were saved with, delete the stored file first:
+  `docker run --rm --entrypoint rm -v "${COMPOSE_PROJECT:?}_agent-keys:/keys"
+  postgres:16-alpine /keys/AGENT_SETTINGS_ENCRYPTION_KEY`. Also keep both deployment roots' `.env`, where they have one,
   and mounted credential files: source-control and compute encryption keys,
   control/session signing secrets, sandbox manager credentials and GitHub App keys.
   Saved settings can hold some of these keys, but they still require the

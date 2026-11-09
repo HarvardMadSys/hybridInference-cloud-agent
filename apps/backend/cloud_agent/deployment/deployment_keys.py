@@ -8,7 +8,9 @@ Compose ``keys`` service runs this module before anything else starts:
 
 * a value set in the environment (a deployment's ``.env`` or the deploying
   process) is stored, so an existing deployment can delete those lines after
-  one start on this release;
+  one start on this release. A settings root key is the exception: one that
+  differs from the stored root is refused, never stored over it, because the
+  stored root may be the only copy of the key every saved secret needs;
 * a value already stored is kept;
 * a missing value is generated only on a provably new installation: the
   database is the bundled one and its volume holds no database yet. Anywhere
@@ -17,9 +19,9 @@ Compose ``keys`` service runs this module before anything else starts:
 
 Each file is readable only by the user that needs it: the database password by
 the Postgres image's ``postgres`` user, everything else by the control-plane
-image's ``cloudagent`` user. The image's entrypoint
-(``deploy/control-plane/load-keys.sh``) fills each variable the environment
-leaves empty from its file. Nothing here prints a value, except ``export``,
+image's ``cloudagent`` user. Every control-plane process fills each variable
+the environment leaves unset from its file when it imports ``cloud_agent``
+(:mod:`cloud_agent.deployment.key_files`). Nothing here prints a value, except ``export``,
 which writes the keys an operator must back up apart from the database as
 ``.env`` lines on standard output; that text restores them on another machine.
 
@@ -38,21 +40,23 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import quote, unquote, urlsplit
 
+from cloud_agent.deployment.key_files import (
+    DATABASE_URL,
+    KEYS_DIR,
+    LEGACY_SETTINGS_ROOT,
+    LOCAL_SESSION_SECRET,
+    SETTINGS_ROOT,
+    given as _given,
+    read as _read,
+)
+
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-#: Where the ``keys`` service and every consumer mount the ``agent-keys`` volume.
-KEYS_DIR = Path("/run/cloud-agent/keys")
 #: Where the ``keys`` service mounts the bundled database's volume, read-only.
 DATABASE_DIR = Path("/run/cloud-agent/database")
 
-DATABASE_URL = "AGENT_DATABASE_URL"
 POSTGRES_PASSWORD = "AGENT_POSTGRES_PASSWORD"
-LOCAL_SESSION_SECRET = "AGENT_LOCAL_SESSION_SECRET"
-SETTINGS_ROOT = "AGENT_SETTINGS_ENCRYPTION_KEY"
-#: An older deployment's settings root. Stored when set, never generated: a
-#: dedicated key beside it would replace that root.
-LEGACY_SETTINGS_ROOT = "AGENT_SESSION_SECRET"
 
 #: Every value this volume holds, in the order ``export`` writes them.
 STORED = (
@@ -64,6 +68,9 @@ STORED = (
 )
 #: Without these no control-plane process starts.
 REQUIRED = (DATABASE_URL, POSTGRES_PASSWORD, LOCAL_SESSION_SECRET)
+#: Never replaced from the environment. The legacy root is stored when set and
+#: never generated: a dedicated key generated beside it would replace that root.
+ROOTS = (SETTINGS_ROOT, LEGACY_SETTINGS_ROOT)
 
 #: ``postgres:16-alpine`` runs as uid and gid 70; the control-plane image as 10001.
 POSTGRES_UID = 70
@@ -89,20 +96,6 @@ class Outcome:
 
 def _new_secret() -> str:
     return secrets.token_hex(32)
-
-
-def _read(directory: Path, name: str) -> str:
-    """One stored value, byte for byte: a key's spaces are part of the key."""
-    try:
-        return (directory / name).read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return ""
-
-
-def _given(environ: Mapping[str, str], name: str) -> str:
-    """The environment's value as it is; empty or only spaces counts as unset."""
-    value = environ.get(name) or ""
-    return value if value.strip() else ""
 
 
 def _write(directory: Path, name: str, value: str) -> None:
@@ -160,7 +153,26 @@ def _bundled_url(environ: Mapping[str, str], password: str) -> str:
 
 
 def _collect(environ: Mapping[str, str], keys: Path, outcome: Outcome) -> dict[str, str]:
-    """The environment's values over the stored ones; stores what changed."""
+    """The environment's values over the stored ones; stores what changed.
+
+    Raises:
+        KeysRefused: The environment sets a settings root other than the stored
+            one. Nothing is stored then.
+    """
+    replaced = []
+    for name in ROOTS:
+        value, kept = _given(environ, name), _read(keys, name)
+        if value and kept and value != kept:
+            replaced.append(name)
+    if replaced:
+        raise KeysRefused(
+            f"{', '.join(replaced)} in the environment differs from the key stored in the "
+            "agent-keys volume. A different settings root key leaves every saved secret "
+            "unreadable, so it is never stored over the one this deployment has. Remove "
+            "the line from the environment (its .env) to keep the stored key. If the "
+            "environment's key is the one the settings were saved with, delete the stored "
+            "file from the volume first (docs/developer/disaster-recovery.md)."
+        )
     values: dict[str, str] = {}
     for name in STORED:
         given = _given(environ, name)
@@ -294,6 +306,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         for line in lines:
             print(line)
         return 0
+    # Importing cloud_agent already filled what the environment left unset
+    # from this same volume; those values equal the stored ones, so they store
+    # nothing and replace no root.
     try:
         outcome = prepare(os.environ, arguments.keys_dir, arguments.database_dir)
     except KeysRefused as refused:
