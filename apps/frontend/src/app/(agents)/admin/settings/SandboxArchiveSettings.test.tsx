@@ -41,6 +41,7 @@ describe('sandbox archive settings card', () => {
 
     expect(screen.getByLabelText('S3 bucket')).toHaveValue('freeinference');
     expect(screen.getByLabelText('S3 bucket')).not.toHaveAttribute('readonly');
+    expect(screen.getByLabelText('S3 bucket')).toHaveAttribute('placeholder', 'my-archive-bucket');
     expect(screen.getByLabelText('S3 bucket')).toHaveAccessibleDescription(
       'Archives go to s3://freeinference/cloud-agent/sandbox. Checkpoints and snapshots ' +
         'stored in a previous bucket are not restored after a change.',

@@ -37,7 +37,7 @@ def platform_instructions(launch: ResidentLaunch, *, coauthor_trailer: bool) -> 
         return ""
     repo = launch.github_repo
     lines = [
-        "# Working in this FreeInference sandbox",
+        "# Working in this Cloud Agent sandbox",
         "",
         f"This workspace is a checkout of `{repo}`; `origin` is "
         f"`https://github.com/{repo}.git` (add it with `git remote add origin` if it "

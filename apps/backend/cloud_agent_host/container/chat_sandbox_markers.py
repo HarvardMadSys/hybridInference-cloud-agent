@@ -484,7 +484,7 @@ def read_stopped_final(
         before="marker read",
         refusal="final archive recovery requires the exact stopped container",
     )
-    with tempfile.TemporaryFile(prefix="freeinference-final-archive-marker-") as archive:
+    with tempfile.TemporaryFile(prefix="cloud-agent-final-archive-marker-") as archive:
         manager.export_archive(
             spec,
             FINAL_ARCHIVE_MARKER_PATH,
@@ -536,7 +536,7 @@ def write_stopped_final(
         before="marker write",
         refusal="stopped final archive marker requires a stopped container",
     )
-    with tempfile.TemporaryFile(prefix="freeinference-final-archive-marker-write-") as archive:
+    with tempfile.TemporaryFile(prefix="cloud-agent-final-archive-marker-write-") as archive:
         with tarfile.open(fileobj=archive, mode="w") as payload_archive:
             marker_root = INITIAL_ARCHIVE_MARKER_ROOT.rsplit("/", 1)[-1]
             directory = tarfile.TarInfo(marker_root)

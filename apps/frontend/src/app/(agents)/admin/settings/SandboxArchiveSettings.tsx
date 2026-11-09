@@ -454,7 +454,7 @@ export default function SandboxArchiveSettingsCard({
                       : 'archive-destination-description'
                   }
                   onChange={(event) => set('bucket', event.target.value)}
-                  placeholder="freeinference"
+                  placeholder="my-archive-bucket"
                   className={INPUT}
                 />
                 <span

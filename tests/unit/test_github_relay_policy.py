@@ -106,6 +106,7 @@ def test_a_repository_s_administration_and_secrets_are_refused(method, path):
 def test_graphql_is_refused_with_the_rest_alternative():
     decision = _api("POST", "/graphql")
     assert decision.outcome is Outcome.REFUSE
+    assert decision.reason.startswith("GitHub GraphQL is not available from Cloud Agent sessions:")
     assert "gh api repos/" in decision.reason
 
 

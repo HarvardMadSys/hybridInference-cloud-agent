@@ -407,7 +407,7 @@ class WorkspaceFilesMixin(MemberExecMixin):
         if export_deadline <= time.monotonic():
             raise SandboxError("chat sandbox archive export timed out")
         total = 0
-        with tempfile.TemporaryFile(prefix="freeinference-docker-cp-error-") as stderr:
+        with tempfile.TemporaryFile(prefix="cloud-agent-docker-cp-error-") as stderr:
             try:
                 process = subprocess.Popen(
                     command,
