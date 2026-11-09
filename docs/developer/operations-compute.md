@@ -199,7 +199,8 @@ with: use **Start new setup** to give existing slots the published image. A
 setup that pulls fails on a later release whose image was never published.
 
 Automatic setup requires a control-plane image built with its full release
-revision, the compute encryption key and the existing sandbox manager token. The form
+revision, the compute encryption key and the sandbox manager token (a new deployment
+generates both into its settings on first start). The form
 shows missing prerequisites. Rebuild or update older images to include the
 Host bundle, or use advanced manual setup.
 

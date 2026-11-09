@@ -11,11 +11,13 @@ See docs/agents/specs/2026-11-09-no-env-file.zh-CN.md.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 import pytest
 
@@ -42,7 +44,8 @@ def volumes(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _stored(keys: Path) -> dict[str, str]:
-    return {path.name: path.read_text().strip() for path in keys.iterdir()}
+    """Every stored value, byte for byte."""
+    return {path.name: path.read_text() for path in keys.iterdir()}
 
 
 def _existing_database(database: Path) -> None:
@@ -249,6 +252,38 @@ def test_a_new_installation_completes_the_connection_for_its_chosen_password(
     assert _stored(keys)[_URL] == "postgresql://cloudagent:chosen@postgres:5432/cloudagent"
 
 
+@pytest.mark.parametrize("password", ["a/b?c#d@e:f", "per%cent and space"])
+def test_a_chosen_password_is_percent_encoded_in_the_connection_only(
+    volumes: tuple[Path, Path], password: str
+) -> None:
+    """The DSN must still name the bundled host and give back the password exactly."""
+    keys, database = volumes
+
+    prepare({_PASSWORD: password}, keys, database)
+
+    url = urlsplit(_stored(keys)[_URL])
+    assert url.hostname == "postgres"
+    assert url.port == 5432
+    assert url.password is not None and unquote(url.password) == password
+    assert _stored(keys)[_PASSWORD] == password
+
+
+def test_a_given_key_is_stored_byte_for_byte(volumes: tuple[Path, Path]) -> None:
+    """The settings root is read raw, so its spaces and `$` are part of the key."""
+    keys, database = volumes
+    _existing_database(database)
+    root = "  root with $dollar ${BRACES} and spaces  "
+    environment = {_URL: "postgresql://u:p@postgres/db", _SESSION: "s" * 40, _ROOT: root}
+
+    prepare(environment, keys, database)
+
+    assert _stored(keys)[_ROOT] == root
+    assert (keys / _ROOT).read_bytes() == root.encode()
+    # Spaces alone are no value, as Compose's empty default is none.
+    assert prepare({_ROOT: "   "}, keys, database).stored == []
+    assert _stored(keys)[_ROOT] == root
+
+
 def test_a_multi_line_value_is_refused(volumes: tuple[Path, Path]) -> None:
     keys, database = volumes
 
@@ -289,13 +324,71 @@ def test_export_writes_env_lines_that_restore_the_keys(volumes: tuple[Path, Path
 
     lines = export(keys)
 
-    assert lines == [f"{name}={stored[name]}" for name in keys_module.STORED if name in stored]
-    # Those lines, as a new machine's environment, are stored as they are.
-    restored = keys.parent / "restored"
-    restored.mkdir()
+    assert lines == [f"{name}='{stored[name]}'" for name in keys_module.STORED if name in stored]
+
+
+def test_a_key_compose_cannot_carry_literally_is_not_exported(
+    volumes: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    keys, _ = volumes
+    (keys / _ROOT).write_text("it's a key")
+
+    with pytest.raises(KeysRefused, match="single quote"):
+        export(keys)
+    assert main(["export", "--keys-dir", str(keys)]) == 1
+    assert "it's a key" not in capsys.readouterr().out
+
+
+def test_an_export_restored_through_compose_is_the_same_bytes(
+    volumes: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """The backup and restore round trip, through Compose's own `.env` parser."""
+    docker = shutil.which("docker")
+    if not docker or subprocess.run([docker, "compose", "version"], capture_output=True).returncode:
+        pytest.skip("Docker Compose CLI is needed for its actual .env parser")
+    keys, database = volumes
     _existing_database(database)
-    prepare(dict(line.split("=", 1) for line in lines), restored, database)
-    assert _stored(restored) == stored
+    original = {
+        _URL: "postgresql://cloudagent:p%24ss@postgres:5432/cloudagent",
+        _SESSION: "session $HOME ${PATH} key with  spaces ",
+        _ROOT: ' $$ root ${UNSET:-default} `tick` \\ "quote" ',
+        _LEGACY: "legacy#not-a-comment",
+    }
+    prepare(original, keys, database)
+    backup = tmp_path / "keys.env"
+    backup.write_text("\n".join(export(keys)) + "\n")
+
+    # The restoring machine's `keys` service gets exactly what Compose resolves.
+    stack = REPO / "deploy/control-plane/docker-compose.yml"
+    rendered = subprocess.run(
+        [
+            docker,
+            "compose",
+            "-f",
+            str(stack),
+            "--env-file",
+            str(backup),
+            "config",
+            "--format",
+            "json",
+        ],
+        env={"PATH": os.environ["PATH"], "AGENT_DEPLOYMENT_SHA": "0" * 40},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    # `config` writes a literal `$` as `$$` so its output re-renders the same;
+    # the container itself receives the single `$`.
+    environment = {
+        name: value.replace("$$", "$")
+        for name, value in json.loads(rendered.stdout)["services"]["keys"]["environment"].items()
+    }
+    restored = tmp_path / "restored"
+    restored.mkdir()
+    prepare(environment, restored, database)
+
+    for name in original:
+        assert (restored / name).read_bytes() == (keys / name).read_bytes(), name
 
 
 @pytest.fixture

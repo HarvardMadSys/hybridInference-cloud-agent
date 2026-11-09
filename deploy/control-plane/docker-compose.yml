@@ -500,7 +500,7 @@ services:
   # the prefix stripped, everything else to the web app. One origin for both
   # is what lets the session cookie travel; two hostnames would not.
   #
-  # Enable with `COMPOSE_PROFILES=edge` in .env. Loopback by default, like every other published port here: the tunnel is on this host.
+  # Enable with `COMPOSE_PROFILES=edge` (or `--profile edge`). Loopback by default, like every other published port here: the tunnel is on this host.
   edge:
     profiles: [edge]
     image: nginx:1.27.5-alpine

@@ -129,9 +129,16 @@ deployment readiness gate. From the deployment checkout:
 
 ```bash
 AGENT_DEPLOYMENT_SHA=$(git rev-parse HEAD) docker compose -p cloudagent \
-  -f deploy/control-plane/docker-compose.yml \
-  up -d --build control-plane mcp-relay web
+  -f deploy/control-plane/docker-compose.yml --profile edge \
+  up -d --build control-plane mcp-relay web edge
 ```
+
+The browser reaches the web app and the API on one origin, with the API at
+`/api`. The `edge` profile is the nginx that splits that origin, on
+`127.0.0.1:3003` (`AGENT_EDGE_BIND`, `AGENT_EDGE_PORT`); point the TLS proxy or
+tunnel in front of the hostname at it. Leave the profile out only when that
+proxy already routes `/api/*` to the control plane with the prefix stripped and
+everything else to the web app.
 
 Before anything else starts, the `keys` service sees that the bundled
 database volume holds no database yet and generates a random database password
@@ -151,7 +158,8 @@ the lines can be deleted. Back the keys up apart from the database from now on
 every saved secret.
 
 On its first start the control plane creates its settings with a random host
-signing key and user and compute credential encryption keys, and logs a
+signing key, user and compute credential encryption keys and sandbox manager
+credential (server setup writes that credential into each host), and logs a
 one-time setup code (`agent_local_setup_pending`). Open `/setup/administrator`,
 enter that code and create the first administrator, then confirm the site
 address the page offers (the public web address account emails link to). Setup

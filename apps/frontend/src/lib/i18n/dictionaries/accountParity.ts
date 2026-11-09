@@ -71,6 +71,8 @@ export const accountParityEn = {
     'This address is already saved. Change it only if people open the site somewhere else.',
   'setup.siteSave': 'Save and continue',
   'setup.siteSkip': 'Skip for now',
+  'setup.siteRetry': 'Read the saved settings again',
+  'setup.siteLoading': 'Reading the saved settings…',
 
   'security.title': 'Account',
   'security.description': 'Manage how you sign in and your password, or delete your account.',
@@ -181,6 +183,8 @@ export const accountParityZh: Record<keyof typeof accountParityEn, string> = {
   'setup.siteSaved': '此地址已保存。仅当用户通过其他地址访问本站时才需修改。',
   'setup.siteSave': '保存并继续',
   'setup.siteSkip': '暂时跳过',
+  'setup.siteRetry': '重新读取已保存的设置',
+  'setup.siteLoading': '正在读取已保存的设置…',
 
   'security.title': '账号',
   'security.description': '管理登录方式和密码，或删除账号。',

@@ -22,12 +22,15 @@ function savedValue(values: Record<string, unknown>): string {
 
 /**
  * The address to confirm: the saved one when there is one, else the address
- * this page is open at; and the revision a change is made against.
+ * this page is open at; and the revision a change is made against. Nothing
+ * can be saved until the saved settings have been read, so a slow read never
+ * lets this page's origin replace an address already saved.
  */
 function useSiteAddress() {
   const [value, setValue] = useState(() => window.location.origin);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     const controller = new AbortController();
     getAgentAdminSettings(controller.signal)
@@ -41,24 +44,28 @@ function useSiteAddress() {
         if (!controller.signal.aborted) setError(getErrorMessage(cause));
       });
     return () => controller.abort();
-  }, []);
-  return { value, setValue, loaded, loadError: error };
+  }, [attempt]);
+  const retry = () => {
+    setError(null);
+    setAttempt((count) => count + 1);
+  };
+  return { value, setValue, loaded, loadError: error, retry };
 }
 
 export function SiteAddressStep({ steps, onDone }: { steps: ReactNode; onDone: () => void }) {
   const t = useT();
-  const { value, setValue, loaded, loadError } = useSiteAddress();
+  const { value, setValue, loaded, loadError, retry } = useSiteAddress();
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   async function save(event: FormEvent) {
     event.preventDefault();
+    if (!loaded) return;
     const address = value.trim();
-    if (loaded && loaded.saved === address) return onDone();
+    if (loaded.saved === address) return onDone();
     setBusy(true);
     setError(null);
     try {
-      const revision = loaded?.revision ?? (await getAgentAdminSettings()).revision;
-      await setAgentAdminSettings({ [KEY]: address }, revision);
+      await setAgentAdminSettings({ [KEY]: address }, loaded.revision);
       onDone();
     } catch (cause) {
       setError(getErrorMessage(cause));
@@ -74,6 +81,11 @@ export function SiteAddressStep({ steps, onDone }: { steps: ReactNode; onDone: (
     >
       <form className="space-y-4" onSubmit={save}>
         {shownError && <AccountNotice error>{shownError}</AccountNotice>}
+        {loadError && !loaded && (
+          <button type="button" className="ui-button ui-button-secondary w-full" onClick={retry}>
+            {t('setup.siteRetry')}
+          </button>
+        )}
         {loaded?.saved && <AccountNotice>{t('setup.siteSaved')}</AccountNotice>}
         <AccountField id="web-base-url" label={t('setup.siteUrl')} hint={t('setup.siteHint')}>
           <input
@@ -90,8 +102,8 @@ export function SiteAddressStep({ steps, onDone }: { steps: ReactNode; onDone: (
             onChange={(e) => setValue(e.target.value)}
           />
         </AccountField>
-        <button className="ui-button ui-button-primary w-full" disabled={busy}>
-          {busy ? t('account.saving') : t('setup.siteSave')}
+        <button className="ui-button ui-button-primary w-full" disabled={busy || !loaded}>
+          {busy ? t('account.saving') : loaded ? t('setup.siteSave') : t('setup.siteLoading')}
         </button>
         <button
           type="button"

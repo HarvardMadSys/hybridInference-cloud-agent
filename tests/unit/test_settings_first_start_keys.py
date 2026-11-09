@@ -1,8 +1,8 @@
 """The service keys a new deployment's first settings row generates, and nothing else does.
 
 ``initialize_settings`` creates the settings row once. When the environment
-supplies no host signing key, user credential key or compute credential key,
-that first row gets random ones, so a new deployment starts without an operator
+supplies no host signing key, user credential key, compute credential key or
+sandbox manager credential, that first row gets random ones, so a new deployment starts without an operator
 inventing them. An existing row is never given one, empty or not. See
 docs/agents/specs/2026-11-04-first-install-keys.zh-CN.md.
 """
@@ -76,7 +76,8 @@ async def test_a_new_deployment_gets_each_service_key_once() -> None:
     groups = {group["key"]: group for group in setup["groups"]}
     assert groups["credentials"]["configured"] is True
     assert groups["compute"]["configured"] is True
-    assert {field["key"] for field in groups["execution"]["missing"]} == {"sandbox_manager_token"}
+    # Server setup writes the generated sandbox manager credential into each host.
+    assert groups["execution"]["configured"] is True
 
     # A restart adopts the stored keys and generates nothing.
     settings.reset_settings()
@@ -90,6 +91,7 @@ async def test_keys_the_environment_supplies_are_imported_not_replaced(monkeypat
         "AGENT_CONTROL_TOKEN_SECRET": "operator-host-signing-key-of-32-bytes",
         "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY": "operator-user-credential-key-of-32b",
         "AGENT_COMPUTE_SECRET_KEY": "operator-compute-credential-key-32b",
+        "AGENT_SANDBOX_MANAGER_TOKEN": "operator-sandbox-manager-credential",
     }
     for name, value in supplied.items():
         monkeypatch.setenv(name, value)

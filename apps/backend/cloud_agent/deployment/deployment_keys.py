@@ -36,7 +36,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -92,10 +92,17 @@ def _new_secret() -> str:
 
 
 def _read(directory: Path, name: str) -> str:
+    """One stored value, byte for byte: a key's spaces are part of the key."""
     try:
-        return (directory / name).read_text(encoding="utf-8").strip()
+        return (directory / name).read_text(encoding="utf-8")
     except FileNotFoundError:
         return ""
+
+
+def _given(environ: Mapping[str, str], name: str) -> str:
+    """The environment's value as it is; empty or only spaces counts as unset."""
+    value = environ.get(name) or ""
+    return value if value.strip() else ""
 
 
 def _write(directory: Path, name: str, value: str) -> None:
@@ -106,7 +113,7 @@ def _write(directory: Path, name: str, value: str) -> None:
     temporary.unlink(missing_ok=True)
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(value + "\n")
+        handle.write(value)
     if os.geteuid() == 0:
         owner = _OWNERS.get(name, CONTROL_PLANE_UID)
         os.chown(temporary, owner, owner)
@@ -147,14 +154,16 @@ def _bundled_url(environ: Mapping[str, str], password: str) -> str:
             "AGENT_POSTGRES_USER and AGENT_POSTGRES_DB must be letters, digits and _ "
             f"for {DATABASE_URL} to be generated; set {DATABASE_URL} yourself."
         )
-    return f"postgresql://{user}:{password}@postgres:5432/{database}"
+    # The password file keeps the password itself; the connection carries it
+    # percent-encoded, so `/`, `?`, `#` or `@` in it cannot move the host.
+    return f"postgresql://{user}:{quote(password, safe='')}@postgres:5432/{database}"
 
 
 def _collect(environ: Mapping[str, str], keys: Path, outcome: Outcome) -> dict[str, str]:
     """The environment's values over the stored ones; stores what changed."""
     values: dict[str, str] = {}
     for name in STORED:
-        given = (environ.get(name) or "").strip()
+        given = _given(environ, name)
         kept = _read(keys, name)
         if given and given != kept:
             _write(keys, name, given)
@@ -240,7 +249,16 @@ def prepare(environ: Mapping[str, str], keys: Path, database: Path) -> Outcome:
 
 
 def export(keys: Path) -> list[str]:
-    """The stored keys this process can read, as ``.env`` lines."""
+    """The stored keys this process can read, as ``.env`` lines that restore them exactly.
+
+    Each value is single-quoted: Compose reads a single-quoted ``.env`` value
+    literally, so a ``$`` or a space in a key survives the round trip, where an
+    unquoted one would be interpolated or trimmed.
+
+    Raises:
+        KeysRefused: A value holds a single quote, which no ``.env`` quoting
+            Compose reads literally can carry.
+    """
     lines = []
     for name in STORED:
         try:
@@ -249,8 +267,14 @@ def export(keys: Path) -> list[str]:
             # The database password is the Postgres user's; the bundled
             # connection carries it, so the export restores it all the same.
             continue
-        if value:
-            lines.append(f"{name}={value}")
+        if not value:
+            continue
+        if "'" in value:
+            raise KeysRefused(
+                f"{name} holds a single quote, which a .env line cannot carry literally; "
+                "back up the agent-keys volume itself instead."
+            )
+        lines.append(f"{name}='{value}'")
     return lines
 
 
@@ -262,7 +286,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--database-dir", type=Path, default=DATABASE_DIR)
     arguments = parser.parse_args(argv)
     if arguments.command == "export":
-        for line in export(arguments.keys_dir):
+        try:
+            lines = export(arguments.keys_dir)
+        except KeysRefused as refused:
+            print(f"[keys] ERROR: {refused}", file=sys.stderr)
+            return 1
+        for line in lines:
             print(line)
         return 0
     try:

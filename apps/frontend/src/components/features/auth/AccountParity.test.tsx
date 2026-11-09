@@ -404,6 +404,8 @@ async function createAdministrator() {
 }
 const siteField = () => screen.getByLabelText('Web app URL') as HTMLInputElement;
 const saveButton = () => screen.getByRole('button', { name: 'Save and continue' });
+/** The save button once the saved settings have been read and it is offered. */
+const readySaveButton = () => screen.findByRole('button', { name: 'Save and continue' });
 
 describe('first-run setup', () => {
   it('creates the administrator with the setup code, then asks for the site address', async () => {
@@ -427,7 +429,7 @@ describe('first-run setup', () => {
     expect(siteField().value).toBe('https://agent.example.edu');
     expect(screen.queryByText(/already saved/)).toBeNull();
     fill('Web app URL', ' https://lab.example.edu ');
-    fireEvent.click(saveButton());
+    fireEvent.click(await readySaveButton());
     await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/hosts'));
     expect(adminSettings.setAgentAdminSettings).toHaveBeenCalledWith(
       { web_base_url: 'https://lab.example.edu' },
@@ -441,7 +443,7 @@ describe('first-run setup', () => {
     await createAdministrator();
     await waitFor(() => expect(siteField().value).toBe('https://saved.example.edu'));
     expect(screen.getByText(/This address is already saved/)).toBeInTheDocument();
-    fireEvent.click(saveButton());
+    fireEvent.click(await readySaveButton());
     await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/hosts'));
     expect(adminSettings.setAgentAdminSettings).not.toHaveBeenCalled();
   });
@@ -453,7 +455,7 @@ describe('first-run setup', () => {
     );
     await createAdministrator();
     await waitFor(() => expect(adminSettings.getAgentAdminSettings).toHaveBeenCalled());
-    fireEvent.click(saveButton());
+    fireEvent.click(await readySaveButton());
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'web_base_url must be an http(s) URL',
     );
@@ -467,19 +469,39 @@ describe('first-run setup', () => {
     expect(assign).toHaveBeenCalledWith('/admin/hosts');
     expect(adminSettings.setAgentAdminSettings).not.toHaveBeenCalled();
   });
-  it('reads the revision when saving if the first read failed', async () => {
+  it('cannot save before the saved settings are read, so a slow read keeps a saved address', async () => {
+    let answer: (snapshot: ReturnType<typeof settingsSnapshot>) => void = () => {};
+    vi.mocked(adminSettings.getAgentAdminSettings).mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve;
+      }),
+    );
+    await createAdministrator();
+    const waiting = screen.getByRole('button', { name: 'Reading the saved settings…' });
+    expect(waiting).toBeDisabled();
+    fireEvent.click(waiting);
+    expect(adminSettings.setAgentAdminSettings).not.toHaveBeenCalled();
+    answer(settingsSnapshot('https://saved.example.edu', 3));
+    await waitFor(() => expect(siteField().value).toBe('https://saved.example.edu'));
+    fireEvent.click(await readySaveButton());
+    await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/hosts'));
+    expect(adminSettings.setAgentAdminSettings).not.toHaveBeenCalled();
+  });
+  it('offers to read the settings again when the first read failed, and saves at that revision', async () => {
     vi.mocked(adminSettings.getAgentAdminSettings)
       .mockRejectedValueOnce(new Error('Settings cannot be loaded.'))
       .mockResolvedValueOnce(settingsSnapshot(null, 4));
     vi.mocked(adminSettings.setAgentAdminSettings).mockResolvedValue(settingsSnapshot('x', 5));
     await createAdministrator();
     expect(await screen.findByRole('alert')).toHaveTextContent('Settings cannot be loaded.');
-    expect(siteField().value).toBe('https://agent.example.edu');
-    fireEvent.click(saveButton());
+    expect(screen.getByRole('button', { name: 'Reading the saved settings…' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Read the saved settings again' }));
+    fireEvent.click(await readySaveButton());
     await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/hosts'));
     expect(adminSettings.setAgentAdminSettings).toHaveBeenCalledWith(
       { web_base_url: 'https://agent.example.edu' },
       4,
     );
+    expect(adminSettings.getAgentAdminSettings).toHaveBeenCalledTimes(2);
   });
 });

@@ -168,10 +168,13 @@ each of those variables the environment leaves empty from its file, and
 Postgres reads `POSTGRES_PASSWORD_FILE`. Back the keys up apart from the
 database ([Disaster recovery](docs/developer/disaster-recovery.md)):
 `docker exec <project>-control-plane-1 python -m cloud_agent.deployment.deployment_keys export`
-prints them as `.env` lines that restore them on another machine. The control plane then creates its settings with random
-`AGENT_CONTROL_TOKEN_SECRET`, `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` and
-`AGENT_COMPUTE_SECRET_KEY` values when the environment supplies none; an
-existing settings row is never given one.
+prints them as `.env` lines that restore them on another machine. The values are stored and exported byte for byte, each
+exported line single-quoted, because Compose reads an unquoted `.env` value's
+`$` as interpolation. The control plane then creates its settings with random
+`AGENT_CONTROL_TOKEN_SECRET`, `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY`,
+`AGENT_COMPUTE_SECRET_KEY` and `AGENT_SANDBOX_MANAGER_TOKEN` values when the
+environment supplies none (server setup writes that sandbox manager credential
+into each host it deploys); an existing settings row is never given one.
 
 Keep bootstrap configuration in deployment files: database access; the settings
 encryption root (`AGENT_SETTINGS_ENCRYPTION_KEY`, with the legacy environment
