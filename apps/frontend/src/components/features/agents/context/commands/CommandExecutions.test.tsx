@@ -140,6 +140,15 @@ function renderSection(props: Partial<Parameters<typeof CommandExecutions>[0]> =
   );
 }
 
+/**
+ * The section once its first page has loaded. Its heading and controls render
+ * before the read resolves, so awaiting them alone races the data.
+ */
+async function loadedSection(): Promise<HTMLElement> {
+  const list = await screen.findByRole('list', { name: 'Command Executions' });
+  return list.closest('section')!;
+}
+
 beforeEach(() => {
   localStorage.clear();
   mocked.mockReset();
@@ -153,8 +162,10 @@ describe('CommandExecutions', () => {
     mocked.mockResolvedValue(page());
     renderSection();
 
-    expect(await screen.findByRole('heading', { name: 'Command Executions' })).toBeInTheDocument();
-    const section = screen.getByRole('heading', { name: 'Command Executions' }).closest('section')!;
+    const section = await loadedSection();
+    expect(
+      within(section).getByRole('heading', { name: 'Command Executions' }),
+    ).toBeInTheDocument();
     expect(within(section).getByText('settled executions')).toBeInTheDocument();
     expect(within(section).getByText('cumulative duration')).toBeInTheDocument();
     expect(within(section).getByText('1 · 50%')).toBeInTheDocument();
@@ -171,9 +182,7 @@ describe('CommandExecutions', () => {
   it('labels the failure rate with its denominator and keeps running out of it', async () => {
     mocked.mockResolvedValue(page());
     renderSection();
-    const section = (await screen.findByRole('heading', { name: 'Command Executions' })).closest(
-      'section',
-    )!;
+    const section = await loadedSection();
     // The denominator is a tooltip on the Failed value, not a paragraph.
     expect(within(section).getByTitle(/failed ÷ settled/)).toBeInTheDocument();
     expect(within(section).getByText(/Running/)).toBeInTheDocument();
@@ -204,7 +213,8 @@ describe('CommandExecutions', () => {
     mocked.mockResolvedValue(page());
     renderSection();
     const filters = await screen.findByRole('group', { name: 'Show one kind of execution' });
-    expect(within(filters).getByRole('button', { name: /^All\s*3$/ })).toHaveAttribute(
+    // The chips render before the first page; only their counts wait for it.
+    expect(await within(filters).findByRole('button', { name: /^All\s*3$/ })).toHaveAttribute(
       'aria-pressed',
       'true',
     );
@@ -244,7 +254,7 @@ describe('CommandExecutions', () => {
     mocked.mockResolvedValue(page());
     renderSection();
     const filters = await screen.findByRole('group', { name: 'Show one kind of execution' });
-    expect(within(filters).getByRole('button', { name: /^Slow\s*1$/ })).toHaveAttribute(
+    expect(await within(filters).findByRole('button', { name: /^Slow\s*1$/ })).toHaveAttribute(
       'title',
       'A command at or over 10s is slow.',
     );
@@ -318,9 +328,7 @@ describe('CommandExecutions', () => {
       }),
     );
     renderSection();
-    const section = (await screen.findByRole('heading', { name: 'Command Executions' })).closest(
-      'section',
-    )!;
+    const section = await loadedSection();
     expect(
       within(section).getByText('Covering the newest 500 of 900 recorded executions.'),
     ).toBeInTheDocument();
@@ -364,7 +372,8 @@ describe('CommandExecutions', () => {
     mocked.mockResolvedValue(page());
     renderSection();
     expect(await screen.findByRole('heading', { name: '命令执行' })).toBeInTheDocument();
-    expect(screen.getByText('已结算执行')).toBeInTheDocument();
+    // The heading renders before the first page; the summary waits for it.
+    expect(await screen.findByText('已结算执行')).toBeInTheDocument();
     expect(screen.getByText('合计耗时')).toBeInTheDocument();
     expect(screen.getAllByText('—').length).toBeGreaterThan(0);
   });
@@ -610,9 +619,7 @@ it('shows an unknown cumulative duration when nothing was measured', async () =>
     }),
   );
   renderSection();
-  const section = (await screen.findByRole('heading', { name: 'Command Executions' })).closest(
-    'section',
-  )!;
+  const section = await loadedSection();
   const facts = within(section).getAllByText('no timing recorded');
   expect(facts.length).toBeGreaterThan(0);
   expect(within(section).queryByText('0ms')).toBeNull();
