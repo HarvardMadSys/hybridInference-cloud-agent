@@ -126,8 +126,9 @@ function RunActions({
 }
 
 /**
- * The first draft PR someone gets: where it is, that merging is theirs, and
- * that the conversation goes on. Said once; later turns get the plain actions.
+ * The first pull request someone gets: where it is, that merging is theirs,
+ * and that the conversation goes on. Said once; later turns get the plain
+ * actions.
  */
 function FirstRunOutcome({
   job,

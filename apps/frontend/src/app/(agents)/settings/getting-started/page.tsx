@@ -13,6 +13,14 @@ export default function GettingStartedPage() {
       <ol className="mt-6 space-y-4 text-sm leading-6 text-muted">
         <li>
           <Link
+            href={SETTINGS_PATHS.models}
+            className="ui-focus-ring rounded text-foreground underline underline-offset-4"
+          >
+            {t('settings.helpModel')}
+          </Link>
+        </li>
+        <li>
+          <Link
             href={SETTINGS_PATHS.integrations}
             className="ui-focus-ring rounded text-foreground underline underline-offset-4"
           >

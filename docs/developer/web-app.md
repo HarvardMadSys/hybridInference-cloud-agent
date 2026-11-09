@@ -44,10 +44,16 @@ on GitHub, so the dialog keeps what was entered and does not retry by itself.
 ### Getting started
 
 An account with no conversations, archived ones included, sees a **Getting
-started** row: **Connect GitHub**, **Grant a repository**, then **Run your first
-task**. Connection and repository state come from `/config`, and the row is
-hidden when the deployment has no GitHub App configured. The sidebar, the
-new-task page and the conversation explanations share one first-run check,
+started** row: **Connect a model**, **Connect GitHub**, **Grant a repository**,
+then **Run your first task**. Model connection, GitHub connection and
+repository state come from `/config`. **Connect a model** is offered where the
+deployment lets owners add model connections, and is done once one of theirs
+has a model verified for some agent (`model_connection_required` is false);
+saving a connection in any tab of the same browser refreshes the row. The
+GitHub steps are left out while the deployment has no GitHub App or its App is
+unavailable, and the row is hidden when neither a model step nor GitHub is left
+to offer. The sidebar, the new-task page and the conversation explanations
+share one first-run check,
 `GET /v1/agent/conversations?include_archived=true&limit=2`, which refreshes on
 page changes until two conversations exist. **Skip** hides the row per account
 in the current browser, with an **Undo** notice; the settings page brings it

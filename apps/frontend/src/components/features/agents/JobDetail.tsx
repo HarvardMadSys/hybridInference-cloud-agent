@@ -191,7 +191,7 @@ export function JobDetail({
   // refused rather than silently overwritten.
   const currentGoal = job.goal ?? null;
   // The first turn of the owner's first conversation explains itself as it
-  // goes, and says where its draft PR is when it has one.
+  // goes, and says where its pull request is when it has one.
   const { onlyThreadId } = useFirstRun();
   const firstRun = (job.turnNo ?? 1) === 1 && onlyThreadId === threadId;
   useEffect(() => setAttemptNo(liveAttempt), [liveAttempt]);

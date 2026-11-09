@@ -903,7 +903,7 @@ describe('TaskComposer source-control onboarding', () => {
 
     expect(
       await screen.findByText(
-        'Describe a task. The agent works in an isolated sandbox and opens a draft pull request in your repository.',
+        'Describe a task. The agent works on a copy of your repository in an isolated sandbox, and opens a pull request when you ask.',
       ),
     ).toBeInTheDocument();
     expect(screen.queryByText('Runs in an isolated sandbox.')).not.toBeInTheDocument();
@@ -920,7 +920,7 @@ describe('TaskComposer source-control onboarding', () => {
         'Describe a task. The agent works in an isolated sandbox that starts empty.',
       ),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/opens a draft pull request/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/opens a pull request when you ask/)).not.toBeInTheDocument();
   });
 
   it('keeps the usual line for someone who has had a task, even an archived one', async () => {
@@ -934,7 +934,7 @@ describe('TaskComposer source-control onboarding', () => {
 
     await waitFor(() => expect(listAgentConversations).toHaveBeenCalled());
     expect(await screen.findByText('Runs in an isolated sandbox.')).toBeInTheDocument();
-    expect(screen.queryByText(/opens a draft pull request/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/opens a pull request when you ask/)).not.toBeInTheDocument();
   });
 
   it('asks nothing itself: the answer is the app’s', async () => {

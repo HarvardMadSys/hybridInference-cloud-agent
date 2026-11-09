@@ -13,25 +13,57 @@ import {
 
 import { getAgentConfig, listAgentConversations, type AgentConfigApi } from '@/lib/api/agents';
 
+import { MODEL_CONNECTIONS_CHANGED } from './composer/modelConnectionEvents';
+
 // First-run guidance: who gets it, how far along they are, and where it may
 // speak — decided once, for the whole app.
 //
 // Someone is new until they have started a conversation. Archived ones count —
 // putting a task away does not make its owner a stranger — and deleted ones do
 // not, since they are gone from that owner's history. Progress is not stored:
-// each step is read from what the owner has actually done, the connection and
-// repositories `/config` reports, then the first conversation. Only Skip is
-// remembered, per account in this browser, and Settings can undo it.
+// each step is read from what the owner has actually done, the model
+// connection, GitHub connection and repositories `/config` reports, then the
+// first conversation. Only Skip is remembered, per account in this browser,
+// and Settings can undo it.
 //
 // The sidebar's getting-started row, the new-task page and the conversation
 // page all read this one answer. Three places each asking for themselves would
 // cost three requests and, sooner or later, three different answers.
 
-/** The sidebar's next step, and how many of the three are behind the owner. */
+export type FirstRunStepId = 'model' | 'connect' | 'repository' | 'task';
+
+/** The sidebar's next step, and how many of the steps are behind the owner. */
 export interface FirstRunStep {
-  next: 'connect' | 'repository' | 'task';
+  next: FirstRunStepId;
   done: number;
   total: number;
+}
+
+/**
+ * The steps between this owner and a first task, in order, each with whether
+ * it is behind them. A step nobody can take here is left out; with nothing to
+ * set up, there is no list, and the new-task page is the whole story.
+ */
+export function firstRunSteps(config: AgentConfigApi): { id: FirstRunStepId; done: boolean }[] {
+  const steps: { id: FirstRunStepId; done: boolean }[] = [];
+  // Every task runs on one of its owner's own model connections, so this comes
+  // first. Where the deployment does not let owners add one, the new-task page
+  // says so, and there is nothing to do here.
+  if (config.model_connections_enabled === true) {
+    steps.push({ id: 'model', done: config.model_connection_required !== true });
+  }
+  // Nobody can connect while the deployment's App is down or absent. The
+  // new-task page says which; a step that cannot be taken is left out.
+  const github =
+    config.github_load_status !== 'unavailable' &&
+    (config.github_connected || Boolean(config.github_install_url));
+  if (github) {
+    steps.push({ id: 'connect', done: config.github_connected });
+    steps.push({ id: 'repository', done: config.github_connected && config.repos.length > 0 });
+  }
+  if (steps.length === 0) return steps;
+  steps.push({ id: 'task', done: false });
+  return steps;
 }
 
 export interface FirstRun {
@@ -93,6 +125,8 @@ export function FirstRunProvider({ userId, children }: { userId?: string; childr
   const [config, setConfig] = useState<AgentConfigApi | null>(null);
   // Unknown until storage has been read, so a skipped row never flashes back.
   const [skipped, setSkipped] = useState<boolean | null>(null);
+  // Counts model connection changes, so saving one finishes its step at once.
+  const [connectionsChanged, setConnectionsChanged] = useState(0);
   const settled = history?.count === 2;
   const newcomer = history?.count === 0;
 
@@ -126,8 +160,24 @@ export function FirstRunProvider({ userId, children }: { userId?: string; childr
     }
   }, [userId]);
 
-  // Where the owner is with GitHub, asked of newcomers only: nobody else is
-  // shown a step.
+  // A connection saved in Settings, in this tab or another, can finish the
+  // model step without a page change here.
+  useEffect(() => {
+    if (!newcomer) return undefined;
+    const changed = () => setConnectionsChanged((count) => count + 1);
+    const storage = (event: StorageEvent) => {
+      if (event.key === MODEL_CONNECTIONS_CHANGED) changed();
+    };
+    window.addEventListener(MODEL_CONNECTIONS_CHANGED, changed);
+    window.addEventListener('storage', storage);
+    return () => {
+      window.removeEventListener(MODEL_CONNECTIONS_CHANGED, changed);
+      window.removeEventListener('storage', storage);
+    };
+  }, [newcomer]);
+
+  // Where the owner is with their model and GitHub, asked of newcomers only:
+  // nobody else is shown a step.
   useEffect(() => {
     if (!newcomer || skipped !== false) return undefined;
     let cancelled = false;
@@ -142,7 +192,7 @@ export function FirstRunProvider({ userId, children }: { userId?: string; childr
     return () => {
       cancelled = true;
     };
-  }, [newcomer, skipped, pathname]);
+  }, [newcomer, skipped, pathname, connectionsChanged]);
 
   const skip = useCallback(() => {
     setSkipped(true);
@@ -166,15 +216,13 @@ export function FirstRunProvider({ userId, children }: { userId?: string; childr
 
   const step = useMemo((): FirstRunStep | null => {
     if (!newcomer || skipped !== false || !config) return null;
-    // Nobody can connect while the deployment's App is down or absent. The
-    // new-task page says which; a step that cannot be taken is left out.
-    if (config.github_load_status === 'unavailable') return null;
-    if (!config.github_connected && !config.github_install_url) return null;
-    const hasRepository = config.github_connected && config.repos.length > 0;
+    const steps = firstRunSteps(config);
+    const next = steps.find((item) => !item.done);
+    if (!next) return null;
     return {
-      next: !config.github_connected ? 'connect' : !hasRepository ? 'repository' : 'task',
-      done: Number(config.github_connected) + Number(hasRepository),
-      total: 3,
+      next: next.id,
+      done: steps.filter((item) => item.done).length,
+      total: steps.length,
     };
   }, [newcomer, skipped, config]);
 
