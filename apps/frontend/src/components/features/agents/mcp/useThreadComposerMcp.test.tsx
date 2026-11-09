@@ -1,8 +1,18 @@
 // @vitest-environment jsdom
-import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
+import '@testing-library/jest-dom/vitest';
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+} from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { getMcpThreadBindings, updateMcpThreadBinding, type McpBindingApi } from '@/lib/api/mcp';
 import { useThreadComposerMcp } from './useThreadComposerMcp';
+import { McpSubmenu } from './McpSubmenu';
 
 vi.mock('@/lib/api/mcp', () => ({
   getMcpThreadBindings: vi.fn(),
@@ -32,6 +42,107 @@ function binding(overrides: Partial<McpBindingApi> = {}): McpBindingApi {
 
 beforeEach(() => vi.resetAllMocks());
 afterEach(cleanup);
+
+function ThreadMenu() {
+  const mcp = useThreadComposerMcp('thread');
+  return (
+    <McpSubmenu
+      choices={mcp.choices}
+      loading={mcp.loading}
+      error={mcp.error}
+      onRetry={mcp.reload}
+      onToggle={(choice, on) => void mcp.toggle(choice.connection, on)}
+    />
+  );
+}
+
+it.each([true, false])(
+  'keeps off/on reversible and preserves permissions when available=%s',
+  async (available) => {
+    const saved = binding({
+      enabled: true,
+      available,
+      error: available ? null : 'This connection is turned off.',
+      tools: { search: 'allow', delete: 'deny' },
+      resources: { 'notes://index': 'confirm' },
+      prompts: { summarize: 'confirm' },
+    });
+    vi.mocked(getMcpThreadBindings).mockResolvedValue({ bindings: [saved] });
+    vi.mocked(updateMcpThreadBinding).mockImplementation(async (_threadId, request) => ({
+      bindings: [{ ...saved, enabled: request.enabled }],
+    }));
+    render(<ThreadMenu />);
+    const toggle = await screen.findByRole('switch', { name: 'Notes' });
+    expect(toggle).toBeChecked();
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(screen.getByRole('switch', { name: 'Notes' })).not.toBeChecked();
+      expect(screen.getByRole('switch', { name: 'Notes' })).toBeEnabled();
+    });
+    fireEvent.click(screen.getByRole('switch', { name: 'Notes' }));
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'Notes' })).toBeChecked());
+    expect(updateMcpThreadBinding).toHaveBeenLastCalledWith('thread', {
+      connection_id: 7,
+      alias: 'notes',
+      enabled: true,
+      use_defaults: false,
+      tools: saved.tools,
+      resources: saved.resources,
+      prompts: saved.prompts,
+    });
+    if (!available) {
+      // A conversation preference never turns the account connection back on.
+      expect(screen.getByText('This connection is turned off.')).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: 'Manage connection' })).toHaveAttribute(
+        'href',
+        '/settings/plugins',
+      );
+    }
+  },
+);
+
+it('offers connection recovery after reopening an unavailable, disabled conversation choice', async () => {
+  vi.mocked(getMcpThreadBindings).mockResolvedValue({
+    bindings: [binding({ available: false, error: 'This connection is turned off.' })],
+  });
+  render(<ThreadMenu />);
+  expect(await screen.findByRole('switch', { name: 'Notes' })).toBeEnabled();
+  expect(screen.getByRole('switch', { name: 'Notes' })).not.toBeChecked();
+  expect(screen.getByRole('link', { name: 'Manage connection' })).toHaveAttribute(
+    'href',
+    '/settings/plugins',
+  );
+});
+
+it('keeps an unavailable new-task choice visible with a recovery route', () => {
+  const onToggle = vi.fn();
+  render(
+    <McpSubmenu
+      choices={[
+        {
+          connection: { id: 7, label: 'Notes' },
+          selected: false,
+          toolCount: 0,
+          busy: false,
+          blocked: true,
+          error: 'turned off',
+        },
+      ]}
+      loading={false}
+      error={null}
+      onRetry={vi.fn()}
+      onToggle={onToggle}
+    />,
+  );
+  const toggle = screen.getByRole('switch', { name: 'Notes' });
+  expect(toggle).toBeDisabled();
+  fireEvent.click(toggle);
+  expect(onToggle).not.toHaveBeenCalled();
+  expect(screen.getByRole('link', { name: 'Manage connection' })).toHaveAttribute(
+    'href',
+    '/settings/plugins',
+  );
+});
 
 it('reenables an empty selection with ask-before-call defaults', async () => {
   vi.mocked(getMcpThreadBindings).mockResolvedValue({ bindings: [binding()] });

@@ -113,15 +113,21 @@ export function McpSubmenu({
                       ? t('common.loading')
                       : (choice.error ?? t('attach.mcpTools', { count: choice.toolCount }))}
                   </span>
+                  {choice.error || choice.blocked ? (
+                    <Link
+                      href="/settings/plugins"
+                      className="ui-focus-ring block w-fit text-[11.5px] text-muted underline"
+                    >
+                      {t('attach.mcpManage')}
+                    </Link>
+                  ) : null}
                 </span>
-                {choice.blocked ? null : (
-                  <SkillSwitch
-                    label={choice.connection.label}
-                    checked={choice.selected}
-                    disabled={choice.busy}
-                    onChange={(on) => onToggle(choice, on)}
-                  />
-                )}
+                <SkillSwitch
+                  label={choice.connection.label}
+                  checked={choice.selected}
+                  disabled={choice.busy || choice.blocked}
+                  onChange={(on) => onToggle(choice, on)}
+                />
               </li>
             ))}
           </ul>
