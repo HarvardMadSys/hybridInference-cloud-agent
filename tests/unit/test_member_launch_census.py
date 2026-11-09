@@ -56,6 +56,10 @@ if os.fork() == 0:
     os._exit(0)
 time.sleep(0.1)
 if sys.argv[1] == "exit":
+    # A large address space keeps it exiting, command line already empty and
+    # not yet a zombie, for long enough that the wait looks in that window.
+    held = bytearray(256 << 20)
+    held[:: 4096] = b"x" * len(held[:: 4096])
     os._exit(3)
 os.execvp(sys.argv[1], sys.argv[1:])
 """
