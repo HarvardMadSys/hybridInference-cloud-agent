@@ -71,6 +71,7 @@ def test_retained_http_launch_refreshes_the_trusted_bridge_without_mcp(
         ensure_kilo_mcp_runtime=lambda spec, version: events.append(("kilo", spec, version)),
         ensure_codex_mcp_policy=lambda spec, base_url: events.append(("policy", spec, base_url)),
         spawn=spawn,
+        await_member_launch=lambda spec, **kwargs: None,
         exact=HELPER_IN_PLACE,
     )
     spec = ChatSandboxSpec(
