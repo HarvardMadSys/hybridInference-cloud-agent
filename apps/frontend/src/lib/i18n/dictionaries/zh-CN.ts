@@ -859,6 +859,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'attach.mcpTools': '{count} 个工具',
   'attach.mcpAdd': '添加 MCP',
   'attach.mcpRetry': '重试',
+  'attach.mcpManage': '管理连接',
   'attach.mcpDisabled': '已停用',
   'attach.mcpDraft': '还没配置完',
   'attach.mcpNeedsSignIn': '需要登录',

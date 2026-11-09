@@ -31,11 +31,11 @@ export interface McpChoice {
   busy: boolean;
   error?: string;
   /**
-   * The connection cannot serve a task at all, so it is offered no switch.
+   * The connection cannot be selected for a new task until it is repaired.
    *
    * Distinct from a failed attempt, which leaves the switch in place: signing
    * in elsewhere or testing the connection can make that one work, and a row
-   * that reports a problem while removing the only control is a dead end.
+   * that reports a problem must keep a route to managing the connection.
    */
   blocked: boolean;
 }

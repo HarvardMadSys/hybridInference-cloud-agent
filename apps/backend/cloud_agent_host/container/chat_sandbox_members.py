@@ -466,6 +466,43 @@ class MemberExecMixin(GuestRootExec):
             )
         return self._parse_member_processes(result.stdout)
 
+    def await_member_launch(
+        self,
+        spec: ChatSandboxSpec,
+        *,
+        pidfile: str,
+        launcher: str,
+        user_uid: int,
+        user_gid: int,
+    ) -> None:
+        """Return once the process ``pidfile`` names has stopped being ``launcher``.
+
+        The member's request meter starts in front of its CLI: the launcher
+        forks the meter, waits until it serves, then replaces itself with the
+        CLI. Until it has, the meter may not exist yet, and a turn's process
+        census taken then leaves it out, so the turn's reap kills it as the
+        turn's own leftover. Once the receipt's process no longer runs the
+        launcher, the meter is up, and a census includes it.
+        """
+        self._validate_member_pidfile(spec, pidfile, user_uid=user_uid)
+        result = self.exec_capture(
+            spec,
+            ["/bin/sh", "-c", _AWAIT_LAUNCH_SCRIPT, "sh", pidfile, launcher],
+            workdir="/",
+            timeout_s=_AWAIT_LAUNCH_TIMEOUT_S + 5,
+            user_uid=user_uid,
+            user_gid=user_gid,
+        )
+        if result.returncode != 0:
+            stderr = (
+                result.stderr.decode("utf-8", "replace")
+                if isinstance(result.stderr, bytes)
+                else str(result.stderr or "")
+            )
+            raise SandboxError(
+                f"member CLI launch did not finish (exit {result.returncode}): {stderr[:300]}"
+            )
+
     def reap_member_processes_except(
         self,
         spec: ChatSandboxSpec,
@@ -796,6 +833,30 @@ class MemberExecMixin(GuestRootExec):
         return results[0], results[1]
 
 
+#: How long a launcher may take to start its meter and become the CLI.
+_AWAIT_LAUNCH_TIMEOUT_S = 15
+#: ``$1`` the receipt, ``$2`` the launcher's path. Exit 125: no receipt in
+#: time; 126: the process ended, or its PID now names another; 124: the
+#: launcher never became the CLI. The receipt's start time fences PID reuse.
+#: An exiting process has an empty command line before it turns Z, so only a
+#: non-empty one that is not the launcher's is the CLI; an empty one is looked
+#: at again, and then reads as ended.
+_AWAIT_LAUNCH_SCRIPT = (
+    'set -u; pidfile="$1"; launcher="$2"; attempt=0; '
+    f"limit={_AWAIT_LAUNCH_TIMEOUT_S * 50}; "
+    "while :; do "
+    'receipt=$(cat -- "$pidfile" 2>/dev/null || :); set -- $receipt; '
+    '[ "$#" -eq 2 ] && break; '
+    'attempt=$((attempt + 1)); [ "$attempt" -lt "$limit" ] || exit 125; sleep 0.02; done; '
+    'pid="$1"; started="$2"; '
+    "while :; do "
+    'fields=$(sed "s/^[^)]*) //" "/proc/$pid/stat" 2>/dev/null) || exit 126; '
+    "set -- $fields; "
+    'case "${1:-}" in Z|X) exit 126;; esac; [ "${20:-}" = "$started" ] || exit 126; '
+    'argv=$(tr "\\000" "\\n" < "/proc/$pid/cmdline" 2>/dev/null) || exit 126; '
+    'if [ -n "$argv" ]; then printf "%s\\n" "$argv" | grep -qxF -- "$launcher" || exit 0; fi; '
+    'attempt=$((attempt + 1)); [ "$attempt" -lt "$limit" ] || exit 124; sleep 0.02; done'
+)
 #: The member reaper's exit when no process receipt appeared in its wait.
 _REAPER_NO_RECEIPT = 125
 

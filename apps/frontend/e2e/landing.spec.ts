@@ -1,4 +1,5 @@
-import { expect, test, type Locator, type Page } from '@playwright/test';
+import { type Locator, type Page } from '@playwright/test';
+import { expect, test } from './network-change';
 
 // The signed-out home page's demo is drawn tilted in 3D, so only a real
 // browser can say whether a click on one of its tabs reaches that tab.

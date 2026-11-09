@@ -134,9 +134,9 @@ def _row(protocols: tuple[str, ...] | list[str] = ("chat_completions",), **chang
         ),
         (_row(protocols=["anthropic_messages"]), "codex", "gpt-4.1", None, "protocol_unsupported"),
         (_row(), "claude-desktop", "gpt-4.1", None, "runtime_unsupported"),
-        (_row(), "codex", "gpt-4.1", "high", "effort_unsupported"),
+        (_row(), "codex", "gpt-4.1", "high", "effort_unknown"),
         (_row(), "opencode", "gpt-4o", None, "model_not_listed"),
-        (_row(), "opencode", "gpt-4.1", "high", "effort_unsupported"),
+        (_row(), "opencode", "gpt-4.1", "high", "effort_unknown"),
     ],
 )
 def test_every_unusable_pairing_is_refused_with_its_reason(row, runtime, model, effort, reason):
@@ -163,12 +163,12 @@ def test_a_usable_pairing_names_its_plan_native_first():
     )
     every = _row(protocols=["chat_completions", "responses", "anthropic_messages"])
     assert {_plan(every, r)[2] for r in ("pi", "codex", "claude-code")} == {"direct"}
-    # Effort stays Auto on a connection, for Claude Code as for the others.
+    # With no declaration read for the model, only Auto runs: unknown, not unsupported.
     with pytest.raises(ModelConnectionUnusable) as refused:
         require_usable(
             messages, runtime="claude-code", model="claude-sonnet-4-5", reasoning_effort="high"
         )
-    assert refused.value.reason == "effort_unsupported"
+    assert refused.value.reason == "effort_unknown"
 
 
 def test_codex_and_claude_code_run_on_a_chat_only_connection_through_the_helper():
@@ -177,10 +177,10 @@ def test_codex_and_claude_code_run_on_a_chat_only_connection_through_the_helper(
     assert _plan(chat, "claude-code") == ("anthropic_messages", "chat_completions", "translated")
     # The stored facts still say only what the upstream offers.
     assert verified_protocols(chat, "gpt-4.1") == ["chat_completions"]
-    # Effort stays Auto on a translated plan too.
+    # Undeclared on a translated plan too: only Auto runs.
     with pytest.raises(ModelConnectionUnusable) as refused:
         require_usable(chat, runtime="claude-code", model="gpt-4.1", reasoning_effort="high")
-    assert refused.value.reason == "effort_unsupported"
+    assert refused.value.reason == "effort_unknown"
 
 
 def _resolver(*addresses: str):

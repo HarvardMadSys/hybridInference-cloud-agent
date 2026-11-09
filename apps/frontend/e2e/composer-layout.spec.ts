@@ -1,4 +1,5 @@
-import { expect, test, type Page } from '@playwright/test';
+import { type Page } from '@playwright/test';
+import { expect, test } from './network-change';
 
 // The new-task composer's two rows of controls under the task box: where the
 // task runs, then how it runs and Run. Long names must wrap the rows by the

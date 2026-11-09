@@ -1,4 +1,5 @@
-import { expect, test, type Page } from '@playwright/test';
+import { type Page } from '@playwright/test';
+import { expect, test } from './network-change';
 
 type Value = string | number | boolean;
 type Field = [key: string, label: string, kind: string, value: Value, extra?: object];

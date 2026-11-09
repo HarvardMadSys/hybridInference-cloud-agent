@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './network-change';
 
 // One model id on two of the owner's connections: the picker must keep the
 // two sources apart, and a turn names the connection it was given.

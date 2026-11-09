@@ -13580,6 +13580,42 @@
         "title": "DnaRequest",
         "type": "object"
       },
+      "EffortFactView": {
+        "description": "What the provider's listings declared about one API's reasoning levels for a model.\n\n``supported`` with its ``levels``; ``unsupported``; or ``unknown`` with a\n``reason`` (``not_read``: never read, ``listing_unavailable``,\n``not_listed``, ``not_declared``). Unknown offers Auto only.",
+        "properties": {
+          "levels": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Levels",
+            "type": "array"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "source": {
+            "default": "",
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "supported",
+              "unsupported",
+              "unknown"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "EffortFactView",
+        "type": "object"
+      },
       "EmailRequest": {
         "additionalProperties": false,
         "description": "Resend verification, and forgot password.",
@@ -17668,6 +17704,16 @@
             "title": "Id",
             "type": "string"
           },
+          "model_efforts": {
+            "additionalProperties": {
+              "additionalProperties": {
+                "$ref": "#/components/schemas/ModelEffortOffer"
+              },
+              "type": "object"
+            },
+            "title": "Model Efforts",
+            "type": "object"
+          },
           "model_runtimes": {
             "additionalProperties": {
               "items": {
@@ -17836,6 +17882,42 @@
         "title": "ModelConnectionView",
         "type": "object"
       },
+      "ModelEffortOffer": {
+        "description": "Which reasoning levels one agent may run one connection model at.\n\n``status`` is what the model's provider declared for the API this agent's\nplan calls: ``supported`` (``levels`` are the declared ones this agent's\nCLI can send, weakest first), ``unsupported`` (the provider declares none,\nor none this agent can send) or ``unknown`` (nothing the provider said\nsettles it). Auto -- no level -- is always available and is not listed.",
+        "properties": {
+          "levels": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Levels",
+            "type": "array"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "source": {
+            "default": "",
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "supported",
+              "unsupported",
+              "unknown"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "ModelEffortOffer",
+        "type": "object"
+      },
       "ModelStatusView": {
         "description": "One listed model as its owner sees it.\n\n``status`` is ``ready``, ``failed``, ``unsupported`` or (a backstop that a\nsaved model never shows) ``unverified``; ``runtimes`` are the agents a task\nmay run it with now, exactly what the execution gates accept. ``paths``\nand ``protocols`` are read-only diagnostics.",
         "properties": {
@@ -17860,6 +17942,24 @@
               }
             ],
             "title": "Checked At"
+          },
+          "efforts": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/EffortFactView"
+            },
+            "title": "Efforts",
+            "type": "object"
+          },
+          "efforts_checked_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Efforts Checked At"
           },
           "message": {
             "default": "",
@@ -42680,6 +42780,65 @@
           }
         },
         "summary": "Update Connection",
+        "tags": [
+          "model-connections"
+        ]
+      }
+    },
+    "/v1/agent/model-connections/{connection_id}/refresh-efforts": {
+      "post": {
+        "description": "Read again which reasoning levels the provider declares for this connection's models.\n\nFor a connection saved before these were read, or after the provider\nchanged what it declares. With the saved key at the saved Base URL: one of\nthe owner's hourly checks, at most two listing requests, no inference.\nOnly the effort facts of models verified at the connection's current state\nare written, and only while it is still that state (409 otherwise); a\nlisting that fails leaves its APIs ``unknown``. Nothing else changes and\nno running process is closed: a turn re-checks its level when it is\nclaimed.",
+        "operationId": "refresh_efforts_v1_agent_model_connections__connection_id__refresh_efforts_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelConnectionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Refresh Efforts",
         "tags": [
           "model-connections"
         ]

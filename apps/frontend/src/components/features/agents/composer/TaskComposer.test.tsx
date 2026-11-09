@@ -258,8 +258,9 @@ async function skillsMenuItem() {
   return screen.findByRole('menuitem', { name: /Skills/ });
 }
 
-function repositoryButton() {
-  return screen.findByRole('button', { name: /^Repository:/ });
+// Given a name, waits for it: a repository the link asked for lands a render later.
+function repositoryButton(shown?: string) {
+  return screen.findByRole('button', { name: shown ? `Repository: ${shown}` : /^Repository:/ });
 }
 
 function repositoryOptions(dialog: HTMLElement) {
@@ -436,7 +437,7 @@ describe('TaskComposer source-control onboarding', () => {
     vi.mocked(getAgentConfig).mockResolvedValue(config());
     vi.mocked(createAgentJob).mockResolvedValue({ id: 'new-job' } as AgentJobApi);
     render(<TaskComposer initialRepo=":temporary" />);
-    expect(await repositoryButton()).toHaveAccessibleName('Repository: Start from scratch');
+    expect(await repositoryButton('Start from scratch')).toBeInTheDocument();
     await openAttachMenu();
     fireEvent.click(await screen.findByRole('menuitem', { name: /Environment/ }));
     expect(screen.queryByRole('radio')).not.toBeInTheDocument();
@@ -2026,9 +2027,7 @@ describe('TaskComposer source-control onboarding', () => {
 
     render(<TaskComposer initialRepo="owner/requested" />);
 
-    expect(
-      await screen.findByRole('button', { name: 'Repository: owner/requested' }),
-    ).toBeInTheDocument();
+    expect(await repositoryButton('owner/requested')).toBeInTheDocument();
     await waitFor(() => expect(listRepoBranches).toHaveBeenCalledWith('owner/requested'));
   });
 
@@ -2192,7 +2191,7 @@ describe('TaskComposer source-control onboarding', () => {
 
     render(<TaskComposer initialRepo=":temporary" />);
 
-    expect(await repositoryButton()).toHaveAccessibleName('Repository: Start from scratch');
+    expect(await repositoryButton('Start from scratch')).toBeInTheDocument();
     expect(screen.queryByText(/is not available to you/)).not.toBeInTheDocument();
   });
 

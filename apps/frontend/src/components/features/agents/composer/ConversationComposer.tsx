@@ -3,6 +3,7 @@ import type { Ref, TextareaHTMLAttributes } from 'react';
 import { useApplePlatform } from '@/components/features/settings/keyboardShortcutPreferences';
 import { chordAriaLabel } from '@/lib/keyboardShortcuts';
 import { isComposerSubmit } from './composerKeys';
+import { effortOverride } from './effort';
 import { modelOverride, type ModelChoice } from './modelSource';
 
 /** The model, source and effort a follow-up inherits; a null or absent source cannot run. */
@@ -15,12 +16,14 @@ export interface InheritedModel {
 /**
  * What differs from `parent`, the turn the message inherits from when a field
  * is omitted. The model is compared with its source: the same model name on
- * another source is a change, and is sent as one (see `modelOverride`).
+ * another source is a change, and is sent as one (see `modelOverride`). The
+ * level is inherited too, so Auto under a parent that chose one is sent as
+ * `"auto"` (see `effortOverride`); `effort` is `''` for Auto.
  */
 export function composerOverrides(parent: InheritedModel, choice: ModelChoice, effort: string) {
   return {
     ...modelOverride(parent, choice),
-    ...(effort && effort !== parent.reasoningEffort ? { reasoning_effort: effort } : {}),
+    ...effortOverride(parent.reasoningEffort, effort),
   };
 }
 export function ComposerTextarea({

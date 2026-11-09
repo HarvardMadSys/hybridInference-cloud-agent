@@ -364,6 +364,41 @@ def test_a_retained_container_gets_this_hosts_helper_only_when_it_differs():
     assert activate[-2] == HELPER_PATH and activate[-1] == "444"
 
 
+@pytest.mark.parametrize("effort", ["minimal", "max"])
+def test_a_translated_codex_tells_its_helper_the_turns_level(effort):
+    argv, env = CodexRuntime().prepare_live(
+        workdir="/workspace",
+        model="chat-model",
+        model_base_url=ResponsesViaChatUrl(_URL),
+        credential=_KEY,
+        reasoning_effort=effort,
+    )
+    # The CLI is told too (its own Responses field, which the helper replaces).
+    assert f'model_reasoning_effort="{effort}"' in " ".join(argv)
+    assert env["AGENT_COMPAT_REASONING_EFFORT"] == effort
+
+
+def test_an_auto_translated_launch_is_what_it_was_before_levels():
+    _, env = CodexRuntime().prepare_live(
+        workdir="/workspace",
+        model="chat-model",
+        model_base_url=ResponsesViaChatUrl(_URL),
+        credential=_KEY,
+    )
+    assert "AGENT_COMPAT_REASONING_EFFORT" not in env
+
+
+def test_a_direct_launch_never_names_a_helper_level():
+    _, env = CodexRuntime().prepare_live(
+        workdir="/workspace",
+        model="gpt-5.1-codex",
+        model_base_url=ExactBaseUrl("https://api.example.com/v1"),
+        credential=_KEY,
+        reasoning_effort="high",
+    )
+    assert not any(name.startswith("AGENT_COMPAT_") for name in env)
+
+
 def test_the_helper_is_looked_for_once_per_container():
     """A direct plan starts behind it too, so a container's later launches skip the probe."""
     spec = SimpleNamespace(container_name="sandbox-1")

@@ -882,13 +882,9 @@ async def insert_follow_up(
         return {"error": "sandbox_context_lost"}
     turn_no = parent["turn_no"] + 1
     connection_id = model_connection_id if model else parent["model_connection_id"]
-    # An owner connection takes no effort setting, so a switch onto one never
-    # carries the Gateway turn's depth along with it.
-    effort = (
-        None
-        if reset_reasoning_effort or connection_id
-        else (reasoning_effort or parent["reasoning_effort"])
-    )
+    # Inherited like the model; the caller checked the resulting level against
+    # the connection's declared levels (``require_usable``).
+    effort = None if reset_reasoning_effort else (reasoning_effort or parent["reasoning_effort"])
     previous_skills = load_json(parent["skills"]) if parent["skills"] is not None else None
     selected_skills = previous_skills if skills is None else skills
     if selected_skills == [] and previous_skills is None:

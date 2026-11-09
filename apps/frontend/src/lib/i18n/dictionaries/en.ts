@@ -911,6 +911,7 @@ export const en = {
   'attach.mcpTools': '{count} tools',
   'attach.mcpAdd': 'Add MCP',
   'attach.mcpRetry': 'Try again',
+  'attach.mcpManage': 'Manage connection',
   'attach.mcpDisabled': 'turned off',
   'attach.mcpDraft': 'not finished',
   'attach.mcpNeedsSignIn': 'needs sign-in',

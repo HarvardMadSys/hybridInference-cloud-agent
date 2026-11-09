@@ -22,7 +22,9 @@ argv refuses the launch), and every ``AGENT_COMPAT_*`` variable, the upstream
 key among them, is removed from its environment.
 
 The service is bound at launch to one client protocol, one upstream URL, one
-key and one model; a request cannot choose any of them. It answers only the
+key, one model and the turn's reasoning level (none at Auto); a request cannot
+choose any of them. At a level, every upstream request carries it as
+``reasoning_effort``; the CLI's own effort field is never forwarded. It answers only the
 client's own endpoint, and only to a caller presenting the member's token
 (issued by the control plane for this member alone): other members of the
 group share the loopback interface, so the address alone protects nothing,
@@ -78,6 +80,7 @@ from cloud_agent_shared.protocol_compat import (
     CLIENTS,
     ENV_CLIENT,
     ENV_MODEL,
+    ENV_REASONING_EFFORT,
     ENV_TOKEN,
     ENV_UPSTREAM_KEY,
     ENV_UPSTREAM_URL,
@@ -98,6 +101,8 @@ if TYPE_CHECKING:
 
 #: A token shorter than this is not one the control plane issued.
 MIN_TOKEN_CHARS = 32
+#: A reasoning level is a short word (``low``, ``xhigh``…).
+MAX_EFFORT_CHARS = 16
 
 #: The one path each client protocol is served at.
 CLIENT_PATHS = {RESPONSES: "/v1/responses", ANTHROPIC_MESSAGES: "/v1/messages"}
@@ -138,6 +143,8 @@ class Binding:
     model: str
     api_key: str = field(repr=False)
     token: str = field(repr=False)
+    #: The turn's level, checked by the control plane; empty is Auto.
+    reasoning_effort: str = ""
 
     @classmethod
     def from_launch(cls, env: MutableMapping[str, str], argv: list[str]) -> Binding:
@@ -149,6 +156,11 @@ class Binding:
             raise LaunchError("incomplete model protocol compatibility launch")
         if any(TOKEN_PLACEHOLDER in arg for arg in argv):
             raise LaunchError("a token never goes in a process argument")
+        effort = values[ENV_REASONING_EFFORT]
+        if effort and not (
+            len(effort) <= MAX_EFFORT_CHARS and effort.isascii() and effort.isalpha()
+        ):
+            raise LaunchError("a reasoning level is one plain word")
         parts = urlsplit(url)
         if parts.scheme != "https" or not parts.hostname or parts.query or parts.fragment:
             raise LaunchError("the upstream must be a plain https URL")
@@ -160,6 +172,7 @@ class Binding:
             model=model,
             api_key=key,
             token=token,
+            reasoning_effort=effort,
         )
 
 
@@ -383,7 +396,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             body = self._read_body()
-            prepared = prepare(binding.client, body, binding.model)
+            prepared = prepare(binding.client, body, binding.model, binding.reasoning_effort)
         except CompatRejected as rejected:
             _log(f"refused a request ({rejected.status})")
             self._error(rejected.status, rejected.message)

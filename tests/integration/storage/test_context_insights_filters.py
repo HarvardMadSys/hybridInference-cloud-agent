@@ -470,12 +470,17 @@ async def test_composition_stays_linear_whatever_the_planner_knows(db, store):
             # What a test-db-local run left: the conversations vacuumed and
             # counted (all-visible, so index-only scans look free) but no
             # column statistics, and the runs never counted.
-            (("agent_threads",), ()),
-            ((), ()),
-            ((), ("agent_attempts", "agent_attempt_context_profiles")),
-            ((), tables),
+            (("agent_threads",), (), ()),
+            ((), (), ()),
+            ((), ("agent_attempts", "agent_attempt_context_profiles"), ()),
+            ((), tables, ()),
+            # What autovacuum leaves when it counts the profiles while they are
+            # being written: their pages, but none of the uncommitted rows. CI
+            # met it on 2026-11-04, and the profiles, believed empty, were
+            # scanned whole for every attempt and every run (12 M rows).
+            ((), (), ("agent_attempt_context_profiles",)),
         )
-        for vacuumed, known in cases:
+        for vacuumed, known, counted_empty in cases:
             for table in vacuumed:
                 await conn.execute(f"VACUUM ANALYZE {table}")
             # Statistics survive the reset's TRUNCATE; forget them, then
@@ -485,6 +490,10 @@ async def test_composition_stays_linear_whatever_the_planner_knows(db, store):
             )
             for table in known:
                 await conn.execute(f"ANALYZE {table}")
+            await conn.execute(
+                "UPDATE pg_class SET reltuples = 0 WHERE oid = ANY($1::regclass[])",
+                list(counted_empty),
+            )
             async with conn.transaction():
                 await conn.execute("SET LOCAL statement_timeout = '30s'")
                 await conn.execute("SET LOCAL plan_cache_mode = force_custom_plan")
@@ -493,7 +502,7 @@ async def test_composition_stays_linear_whatever_the_planner_knows(db, store):
                 )
                 rows = await conn.fetch(context_queries._COMPOSITION_SQL, *params)
             [explained] = json.loads(plan)
-            case = (vacuumed, known)
+            case = (vacuumed, known, counted_empty)
             # A few index lookups per run; the rescanning plan visited about
             # a thousand rows per run here, and more the longer the history.
             assert _row_visits(explained["Plan"]) < 40 * runs, case

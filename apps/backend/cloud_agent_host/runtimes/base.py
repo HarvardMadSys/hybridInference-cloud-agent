@@ -11,6 +11,7 @@ from cloud_agent_shared.model_connections import ANTHROPIC_MESSAGES, RESPONSES
 from cloud_agent_shared.protocol_compat import (
     ENV_CLIENT,
     ENV_MODEL,
+    ENV_REASONING_EFFORT,
     ENV_UPSTREAM_KEY,
     ENV_UPSTREAM_URL,
     ORIGIN_PLACEHOLDER,
@@ -193,21 +194,41 @@ def compat_launch(
     credential: str,
     *,
     model: str,
+    reasoning_effort: str | None = None,
 ) -> tuple[list[str], dict[str, str]]:
     """The CLI's launch behind the member's compatibility helper.
 
     The argv gains the launcher in front; the upstream's URL and key travel in
     the environment the launcher consumes and removes before it becomes the
     CLI (``cloud_agent_host.protocol_translator``). ``model`` locks the helper to one model;
-    empty takes the CLI's own ``--model`` argument.
+    empty takes the CLI's own ``--model`` argument. ``reasoning_effort`` is
+    the turn's level, which the helper sends upstream; ``None`` (Auto) adds
+    nothing, so an Auto launch is what it was before levels were offered.
     """
-    return [*COMPAT_LAUNCHER, *argv], {
-        **env,
-        ENV_CLIENT: url.client_protocol,
-        ENV_UPSTREAM_URL: str(url),
-        ENV_UPSTREAM_KEY: credential,
-        ENV_MODEL: model,
-    }
+    return [*COMPAT_LAUNCHER, *argv], compat_effort_env(
+        {
+            **env,
+            ENV_CLIENT: url.client_protocol,
+            ENV_UPSTREAM_URL: str(url),
+            ENV_UPSTREAM_KEY: credential,
+            ENV_MODEL: model,
+        },
+        reasoning_effort,
+    )
+
+
+def compat_effort_env(env: dict[str, str], reasoning_effort: str | None) -> dict[str, str]:
+    """``env`` with the helper told the turn's level, when it is a translated launch.
+
+    A direct launch, or Auto, is returned unchanged; a level already there is
+    replaced, so a launch template built at Auto can be bound to its turn's.
+    """
+    if ENV_CLIENT not in env:
+        return env
+    bound = {key: value for key, value in env.items() if key != ENV_REASONING_EFFORT}
+    if reasoning_effort:
+        bound[ENV_REASONING_EFFORT] = reasoning_effort
+    return bound
 
 
 def compat_cli_credential(credential: str) -> str:

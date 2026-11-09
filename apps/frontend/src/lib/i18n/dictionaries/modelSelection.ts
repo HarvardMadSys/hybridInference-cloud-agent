@@ -26,6 +26,14 @@ export const modelSelectionEn = {
   'picker.noResults': 'No matching options',
   'composer.model': 'Model',
   'composer.reasoning': 'Reasoning',
+  'composer.reasoningForTurn': 'Reasoning for this turn',
+  'effort.auto': 'Auto',
+  'effort.autoOnly': 'Auto only',
+  'effort.unknown':
+    "This model's provider does not declare which reasoning levels it accepts, so it runs at the provider's default. Refresh its reasoning levels in Settings once the provider declares them.",
+  'effort.unsupported':
+    "This model's provider declares no reasoning level this agent can send, so it runs at the provider's default.",
+  'effort.dropped': '{level} is not offered for this model; reasoning is back on Auto.',
 } as const;
 
 export const modelSelectionZhCN = {
@@ -52,4 +60,11 @@ export const modelSelectionZhCN = {
   'picker.noResults': '没有匹配的选项',
   'composer.model': '模型',
   'composer.reasoning': '推理强度',
+  'composer.reasoningForTurn': '本轮推理强度',
+  'effort.auto': '自动',
+  'effort.autoOnly': '仅自动',
+  'effort.unknown':
+    '此模型的服务商没有声明支持哪些推理强度，因此按服务商默认值运行。服务商声明后，可在设置中刷新推理强度。',
+  'effort.unsupported': '此模型的服务商没有声明此 Agent 可发送的推理强度，因此按服务商默认值运行。',
+  'effort.dropped': '此模型不提供 {level}，推理强度已改回自动。',
 } as const;

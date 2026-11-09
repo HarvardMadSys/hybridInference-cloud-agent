@@ -456,6 +456,7 @@ def _manager(guest: _Guest) -> ChatSandboxManager:
     manager.exact._proven.note_helper(proven, helper_key())
     manager.exec_capture = guest.exec_capture
     manager.spawn = lambda *_a, **_kw: guest.events.append(("spawn", None, None))
+    manager.await_member_launch = lambda *_a, **_kw: None
     for root_only in ("ensure_mcp_helpers", "ensure_kilo_mcp_runtime", "ensure_codex_mcp_policy"):
         setattr(manager, root_only, lambda *_a: None)
     return manager
@@ -667,6 +668,7 @@ def test_claude_slot_is_reaped_before_new_member_launch_state(monkeypatch):
             or subprocess.CompletedProcess(argv, 0, b"", b"")
         ),
         spawn=lambda *_args, **_kwargs: events.append("spawn"),
+        await_member_launch=lambda *_args, **_kwargs: None,
     )
     factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
     monkeypatch.setattr(

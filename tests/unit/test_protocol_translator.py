@@ -106,7 +106,7 @@ def upstream(monkeypatch):
     fake.server.shutdown()
 
 
-def _binding(client: str) -> Binding:
+def _binding(client: str, effort: str = "") -> Binding:
     env = {
         "AGENT_COMPAT_CLIENT": client,
         "AGENT_COMPAT_UPSTREAM_URL": "https://provider.example/prefix/v1",
@@ -114,7 +114,18 @@ def _binding(client: str) -> Binding:
         "AGENT_COMPAT_MODEL": "m",
         "AGENT_COMPAT_TOKEN": _TOKEN,
     }
+    if effort:
+        env["AGENT_COMPAT_REASONING_EFFORT"] = effort
     return Binding.from_launch(env, ["cli"])
+
+
+def _serve(binding: Binding):
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(16)
+    server = _Server(sock, binding)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, sock.getsockname()[1]
 
 
 @pytest.fixture(params=["responses", "anthropic_messages"])
@@ -391,6 +402,65 @@ def test_a_non_streamed_request_is_answered_whole(service, upstream):
     status, text = _call(port, _path(binding), token=_TOKEN, body=_body(binding, stream=False))
     assert status == 200 and "done" in text
     assert "stream" not in upstream.requests[0]["body"]
+
+
+#: What each CLI puts in its own effort field. Claude Code sends ``high`` at
+#: Auto too (tests/fixtures/agent_runtime_streams/effort_wire_shapes.md).
+_CLIENT_EFFORT = {
+    "responses": {"reasoning": {"effort": "high", "summary": "auto"}},
+    "anthropic_messages": {"output_config": {"effort": "high"}},
+}
+
+
+@pytest.mark.parametrize("client", ["responses", "anthropic_messages"])
+@pytest.mark.parametrize("effort", ["low", "max"])
+def test_a_chosen_level_reaches_the_chat_upstream_on_every_request(upstream, client, effort):
+    """The original bug: the helper popped the level, so a chosen effort never left it."""
+    binding = _binding(client, effort)
+    server, port = _serve(binding)
+    try:
+        for body in (_body(binding, **_CLIENT_EFFORT[client]), _body(binding)):
+            assert _call(port, _path(binding), token=_TOKEN, body=body)[0] == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+    sent = [request["body"] for request in upstream.requests]
+    assert [body.get("reasoning_effort") for body in sent] == [effort, effort]
+    for body in sent:
+        assert "output_config" not in body and "reasoning" not in body
+
+
+@pytest.mark.parametrize("client", ["responses", "anthropic_messages"])
+def test_at_auto_no_level_reaches_the_upstream_whatever_the_cli_sends(upstream, client):
+    binding = _binding(client)
+    assert binding.reasoning_effort == ""
+    server, port = _serve(binding)
+    try:
+        body = _body(binding, **_CLIENT_EFFORT[client])
+        assert _call(port, _path(binding), token=_TOKEN, body=body)[0] == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+    (sent,) = upstream.requests
+    assert "reasoning_effort" not in sent["body"]
+
+
+def test_a_level_is_one_plain_word_from_the_launch_only():
+    with pytest.raises(LaunchError, match="reasoning level"):
+        _binding("responses", "high; rm -rf /")
+    with pytest.raises(LaunchError, match="reasoning level"):
+        _binding("responses", "x" * 40)
+    env = {
+        "AGENT_COMPAT_CLIENT": "responses",
+        "AGENT_COMPAT_UPSTREAM_URL": "https://provider.example/v1",
+        "AGENT_COMPAT_UPSTREAM_KEY": _KEY,
+        "AGENT_COMPAT_MODEL": "m",
+        "AGENT_COMPAT_TOKEN": _TOKEN,
+        "AGENT_COMPAT_REASONING_EFFORT": "xhigh",
+    }
+    assert Binding.from_launch(env, ["cli"]).reasoning_effort == "xhigh"
+    # Consumed with the other launch variables: the CLI never sees it.
+    assert "AGENT_COMPAT_REASONING_EFFORT" not in env
 
 
 def test_a_launch_without_its_token_key_or_https_upstream_starts_nothing():

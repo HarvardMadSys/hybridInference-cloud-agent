@@ -1,4 +1,5 @@
-import { expect, test, type Page } from '@playwright/test';
+import { type Page } from '@playwright/test';
+import { expect, test } from './network-change';
 
 // Admin → Users in the production build: the old Accounts address lands on it,
 // it is the first admin section, its quick views write the address bar, and

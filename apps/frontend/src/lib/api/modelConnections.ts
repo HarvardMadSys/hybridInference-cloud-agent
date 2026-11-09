@@ -29,6 +29,19 @@ export interface AgentPath {
   upstream_protocol: ModelProtocol;
 }
 
+/**
+ * What the provider's model listing declared about one API's reasoning levels
+ * for a model: `supported` with `levels`, `unsupported`, or `unknown` with a
+ * `reason` (`not_read`: never read; `listing_unavailable`; `not_listed`;
+ * `not_declared`; `conflicting_declarations`: two shapes in one entry disagree).
+ */
+export interface EffortFact {
+  status: 'supported' | 'unsupported' | 'unknown';
+  levels: string[];
+  source?: string;
+  reason?: string;
+}
+
 export interface ModelStatus {
   model: string;
   status: ModelStatusKind;
@@ -39,6 +52,9 @@ export interface ModelStatus {
   paths: AgentPath[];
   protocols: Partial<Record<ModelProtocol, ProtocolResult>>;
   checked_at: string | null;
+  /** Per API; absent from a control plane that predates it. */
+  efforts?: Partial<Record<ModelProtocol, EffortFact>>;
+  efforts_checked_at?: string | null;
 }
 
 export interface ModelConnection {
@@ -155,6 +171,16 @@ export async function updateModelConnection(
   changes: Partial<ModelConnectionInput> & { enabled?: boolean },
 ): Promise<ModelConnection> {
   return connectionJson(await fetchWithAuth(config.apiBase, path(id), json('PATCH', changes)));
+}
+
+/**
+ * Read again which reasoning levels the provider declares for this
+ * connection's models: one hourly check, no inference, nothing else changes.
+ */
+export async function refreshModelConnectionEfforts(id: string): Promise<ModelConnection> {
+  return connectionJson(
+    await fetchWithAuth(config.apiBase, path(id, '/refresh-efforts'), { method: 'POST' }),
+  );
 }
 
 export async function deleteModelConnection(id: string): Promise<void> {

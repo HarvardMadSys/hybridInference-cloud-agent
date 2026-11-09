@@ -49,6 +49,7 @@ def test_the_chat_sandbox_manager_keeps_its_methods() -> None:
         "_validate_extra_args",
         "_validate_member_identity",
         "_validate_member_pidfile",
+        "await_member_launch",
         "begin_guest_observation",
         "build_create_command",
         "build_exec_command",

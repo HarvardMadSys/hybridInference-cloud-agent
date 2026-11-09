@@ -102,6 +102,8 @@ MAX_REQUEST_HEAD = 16 * 1024
 #: the service user, which can do less than a member. ``status`` reports which
 #: mode is in effect.
 ALLOW_UNSANDBOXED = True
+#: A D-Bus address no client can parse, so every bus call fails at once.
+NO_DBUS = "disabled:"
 
 WEBSOCKET_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 PR_SET_PDEATHSIG = 1
@@ -689,15 +691,22 @@ def chromium_argv(profile: str, *, sandboxed: bool) -> list[str]:
 
 
 def chromium_env(profile: str, environ: dict[str, str] | None = None) -> dict[str, str]:
-    """The service's environment, with a home Chromium can write.
+    """The service's environment, with a home Chromium can write and no D-Bus.
 
     Chromium's crash handler refuses to start without a writable home, and a
     uid with no passwd entry gets ``/``. The profile's parent is the service's.
+
+    Headless Chromium needs nothing from D-Bus, but it still calls the session
+    and system buses while it starts, and waits on a bus that accepts a
+    connection without answering: past READY_TIMEOUT_S, so it never answers
+    either. An address it cannot parse fails each call at once.
     """
     env = dict(os.environ if environ is None else environ)
     home = env.get("HOME", "")
     if not home or not os.access(home, os.W_OK):
         env["HOME"] = os.path.dirname(os.path.normpath(profile))
+    env["DBUS_SESSION_BUS_ADDRESS"] = NO_DBUS
+    env["DBUS_SYSTEM_BUS_ADDRESS"] = NO_DBUS
     return env
 
 
@@ -1589,7 +1598,11 @@ def service_stop(paths: Paths) -> bool:
 
 def _spawn(paths: Paths, *, idle_s: float) -> dict[str, Any]:
     ready_r, ready_w = os.pipe()
-    log = os.open(paths.log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o640)
+    # O_APPEND: Chromium appends to the same file, and without it the
+    # service's own lines overwrite Chromium's first ones.
+    log = os.open(
+        paths.log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_APPEND | os.O_NOFOLLOW, 0o640
+    )
     try:
         subprocess.Popen(  # this script, re-executed isolated
             [

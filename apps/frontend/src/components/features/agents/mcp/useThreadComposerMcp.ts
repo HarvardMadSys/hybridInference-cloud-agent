@@ -83,8 +83,9 @@ export function useThreadComposerMcp(threadId?: string) {
     toolCount: binding.capabilities.filter((capability) => capability.kind === 'tool').length,
     busy: saving,
     error: binding.error ?? undefined,
-    // Unavailable servers can still be disabled for this conversation.
-    blocked: !binding.available && !binding.enabled,
+    // Availability belongs to the account connection, not this conversation's
+    // preference. Keep the switch reversible even while the connection is off.
+    blocked: false,
   }));
   return {
     choices,
