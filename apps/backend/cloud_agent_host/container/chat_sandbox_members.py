@@ -833,12 +833,14 @@ class MemberExecMixin(GuestRootExec):
         return results[0], results[1]
 
 
-#: The member reaper's exit when no process receipt appeared in its wait.
 #: How long a launcher may take to start its meter and become the CLI.
 _AWAIT_LAUNCH_TIMEOUT_S = 15
 #: ``$1`` the receipt, ``$2`` the launcher's path. Exit 125: no receipt in
 #: time; 126: the process ended, or its PID now names another; 124: the
 #: launcher never became the CLI. The receipt's start time fences PID reuse.
+#: An exiting process has an empty command line before it turns Z, so only a
+#: non-empty one that is not the launcher's is the CLI; an empty one is looked
+#: at again, and then reads as ended.
 _AWAIT_LAUNCH_SCRIPT = (
     'set -u; pidfile="$1"; launcher="$2"; attempt=0; '
     f"limit={_AWAIT_LAUNCH_TIMEOUT_S * 50}; "
@@ -852,9 +854,10 @@ _AWAIT_LAUNCH_SCRIPT = (
     "set -- $fields; "
     'case "${1:-}" in Z|X) exit 126;; esac; [ "${20:-}" = "$started" ] || exit 126; '
     'argv=$(tr "\\000" "\\n" < "/proc/$pid/cmdline" 2>/dev/null) || exit 126; '
-    'printf "%s\\n" "$argv" | grep -qxF -- "$launcher" || exit 0; '
+    'if [ -n "$argv" ]; then printf "%s\\n" "$argv" | grep -qxF -- "$launcher" || exit 0; fi; '
     'attempt=$((attempt + 1)); [ "$attempt" -lt "$limit" ] || exit 124; sleep 0.02; done'
 )
+#: The member reaper's exit when no process receipt appeared in its wait.
 _REAPER_NO_RECEIPT = 125
 
 #: How long a killed command whose receipt is gone may take to finish exiting.
