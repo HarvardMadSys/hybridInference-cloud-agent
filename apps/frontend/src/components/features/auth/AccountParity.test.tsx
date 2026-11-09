@@ -4,6 +4,9 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '@/lib/api/accounts';
 import * as self from '@/lib/api/accountSelf';
+import * as adminSettings from '@/lib/api/adminSettings';
+import type { AgentAdminSettings } from '@/lib/api/adminSettings';
+import { APIError } from '@/lib/utils/errors';
 import type { AccountIdentity, AuthOptions } from '@/lib/api/accounts';
 import { SignupPage } from './SignupPage';
 import { LocalLogin } from './LocalLogin';
@@ -34,6 +37,10 @@ vi.mock('@/lib/api/accounts', () => ({
   removeBrowserAccount: vi.fn(),
   signOutEverywhereHere: vi.fn(),
   createSetupAdmin: vi.fn(),
+}));
+vi.mock('@/lib/api/adminSettings', () => ({
+  getAgentAdminSettings: vi.fn(),
+  setAgentAdminSettings: vi.fn(),
 }));
 vi.mock('@/lib/api/accountSelf', () => ({
   getOwnAccount: vi.fn(),
@@ -81,7 +88,10 @@ async function agreeToTerms() {
 beforeEach(() => {
   vi.resetAllMocks();
   vi.mocked(api.getAuthOptions).mockResolvedValue(OPTIONS);
-  Object.defineProperty(window, 'location', { value: { assign }, writable: true });
+  Object.defineProperty(window, 'location', {
+    value: { assign, origin: 'https://agent.example.edu' },
+    writable: true,
+  });
 });
 afterEach(cleanup);
 
@@ -370,24 +380,106 @@ describe('account security', () => {
   });
 });
 
+function settingsSnapshot(webBaseUrl: string | null, revision = 3): AgentAdminSettings {
+  return {
+    revision,
+    definitions: [],
+    values: { web_base_url: webBaseUrl },
+    secret_configured: {},
+    bootstrap: [],
+  };
+}
+/** Complete step 1 and wait for the site-address step. */
+async function createAdministrator() {
+  vi.mocked(api.getAuthOptions).mockResolvedValue({ ...OPTIONS, setup_required: true });
+  vi.mocked(api.createSetupAdmin).mockResolvedValue({ id: 'root' } as never);
+  render(<FirstRunSetup />);
+  expect(currentStep()).toBe('Administrator');
+  fill('Setup code', 'ABCD-EFGH-JKLM');
+  fill('Username', 'root');
+  fill('Password', 'Goodpass123');
+  fill('Confirm password', 'Goodpass123');
+  fireEvent.submit(screen.getByRole('button', { name: 'Create administrator' }).closest('form')!);
+  await screen.findByRole('heading', { name: 'Confirm the site address' });
+}
+const siteField = () => screen.getByLabelText('Web app URL') as HTMLInputElement;
+const saveButton = () => screen.getByRole('button', { name: 'Save and continue' });
+
 describe('first-run setup', () => {
-  it('creates the administrator with the setup code and opens administration', async () => {
-    vi.mocked(api.getAuthOptions).mockResolvedValue({ ...OPTIONS, setup_required: true });
-    vi.mocked(api.createSetupAdmin).mockResolvedValue({ id: 'root' } as never);
-    render(<FirstRunSetup />);
-    fill('Setup code', 'ABCD-EFGH-JKLM');
-    fill('Username', 'root');
-    fill('Password', 'Goodpass123');
-    fill('Confirm password', 'Goodpass123');
-    fireEvent.submit(screen.getByRole('button', { name: 'Create administrator' }).closest('form')!);
-    await waitFor(() =>
-      expect(api.createSetupAdmin).toHaveBeenCalledWith({
-        setup_code: 'ABCD-EFGH-JKLM',
-        login_name: 'root',
-        password: 'Goodpass123',
-        display_name: undefined,
-      }),
+  it('creates the administrator with the setup code, then asks for the site address', async () => {
+    vi.mocked(adminSettings.getAgentAdminSettings).mockResolvedValue(settingsSnapshot(null));
+    await createAdministrator();
+    expect(api.createSetupAdmin).toHaveBeenCalledWith({
+      setup_code: 'ABCD-EFGH-JKLM',
+      login_name: 'root',
+      password: 'Goodpass123',
+      display_name: undefined,
+    });
+    expect(steps()).toEqual(['Administrator', 'Site address', 'First server']);
+    expect(currentStep()).toBe('Site address');
+    expect(assign).not.toHaveBeenCalled();
+  });
+  it('prefills an unset address with this page’s origin and saves it at the read revision', async () => {
+    vi.mocked(adminSettings.getAgentAdminSettings).mockResolvedValue(settingsSnapshot('', 7));
+    vi.mocked(adminSettings.setAgentAdminSettings).mockResolvedValue(settingsSnapshot('x', 8));
+    await createAdministrator();
+    await waitFor(() => expect(adminSettings.getAgentAdminSettings).toHaveBeenCalled());
+    expect(siteField().value).toBe('https://agent.example.edu');
+    expect(screen.queryByText(/already saved/)).toBeNull();
+    fill('Web app URL', ' https://lab.example.edu ');
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/hosts'));
+    expect(adminSettings.setAgentAdminSettings).toHaveBeenCalledWith(
+      { web_base_url: 'https://lab.example.edu' },
+      7,
     );
-    expect(assign).toHaveBeenCalledWith('/admin/users');
+  });
+  it('shows an address already saved, and continues without rewriting it', async () => {
+    vi.mocked(adminSettings.getAgentAdminSettings).mockResolvedValue(
+      settingsSnapshot('https://saved.example.edu'),
+    );
+    await createAdministrator();
+    await waitFor(() => expect(siteField().value).toBe('https://saved.example.edu'));
+    expect(screen.getByText(/This address is already saved/)).toBeInTheDocument();
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/hosts'));
+    expect(adminSettings.setAgentAdminSettings).not.toHaveBeenCalled();
+  });
+  it('shows why the API refused the address and stays on the step', async () => {
+    vi.mocked(adminSettings.getAgentAdminSettings).mockResolvedValue(settingsSnapshot(null));
+    vi.mocked(adminSettings.setAgentAdminSettings).mockRejectedValue(
+      // How `jsonOrThrow` reports the API's 422 with a plain `detail`.
+      new APIError('UNKNOWN_ERROR', 'web_base_url must be an http(s) URL', 422),
+    );
+    await createAdministrator();
+    await waitFor(() => expect(adminSettings.getAgentAdminSettings).toHaveBeenCalled());
+    fireEvent.click(saveButton());
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'web_base_url must be an http(s) URL',
+    );
+    expect(assign).not.toHaveBeenCalled();
+    expect(saveButton()).toBeEnabled();
+  });
+  it('can skip the address and still go on to add a server', async () => {
+    vi.mocked(adminSettings.getAgentAdminSettings).mockResolvedValue(settingsSnapshot(null));
+    await createAdministrator();
+    fireEvent.click(screen.getByRole('button', { name: 'Skip for now' }));
+    expect(assign).toHaveBeenCalledWith('/admin/hosts');
+    expect(adminSettings.setAgentAdminSettings).not.toHaveBeenCalled();
+  });
+  it('reads the revision when saving if the first read failed', async () => {
+    vi.mocked(adminSettings.getAgentAdminSettings)
+      .mockRejectedValueOnce(new Error('Settings cannot be loaded.'))
+      .mockResolvedValueOnce(settingsSnapshot(null, 4));
+    vi.mocked(adminSettings.setAgentAdminSettings).mockResolvedValue(settingsSnapshot('x', 5));
+    await createAdministrator();
+    expect(await screen.findByRole('alert')).toHaveTextContent('Settings cannot be loaded.');
+    expect(siteField().value).toBe('https://agent.example.edu');
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/hosts'));
+    expect(adminSettings.setAgentAdminSettings).toHaveBeenCalledWith(
+      { web_base_url: 'https://agent.example.edu' },
+      4,
+    );
   });
 });

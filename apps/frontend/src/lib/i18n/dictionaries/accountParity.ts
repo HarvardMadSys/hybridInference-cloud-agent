@@ -58,6 +58,19 @@ export const accountParityEn = {
   'setup.loginName': 'Username',
   'setup.create': 'Create administrator',
   'setup.done': 'This deployment already has an administrator.',
+  'setup.stepAdmin': 'Administrator',
+  'setup.stepSite': 'Site address',
+  'setup.stepServer': 'First server',
+  'setup.siteTitle': 'Confirm the site address',
+  'setup.siteDescription':
+    'Account emails link to this address, and sign-in and connection callbacks must come from it. Use the address people type to open this site.',
+  'setup.siteUrl': 'Web app URL',
+  'setup.siteHint':
+    'For example https://agent.example.edu. You can change it later in Admin → Settings.',
+  'setup.siteSaved':
+    'This address is already saved. Change it only if people open the site somewhere else.',
+  'setup.siteSave': 'Save and continue',
+  'setup.siteSkip': 'Skip for now',
 
   'security.title': 'Account',
   'security.description': 'Manage how you sign in and your password, or delete your account.',
@@ -157,6 +170,17 @@ export const accountParityZh: Record<keyof typeof accountParityEn, string> = {
   'setup.loginName': '用户名',
   'setup.create': '创建管理员',
   'setup.done': '本部署已有管理员。',
+  'setup.stepAdmin': '管理员',
+  'setup.stepSite': '站点地址',
+  'setup.stepServer': '第一台服务器',
+  'setup.siteTitle': '确认站点地址',
+  'setup.siteDescription':
+    '账号邮件中的链接指向此地址，登录和连接回调也必须来自此地址。请填写用户打开本站时输入的地址。',
+  'setup.siteUrl': 'Web 应用地址',
+  'setup.siteHint': '例如 https://agent.example.edu。之后可在“管理后台 → Settings”中修改。',
+  'setup.siteSaved': '此地址已保存。仅当用户通过其他地址访问本站时才需修改。',
+  'setup.siteSave': '保存并继续',
+  'setup.siteSkip': '暂时跳过',
 
   'security.title': '账号',
   'security.description': '管理登录方式和密码，或删除账号。',
