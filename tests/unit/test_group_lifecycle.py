@@ -490,10 +490,12 @@ def test_combinations_are_logged_when_first_seen_and_counted_hourly(
     now[0] = 3600.0
     counts.observe(("start",), site="end_start")
 
-    events = [(record.getMessage(), record.__dict__) for record in caplog.records]
-    first_seen = [extra["combination"] for message, extra in events if message.endswith("ation")]
+    events = [(record.__dict__.get("event"), record.__dict__) for record in caplog.records]
+    first_seen = [
+        extra["combination"] for event, extra in events if event == "group_lifecycle_combination"
+    ]
     assert first_seen == ["start", "idle"]
     reports = [
-        extra["counts"] for message, extra in events if message.endswith("combination_counts")
+        extra["counts"] for event, extra in events if event == "group_lifecycle_combination_counts"
     ]
     assert reports == [{"start": 3, "idle": 1}]
