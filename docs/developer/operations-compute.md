@@ -220,7 +220,7 @@ recovery. Start with these operator templates:
 
 - [`compute.example.json`](../../deploy/control-plane/compute.example.json)
 - [`compute-host.env.example`](../../deploy/control-plane/compute-host.env.example)
-- [Host field descriptions](../../deploy/host/.env.example)
+- [Host field descriptions](operations.md#host-configuration-reference)
 
 Copy them to a private configuration directory. Replace every example address,
 token, network and all-zero digest/revision. Keep these files outside Git.

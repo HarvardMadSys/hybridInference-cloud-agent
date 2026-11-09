@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-04 08:10-0500\n"
+"POT-Creation-Date: 2026-11-09 03:25-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -581,8 +581,8 @@ msgid ""
 msgstr ""
 
 #: ../developer/operations-compute.md:223
-msgid "[Host field descriptions](../../deploy/host/.env.example)"
-msgstr "[Host 各字段说明](../../deploy/host/.env.example)"
+msgid "[Host field descriptions](operations.md#host-configuration-reference)"
+msgstr "[主机字段说明](operations.md#host-configuration-reference)"
 
 #: ../developer/operations-compute.md:225
 msgid ""
@@ -1823,4 +1823,7 @@ msgstr ""
 "接入线上流量之前，在同一台 Host 上完整走一遍：部署、跑一个真实任务、续接保留的会话、做一次 Fork，以此确认选定的 CloudLab "
 "profile 没问题。续期成功和单元测试都证明不了这个 profile 的虚拟化和网络是合适的。适配器测试模拟了 HTTP 和 "
 "SSH，既不会连接 CloudLab，也不会消耗它的资源。"
+
+#~ msgid "[Host field descriptions](../../deploy/host/.env.example)"
+#~ msgstr "[Host 各字段说明](../../deploy/host/.env.example)"
 

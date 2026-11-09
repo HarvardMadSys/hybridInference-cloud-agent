@@ -57,27 +57,29 @@ Use [deployment reliability](deployment-reliability.md) and
 
 ## 1. Configure
 
-Use separate, private environment files for the control plane and host. Start
-from [`control-plane/.env.example`](../../deploy/control-plane/.env.example) and
-[`host/.env.example`](../../deploy/host/.env.example); [ENVIRONMENT.md](../../ENVIRONMENT.md)
-is the reference.
+Neither machine needs a hand-written environment file.
+[ENVIRONMENT.md](../../ENVIRONMENT.md) is the reference for the optional
+overrides.
 
-Leave the control plane's keys empty. On a new deployment root with the
-bundled database, the first `deploy.sh` run generates the database password
-and DSN, `AGENT_LOCAL_SESSION_SECRET` and `AGENT_SETTINGS_ENCRYPTION_KEY` into
-its `.env`, and the control plane generates its host signing and credential
-encryption keys into its settings
-([new installation](operations.md#admin-settings)). Keep that `.env` out of
-version control and stable so saved connections and settings remain
+The control plane needs no `.env`. On its first start with the bundled
+database, the `keys` service generates the database password and DSN,
+`AGENT_LOCAL_SESSION_SECRET` and `AGENT_SETTINGS_ENCRYPTION_KEY` into the
+`agent-keys` volume, and the control plane generates its host signing and
+credential encryption keys into its settings
+([new installation](operations.md#admin-settings)). Keep that volume, and a
+backup of it apart from the database, so saved connections and settings remain
 decryptable. None of these keys is shared with any other service.
 
-- [ ] Set `AGENT_WEB_BASE_URL` and `AGENT_PUBLIC_API_URL`; the app is served at
-      the root of its hostname with the API at `/api`. Set no `GATEWAY_*`, `IDENTITY_*` or `AGENT_AUTH_MODE`:
-      the control plane and `deploy.sh` refuse them.
-- [ ] Set explicit Compose project names, sandbox image, enrolled host name,
-      sandbox manager credential/reverse route, both tunnel destinations and keys,
-      and the host's non-overlapping egress pool/resolver.
-- [ ] Render configuration privately using the active environment file. Export
+- [ ] Confirm the site address during first-run setup (`/setup/administrator`),
+      or set `AGENT_PUBLIC_API_URL` and the web address in Admin → Settings; the
+      app is served at the root of its hostname with the API at `/api`. Set no
+      `GATEWAY_*`, `IDENTITY_*` or `AGENT_AUTH_MODE`: the control plane and
+      `deploy.sh` refuse them.
+- [ ] Add the host from Admin → Servers → **Add server**. It writes the host's
+      Compose project name, sandbox image, enrolled host name, sandbox manager
+      credential and reverse route, both tunnel destinations and keys, and the
+      non-overlapping egress pool and resolver you give it.
+- [ ] Render configuration privately using the deployment's environment. Export
       `AGENT_DEPLOYMENT_SHA` for direct control-plane Compose commands; the
       deployment scripts supply it themselves. Rendered configuration contains
       secrets, so do not paste it into acceptance logs.

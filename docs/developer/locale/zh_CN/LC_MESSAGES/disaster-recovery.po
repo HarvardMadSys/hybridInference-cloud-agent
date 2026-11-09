@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-04 08:10-0500\n"
+"POT-Creation-Date: 2026-11-09 03:25-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -175,21 +175,32 @@ msgstr ""
 "attempt、连接，以及计算资源的生命周期记录。不要只挑用户看得到的那几张对话表。"
 
 #: ../developer/disaster-recovery.md:50
+#, python-brace-format
 msgid ""
-"Both deployment roots' `.env` and mounted credential files. Preserve "
-"`AGENT_SETTINGS_ENCRYPTION_KEY`, or the original `AGENT_SESSION_SECRET` "
-"when used as its fallback; also preserve source-control and compute "
-"encryption keys, control/session signing secrets, sandbox manager "
-"credentials and GitHub App keys. Saved settings can hold some of these "
-"keys, but they still require the settings root key to decrypt. Generating"
-" new keys does not recover old data."
+"The control plane's deployment keys, apart from the database: the `agent-"
+"keys` volume holds `AGENT_SETTINGS_ENCRYPTION_KEY` (or the original "
+"`AGENT_SESSION_SECRET` where that is the root), the account key and the "
+"database connection. Export them as `.env` lines with `docker exec "
+"\"${COMPOSE_PROJECT:?}-control-plane-1\" python -m "
+"cloud_agent.deployment.deployment_keys export > keys.env`, written only "
+"to the encrypted backup storage; on a replacement machine, that file as "
+"the deployment's `.env` restores them on its first start. Also keep both "
+"deployment roots' `.env`, where they have one, and mounted credential "
+"files: source-control and compute encryption keys, control/session "
+"signing secrets, sandbox manager credentials and GitHub App keys. Saved "
+"settings can hold some of these keys, but they still require the settings"
+" root key to decrypt. Generating new keys does not recover old data."
 msgstr ""
-"两个部署根目录下的 `.env` 和挂载的凭据文件。要保存 "
-"`AGENT_SETTINGS_ENCRYPTION_KEY`；如果没设它、而是由原来的 `AGENT_SESSION_SECRET` "
-"兜底，就保存后者。代码托管和计算资源的加密密钥、控制和会话的签名密钥、sandbox manager 凭据以及 GitHub App "
-"密钥，也都要保存。已保存的设置里可能存着其中一部分密钥，但要解密它们，仍然需要设置的根密钥。重新生成密钥是找不回旧数据的。"
+"控制平面的部署密钥，与数据库分开保存：`agent-keys` volume 保存 "
+"`AGENT_SETTINGS_ENCRYPTION_KEY`（或作为根密钥的原 "
+"`AGENT_SESSION_SECRET`）、账号密钥和数据库连接。用 `docker exec \"${COMPOSE_PROJECT"
+":?}-control-plane-1\" python -m cloud_agent.deployment.deployment_keys "
+"export > keys.env` 把它们导出为 `.env` 格式的行，只写入加密的备份存储；在替换机器上，把这个文件作为部署的 "
+"`.env`，首次启动时就会恢复它们。另外保留两个部署根目录中的 "
+"`.env`（如果有）和挂载的凭据文件：源码托管和计算资源的加密密钥、控制/会话签名密钥、沙箱管理器凭据以及 GitHub App "
+"密钥。已保存的设置可能包含其中一些密钥，但仍需要设置根密钥才能解密。生成新密钥无法恢复旧数据。"
 
-#: ../developer/disaster-recovery.md:56
+#: ../developer/disaster-recovery.md:62
 msgid ""
 "Each host's persisted enrollment credential directory and deployment "
 "identity, `.deployed-sha`, readiness marker, namespace/project, tunnel "
@@ -200,7 +211,7 @@ msgstr ""
 "每台主机上持久化的注册凭据目录和部署身份、`.deployed-sha`、就绪标记、命名空间或项目名、隧道用的 SSH 凭据和核实过的 "
 "`known_hosts`，以及主机的运行时和存储配置。凭据必须和恢复后主机记录里的凭据哈希对得上。"
 
-#: ../developer/disaster-recovery.md:60
+#: ../developer/disaster-recovery.md:66
 msgid ""
 "The complete retained Docker store and the containerd image store. With "
 "the supported bind layout those trees are `<disk>/docker` and "
@@ -216,7 +227,7 @@ msgstr ""
 "`DockerRootDir=/var/lib/docker`。复制时 Docker 和 containerd "
 "都要先停掉，并保留属主、权限、硬链接、扩展属性和稀疏文件。对话、主机、容器三者之间的身份对应关系要留在配套的数据库里；只导出容器的文件系统，会丢掉必需的元数据。"
 
-#: ../developer/disaster-recovery.md:67
+#: ../developer/disaster-recovery.md:73
 msgid ""
 "The verified `release.json`, its reviewed pinned SHA-256, "
 "`recipe.tar.gz`, extracted recipe, helper dependencies and image digests "
@@ -226,7 +237,7 @@ msgstr ""
 "当前和上一个在用发布的这些材料：验证过的 `release.json`、评审后固定的 SHA-256、`recipe.tar.gz`、解压后的 "
 "recipe、辅助依赖，以及镜像摘要。按摘要寻址的镜像要一直能拿到，要么留在镜像仓库里，要么存在测试过的私有归档里。"
 
-#: ../developer/disaster-recovery.md:72
+#: ../developer/disaster-recovery.md:78
 msgid ""
 "Never place these backups in the repository or attach credential archives"
 " to issues or CI logs. A read-only Docker socket does not make raw "
@@ -237,11 +248,11 @@ msgstr ""
 " 目录变得安全。具体做法见[保留的 Docker 存储](operations.md#retained-docker-storage-"
 "on-a-host)。"
 
-#: ../developer/disaster-recovery.md:76
+#: ../developer/disaster-recovery.md:82
 msgid "Capture a coordinated set"
 msgstr "采集一套彼此对应的恢复集"
 
-#: ../developer/disaster-recovery.md:78
+#: ../developer/disaster-recovery.md:84
 msgid ""
 "Record current deployment markers, placement, host status, container "
 "inventory and encryption-key version identifiers. Schedule a maintenance "
@@ -252,7 +263,7 @@ msgstr ""
 "记下当前的部署标记、放置关系、主机状态、容器清单和加密密钥的版本标识。安排维护窗口，暂停接收新任务，也暂停管理配置的修改。排空主机，等进行中的 "
 "attempt 都结束；同时记下哪些主机本来就处于排空或禁用状态，事后不要把它们的状态改掉。"
 
-#: ../developer/disaster-recovery.md:83
+#: ../developer/disaster-recovery.md:89
 msgid ""
 "Stop the main API and MCP listener after draining. This also stops "
 "compute reconciliation and background writers. Stop retained sandbox "
@@ -264,7 +275,7 @@ msgstr ""
 "`docker.socket`、Docker 和 "
 "containerd，之后才能给主机状态做快照或复制。采集恢复集期间，任何一台源主机都不能再写数据。"
 
-#: ../developer/disaster-recovery.md:88
+#: ../developer/disaster-recovery.md:94
 msgid ""
 "Take a full database dump while the listeners remain stopped. From the "
 "control-plane deployment root, with the existing generated Compose file "
@@ -273,7 +284,7 @@ msgstr ""
 "在两个监听器都停着的时候，做一次完整的数据库转储。在控制平面的部署根目录下，选好现有生成的 Compose "
 "文件和项目，运行下面的命令；它不会把凭据打印到输出里："
 
-#: ../developer/disaster-recovery.md:102
+#: ../developer/disaster-recovery.md:108
 msgid ""
 "Capture configuration and the stopped host storage into that same set "
 "using the approved encrypted backup tooling. Transfer it off-node, record"
@@ -281,7 +292,7 @@ msgid ""
 "as usable."
 msgstr "用批准使用的加密备份工具，把配置和停止状态下的主机存储也采集到同一套恢复集里。传输到节点之外，记下哈希；确认归档和转储都能正常读取之后，才把它当作可用的恢复集。"
 
-#: ../developer/disaster-recovery.md:105
+#: ../developer/disaster-recovery.md:111
 msgid ""
 "Start the original daemons and both listeners, then start host stacks and"
 " run host checks; their live probes require the API and MCP listener. "
@@ -293,7 +304,7 @@ msgstr ""
 "启动原来的守护进程和两个监听器，再启动各主机上的服务并做主机检查；这些检查的实时探测需要 API 和 MCP 监听器在线。确认身份、sandbox"
 " manager 访问和就绪状态都没问题。只把这次维护窗口里改过的排空状态改回去，然后重新开放任务接收。备份失败了，也不能因此删掉或替换源数据。"
 
-#: ../developer/disaster-recovery.md:111
+#: ../developer/disaster-recovery.md:117
 msgid ""
 "An hourly database-only dump can be taken while Postgres serves requests;"
 " `pg_dump` supplies a consistent database snapshot. Label it as database-"
@@ -303,11 +314,11 @@ msgstr ""
 "每小时一次的纯数据库转储可以在 Postgres 正常服务时进行，`pg_dump` "
 "本身就能给出一致的数据库快照。这种备份要标明\"仅数据库\"。不要把它和另一个时间点的主机快照凑在一起，还声称能完整恢复原生会话。"
 
-#: ../developer/disaster-recovery.md:116
+#: ../developer/disaster-recovery.md:122
 msgid "Restore and verify before reopening"
 msgstr "恢复，并在重新开放前验证"
 
-#: ../developer/disaster-recovery.md:118
+#: ../developer/disaster-recovery.md:124
 msgid ""
 "Keep ingress closed and replacement host daemons stopped. Isolate "
 "recovered compute controllers from provider side effects until "
@@ -317,7 +328,7 @@ msgid ""
 " simultaneously."
 msgstr "入口保持关闭，替换用的主机守护进程先不要启动。在分配和节点清单核对清楚之前，不要让恢复出来的计算资源控制器去调用云服务商：旧数据库里可能还记着早已过期的分配。确认源主机已经停掉或被隔离；绝不能让两台机器同时用同一个主机凭据和同一个保留命名空间对外服务。"
 
-#: ../developer/disaster-recovery.md:123
+#: ../developer/disaster-recovery.md:129
 msgid ""
 "Verify the selected set's hashes and decryption material. Restore into an"
 " isolated database first, using compatible Postgres and the selected "
@@ -332,7 +343,7 @@ msgstr ""
 "时代的数据库会被拒绝，并保留为归档（[旧数据库](operations.md#preserving-an-old-chain-"
 "database)）。不要临时拼凑 Alembic 降级。"
 
-#: ../developer/disaster-recovery.md:130
+#: ../developer/disaster-recovery.md:136
 msgid ""
 "Restore the complete stopped host state with a compatible Docker/storage "
 "driver and the correct mounts. Check mount availability before starting "
@@ -345,7 +356,7 @@ msgstr ""
 "之前，先确认挂载都在。注册凭据、命名空间和容器 ID "
 "要和原来一致。启动并检查对应的守护进程，但先不接新任务；不要为了让不一致的状态\"看起来干净\"，就去跑通用的 prune 或孤儿清理。"
 
-#: ../developer/disaster-recovery.md:135
+#: ../developer/disaster-recovery.md:141
 msgid ""
 "Compare every retained group's database owner and recorded container "
 "identity with the restored Docker labels. Reconcile stale attempts, "
@@ -356,7 +367,7 @@ msgstr ""
 "把每个保留沙箱组在数据库里记录的所有者和容器身份，和恢复出来的 Docker 标签逐个比对。过期的 "
 "attempt、租约和计算资源操作，走它们各自受支持的恢复路径去调和。容器不见了或凭据对不上，说明恢复卡住了，而不是说明换一台主机就能重建原生会话。"
 
-#: ../developer/disaster-recovery.md:140
+#: ../developer/disaster-recovery.md:146
 msgid ""
 "Run namespace verification and Kata/candidate checks, then use the phased"
 " deployment sequence to bootstrap listeners before host live checks. "
@@ -378,7 +389,7 @@ msgstr ""
 " 出的独立上下文、排队的轮次、取消、agent 开的 pull "
 "request，以及主机重启。这些检查和外部的健康、队列监控都通过之后，才重新对生产开放。"
 
-#: ../developer/disaster-recovery.md:153
+#: ../developer/disaster-recovery.md:159
 msgid ""
 "Perform an isolated restore drill quarterly and after changing storage "
 "topology, key handling or deployment protocol. Record the set/release "
@@ -401,11 +412,11 @@ msgstr ""
 "sandboxes)。这时只要它的主机被移出资源池、节点被确认已回收，或者主机在租期结束前迁出，另一台主机就会在这个组的下一轮把它恢复出来。如果源磁盘、它在节点外的副本和所有检查点全都丢了，原生上下文就没办法从"
 " Postgres 里恢复了。"
 
-#: ../developer/disaster-recovery.md:165
+#: ../developer/disaster-recovery.md:171
 msgid "Recover a previous artifact release"
 msgstr "恢复到上一个产物发布"
 
-#: ../developer/disaster-recovery.md:167
+#: ../developer/disaster-recovery.md:173
 msgid ""
 "The host deployer does not automatically restore an older artifact "
 "manifest: it is handed only one release. The consuming distribution must "
@@ -417,7 +428,7 @@ msgstr ""
 "主机部署器不会自动退回到更早的产物清单，因为它每次只拿到一个发布。使用这个发行版的一方必须在 `DEPLOY_ROOT` "
 "之外，和评审过的锁定文件放在一起，保留之前验证过的发布材料。每个发布放进单独的、不再改动的目录；不要用一个失败的候选版本覆盖上一个 recipe。"
 
-#: ../developer/disaster-recovery.md:173
+#: ../developer/disaster-recovery.md:179
 msgid ""
 "Before rollback, verify the previous manifest's pinned hash, the recipe "
 "hash, registry digests/platforms/labels and deployment protocol. Check "
@@ -433,13 +444,13 @@ msgstr ""
 "commit，并确认上一个发布和当前已装的数据库兼容。兼容性记录为空，不能说明可以安全地在线回滚。旧 recipe "
 "不能反向执行迁移，也不能跨过部署协议的栅栏；在线兼容性没有得到证实时，请使用测试过的、停止所有写入后再恢复的流程。"
 
-#: ../developer/disaster-recovery.md:181
+#: ../developer/disaster-recovery.md:187
 msgid ""
 "For a compatible rollback, on **each** machine select its previously "
 "verified directory and stable deployment root:"
 msgstr "确认兼容、准备回滚时，在**每台**机器上指定它之前验证过的发布目录和固定的部署根目录："
 
-#: ../developer/disaster-recovery.md:192
+#: ../developer/disaster-recovery.md:198
 #, python-brace-format
 msgid ""
 "Run the [phased deployment sequence](../../deploy/release/README.md"
@@ -464,7 +475,7 @@ msgstr ""
 "会拒绝执行。所以在决定在线回滚之前，先在隔离环境里对着当前的 schema 验证一遍。不要为了绕过这个拒绝去删除迁移历史或执行 "
 "stamp。也就是说，回滚有可能需要一个专门测试过的兼容 recipe，或者一次完整的停写恢复。"
 
-#: ../developer/disaster-recovery.md:203
+#: ../developer/disaster-recovery.md:209
 msgid ""
 "Read both `.deployed-sha` files and host readiness after success. Record "
 "the incident as a failed candidate rollout even when the previous release"
@@ -474,4 +485,26 @@ msgstr ""
 "完成后，读一下两边的 `.deployed-sha` "
 "文件和主机就绪状态。即使上一个发布已经重新开始服务，这次事件也要记为一次失败的候选版本上线。重新放流量之前，确认保留会话能正常续接，sandbox"
 " manager 访问也正常。"
+
+#~ msgid ""
+#~ "Both deployment roots' `.env` and "
+#~ "mounted credential files. Preserve "
+#~ "`AGENT_SETTINGS_ENCRYPTION_KEY`, or the original "
+#~ "`AGENT_SESSION_SECRET` when used as its "
+#~ "fallback; also preserve source-control "
+#~ "and compute encryption keys, control/session"
+#~ " signing secrets, sandbox manager "
+#~ "credentials and GitHub App keys. Saved"
+#~ " settings can hold some of these "
+#~ "keys, but they still require the "
+#~ "settings root key to decrypt. Generating"
+#~ " new keys does not recover old "
+#~ "data."
+#~ msgstr ""
+#~ "两个部署根目录下的 `.env` 和挂载的凭据文件。要保存 "
+#~ "`AGENT_SETTINGS_ENCRYPTION_KEY`；如果没设它、而是由原来的 "
+#~ "`AGENT_SESSION_SECRET` "
+#~ "兜底，就保存后者。代码托管和计算资源的加密密钥、控制和会话的签名密钥、sandbox manager 凭据以及"
+#~ " GitHub App "
+#~ "密钥，也都要保存。已保存的设置里可能存着其中一部分密钥，但要解密它们，仍然需要设置的根密钥。重新生成密钥是找不回旧数据的。"
 
