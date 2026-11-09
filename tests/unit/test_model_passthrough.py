@@ -198,6 +198,11 @@ def test_a_kept_connection_keeps_its_upstream_one(meter, provider, records):
 
 
 def test_an_upstream_connection_closed_while_idle_is_replaced(meter, provider):
+    # Idle means closed before the next request: on a busy runner the
+    # provider's thread could close only once that request was on its way,
+    # which is the race of a close crossing a request, not this case.
+    closed = threading.Event()
+
     def answer_and_close(handler: BaseHTTPRequestHandler) -> None:
         handler.send_response(200)
         handler.send_header("content-length", "2")
@@ -206,12 +211,15 @@ def test_an_upstream_connection_closed_while_idle_is_replaced(meter, provider):
         handler.wfile.flush()
         handler.connection.shutdown(socket.SHUT_RDWR)
         handler.close_connection = True
+        closed.set()
 
     provider.respond = answer_and_close
     connection = http.client.HTTPConnection("127.0.0.1", meter)
     for _ in range(2):
+        closed.clear()
         response, data = _post(connection, "/provider.example/v1/messages", _body())
         assert (response.status, data) == (200, b"{}")
+        assert closed.wait(10)
     assert provider.connections == 2
 
 

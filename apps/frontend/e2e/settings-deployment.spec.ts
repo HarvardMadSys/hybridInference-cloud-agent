@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './network-change';
 
 test.beforeEach(async ({ page, request }) => {
   expect((await request.post('/__fixture/reset')).ok()).toBe(true);

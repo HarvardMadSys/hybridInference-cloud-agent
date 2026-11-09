@@ -357,6 +357,9 @@ describe('admin Audit log', () => {
   });
 
   it("shows a request's final result beside it", async () => {
+    // Both times from one clock read. Reading the clock twice, a millisecond
+    // apart, put the result 119.999 s after the row: "Failed 1 min later".
+    const requestedAt = Date.now() - 120_000;
     list.mockResolvedValue(
       page([
         entry(2, {
@@ -364,7 +367,8 @@ describe('admin Audit log', () => {
           outcome: 'requested',
           details: { sandbox_id: 'asbx_1' },
           result: 'failed',
-          result_at: new Date().toISOString(),
+          created_at: new Date(requestedAt).toISOString(),
+          result_at: new Date(requestedAt + 120_000).toISOString(),
         }),
         entry(1, { action: 'agent.compute.server.add', outcome: 'requested', details: {} }),
       ]),

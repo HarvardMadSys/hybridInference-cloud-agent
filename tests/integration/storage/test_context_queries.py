@@ -399,9 +399,12 @@ async def _bulk_history(
 
 async def test_all_sums_every_run_beyond_one_selections_bound(db, store, monkeypatch):
     # This is about the sums across selections, not their speed: locally the
-    # read takes about 0.6 s of each statement's 5 s, and a busy CI database
-    # ran one past it.
+    # usage read takes about 0.6 s of each statement's 5 s and the context page
+    # about 1 s, and a busy CI database ran each of them past it.
     monkeypatch.setattr("cloud_agent.storage.repositories.admin.usage.STATEMENT_TIMEOUT_MS", 60_000)
+    monkeypatch.setattr(
+        "cloud_agent.storage.repositories.context_queries.INSIGHTS_STATEMENT_TIMEOUT_MS", 60_000
+    )
     runs = MAX_USAGE_RUNS + 250
     expected = await _bulk_history(
         db, store, user_id=OWNER, runs=runs, span_days=400, reported=True

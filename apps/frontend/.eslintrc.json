@@ -26,6 +26,23 @@
       "rules": {
         "no-console": "off"
       }
+    },
+    {
+      "files": ["e2e/**/*.spec.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "paths": [
+              {
+                "name": "@playwright/test",
+                "importNames": ["test", "expect"],
+                "message": "Import test and expect from ./network-change: the CI retry is only for attempts a host network change aborted."
+              }
+            ]
+          }
+        ]
+      }
     }
   ],
   "rules": {
