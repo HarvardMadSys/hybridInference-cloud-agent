@@ -754,7 +754,7 @@ def _import_retained_base(
     does not fit a bundle, goes only to a workspace that lacks the parent
     too.
     """
-    with tempfile.TemporaryDirectory(prefix="freeinference-base-") as source:
+    with tempfile.TemporaryDirectory(prefix="cloud-agent-base-") as source:
         held: str | None = None
         if job.repo is None:
             # A temporary workspace's base is its fixed empty commit, which a

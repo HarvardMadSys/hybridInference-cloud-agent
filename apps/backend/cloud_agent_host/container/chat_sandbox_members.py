@@ -783,8 +783,8 @@ class MemberExecMixin(GuestRootExec):
         deadline = time.monotonic() + timeout_s
         processes: builtins.list[subprocess.Popen[bytes]] = []
         with (
-            tempfile.TemporaryFile(prefix="freeinference-member-pipe-") as source_stderr,
-            tempfile.TemporaryFile(prefix="freeinference-member-pipe-") as target_stderr,
+            tempfile.TemporaryFile(prefix="cloud-agent-member-pipe-") as source_stderr,
+            tempfile.TemporaryFile(prefix="cloud-agent-member-pipe-") as target_stderr,
         ):
             try:
                 source = subprocess.Popen(
