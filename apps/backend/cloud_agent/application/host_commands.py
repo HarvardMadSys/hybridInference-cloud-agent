@@ -80,8 +80,9 @@ class HostCommands:
                 )
             else:
                 how = (
-                    "A version has to be built into the sandbox image before it can be "
-                    "selected — add it to that host's *_EXTRA_VERSIONS and redeploy."
+                    "This agent runs only the version pinned in the sandbox image: "
+                    "change that pin in a reviewed change to the Dockerfile and "
+                    "SHARED_SANDBOX_RUNTIME_PINS together, then redeploy."
                 )
             raise HostCommandError(404, f"No host in the pool offers {runtime} {version!r}. {how}")
         return previous
