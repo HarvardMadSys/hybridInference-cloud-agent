@@ -2458,8 +2458,10 @@ see [Restoring a removed host's sandboxes](#restoring-a-removed-hosts-sandboxes)
   state, and anything installed outside `/workspace`. Credential tmpfs mounts
   are not part of a commit. It also holds the Sandbox Manager's own archive
   markers for the generation that stopped; a restored container reads a marker
-  from an earlier generation of its group as absent and writes its own. Bucket lifecycle and retention rules apply to the
-  `v2/` prefix like the rest of the archives.
+  from an earlier generation of its group as absent and writes its own. Host
+  reconciliation reads it the same way, so a restored container left stopped
+  before its first start owes no final archive. Bucket lifecycle and retention
+  rules apply to the `v2/` prefix like the rest of the archives.
 
 #### Restoring a removed host's sandboxes
 

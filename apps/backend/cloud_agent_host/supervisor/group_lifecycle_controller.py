@@ -13,6 +13,7 @@ steps here are also how reconciliation finishes an orphan's archive.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 from dataclasses import asdict, replace
 from typing import TYPE_CHECKING, Any, Literal
@@ -21,6 +22,7 @@ from cloud_agent_host.archive.archive_failure_diagnostics import (
     _archive_failure_diagnostic,
     logged_stopped_archive_failure,
 )
+from cloud_agent_host.archive.sandbox_archives import carried_by_checkpoint
 from cloud_agent_host.container.chat_sandbox import (
     ChatSandboxInspection,
     ChatSandboxSpec,
@@ -206,16 +208,35 @@ class GroupLifecycleController:
     def read_final_marker(
         self, spec: ChatSandboxSpec, inspection: ChatSandboxInspection
     ) -> bytes | None:
-        """Read the exact object's marker with no supervisor metadata lock held."""
+        """Read the exact object's marker with no supervisor metadata lock held.
+
+        A stopped container's marker from an earlier generation of its group
+        came in with the checkpoint it was restored from, and reads as absent,
+        as every other marker reader treats it (:func:`carried_by_checkpoint`).
+        """
         if inspection.running:
             return self._manager.read_running_final_archive_marker(
                 spec,
                 expected_container_id=inspection.container_id,
             )
-        return self._manager.read_stopped_final_archive_marker_optional(
+        payload = self._manager.read_stopped_final_archive_marker_optional(
             spec,
             expected_container_id=inspection.container_id,
         )
+        if payload is not None and _carried_final_marker(payload, spec):
+            logger.info(
+                "sandbox final archive marker of generation below %s came with its "
+                "checkpoint; it is not this container's: sandbox_id=%s",
+                spec.generation,
+                spec.sandbox_id,
+                extra={
+                    "event": "sandbox_carried_final_marker_ignored",
+                    "sandbox_id": spec.sandbox_id,
+                    "generation": spec.generation,
+                },
+            )
+            return None
+        return payload
 
     @staticmethod
     def marker_result(payload: bytes | None, error: BaseException | None) -> bytes | None:
@@ -1237,6 +1258,33 @@ class GroupLifecycleController:
                 )
         return stopped
 
+
+
+def _carried_final_marker(payload: bytes, spec: ChatSandboxSpec) -> bool:
+    """Whether a final marker is an earlier generation's, restored with its checkpoint.
+
+    Reconciliation reads the marker before the archive decodes it, to decide
+    whether a final archive is owed at all. Without this a container restored
+    from a checkpoint, and left stopped before its first start wrote its own
+    marker, owed the earlier container's final archive, which the upload then
+    refused as not its own, every pass. A marker that does not parse is left
+    to the archive's own checks.
+    """
+    try:
+        named = json.loads(payload)
+    except ValueError:
+        return False
+    if not isinstance(named, dict):
+        return False
+    sandbox_id, generation = named.get("sandbox_id"), named.get("generation")
+    if not isinstance(sandbox_id, str) or type(generation) is not int:
+        return False
+    return carried_by_checkpoint(
+        marker_sandbox_id=sandbox_id,
+        marker_generation=generation,
+        sandbox_id=spec.sandbox_id,
+        generation=spec.generation,
+    )
 
 __all__ = [
     "GroupLifecycleController",
