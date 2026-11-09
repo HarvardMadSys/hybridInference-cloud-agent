@@ -114,7 +114,7 @@ it('offers connection recovery after reopening an unavailable, disabled conversa
   );
 });
 
-it('keeps an unavailable new-task choice visible with a recovery route', () => {
+it('offers recovery for an unavailable new-task choice without allowing selection', () => {
   const onToggle = vi.fn();
   render(
     <McpSubmenu
@@ -134,9 +134,7 @@ it('keeps an unavailable new-task choice visible with a recovery route', () => {
       onToggle={onToggle}
     />,
   );
-  const toggle = screen.getByRole('switch', { name: 'Notes' });
-  expect(toggle).toBeDisabled();
-  fireEvent.click(toggle);
+  expect(screen.queryByRole('switch', { name: 'Notes' })).not.toBeInTheDocument();
   expect(onToggle).not.toHaveBeenCalled();
   expect(screen.getByRole('link', { name: 'Manage connection' })).toHaveAttribute(
     'href',

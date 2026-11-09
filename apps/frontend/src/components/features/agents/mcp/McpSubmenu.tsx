@@ -122,12 +122,14 @@ export function McpSubmenu({
                     </Link>
                   ) : null}
                 </span>
-                <SkillSwitch
-                  label={choice.connection.label}
-                  checked={choice.selected}
-                  disabled={choice.busy || choice.blocked}
-                  onChange={(on) => onToggle(choice, on)}
-                />
+                {choice.blocked ? null : (
+                  <SkillSwitch
+                    label={choice.connection.label}
+                    checked={choice.selected}
+                    disabled={choice.busy}
+                    onChange={(on) => onToggle(choice, on)}
+                  />
+                )}
               </li>
             ))}
           </ul>
