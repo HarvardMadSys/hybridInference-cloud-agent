@@ -318,7 +318,10 @@ class InitialArchiveCapture:
                 # another stop (or a later stop of the same group) made.
                 if preserve_frozen_writers and preservation_error is not None:
                     logger.info(
-                        "sandbox_initial_archive_preservation_released_by_stop",
+                        "sandbox_initial_archive_preservation_released_by_stop: "
+                        "sandbox_id=%s generation=%s",
+                        authoritative_spec.sandbox_id,
+                        authoritative_spec.generation,
                         extra={
                             "event": "sandbox_initial_archive_preservation_released_by_stop",
                             "sandbox_id": authoritative_spec.sandbox_id,
