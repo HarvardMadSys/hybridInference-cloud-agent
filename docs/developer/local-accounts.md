@@ -495,9 +495,13 @@ goals, Fork and residency keep that source; an unavailable connection never
 falls back to a same-named model on another connection. Saving, disabling or
 deleting a connection refreshes open composers, which retain an unavailable
 selection and block submission until the owner chooses a usable source. A turn
-on a connection runs at its provider's default reasoning effort: a request
-naming an effort is refused (`model_connection_unusable`, reason
-`effort_unsupported`), and the composer offers no effort control. See
+runs at Auto, its provider's default reasoning effort, unless the owner chooses
+one of the levels the provider's own model listing declares for that model and
+the agent's CLI can send; anything else is refused (`model_connection_unusable`
+with reason `effort_unknown`, `effort_unsupported` or
+`effort_level_unsupported`). See
+[reasoning levels](operations.md#owner-model-connections) for where they come
+from. See
 [owner model connections](operations.md#owner-model-connections) for
 verification, key handling and rollout requirements, and
 [usage](operations.md#usage) for what the Usage pages count.

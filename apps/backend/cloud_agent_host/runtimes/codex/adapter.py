@@ -227,7 +227,14 @@ class CodexRuntime(AgentRuntime):
         if session_state_dir:
             env["CODEX_HOME"] = session_state_dir
         if isinstance(model_base_url, ResponsesViaChatUrl):
-            return compat_launch(argv, env, model_base_url, credential, model=model)
+            return compat_launch(
+                argv,
+                env,
+                model_base_url,
+                credential,
+                model=model,
+                reasoning_effort=reasoning_effort,
+            )
         return argv, env
 
     #: What a translated Codex leaves out of its requests: 0.145.0 otherwise

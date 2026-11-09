@@ -195,8 +195,10 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   connections: a provider Base URL, the owner's own API key and verified
   model ids (FreeInference is one such provider, used with the owner's key).
   The claim and the residency of the owner's turn hand the key to the host;
-  the member's CLI runs on it. A turn on a connection runs at its provider's
-  default reasoning effort: an effort is refused, not stored. MCP servers are
+  the member's CLI runs on it. A turn runs at Auto (the provider's default)
+  unless its owner picks a reasoning level the provider's own model listing
+  declares for that model and API and the agent's CLI can send
+  ([design](docs/agents/specs/2026-11-05-upstream-reasoning-effort.md)). MCP servers are
   resolved per user by the control plane and reached through its MCP-only
   relay with a separate scoped credential. A chat member's CLI holds its
   residency's MCP credential, which the relay resolves on every call to the
@@ -341,7 +343,8 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   Each model gets a streaming tool round trip on each of Chat Completions,
   Responses and Anthropic Messages (at most six provider requests and one of
   the owner's hourly checks, all reserved before any call, connection or
-  not). The save commits only if every model has an agent that can use it,
+  not); the save also reads the provider's two model listings once for the
+  reasoning levels it declares (no inference, no extra check). The save commits only if every model has an agent that can use it,
   storing the native outcomes (supported, unsupported or failed) per model;
   otherwise nothing is written, not even a new key, and each model's result is
   answered. An edit commits only while the row still has the revisions and

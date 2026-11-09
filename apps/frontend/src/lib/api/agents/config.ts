@@ -17,6 +17,29 @@ export interface ModelConnectionOptionApi {
    * verified, or no agent can use it.
    */
   model_runtimes: Record<string, string[]>;
+  /**
+   * For each model in `model_runtimes`, per agent: the reasoning levels a task
+   * may pick besides Auto, and whether the provider declared them. Absent on a
+   * control plane that predates it, which offers Auto alone.
+   */
+  model_efforts?: Record<string, Record<string, ModelEffortOfferApi>>;
+}
+
+/**
+ * What the model's provider declared for the API one agent's turn calls.
+ * `supported`: `levels` are the declared ones that agent can send, weakest
+ * first. `unsupported`: none (declared, or none the agent can send).
+ * `unknown`: the provider did not say. Auto is always available besides.
+ */
+export interface ModelEffortOfferApi {
+  status: 'supported' | 'unsupported' | 'unknown';
+  levels: string[];
+  /**
+   * `not_read`, `listing_unavailable`, `not_listed`, `not_declared`,
+   * `conflicting_declarations`, `agent_cannot_express`.
+   */
+  reason?: string;
+  source?: string;
 }
 
 export interface AgentConfigApi {

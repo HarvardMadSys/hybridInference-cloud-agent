@@ -89,6 +89,15 @@ export const modelConnectionsEn = {
   'connections.confirm': 'Confirm',
   'connections.agents': 'Works with {agents}',
   'connections.notUsable': 'No agent can use this model. Edit the connection to fix it.',
+  'connections.effortLevels': 'Reasoning levels the provider declares: {levels}',
+  'connections.effortNone': 'The provider declares no reasoning levels; tasks run at Auto.',
+  'connections.effortUnknown':
+    'The provider does not say which reasoning levels it accepts; tasks run at Auto.',
+  'connections.refreshEfforts': 'Refresh reasoning levels',
+  'connections.refreshEffortsHint':
+    "Reads the provider's model list again for the reasoning levels it declares. Uses one check; no model is run.",
+  'connections.refreshEffortsFailed':
+    'Could not refresh the reasoning levels. Nothing was changed; try again later.',
   'connections.suggest.load': 'Load models from provider',
   'connections.suggest.loadingShort': 'Loading…',
   'connections.suggest.hint':
@@ -198,6 +207,13 @@ export const modelConnectionsZhCN: Record<keyof typeof modelConnectionsEn, strin
   'connections.confirm': '确认',
   'connections.agents': '可用于 {agents}',
   'connections.notUsable': '没有 Agent 能使用此模型，请编辑连接修正。',
+  'connections.effortLevels': '服务商声明的推理强度：{levels}',
+  'connections.effortNone': '服务商声明不支持推理强度；任务按自动运行。',
+  'connections.effortUnknown': '服务商没有说明支持哪些推理强度；任务按自动运行。',
+  'connections.refreshEfforts': '刷新推理强度',
+  'connections.refreshEffortsHint':
+    '重新读取服务商的模型列表中声明的推理强度。消耗一次检查次数，不运行模型。',
+  'connections.refreshEffortsFailed': '无法刷新推理强度，未做任何更改，请稍后重试。',
   'connections.suggest.load': '从服务商获取模型',
   'connections.suggest.loadingShort': '获取中…',
   'connections.suggest.hint':

@@ -9,7 +9,8 @@ its class rather than by a status code.
 
 ``type`` is the wire's ``error.type`` and ``message`` its sentence, both
 already safe to show the owner. ``details`` are further owner-facing fields
-the envelope carries between the two (a model connection's ``reason``).
+the envelope carries between the two (a model connection's ``reason``, or
+the ``offered_efforts`` a refused level could be replaced with).
 """
 
 from __future__ import annotations
@@ -36,14 +37,14 @@ class Refused(Exception):
         type: str,
         message: str,
         *,
-        details: Mapping[str, str] | None = None,
+        details: Mapping[str, str | list[str]] | None = None,
         retry_after_seconds: int | None = None,
     ) -> None:
         super().__init__(message)
         self.kind: RefusalKind = kind
         self.type = type
         self.message = message
-        self.details: dict[str, str] = dict(details or {})
+        self.details: dict[str, str | list[str]] = dict(details or {})
         self.retry_after_seconds = retry_after_seconds
 
 

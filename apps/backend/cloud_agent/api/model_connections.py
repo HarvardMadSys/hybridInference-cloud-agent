@@ -20,6 +20,12 @@ connection closes every member process still running on its old state. A field
 sent with its stored value changes nothing, and a rename, removing models,
 enabling or disabling makes no provider call.
 
+Which reasoning levels each model takes is read from the provider's own model
+listings (``application.model_connection_efforts``): inside every verifying
+save, and on the owner's ``refresh-efforts`` for a saved connection, which
+spends one hourly check, makes at most two listing requests and no inference,
+changes nothing else and closes no process.
+
 Listing a provider's model ids (``discover-models``) is a convenience for
 filling in the form, before or after a connection exists. It writes nothing,
 spends one hourly check, and says nothing about whether a listed model works:
@@ -45,6 +51,7 @@ from cloud_agent.application.model_connection_check import (
     CheckStop,
     discover_models,
 )
+from cloud_agent.application.model_connection_efforts import read_effort_facts, with_efforts
 from cloud_agent.application.model_connection_save import (
     CheckLimitReached,
     EditPlan,
@@ -206,6 +213,20 @@ class ProtocolResultView(BaseModel):
     http_status: int | None = None
 
 
+class EffortFactView(BaseModel):
+    """What the provider's listings declared about one API's reasoning levels for a model.
+
+    ``supported`` with its ``levels``; ``unsupported``; or ``unknown`` with a
+    ``reason`` (``not_read``: never read, ``listing_unavailable``,
+    ``not_listed``, ``not_declared``). Unknown offers Auto only.
+    """
+
+    status: Literal["supported", "unsupported", "unknown"]
+    levels: list[str] = Field(default_factory=list)
+    source: str = ""
+    reason: str = ""
+
+
 class AgentPathView(BaseModel):
     """How one agent reaches a model: directly, or through the member's helper."""
 
@@ -232,6 +253,9 @@ class ModelStatusView(BaseModel):
     paths: list[AgentPathView] = Field(default_factory=list)
     protocols: dict[str, ProtocolResultView] = Field(default_factory=dict)
     checked_at: str | None = None
+    #: Per API, what the provider declared about reasoning levels.
+    efforts: dict[str, EffortFactView] = Field(default_factory=dict)
+    efforts_checked_at: str | None = None
 
 
 class VerificationRefusal(BaseModel):
@@ -672,3 +696,56 @@ async def discover_for_form(
     return DiscoveredModels(
         models=await _listing(store, user_id, base_url=body.base_url, api_key=api_key)
     )
+
+
+@router.post("/{connection_id}/refresh-efforts", response_model=ModelConnectionView)
+async def refresh_efforts(
+    connection_id: str,
+    user: dict[str, Any] = Depends(require_agent_owner),
+    store: _Storage | None = Depends(get_storage),
+) -> ModelConnectionView:
+    """Read again which reasoning levels the provider declares for this connection's models.
+
+    For a connection saved before these were read, or after the provider
+    changed what it declares. With the saved key at the saved Base URL: one of
+    the owner's hourly checks, at most two listing requests, no inference.
+    Only the effort facts of models verified at the connection's current state
+    are written, and only while it is still that state (409 otherwise); a
+    listing that fails leaves its APIs ``unknown``. Nothing else changes and
+    no running process is closed: a turn re-checks its level when it is
+    claimed.
+    """
+    _require_enabled()
+    store = require_store(store)
+    user_id = user["user_id"]
+    row = await _live(store, user_id, connection_id)
+    current = kept_checks(row, list(row["models"]))
+    if not current:
+        raise _refused(
+            409,
+            "model_connection_unverified",
+            "No model on this connection is verified; save it again to verify it.",
+        )
+    reserved = await store.model_connections.reserve_model_connection_checks(
+        user_id=user_id, count=1, limit=CHECKS_PER_HOUR, seconds=3600
+    )
+    if not reserved:
+        raise _refused(
+            429,
+            "model_connection_check_limit",
+            "Too many checks in the last hour. Try again later.",
+        )
+    efforts = await read_effort_facts(
+        base_url=row["base_url"], api_key=_key(row), models=list(current)
+    )
+    updated = await store.model_connections.commit_verified_update(
+        user_id=user_id,
+        connection_id=row["id"],
+        expected=row,
+        changes={},
+        model_checks=with_efforts(current, efforts),
+    )
+    if updated is None:
+        await _live(store, user_id, row["id"])
+        raise _changed()
+    return _view(updated)

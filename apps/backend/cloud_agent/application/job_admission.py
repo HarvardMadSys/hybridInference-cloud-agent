@@ -37,6 +37,7 @@ from cloud_agent.mcp.registry import resolve_connection
 from cloud_agent.schemas import (
     BASE_REF_METADATA_KEY,
     ONCALL_METADATA_KEY,
+    RESET_REASONING_EFFORT,
 )
 from cloud_agent.skills.models import SkillError
 from cloud_agent.skills.selection import resolve_skills
@@ -100,7 +101,11 @@ def model_connection_unusable(exc: ModelConnectionUnusable) -> Refused:
     waiting message's check holds the message with this sentence until its
     owner changes the connection or the model.
     """
-    return Refused("invalid", "model_connection_unusable", str(exc), details={"reason": exc.reason})
+    details: dict[str, str | list[str]] = {"reason": exc.reason}
+    if exc.offered:
+        # For a refused level: the levels that would run, besides Auto.
+        details["offered_efforts"] = list(exc.offered)
+    return Refused("invalid", "model_connection_unusable", str(exc), details=details)
 
 
 async def require_connection_source(
@@ -138,22 +143,26 @@ async def _admit_model(
     *,
     connections: ModelConnectionRepository,
 ) -> tuple[str, str | None]:
-    """The model a new job runs with, checked against the connection it names.
+    """The model and effort a new job runs with, checked against the connection it names.
 
-    The connection's checks settle the effort too; a connection turn stores
-    none.
+    The effort is Auto (``None``) when omitted or sent as ``"auto"``;
+    otherwise it must be a level the model's provider declares for this
+    runtime's plan, and is stored exactly as sent.
     """
     if body.model_connection_id is None:
         raise model_connection_required()
+    effort = (
+        None if body.reasoning_effort in (None, RESET_REASONING_EFFORT) else body.reasoning_effort
+    )
     await require_connection_source(
         connections,
         user_id=user["user_id"],
         connection_id=body.model_connection_id,
         runtime=body.runtime,
         model=body.model,
-        reasoning_effort=body.reasoning_effort,
+        reasoning_effort=effort,
     )
-    return body.model, None
+    return body.model, effort
 
 
 async def _resolve_mcp_bindings(

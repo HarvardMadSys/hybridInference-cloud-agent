@@ -15,7 +15,10 @@ has an agent that can use it is anything written:
   edit made meanwhile is never undone by a late result.
 
 Each verified model costs one of the owner's hourly checks, all reserved before
-any provider call, whether or not a connection exists yet. No database
+any provider call, whether or not a connection exists yet. Beside the
+verification, the same save reads the provider's two model listings once
+(``model_connection_efforts``) for the reasoning levels it declares; that adds
+at most two requests per save, no inference, and never fails the save. No database
 transaction is open during the calls. A rename, removing models, enabling or
 disabling needs no verification and makes no provider call.
 """
@@ -27,6 +30,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from cloud_agent.application.model_connection_check import CHECKS_PER_HOUR, verify_models
+from cloud_agent.application.model_connection_efforts import read_effort_facts, with_efforts
 from cloud_agent.application.model_connection_status import verification_status
 from cloud_agent.domain.model_connections import current_check
 
@@ -133,9 +137,13 @@ async def verify_for_save(
         raise CheckLimitReached
     try:
         async with asyncio.timeout(SAVE_TIMEOUT_S):
-            results = await verify_models(base_url=base_url, api_key=api_key, models=models)
+            results, efforts = await asyncio.gather(
+                verify_models(base_url=base_url, api_key=api_key, models=models),
+                read_effort_facts(base_url=base_url, api_key=api_key, models=models),
+            )
     except TimeoutError:
         raise VerificationTimedOut from None
+    results = with_efforts(results, efforts)
     statuses = [verification_status(model, results[model]) for model in models]
     if any(not status["runtimes"] for status in statuses):
         raise VerificationRefused(statuses)

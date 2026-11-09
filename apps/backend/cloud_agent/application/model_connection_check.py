@@ -741,7 +741,7 @@ async def verify_models(
     return dict(zip(models, results, strict=True))
 
 
-async def _bounded_get(
+async def bounded_get(
     *, client_transport: httpx.AsyncBaseTransport | None, url: str, headers: dict[str, str]
 ) -> bytes:
     """One authenticated GET, read only up to the model-list bound."""
@@ -800,7 +800,7 @@ async def discover_models(
         for position, (url, headers) in enumerate(attempts):
             try:
                 return _listed_models(
-                    await _bounded_get(client_transport=transport, url=url, headers=headers)
+                    await bounded_get(client_transport=transport, url=url, headers=headers)
                 )
             except CheckStop as stop:
                 if position + 1 == len(attempts) or stop.category not in _TRY_NEXT_LISTING:
@@ -828,6 +828,7 @@ __all__ = [
     "CHECK_MESSAGES",
     "CheckResult",
     "CheckStop",
+    "bounded_get",
     "check_connection",
     "discover_models",
     "guard_base_url",

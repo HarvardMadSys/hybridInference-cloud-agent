@@ -18,12 +18,17 @@ from cloud_agent.api.deps import (
     get_github_app_state,
     get_storage,
 )
-from cloud_agent.application.model_connection_status import usable_runtimes
+from cloud_agent.application.model_connection_status import model_efforts, usable_runtimes
 from cloud_agent.application.model_connections import model_connections_enabled
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.registry import resolve_connection
 from cloud_agent.profile.model_preference import resolve_connection_default
-from cloud_agent.schemas import AgentConfigResponse, McpConnectionSummary, ModelConnectionOption
+from cloud_agent.schemas import (
+    AgentConfigResponse,
+    McpConnectionSummary,
+    ModelConnectionOption,
+    ModelEffortOffer,
+)
 from cloud_agent.schemas.model_preferences import ModelPreferenceView
 from cloud_agent.source_control.entitlement import repos_for_user
 from cloud_agent.source_control.source_control import github_connect_configured
@@ -212,6 +217,10 @@ def _connection_option(row: dict[str, Any]) -> ModelConnectionOption:
         name=row["name"],
         models=list(row["models"]),
         model_runtimes=usable_runtimes(row),
+        model_efforts={
+            model: {runtime: ModelEffortOffer(**offer) for runtime, offer in offers.items()}
+            for model, offers in model_efforts(row).items()
+        },
     )
 
 

@@ -228,7 +228,9 @@ async def test_turns_carry_their_source_through_follow_ups(pool, store):
 
     async with pool.acquire() as conn:
         await conn.execute("UPDATE agent_jobs SET state = 'cancelled' WHERE id = $1", gateway["id"])
-    # Back onto the connection: the Gateway turn's effort does not come along.
+    # Back onto the connection: the level is inherited like the model. Whether
+    # the connection's model offers it is ``require_usable``'s to refuse,
+    # before this insert; the store neither drops nor replaces it.
     back = await append_follow_up(
         pool,
         parent_job_id=gateway["id"],
@@ -238,7 +240,19 @@ async def test_turns_carry_their_source_through_follow_ups(pool, store):
         model_connection_id=connection["id"],
     )
     assert back["model_connection_id"] == connection["id"]
-    assert back["reasoning_effort"] is None
+    assert back["reasoning_effort"] == "high"
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE agent_jobs SET state = 'cancelled' WHERE id = $1", back["id"])
+    # ``"auto"`` on a follow-up clears it.
+    auto = await append_follow_up(
+        pool,
+        parent_job_id=back["id"],
+        user_id="user-1",
+        prompt="at the default",
+        reset_reasoning_effort=True,
+    )
+    assert auto["model_connection_id"] == connection["id"]
+    assert auto["reasoning_effort"] is None
 
     preference = await store.model_preferences.get_model_preference("user-1")
     assert preference.last_model == "gpt-4.1"

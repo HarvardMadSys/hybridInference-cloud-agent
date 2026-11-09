@@ -662,13 +662,11 @@ class ClaudeCodeLiveSession(HarnessSession[ClaudeCodeRuntime]):
             # in beside the model rather than replaced. Spelling comes from the
             # dialect layer; this method only knows there is one.
             argv[model_at + 1 : model_at + 1] = self.runtime.effort_args(reasoning_effort)
-            env = dict(self._context.base_env)
-            env.update(self._extra_env)
-            env["ANTHROPIC_MODEL"] = model
-            env["ANTHROPIC_SMALL_FAST_MODEL"] = model
-            # The launch template was built with model=""; bind delegated
-            # requests to the actual model chosen for this residency too.
-            env["CLAUDE_CODE_SUBAGENT_MODEL"] = model
+            env = self.runtime.bind_live_env(
+                {**self._context.base_env, **self._extra_env},
+                model=model,
+                reasoning_effort=reasoning_effort,
+            )
             assert self._context.spawn_live is not None
             self._process = self._context.spawn_live(argv, env)
             self._lines = self._process.lines()

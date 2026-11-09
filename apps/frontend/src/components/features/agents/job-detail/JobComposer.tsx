@@ -36,6 +36,8 @@ import { ComposerOptionsButton, ComposerOptionsPanel, useComposerOptions } from 
 import { ComposerTodos, type ComposerTodosProps } from './ComposerTodos';
 import { SkillSelectionDialog } from './LazyPanels';
 import type { useJobComposerSettings } from './useJobComposerSettings';
+import { effortOverride } from '../composer/effort';
+import { EffortPicker } from '../composer/EffortPicker';
 import type { useJobRunActions } from './useJobRunActions';
 
 /** What the next message runs with, before the model: the thread's harness. */
@@ -150,15 +152,18 @@ export function JobComposer({
     inheritedLabel,
     inheritedUnavailable,
     effort,
+    effortDropped,
     setChosenEffort,
     modelPicker,
-    efforts,
+    effortOffer,
   } = settings;
   const { restoring, unarchive } = runActions;
   // Steering puts the draft into the running turn, which answers on its own
-  // model and source. A draft that chose another goes as the next turn
-  // instead, so it is never billed where its owner did not choose.
-  const otherModel = Boolean(modelOverride(inherited, choice).model);
+  // model, source and reasoning level. A draft that chose another goes as the
+  // next turn instead, so it never runs or is billed where its owner did not choose.
+  const otherModel =
+    Boolean(modelOverride(inherited, choice).model) ||
+    'reasoning_effort' in effortOverride(inherited.reasoningEffort, effort);
   const canSteer = queue.canSendNow && !otherModel;
   const followUp = useComposerDraftValue(draft);
   const { setValue: setFollowUp } = draft;
@@ -394,11 +399,11 @@ export function JobComposer({
                           native-resumes it in the same retained workspace; it
                           does not replace or clone the sandbox. */}
                       <Picker compact label="Model for this turn" {...modelPicker} />
-                      <Picker
-                        compact
-                        label="Reasoning for this turn"
+                      <EffortPicker
+                        label={t('composer.reasoningForTurn')}
                         value={effort}
-                        options={efforts}
+                        offer={effortOffer}
+                        dropped={effortDropped}
                         onChange={setChosenEffort}
                       />
                     </>

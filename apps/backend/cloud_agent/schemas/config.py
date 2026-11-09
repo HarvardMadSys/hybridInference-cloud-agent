@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -16,6 +16,27 @@ from cloud_agent.source_control.source_control_runtime import (
     LoadStatus,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
 from cloud_agent_shared.environment import environment_limits
+
+
+class ModelEffortOffer(BaseModel):
+    """Which reasoning levels one agent may run one connection model at.
+
+    ``status`` is what the model's provider declared for the API this agent's
+    plan calls: ``supported`` (``levels`` are the declared ones this agent's
+    CLI can send, weakest first), ``unsupported`` (the provider declares none,
+    or none this agent can send) or ``unknown`` (nothing the provider said
+    settles it). Auto -- no level -- is always available and is not listed.
+    """
+
+    status: Literal["supported", "unsupported", "unknown"]
+    levels: list[str] = Field(default_factory=list)
+    #: Why, for ``unknown`` or an agent that cannot send a declared level:
+    #: ``not_read``, ``listing_unavailable``, ``not_listed``, ``not_declared``,
+    #: ``conflicting_declarations`` or ``agent_cannot_express``.
+    reason: str = ""
+    #: Which declaration it came from: ``anthropic_models_api``,
+    #: ``models_listing_reasoning`` or ``models_listing_effort``; empty when none.
+    source: str = ""
 
 
 class ModelConnectionOption(BaseModel):
@@ -33,6 +54,9 @@ class ModelConnectionOption(BaseModel):
     #: it: exactly what the execution gates accept. A model missing here is not
     #: verified, or no agent can use it.
     model_runtimes: dict[str, list[str]] = Field(default_factory=dict)
+    #: For each model in ``model_runtimes``, per agent: the reasoning levels a
+    #: task may choose besides Auto, and whether the provider declared them.
+    model_efforts: dict[str, dict[str, ModelEffortOffer]] = Field(default_factory=dict)
 
 
 class AgentConfigResponse(BaseModel):
