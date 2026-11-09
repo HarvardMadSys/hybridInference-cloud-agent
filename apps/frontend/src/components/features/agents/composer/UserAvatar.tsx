@@ -26,7 +26,7 @@ function ProfileAvatar({ userId, view }: { userId?: string; view: WorkInsights |
   const companion = !imageDataUrl;
 
   return (
-    <div className="relative mx-auto mb-8 h-[152px] w-[152px]">
+    <div className="ui-avatar-glow relative isolate mx-auto mb-8 h-[152px] w-[152px]">
       <span
         aria-hidden="true"
         className="absolute inset-0 -rotate-6 rounded-[36px] border border-accent/20 bg-accent/5"

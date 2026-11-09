@@ -347,7 +347,9 @@ class GroupLifecycleState:
         if _Checks.strict:
             raise AssertionError(f"group lifecycle: {violation}")
         logger.warning(
-            "group_lifecycle_violation",
+            "group_lifecycle_violation: %s (combination %s)",
+            violation,
+            render_combination(self.combination()),
             extra={
                 "event": "group_lifecycle_violation",
                 "violation": violation,
@@ -413,7 +415,11 @@ class GroupLifecycleState:
             self.run = replace(run, unfenced=True)
         elif run.sealed_seq is not None and start_seq <= run.sealed_seq:
             logger.warning(
-                "sandbox_run_join_below_sealed_checkpoint",
+                "sandbox_run_join_below_sealed_checkpoint: start_seq=%s sealed_seq=%s "
+                "run_start_seq=%s",
+                start_seq,
+                run.sealed_seq,
+                run.start_seq,
                 extra={
                     "event": "sandbox_run_join_below_sealed_checkpoint",
                     "start_seq": start_seq,
@@ -724,7 +730,9 @@ class CombinationCounts:
                 self._since = now
         if first:
             logger.info(
-                "group_lifecycle_combination",
+                "group_lifecycle_combination %s at %s",
+                render_combination(combination),
+                site,
                 extra={
                     "event": "group_lifecycle_combination",
                     "combination": render_combination(combination),
@@ -733,7 +741,9 @@ class CombinationCounts:
             )
         if due:
             logger.info(
-                "group_lifecycle_combination_counts",
+                "group_lifecycle_combination_counts over %ss: %s",
+                self._interval_s,
+                ", ".join(f"{key}={count}" for key, count in sorted(counts.items())),
                 extra={
                     "event": "group_lifecycle_combination_counts",
                     "counts": counts,

@@ -491,13 +491,18 @@ class GroupReconciler:
                     else:
                         with self._state.lock:
                             self._state.accept_inspection_locked(group, inspection)
+                detail = _archive_failure_diagnostic("fail_stop_final", exc).render()
                 logger.error(
-                    "shared sandbox archive finalization remains pending",
+                    "shared sandbox archive finalization remains pending: sandbox_id=%s "
+                    "generation=%s %s",
+                    spec.sandbox_id,
+                    spec.generation,
+                    detail,
                     extra={
                         "event": "sandbox_archive_finalization_pending",
                         "sandbox_id": spec.sandbox_id,
                         "generation": spec.generation,
-                        "detail": _archive_failure_diagnostic("fail_stop_final", exc).render(),
+                        "detail": detail,
                     },
                 )
             finally:

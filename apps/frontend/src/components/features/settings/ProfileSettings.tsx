@@ -179,7 +179,7 @@ function ProfileEditor({ userId }: { userId: string }) {
 
   return (
     <form
-      className="rounded-2xl border border-border bg-surface px-4 sm:px-6"
+      className="rounded-2xl border border-border bg-surface-raised px-4 shadow-xs sm:px-6"
       aria-busy={loading || saving}
       onSubmit={(event) => {
         event.preventDefault();

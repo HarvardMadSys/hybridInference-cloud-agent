@@ -1,4 +1,5 @@
 import type { Config } from 'tailwindcss';
+import colors from 'tailwindcss/colors';
 
 export default {
   content: ['./src/**/*.{ts,tsx}'],
@@ -6,6 +7,11 @@ export default {
   theme: {
     extend: {
       colors: {
+        // One neutral family. The semantic tokens below are zinc, and Tailwind's
+        // own `gray` is blue-tinted, so every legacy `gray-*` utility read as a
+        // second grey beside them. Mapping `gray` onto zinc makes them one
+        // palette without touching the components that use either.
+        gray: colors.zinc,
         crimson: {
           DEFAULT: '#A51C30',
           dark: '#8B1729',
@@ -23,6 +29,9 @@ export default {
         border: {
           DEFAULT: 'rgb(var(--ui-border) / <alpha-value>)',
           strong: 'rgb(var(--ui-border-strong) / <alpha-value>)',
+          // The frame of a field or a secondary button: firmer than a divider,
+          // lighter than `strong`, which is the hover state's.
+          control: 'rgb(var(--ui-border-control) / <alpha-value>)',
         },
         accent: {
           DEFAULT: 'rgb(var(--ui-accent) / <alpha-value>)',
@@ -43,11 +52,24 @@ export default {
         serif: ['var(--font-serif, Georgia)', 'Cambria', 'Times New Roman', 'serif'],
       },
       borderRadius: {
-        lg: '0.5rem',
+        md: '0.5rem',
+        lg: '0.625rem',
+        xl: '0.875rem',
+        '2xl': '1.125rem',
       },
+      // Elevation is a theme token: a shadow drawn from a fixed dark colour
+      // disappears on a dark ground and one drawn from the foreground glows
+      // there, so each level is defined once per theme in globals.css.
       boxShadow: {
-        subtle: '0 1px 2px rgba(0,0,0,0.06)',
-        card: '0 8px 24px -8px rgb(var(--ui-foreground) / 0.12), 0 2px 6px rgb(var(--ui-foreground) / 0.04)',
+        xs: 'var(--ui-shadow-xs)',
+        subtle: 'var(--ui-shadow-xs)',
+        sm: 'var(--ui-shadow-sm)',
+        DEFAULT: 'var(--ui-shadow-sm)',
+        md: 'var(--ui-shadow-md)',
+        lg: 'var(--ui-shadow-lg)',
+        xl: 'var(--ui-shadow-xl)',
+        '2xl': 'var(--ui-shadow-xl)',
+        card: 'var(--ui-shadow-card)',
       },
     },
   },

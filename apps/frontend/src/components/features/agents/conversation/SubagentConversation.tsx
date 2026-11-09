@@ -127,7 +127,7 @@ export function SubagentConversation({
           <p className="ml-auto w-fit max-w-[88%] text-[11px] text-gray-400 dark:text-gray-500">
             From the main agent
           </p>
-          <UserMessage text={activity.prompt} presentation={presentation} />
+          <UserMessage text={activity.prompt} />
         </div>
       ) : null}
 
