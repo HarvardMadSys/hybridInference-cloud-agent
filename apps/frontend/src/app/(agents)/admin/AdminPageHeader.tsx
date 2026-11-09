@@ -9,9 +9,9 @@ export function AdminPageHeader({
 }) {
   return (
     <header>
-      <h1 className="text-[11px] font-medium uppercase tracking-[0.12em] text-muted">Admin</h1>
-      <p className="text-lg font-semibold tracking-tight text-foreground">{section}</p>
-      <p className="mt-0.5 max-w-3xl text-[13px] leading-5 text-muted">{description}</p>
+      <h1 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-accent">Admin</h1>
+      <p className="mt-0.5 text-xl font-semibold tracking-[-0.015em] text-foreground">{section}</p>
+      <p className="mt-1 max-w-3xl text-[13px] leading-5 text-muted">{description}</p>
     </header>
   );
 }

@@ -431,7 +431,7 @@
         "max-lines": [
           "error",
           {
-            "max": 996
+            "max": 993
           }
         ]
       }
@@ -442,7 +442,7 @@
         "max-lines": [
           "error",
           {
-            "max": 1219
+            "max": 1196
           }
         ]
       }

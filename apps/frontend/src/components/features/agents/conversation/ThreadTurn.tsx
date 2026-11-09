@@ -147,7 +147,7 @@ function ThreadTurnBody({
       </div>
     );
   }
-  return <UserMessage text={message.content} {...{ blockKey, busy, onRewind, presentation }} />;
+  return <UserMessage text={message.content} {...{ blockKey, busy, onRewind }} />;
 }
 
 /**

@@ -655,7 +655,7 @@ export function AgentsSidebar({
         id={active ? 'agents-sidebar' : undefined}
         hidden={!active}
         style={{ width: pane.width }}
-        className={`${active ? 'ui-enter flex' : 'hidden'} min-h-0 shrink-0 flex-col border-r border-border/70 bg-surface-muted`}
+        className={`${active ? 'ui-enter flex' : 'hidden'} min-h-0 shrink-0 flex-col bg-surface-muted`}
       >
         <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
           <div className="flex items-center gap-1.5">
@@ -664,13 +664,13 @@ export function AgentsSidebar({
               aria-current={pathname === '/' ? 'page' : undefined}
               className={`ui-focus-ring flex min-h-8 min-w-0 flex-1 items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[13px] font-semibold transition-colors [@media(pointer:coarse)]:min-h-11 ${
                 pathname === '/'
-                  ? 'border-border bg-surface text-foreground shadow-subtle'
-                  : 'border-border/70 bg-surface text-foreground hover:border-border-strong/50 hover:bg-surface-hover'
+                  ? 'border-border-control bg-surface-raised text-foreground shadow-sm'
+                  : 'border-border bg-surface-raised text-foreground shadow-xs hover:border-border-control hover:shadow-sm'
               }`}
             >
               <svg
                 aria-hidden="true"
-                className="h-4 w-4 shrink-0 text-accent"
+                className="ui-brand-tile h-5 w-5 shrink-0 rounded-md p-[3px]"
                 fill="none"
                 viewBox="0 0 24 24"
                 stroke="currentColor"
@@ -689,10 +689,7 @@ export function AgentsSidebar({
 
           {!searching && (pinnedRows.length > 0 || pinnedList.error) && (
             <section aria-labelledby="sidebar-pinned-heading" className="mt-4">
-              <h2
-                id="sidebar-pinned-heading"
-                className="mb-1 px-2 text-[11px] font-medium text-muted"
-              >
+              <h2 id="sidebar-pinned-heading" className="ui-section-label mb-1 px-2">
                 {t('sidebar.pinned')}
               </h2>
               <div className="space-y-1">
@@ -721,7 +718,7 @@ export function AgentsSidebar({
           )}
 
           <div className="mb-1 mt-4 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 pl-2 pr-0.5">
-            <span className="text-[11px] font-medium text-muted">{t('sidebar.projects')}</span>
+            <span className="ui-section-label">{t('sidebar.projects')}</span>
             <div className="ml-auto flex items-center gap-0.5">
               <button
                 ref={searchButton}
