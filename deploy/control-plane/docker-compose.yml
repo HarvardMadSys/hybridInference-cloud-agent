@@ -29,6 +29,15 @@ services:
   # each file to the one user that reads it, but with no network and only the
   # capabilities that needs.
   keys:
+    # The one service that builds the control-plane image; migrate, the API and
+    # both relays run that same image and never build or pull it. Five builds
+    # would be five images: Compose labels each with its service, so the API and
+    # the MCP relay would differ, and automatic Server setup refuses a control
+    # plane whose two listeners do not run one image. It is this service because
+    # everything else depends on it, so any `up` builds it first. The project
+    # name keeps two stacks on one machine from sharing a tag, and the commit
+    # keeps an image built for another one from being started as this one.
+    image: ${COMPOSE_PROJECT_NAME}-control-plane:${AGENT_DEPLOYMENT_SHA:-unknown}
     build:
       context: ../..
       dockerfile: deploy/control-plane/Dockerfile
@@ -59,11 +68,9 @@ services:
   # racing an unmigrated database is not a slow start, it is a crash loop
   # against tables that do not exist.
   migrate:
-    build:
-      context: ../..
-      dockerfile: deploy/control-plane/Dockerfile
-      args:
-        SOURCE_COMMIT: ${AGENT_DEPLOYMENT_SHA:-unknown}
+    # The image `keys` builds; see there.
+    image: ${COMPOSE_PROJECT_NAME}-control-plane:${AGENT_DEPLOYMENT_SHA:-unknown}
+    pull_policy: never
     command: ["alembic", "upgrade", "head"]
     environment:
       AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:-}
@@ -78,11 +85,9 @@ services:
     networks: [control-plane]
 
   control-plane:
-    build:
-      context: ../..
-      dockerfile: deploy/control-plane/Dockerfile
-      args:
-        SOURCE_COMMIT: ${AGENT_DEPLOYMENT_SHA:-unknown}
+    # The image `keys` builds; see there.
+    image: ${COMPOSE_PROJECT_NAME}-control-plane:${AGENT_DEPLOYMENT_SHA:-unknown}
+    pull_policy: never
     restart: unless-stopped
     labels:
       io.hybridinference.deployment.sha: ${AGENT_DEPLOYMENT_SHA:?exact commit this control plane serves}
@@ -345,11 +350,9 @@ services:
   # simply does not contain them, which is the difference between a policy and
   # a fact.
   mcp-relay:
-    build:
-      context: ../..
-      dockerfile: deploy/control-plane/Dockerfile
-      args:
-        SOURCE_COMMIT: ${AGENT_DEPLOYMENT_SHA:-unknown}
+    # The image `keys` builds; see there.
+    image: ${COMPOSE_PROJECT_NAME}-control-plane:${AGENT_DEPLOYMENT_SHA:-unknown}
+    pull_policy: never
     command:
       - uvicorn
       - cloud_agent.app:create_mcp_app
@@ -399,11 +402,9 @@ services:
   # github-tunnel and AGENT_SANDBOX_GITHUB_RELAY_CA_FILE.
   github-relay:
     profiles: [github-relay]
-    build:
-      context: ../..
-      dockerfile: deploy/control-plane/Dockerfile
-      args:
-        SOURCE_COMMIT: ${AGENT_DEPLOYMENT_SHA:-unknown}
+    # The image `keys` builds; see there.
+    image: ${COMPOSE_PROJECT_NAME}-control-plane:${AGENT_DEPLOYMENT_SHA:-unknown}
+    pull_policy: never
     command:
       - uvicorn
       - cloud_agent.app:create_github_relay_app

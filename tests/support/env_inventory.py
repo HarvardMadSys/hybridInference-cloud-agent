@@ -634,8 +634,10 @@ FAMILIES: tuple[Family, ...] = (
     Family(
         "platform",
         "Process, locale and Docker client variables defined by the OS, Docker or sshd; "
-        "read to start children or by an embedded remote script.",
+        "read to start children or by an embedded remote script. COMPOSE_PROJECT_NAME is "
+        "the project name Compose itself interpolates, naming the control-plane image.",
         names=(
+            "COMPOSE_PROJECT_NAME",
             "PATH",
             "HOME",
             "LANG",

@@ -282,7 +282,7 @@ def test_local_up_stops_before_full_stack_when_retained_database_auth_fails(
     calls = compose_log.read_text()
 
     assert result.returncode != 0
-    assert (" build sandbox-image migrate" in calls) is not prebuilt
+    assert (" build sandbox-image keys" in calls) is not prebuilt
     assert " up --detach postgres" in calls
     assert " run --rm --no-deps migrate python -c" in calls
     assert " up --detach --build" not in calls
