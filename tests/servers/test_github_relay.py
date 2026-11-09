@@ -201,7 +201,17 @@ async def test_refused_requests_never_reach_github(method, url):
     assert github.requests == []
 
 
-async def test_an_owner_without_github_is_told_to_connect_it():
+@pytest.mark.parametrize(("configured", "app_name"), [(None, "Cloud Agent"), ("Acme", "Acme")])
+async def test_an_owner_without_github_is_told_to_connect_it(monkeypatch, configured, app_name):
+    """The message names this deployment's application, and links nowhere of its own.
+
+    No settings snapshot is loaded here, so the name is read from the
+    environment, as the token secret this file mints placeholders with is.
+    """
+    if configured is None:
+        monkeypatch.delenv("AGENT_WEB_APP_NAME", raising=False)
+    else:
+        monkeypatch.setenv("AGENT_WEB_APP_NAME", configured)
     github = _GitHub()
     response = await _send(
         _Store(connected=False),
@@ -211,7 +221,10 @@ async def test_an_owner_without_github_is_told_to_connect_it():
         auth=f"token {_placeholder()}",
     )
     assert response.status_code == 403
-    assert "connected GitHub" in response.json()["message"]
+    assert response.json() == {
+        "message": "The owner of this chat has not connected GitHub, or must reconnect it, "
+        f"in {app_name} before this chat can act on GitHub as them."
+    }
     assert github.requests == []
 
 

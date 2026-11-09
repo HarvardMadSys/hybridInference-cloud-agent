@@ -46,6 +46,7 @@ from starlette.background import BackgroundTask
 
 from cloud_agent.api.deps import get_agent_app_credentials, get_http_client, get_storage
 from cloud_agent.logging_utils import get_logger
+from cloud_agent.settings import text_setting
 from cloud_agent.source_control.github_relay_policy import (
     API_HOST,
     MAX_PUSH_COMMAND_BYTES,
@@ -108,10 +109,7 @@ class _RelayStorage(Protocol):
 def _refusal(host: str, status: int, message: str) -> Response:
     """A refusal git or ``gh`` will show the agent as it is."""
     if host == API_HOST:
-        return JSONResponse(
-            {"message": message, "documentation_url": "https://freeinference.org/"},
-            status_code=status,
-        )
+        return JSONResponse({"message": message}, status_code=status)
     return Response(message + "\n", status_code=status, media_type="text/plain")
 
 
@@ -326,7 +324,7 @@ async def relay(  # noqa: PLR0912 — one decision per branch, read top to botto
             host,
             403,
             "The owner of this chat has not connected GitHub, or must reconnect it, "
-            "in FreeInference before this chat can act on GitHub as them.",
+            f"in {text_setting('site.app_name')} before this chat can act on GitHub as them.",
         )
     return await _forward_as_owner(request, http, store, caller, decision, host, token)
 
