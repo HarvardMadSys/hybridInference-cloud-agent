@@ -1,15 +1,11 @@
-"""Every variable a stack refuses to start without has a line in its example.
+"""Every variable a stack refuses to start without has something that supplies it.
 
-The gap this closes is not "a variable is undocumented". It is that
-`deploy/control-plane/` had no `.env.example` at all, so the only way to learn
-what the stack needs was to read the compose file's interpolations — and the
-web build arguments, which are *not* required and default to empty, produce a
-stack that starts happily and is wrong in ways nobody sees until a user tries
-to sign in.
-
-So: the compose file is the source of truth, and the example is checked
-against it. A new required variable fails here rather than at an operator's
-first `docker compose up`.
+Nobody writes a production env file by hand any more: a new control plane
+needs none (its keys come from the `keys` service, everything else from
+Admin), and a host's is written by Admin → Servers → Add server. So the
+compose files are the source of truth, and each required variable is checked
+against what supplies it. A new required variable fails here rather than at an
+operator's first `docker compose up`.
 
 Written as a test and not a checklist deliberately. A checklist is a thing
 somebody remembers to update.
@@ -107,45 +103,11 @@ def test_compose_accepts_the_new_token_alone_and_still_rejects_missing_credentia
     assert "AGENT_SANDBOX_MANAGER_TOKEN" in refused.stderr
 
 
-#: (compose file, its example) — one pair per machine in the deployment.
-STACKS = [
-    pytest.param(
-        REPO / "deploy/control-plane/docker-compose.yml",
-        REPO / "deploy/control-plane/.env.example",
-        id="control-plane",
-    ),
-    pytest.param(
-        REPO / "deploy/host/docker-compose.sandbox.yml",
-        REPO / "deploy/host/.env.example",
-        id="host",
-    ),
-]
+CONTROL_PLANE = REPO / "deploy/control-plane/docker-compose.yml"
+HOST = REPO / "deploy/host/docker-compose.sandbox.yml"
 
 #: `${VAR:?message}` — the form that refuses to render when unset.
 _REQUIRED = re.compile(r"\$\{([A-Z_][A-Z0-9_]*):\?")
-
-#: `${VAR:-default}` — everything else the file reads.
-_OPTIONAL = re.compile(r"\$\{([A-Z_][A-Z0-9_]*):-")
-
-#: The scripts that stand in front of each stack and read the same `.env`.
-#:
-#: Not everything an operator must set reaches compose as an interpolation.
-#: `COMPOSE_PROJECT` is passed as `-p`, so a check that read only the compose
-#: file would call the one variable this deploy refuses to run without an
-#: invention.
-FRONTENDS = {
-    "deploy/control-plane/docker-compose.yml": ("deploy/control-plane/deploy.sh",),
-    "deploy/host/docker-compose.sandbox.yml": (
-        "deploy/host/deploy.sh",
-        "deploy/host/sandbox_host.sh",
-    ),
-}
-
-#: Only the explicit lookups — `env_or_dotenv NAME` and `from_env NAME`. Any
-#: `${NAME}` would count every shell local as configuration and leave this test
-#: asserting nothing.
-_SCRIPT_READ = re.compile(r"(?:env_or_dotenv|from_env)\s+([A-Z_][A-Z0-9_]*)")
-
 
 #: Required by a compose file, but exported by the script that runs it rather
 #: than written by an operator: deploy.sh exports the commit it deploys, and
@@ -153,25 +115,18 @@ _SCRIPT_READ = re.compile(r"(?:env_or_dotenv|from_env)\s+([A-Z_][A-Z0-9_]*)")
 #: hand still fails on it with its own message.
 EXPORTED_BY_DEPLOYER = {"AGENT_DEPLOYMENT_SHA"}
 
-
-def _assigned(example: Path) -> set[str]:
-    """Variable names the example file assigns, commented lines excluded."""
-    return {
-        match.group(1)
-        for line in example.read_text().splitlines()
-        if (match := re.match(r"\s*([A-Z_][A-Z0-9_]*)=", line))
-    }
+#: The two relays a host reaches, each spelled as a prefix in server setup.
+_TUNNELS = ("AGENT_MCP_TUNNEL", "AGENT_CONTROL_PLANE_TUNNEL")
 
 
-@pytest.mark.parametrize(("compose", "example"), STACKS)
-def test_every_required_variable_is_in_the_example(compose: Path, example: Path) -> None:
-    """An operator copying the example gets a file that names every blocker."""
-    required = set(_REQUIRED.findall(compose.read_text()))
-    assert required, f"no required variables found in {compose.name} — regex drift?"
-    missing = required - _assigned(example) - EXPORTED_BY_DEPLOYER
-    assert not missing, (
-        f"{example.relative_to(REPO)} is missing {sorted(missing)}; an operator "
-        "copying it hits the failure one variable at a time"
+def test_a_new_control_plane_needs_no_env_file() -> None:
+    """Its keys come from the `keys` service and everything else from Admin, so
+    the only thing a first start needs is the commit its deployer exports."""
+    required = set(_REQUIRED.findall(CONTROL_PLANE.read_text()))
+    assert required, "no required variables found — regex drift?"
+    assert required <= EXPORTED_BY_DEPLOYER, (
+        f"{CONTROL_PLANE.name} now refuses to start without {sorted(required - EXPORTED_BY_DEPLOYER)}; "
+        "a new installation has no env file to set it in"
     )
 
 
@@ -181,19 +136,24 @@ def test_the_deployer_exports_what_the_examples_leave_out() -> None:
         assert f"export {name}" in script, name
 
 
-@pytest.mark.parametrize(("compose", "example"), STACKS)
-def test_the_example_invents_nothing(compose: Path, example: Path) -> None:
-    """A variable the compose file does not read is one nobody will notice.
+def _written_by_server_setup() -> set[str]:
+    """Every name automatic server setup or the host bootstrap writes into a host's .env."""
+    setup = (REPO / "apps/backend/cloud_agent/application/compute_setup.py").read_text()
+    bootstrap = (REPO / "apps/backend/cloud_agent/providers/compute/host_bootstrap.py").read_text()
+    names = set(re.findall(r'"([A-Z][A-Z0-9_]+)":', setup + bootstrap))
+    suffixes = set(re.findall(r'prefix\s*\+\s*"(_[A-Z_]+)"', setup))
+    assert suffixes, (
+        "server setup no longer spells the tunnel names as prefix + suffix — regex drift?"
+    )
+    return names | {prefix + suffix for prefix in _TUNNELS for suffix in suffixes}
 
-    Renaming a variable in the compose file and not here leaves a line that
-    looks like configuration and is not — set it, restart, and nothing
-    changes. That is worse than an absent line, which at least fails.
-    """
-    text = compose.read_text()
-    known = set(_REQUIRED.findall(text)) | set(_OPTIONAL.findall(text))
-    for script in FRONTENDS[str(compose.relative_to(REPO))]:
-        known |= set(_SCRIPT_READ.findall((REPO / script).read_text()))
-    unread = _assigned(example) - known
-    assert not unread, (
-        f"{example.relative_to(REPO)} assigns {sorted(unread)}, which {compose.name} never reads"
+
+def test_server_setup_writes_every_variable_a_host_cannot_start_without() -> None:
+    """A host's .env is written by Admin → Servers → Add server, never by hand,
+    so a new required variable must be one it writes."""
+    required = set(_REQUIRED.findall(HOST.read_text()))
+    assert required, "no required variables found — regex drift?"
+    missing = required - _written_by_server_setup() - EXPORTED_BY_DEPLOYER
+    assert not missing, (
+        f"{HOST.name} refuses to start without {sorted(missing)}, which server setup never writes"
     )

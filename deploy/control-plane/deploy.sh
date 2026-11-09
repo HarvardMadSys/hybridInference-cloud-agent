@@ -97,7 +97,8 @@ esac
   || die "SHARED_READY_TIMEOUT must be a positive integer (got '${SHARED_READY_TIMEOUT}')"
 
 cd "${DEPLOY_ROOT}" 2>/dev/null || die "${DEPLOY_ROOT} does not exist"
-[ -f .env ] || die ".env is missing from ${DEPLOY_ROOT} — it holds this deployment's secrets and is deliberately not in git"
+# A .env is optional. It holds only the overrides this deployment chose; the
+# keys live in their own volume (see the `keys` service).
 
 if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
   source "$SCRIPT_DIR/../release/artifact_env.sh"
@@ -159,7 +160,7 @@ else
   log "checkout now at ${NOW}"
 fi
 
-# Read one value from the deployment's persistent, untracked .env.
+# Read one value from the deployment's persistent, untracked .env, if it has one.
 from_env() {
   local value
   if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
@@ -226,7 +227,9 @@ compose() {
       run) shift; set -- run --pull never "$@" ;;
     esac
   fi
-  local command=(docker compose -p "${COMPOSE_PROJECT}" --env-file .env -f "${COMPOSE_FILE}")
+  local command=(docker compose -p "${COMPOSE_PROJECT}")
+  [ ! -f .env ] || command+=(--env-file .env)
+  command+=(-f "${COMPOSE_FILE}")
   if [[ -n "${AGENT_COMPUTE_DIRECTORY:-$(from_env AGENT_COMPUTE_DIRECTORY)}" ]]; then
     command+=(-f "$SCRIPT_DIR/docker-compose.compute.yml")
   fi
@@ -260,172 +263,11 @@ compose() {
 # daemon, where the next deploy can reuse it.
 export BUILDX_CONFIG="${DEPLOY_ROOT}/.buildx"
 
-# A new installation's keys, so an operator does not invent them by hand.
-#
-# On a provably fresh installation this writes the bundled database's password
-# and connection, the account system's key and the settings root key into the
-# persistent .env, once. The keys the application keeps among its settings
-# (host signing, user and compute credential encryption) it generates itself
-# when it creates its settings on first start.
-#
-# A value that is set, in .env or in this process's environment, is never
-# replaced. The settings root key decrypts every stored secret, so a new one on
-# an existing deployment would make all of them unreadable. A missing value is
-# therefore generated only when nothing can already depend on it: this root
-# has never completed a deployment, the database is the bundled one, no Docker
-# volume or container of this Compose project exists, and no legacy
-# AGENT_SESSION_SECRET serves as the settings root. Otherwise the deployment
-# stops naming what to set; it never invents a value. A private override's
-# `environment:` entry still wins over a value written here. See
-# docs/agents/specs/2026-11-04-first-install-keys.zh-CN.md.
-#
-# .env is read leniently, so an unusual spelling (`export NAME=`, spaces around `=`)
-# reads as set rather than as missing.
-dotenv_value() {
-  local value
-  value="$(grep -E "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=" .env 2>/dev/null \
-    | tail -1 | cut -d= -f2- || true)"
-  value="${value#"${value%%[![:space:]]*}"}"; value="${value%"${value##*[![:space:]]}"}"
-  value="${value%\"}"; value="${value#\"}"
-  value="${value%\'}"; value="${value#\'}"
-  printf '%s' "${value}"
-}
-
-# The value Compose will see: this process's environment wins over .env.
-deployment_value() {
-  local name="$1"
-  if [ -n "${!name:-}" ]; then
-    printf '%s' "${!name}"
-  else
-    dotenv_value "${name}"
-  fi
-}
-
-# Why this cannot be proved a fresh installation; nothing when it can.
-not_fresh_reason() {
-  local url="$1" volumes="" labelled="" containers="" project=""
-  if [ -e .deployed-sha ]; then
-    printf 'this deployment root has completed a deployment before (.deployed-sha exists)'
-    return 0
-  fi
-  if [ -n "${url}" ] && ! [[ "${url}" =~ @postgres(:[0-9]+)?(/|$) ]]; then
-    printf 'AGENT_DATABASE_URL names a database other than the bundled one'
-    return 0
-  fi
-  if ! volumes="$(docker volume ls -q 2>/dev/null)"; then
-    printf 'Docker could not list its volumes'
-    return 0
-  fi
-  for project in "${COMPOSE_PROJECT}" "$(dotenv_value COMPOSE_PROJECT)"; do
-    [ -n "${project}" ] || continue
-    project="${project,,}"
-    if ! labelled="$(docker volume ls -q --filter "label=com.docker.compose.project=${project}" \
-      --filter label=com.docker.compose.volume=agent-postgres 2>/dev/null)"; then
-      printf 'Docker could not list its volumes'
-      return 0
-    fi
-    if [ -n "${labelled}" ] || grep -qx "${project}_agent-postgres" <<<"${volumes}"; then
-      printf 'the database volume of Compose project %s already exists' "${project}"
-      return 0
-    fi
-    if ! containers="$(docker ps -aq --filter "label=com.docker.compose.project=${project}" 2>/dev/null)"; then
-      printf 'Docker could not list its containers'
-      return 0
-    fi
-    if [ -n "${containers}" ]; then
-      printf 'containers of Compose project %s already exist' "${project}"
-      return 0
-    fi
-  done
-}
-
-# Fill each NAME=value given in FIRST_INSTALL_LINES into .env: an empty
-# NAME= line takes it, otherwise it is appended. The values travel in the
-# environment, never on a command line another user could list.
-write_first_install_lines() {
-  local temporary
-  temporary="$(mktemp "${DEPLOY_ROOT}/.env.first-install.XXXXXX")"
-  chmod 600 "${temporary}"
-  awk '
-    BEGIN {
-      count = split(ENVIRON["FIRST_INSTALL_LINES"], added, "\n")
-      for (i = 1; i <= count; i++) {
-        name = added[i]; sub(/=.*/, "", name)
-        line[name] = added[i]; order[i] = name
-      }
-    }
-    {
-      name = $0; sub(/=.*/, "", name)
-      if ((name in line) && ($0 == name "=" || $0 == name "=\"\"" || $0 == name "='"''"'")) {
-        if (!(name in written)) { print line[name]; written[name] = 1 }
-        next
-      }
-      print
-    }
-    END { for (i = 1; i <= count; i++) if (!(order[i] in written)) print line[order[i]] }
-  ' .env > "${temporary}"
-  mv "${temporary}" .env
-}
-
-ensure_first_install_keys() {
-  local url password session settings fallback reason="" user="" database="" generated=()
-  local missing=() lines=()
-  url="$(deployment_value AGENT_DATABASE_URL)"
-  password="$(deployment_value AGENT_POSTGRES_PASSWORD)"
-  session="$(deployment_value AGENT_LOCAL_SESSION_SECRET)"
-  settings="$(deployment_value AGENT_SETTINGS_ENCRYPTION_KEY)"
-  fallback="$(deployment_value AGENT_SESSION_SECRET)"
-  [ -n "${url}" ] || missing+=(AGENT_DATABASE_URL)
-  [ -n "${password}" ] || missing+=(AGENT_POSTGRES_PASSWORD)
-  [ -n "${session}" ] || missing+=(AGENT_LOCAL_SESSION_SECRET)
-  # An older deployment's settings root may be AGENT_SESSION_SECRET. That
-  # root stays: a dedicated key beside it would replace it.
-  if [ -z "${settings}" ] && [ -z "${fallback}" ]; then
-    missing+=(AGENT_SETTINGS_ENCRYPTION_KEY)
-  fi
-  [ "${#missing[@]}" -gt 0 ] || return 0
-
-  reason="$(not_fresh_reason "${url}")"
-  if [ -n "${reason}" ]; then
-    if [ "${missing[*]}" = AGENT_SETTINGS_ENCRYPTION_KEY ]; then
-      # Compose does not require it, and a private override may supply it.
-      log "WARNING: AGENT_SETTINGS_ENCRYPTION_KEY is not set and was not generated: ${reason}. Set the key this deployment's settings were saved with."
-      return 0
-    fi
-    die "${missing[*]} not set, and not generated: ${reason}. Set them in ${DEPLOY_ROOT}/.env. For an existing database use the exact values it was created with, never new ones."
-  fi
-  if [ -n "${url}" ] && [ -z "${password}" ]; then
-    die "AGENT_DATABASE_URL is set but AGENT_POSTGRES_PASSWORD is not: set the password the URL uses"
-  fi
-  if [ -z "${url}" ] && [ -n "${password}" ]; then
-    die "AGENT_POSTGRES_PASSWORD is set but AGENT_DATABASE_URL is not: set the URL with that password, or leave both empty to generate them"
-  fi
-  command -v openssl >/dev/null 2>&1 || die "openssl is required to generate a new installation's keys"
-
-  if [ -z "${password}" ]; then
-    user="$(deployment_value AGENT_POSTGRES_USER)"; user="${user:-cloudagent}"
-    database="$(deployment_value AGENT_POSTGRES_DB)"; database="${database:-cloudagent}"
-    [[ "${user}" =~ ^[A-Za-z0-9_]+$ && "${database}" =~ ^[A-Za-z0-9_]+$ ]] \
-      || die "AGENT_POSTGRES_USER and AGENT_POSTGRES_DB must be letters, digits and _ to generate AGENT_DATABASE_URL; set it yourself"
-    password="$(openssl rand -hex 32)"
-    lines+=("AGENT_POSTGRES_PASSWORD=${password}")
-    lines+=("AGENT_DATABASE_URL=postgresql://${user}:${password}@postgres:5432/${database}")
-    generated+=(AGENT_POSTGRES_PASSWORD AGENT_DATABASE_URL)
-  fi
-  if [ -z "${session}" ]; then
-    lines+=("AGENT_LOCAL_SESSION_SECRET=$(openssl rand -hex 32)")
-    generated+=(AGENT_LOCAL_SESSION_SECRET)
-  fi
-  if [ -z "${settings}" ] && [ -z "${fallback}" ]; then
-    lines+=("AGENT_SETTINGS_ENCRYPTION_KEY=$(openssl rand -hex 32)")
-    generated+=(AGENT_SETTINGS_ENCRYPTION_KEY)
-  fi
-  FIRST_INSTALL_LINES="$(printf '%s\n' "${lines[@]}")" write_first_install_lines
-  log "new installation: generated ${generated[*]} into ${DEPLOY_ROOT}/.env; back this file up with the database"
-}
-
-# Abandoning an attempt changes no configuration.
-[ "${PHASE}" = abandon ] || ensure_first_install_keys
+# A new installation's keys are not this script's business any more: the
+# Compose `keys` service stores, keeps or generates them in the agent-keys
+# volume before anything that needs one starts, and refuses to invent one where
+# data may depend on it (apps/backend/cloud_agent/deployment/deployment_keys.py).
+# A value this deployment's .env still sets is stored there on the next start.
 
 # The value Compose resolves for one variable: this process's environment, then
 # .env with its interpolation applied, so `NAME=${OTHER:-}` reads as empty. An
@@ -439,7 +281,7 @@ resolved_value() {
   # Through the same Compose files as every other call, the private override
   # last, so this reads what the deployment itself would.
   resolved="$(compose config --environment)" \
-    || die "Compose could not resolve ${DEPLOY_ROOT}/.env"
+    || die "Compose could not resolve this deployment's configuration"
   while IFS= read -r line; do
     if [[ "${line%%=*}" == "$1" ]]; then
       printf '%s' "${line#*=}"

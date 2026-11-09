@@ -41,7 +41,7 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, and they are strings
 #: "six images and nine questions".
 STACKS: dict[str, dict[str, tuple[str, ...]]] = {
     "control-plane": {
-        "control": ("migrate", "control-plane", "mcp-relay", "github-relay"),
+        "control": ("keys", "migrate", "control-plane", "mcp-relay", "github-relay"),
         "web": ("web",),
     },
     "host": {

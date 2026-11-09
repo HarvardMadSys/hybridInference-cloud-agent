@@ -658,21 +658,15 @@ FAMILIES: tuple[Family, ...] = (
             "DOCKER_CONFIG",
             "SSH_ORIGINAL_COMMAND",
             "NODE_ENV",
-            "COMPOSE_PROFILES",
         ),
     ),
     Family(
         "platform",
-        "Third-party images and SDKs: the AWS SDK's credential chain for sandbox archives, "
-        "and the PostgreSQL and pgAdmin images' own settings.",
+        "Third-party images' own settings: PostgreSQL's and pgAdmin's.",
         names=(
-            "AWS_ACCESS_KEY_ID",
-            "AWS_SECRET_ACCESS_KEY",
-            "AWS_SESSION_TOKEN",
-            "AWS_DEFAULT_REGION",
             "POSTGRES_DB",
             "POSTGRES_USER",
-            "POSTGRES_PASSWORD",
+            "POSTGRES_PASSWORD_FILE",
         ),
         prefixes=("PGADMIN_",),
     ),

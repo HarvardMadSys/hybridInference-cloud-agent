@@ -641,17 +641,6 @@ def test_shared_live_capacity_defaults_are_deployable(tmp_path: Path) -> None:
     assert "retained storage verified" in result.stdout
 
 
-def test_host_env_example_has_one_value_per_key() -> None:
-    """A later duplicate silently overrides the environment-specific value."""
-    keys = [
-        line.split("=", 1)[0]
-        for line in (REPO_ROOT / "deploy/host/.env.example").read_text().splitlines()
-        if line and not line.startswith("#") and "=" in line
-    ]
-
-    assert len(keys) == len(set(keys))
-
-
 def test_shared_live_refuses_an_invalid_chat_idle_timeout(tmp_path: Path) -> None:
     env = _host(tmp_path)
     app_dir = Path(env["APP_DIR"])

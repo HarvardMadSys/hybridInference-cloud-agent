@@ -63,6 +63,9 @@ COPY apps/backend/cloud_agent_host/ apps/backend/cloud_agent_host/
 # the pyproject.toml copied above.
 COPY apps/backend/migrations/ apps/backend/migrations/
 COPY --from=host-release /compute-host-release/ /app/compute-host-release/
+# Every command this image runs reads the deployment keys the environment does
+# not set from the agent-keys volume; see the script.
+COPY --chmod=0755 deploy/control-plane/load-keys.sh /usr/local/bin/cloud-agent-load-keys
 
 RUN uv sync --frozen --no-dev --no-editable \
     && useradd --create-home --uid 10001 cloudagent \
@@ -92,5 +95,6 @@ EXPOSE 8000
 # address is `AGENT_TRUST_PROXY_HEADERS`, decided by the deployment that knows
 # whether a proxy it controls actually overwrites the header — baking it in
 # here would let any caller write the admin audit trail's client IP.
+ENTRYPOINT ["/usr/local/bin/cloud-agent-load-keys"]
 CMD ["uvicorn", "cloud_agent.app:create_app", "--factory", \
      "--host", "0.0.0.0", "--port", "8000"]
