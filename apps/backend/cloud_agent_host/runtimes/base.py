@@ -327,11 +327,11 @@ class RuntimeMCPConfig:
     alias from.
 
     **A separate address and a separate credential from inference.** MCP is
-    served by the cloud agent's own relay, model calls by the FreeInference
-    gateway, and the two credentials are not interchangeable: a leaked MCP
-    token buys no inference, a leaked inference grant buys no tools. Carrying
-    them in one field, as this did while the gateway proxied MCP, would make
-    that separation impossible to express.
+    served by the cloud agent's own relay, model calls by the owner's model
+    provider, and the two credentials are not interchangeable: a leaked MCP
+    token buys no inference, a leaked provider key buys no tools. Carrying
+    them in one field, as this did while an inference gateway proxied MCP,
+    would make that separation impossible to express.
 
     Still no endpoint or header for the *upstream*: each alias is a name one
     conversation gave one connection, the relay resolves it against that job's

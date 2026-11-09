@@ -545,10 +545,10 @@ _MIGRATED_DEFINITIONS: tuple[Setting, ...] = (
         env="AGENT_SANDBOX_ARCHIVE_S3_BUCKET",
         check=_s3_bucket,
         hint=(
-            "Use a bucket name such as freeinference; set cloud-agent/sandbox "
+            "Use a bucket name such as my-archive-bucket; set cloud-agent/sandbox "
             "in Sandbox archive S3 prefix."
         ),
-        description="Enter a bucket name, or paste an S3 URI such as s3://freeinference/cloud-agent/sandbox to save the bucket and prefix together. Required for sandbox deletion; the completed archive is verified before removal. Empty disables deletion.",
+        description="Enter a bucket name, or paste an S3 URI such as s3://my-archive-bucket/cloud-agent/sandbox to save the bucket and prefix together. Required for sandbox deletion; the completed archive is verified before removal. Empty disables deletion.",
     ),
     Setting(
         "sandbox_archive.region",

@@ -32,7 +32,7 @@ API_HOST = "api.github.com"
 RELAY_HOSTS = frozenset({WEB_HOST, API_HOST})
 
 GRAPHQL_REFUSAL = (
-    "GitHub GraphQL is not available from FreeInference sessions: a GraphQL "
+    "GitHub GraphQL is not available from Cloud Agent sessions: a GraphQL "
     "request can name any repository, and this session may only act on its own. "
     "Use the REST API instead, for example `gh api repos/{owner}/{repo}/pulls`."
 )

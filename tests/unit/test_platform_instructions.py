@@ -111,6 +111,7 @@ def test_the_instructions_say_facts_and_no_way_of_working():
     )
     text = platform_instructions(launch, coauthor_trailer=True)
 
+    assert text.startswith("# Working in this Cloud Agent sandbox\n")
     assert "a checkout of `owner/repo`" in text
     assert "`Co-Authored-By: Bot <b@x>`" in text
     assert "gh api repos/owner/repo/pulls -f title=" in text
