@@ -61,6 +61,10 @@ CATEGORIES = {
         "Names the FreeInference system the one-time account import reads from; it stays while "
         "the importer does."
     ),
+    "neutrality-guard": (
+        "A test that refuses the name somewhere else, so it has to spell it: in the text it "
+        "searches for and in the samples it must catch."
+    ),
     "deployment-branding": (
         "Text, a sample value or a default that still presents the FreeInference deployment as "
         "the product. Debt: make it neutral or configurable, then lower the entry."
