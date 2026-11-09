@@ -14,15 +14,17 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from tests.support.archive_policy import hooked_supervisor
 from tests.unit.test_shared_session_supervisor import _Manager, _spec
 
 from cloud_agent_host.container.chat_sandbox import ChatSandboxStatus
-from cloud_agent_host.container.chat_sandbox_models import ChatSandboxSpec
 from cloud_agent_host.container.sandbox import SandboxError
+
+if TYPE_CHECKING:
+    from cloud_agent_host.container.chat_sandbox_models import ChatSandboxSpec
 
 #: The restored generation; the checkpoint was taken of generation 1.
 _RESTORED = 2

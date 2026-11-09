@@ -9,8 +9,8 @@ The fields stay in ``extra`` for ``AGENT_LOG_FORMAT=json``.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
-import pytest
 from tests.support.group_lifecycle import new_state
 
 from cloud_agent_host.supervisor.group_lifecycle_state import (
@@ -19,6 +19,9 @@ from cloud_agent_host.supervisor.group_lifecycle_state import (
     Hold,
     set_strict_checks,
 )
+
+if TYPE_CHECKING:
+    import pytest
 
 _LOGGER = "cloud_agent_host.supervisor.group_lifecycle"
 

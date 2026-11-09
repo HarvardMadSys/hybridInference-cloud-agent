@@ -1259,7 +1259,6 @@ class GroupLifecycleController:
         return stopped
 
 
-
 def _carried_final_marker(payload: bytes, spec: ChatSandboxSpec) -> bool:
     """Whether a final marker is an earlier generation's, restored with its checkpoint.
 
@@ -1285,6 +1284,7 @@ def _carried_final_marker(payload: bytes, spec: ChatSandboxSpec) -> bool:
         sandbox_id=spec.sandbox_id,
         generation=spec.generation,
     )
+
 
 __all__ = [
     "GroupLifecycleController",
