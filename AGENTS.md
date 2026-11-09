@@ -121,6 +121,12 @@ tests, scripts, `deploy/` or migrations; the frontend limits skip
   `noqa` (ruff's `RUF100` fix).
 - Oversized backend modules are listed in `tests/unit/test_file_size_budget.py`
   and may not grow. Lower an entry when its module shrinks.
+- `tests/unit/distribution_neutrality_allowlist.json` lists, by reason, the
+  tracked files that still name one particular deployment of this code, and
+  how often. `tests/unit/test_distribution_neutrality.py` fails on a new
+  mention, and on an entry above its file's count; after removing mentions,
+  `uv run python scripts/check_distribution_neutrality.py --write` lowers the
+  entries.
 - `apps/frontend/eslint-ratchet.json` lists the frontend files over a limit,
   each at its current value. ESLint applies a listed value to every function in
   that file, so it lets a new function there go past 15; keep new functions
