@@ -76,8 +76,8 @@ for version in "${wanted[@]}"; do
 
     prefix="${root}/${version}"
     if [ "${runtime_id}" = kilo ]; then
-        # Every selectable Kilo version must carry the reviewed isolation fix.
-        # Refuse an unreviewed extra version at build time, before advertising it.
+        # Kilo runs only its reviewed build, which carries the isolation fix.
+        # Refuse any other version at build time, before advertising it.
         test "${version}" = 7.4.17
         mkdir -p "${prefix}"
         cp -a /opt/kilo/. "${prefix}/"

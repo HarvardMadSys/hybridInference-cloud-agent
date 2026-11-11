@@ -47,10 +47,21 @@ Preserve all of the following privately:
 - A full agent-owned Postgres backup, including settings, identity namespace,
   enrolled hosts, placement/ownership, jobs and attempts, connections, and compute
   lifecycle records. Do not select only user-facing conversation tables.
-- Both deployment roots' `.env` and mounted credential files. Preserve
-  `AGENT_SETTINGS_ENCRYPTION_KEY`, or the original `AGENT_SESSION_SECRET` when
-  used as its fallback; also preserve source-control and compute encryption
-  keys, control/session signing secrets, sandbox manager credentials and GitHub App keys.
+- The control plane's deployment keys, apart from the database: the
+  `agent-keys` volume holds `AGENT_SETTINGS_ENCRYPTION_KEY` (or the original
+  `AGENT_SESSION_SECRET` where that is the root), the account key and the
+  database connection. Export them as `.env` lines with
+  `docker exec "${COMPOSE_PROJECT:?}-control-plane-1" python -m
+  cloud_agent.deployment.deployment_keys export > keys.env`, written only to the
+  encrypted backup storage; on a replacement machine, that file as the
+  deployment's `.env` restores them on its first start. A settings root key
+  in the environment that differs from the stored one stops the start, because
+  the `keys` service never replaces a root. Only when the environment's key is
+  the one the settings were saved with, delete the stored file first:
+  `docker run --rm --entrypoint rm -v "${COMPOSE_PROJECT:?}_agent-keys:/keys"
+  postgres:16-alpine /keys/AGENT_SETTINGS_ENCRYPTION_KEY`. Also keep both deployment roots' `.env`, where they have one,
+  and mounted credential files: source-control and compute encryption keys,
+  control/session signing secrets, sandbox manager credentials and GitHub App keys.
   Saved settings can hold some of these keys, but they still require the
   settings root key to decrypt. Generating new keys does not recover old data.
 - Each host's persisted enrollment credential directory and deployment identity,

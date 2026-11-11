@@ -267,22 +267,6 @@ RELAY_NETWORK="${RELAY_NETWORK:-${COMPOSE_PROJECT:+${COMPOSE_PROJECT}-}agent-rel
 AGENT_RELAY_NETWORK="$RELAY_NETWORK"
 export AGENT_RELAY_NETWORK
 
-# Extra versions the image also carries, comma-separated, so an admin can switch
-# new chats between them from the admin page without a rebuild. The image's
-# default versions are protocol pins shared by the host and control plane, so
-# they change in source together with `SHARED_SANDBOX_RUNTIME_PINS`, not through
-# one host's environment. Empty is the normal case and means the image holds
-# exactly those reviewed defaults.
-#
-# Build time decides the menu; the admin page decides which item is active. The
-# control plane cannot offer a version this image does not contain, so what goes
-# here is the ceiling on what an admin can pick.
-CLAUDE_CODE_EXTRA_VERSIONS="$(env_or_dotenv CLAUDE_CODE_EXTRA_VERSIONS)"
-CODEX_EXTRA_VERSIONS="$(env_or_dotenv CODEX_EXTRA_VERSIONS)"
-PI_EXTRA_VERSIONS="$(env_or_dotenv PI_EXTRA_VERSIONS)"
-OPENCODE_EXTRA_VERSIONS="$(env_or_dotenv OPENCODE_EXTRA_VERSIONS)"
-KILO_EXTRA_VERSIONS="$(env_or_dotenv KILO_EXTRA_VERSIONS)"
-
 require_env() {
   # Named up front, because each of these fails much later and much less
   # legibly: a missing token as a 401 per claim, a missing key as a container
@@ -389,30 +373,14 @@ validate_retained_config() {
   # protocol unit. A per-host default override used to build successfully and
   # then make every runner omit shared-sandbox-v1, because the control plane
   # quite correctly rejected the mismatched attestation. Fail at configuration
-  # time instead. A staging/rollback version is added to *_EXTRA_VERSIONS and
-  # selected in Admin; a new default changes both source pin locations.
+  # time instead. Another version of an agent is installed at runtime from
+  # Admin -> Settings -> Agent versions; a new default changes both source pin
+  # locations in one reviewed change.
   local default_pin configured_pin
   for default_pin in CLAUDE_CODE_VERSION CODEX_VERSION PI_VERSION OPENCODE_VERSION KILO_VERSION; do
     configured_pin="$(env_or_dotenv "$default_pin")"
     [[ -z "$configured_pin" ]] || die \
-      "$default_pin is a source-level shared protocol pin, not a host override. Remove it and put ${default_pin%_VERSION}_EXTRA_VERSIONS=$configured_pin in this host's configuration, then select that version in Admin; or update the Dockerfile and SHARED_SANDBOX_RUNTIME_PINS together in a reviewed change."
-  done
-
-  # Every menu entry is an exact version. npm reads a partial one such as `2.1`
-  # as a range, so the image would label whatever the build resolved with the
-  # partial string, and a rebuild could put a different binary under the same
-  # label. install-runtimes.sh refuses it as well; this refuses it before the
-  # image build starts.
-  local menu entry
-  local -a entries
-  for menu in CLAUDE_CODE_EXTRA_VERSIONS CODEX_EXTRA_VERSIONS PI_EXTRA_VERSIONS \
-              OPENCODE_EXTRA_VERSIONS KILO_EXTRA_VERSIONS; do
-    [[ -n "${!menu}" ]] || continue
-    IFS=',' read -r -a entries <<<"${!menu}"
-    for entry in "${entries[@]}"; do
-      [[ "$entry" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || die \
-        "$menu entry '$entry' is not an exact version (MAJOR.MINOR.PATCH, optionally -PRERELEASE); a partial version, a range or a dist-tag would make the image's version label describe whatever npm resolved."
-    done
+      "$default_pin is a source-level shared protocol pin, not a host override. Remove it from this host's configuration. To change the default, update the Dockerfile and SHARED_SANDBOX_RUNTIME_PINS together in a reviewed change; to run another version of an agent, update it from Admin -> Settings -> Agent versions."
   done
 
   # One spelling, checked once. The runner normalises this value too, and its
@@ -1117,26 +1085,12 @@ cmd_prepare() {
     log "pulling sandbox image (${SANDBOX_IMAGE})"
     docker pull "$SANDBOX_IMAGE"
   elif [[ "${SANDBOX_IMAGE_PULL:-false}" == "true" ]]; then
-    # The published image has the reviewed default menu only; extra versions
-    # need a local build, which this switch exists to avoid.
-    for name in CLAUDE_CODE_EXTRA_VERSIONS CODEX_EXTRA_VERSIONS PI_EXTRA_VERSIONS \
-                OPENCODE_EXTRA_VERSIONS KILO_EXTRA_VERSIONS; do
-      [[ -z "${!name}" ]] || die "${name} needs a local sandbox build; unset AGENT_SANDBOX_IMAGE_PULL"
-    done
     log "pulling the published sandbox image (${SANDBOX_IMAGE})"
     docker pull "$SANDBOX_IMAGE"
   else
-    # Only extra, operator-approved menu entries are passed. The defaults fall
-    # through to the Dockerfile's reviewed pins and are attested as one protocol
-    # unit by both the runner and control plane.
-    local build_args=() name
-    for name in CLAUDE_CODE_EXTRA_VERSIONS CODEX_EXTRA_VERSIONS PI_EXTRA_VERSIONS \
-                OPENCODE_EXTRA_VERSIONS KILO_EXTRA_VERSIONS; do
-      [[ -n "${!name}" ]] || continue
-      log "runtime menu: ${name}=${!name} (adds to the reviewed Dockerfile default)"
-      build_args+=(--build-arg "${name}=${!name}")
-    done
-
+    # No build argument is passed: the image carries exactly the Dockerfile's
+    # reviewed pins, which the runner and control plane attest as one protocol
+    # unit.
     log "building the sandbox image (${SANDBOX_IMAGE})"
     # `--provenance=false` is load-bearing, not tidiness. Buildx attaches a
     # provenance attestation by default and regenerates it on *every* build, so
@@ -1159,11 +1113,7 @@ cmd_prepare() {
     # `docker compose build`; `SOURCE_DATE_EPOCH` and `BUILDKIT_PROVENANCE` were
     # both measured and change nothing. With the flag, two builds of the real
     # runner image, every layer CACHED, return the same id.
-    #
-    # The `+` guard is load-bearing under `set -u`: with no overrides at all,
-    # a bare `"${build_args[@]}"` is an unbound reference on bash before 4.4,
-    # and this script also runs on developer machines.
-    docker build ${build_args[@]+"${build_args[@]}"} --provenance=false \
+    docker build --provenance=false \
       -f deploy/sandbox/Dockerfile.agent-sandbox -t "$SANDBOX_IMAGE" .
   fi
 

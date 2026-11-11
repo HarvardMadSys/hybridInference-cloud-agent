@@ -1732,12 +1732,37 @@ jobs:
 
           CP=deploy/control-plane/docker-compose.yml
           HOST=deploy/host/docker-compose.sandbox.yml
-          for required in AGENT_DATABASE_URL AGENT_POSTGRES_PASSWORD AGENT_DEPLOYMENT_SHA; do
-            check "$CP" .env.control-plane "$required"
-          done
+          # The deployment keys are not here: the `keys` service supplies them
+          # (the next step). Only the exact commit served stays required.
+          check "$CP" .env.control-plane AGENT_DEPLOYMENT_SHA
           for required in AGENT_SANDBOX_MANAGER_TOKEN AGENT_EGRESS_CHAT_NETWORK_POOL AGENT_EGRESS_DNS_SERVER; do
             check "$HOST" .env "$required"
           done
+
+      # A new installation writes no env file: the `keys` service generates the
+      # deployment keys into their own volume, and every reader waits for it.
+      - name: A control plane with no deployment keys renders around the keys service
+        run: |
+          set -euo pipefail
+          printf 'AGENT_DEPLOYMENT_SHA=ci-deployment-sha\n' > .env.new-installation
+          docker compose -f deploy/control-plane/docker-compose.yml \
+            --env-file .env.new-installation config > "${RUNNER_TEMP}/new-installation.yml"
+          uv run --no-project --with pyyaml python - <<'PY'
+          import os, yaml
+          stack = yaml.safe_load(open(os.environ["RUNNER_TEMP"] + "/new-installation.yml"))
+          services = stack["services"]
+          keys = services["keys"]
+          assert keys["network_mode"] == "none", keys
+          assert keys["cap_drop"] == ["ALL"], keys
+          postgres = services["postgres"]["environment"]
+          assert "POSTGRES_PASSWORD" not in postgres, postgres
+          assert postgres["POSTGRES_PASSWORD_FILE"] == "/run/cloud-agent/keys/AGENT_POSTGRES_PASSWORD"
+          for name in ("migrate", "control-plane", "mcp-relay"):
+              mounts = {(m["source"], m["target"]) for m in services[name]["volumes"]}
+              assert ("agent-keys", "/run/cloud-agent/keys") in mounts, (name, mounts)
+              assert not services[name]["environment"].get("AGENT_DATABASE_URL"), name
+          print("a new installation renders with its keys left to the keys service")
+          PY
 
       - name: Missing runtime keys permit administrator setup without default secrets
         run: |

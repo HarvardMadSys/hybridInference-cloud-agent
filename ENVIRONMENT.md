@@ -4,12 +4,14 @@ Use this inventory to find a configuration value, see which component reads it,
 and learn where to set it. When application defaults differ from the supported
 Compose deployment, both are listed.
 
-For local setup, start with the [developer guide](docs/developer/development.md). For a
-deployment, start with the
-[control-plane configuration](deploy/control-plane/.env.example) and
-[host configuration](deploy/host/.env.example). The
-[release contract](deploy/release/README.md) describes packaged artifacts.
-Names inherited from HybridInference remain in use.
+For local setup, start with the [developer guide](docs/developer/development.md). A
+deployment needs no hand-written configuration: a new control plane starts with
+no `.env` (see [Settings and bootstrap configuration](#settings-and-bootstrap-configuration)),
+and each host's configuration is written by Admin → Servers → Add server
+([Compute resources](docs/developer/operations-compute.md)). The variables below
+are the optional overrides a deployment may still set in its environment or
+`.env`. The [release contract](deploy/release/README.md) describes packaged
+artifacts. Names inherited from HybridInference remain in use.
 
 > **Keep deployment values outside this public repository.**
 >
@@ -144,18 +146,38 @@ no administrator can sign in, an operator with `ADMIN_TOKEN` can open
 settings API. The recovery token stays in page memory and is never saved in
 browser storage.
 
-A new installation has no keys to invent. On its first run, the control-plane
-`deploy.sh` writes a random `AGENT_POSTGRES_PASSWORD` with its matching
-`AGENT_DATABASE_URL` for the bundled database, `AGENT_LOCAL_SESSION_SECRET` and
-`AGENT_SETTINGS_ENCRYPTION_KEY` into the empty lines of `.env`. It does so only
-when nothing can depend on them yet: the deployment root has never completed a
-deployment, the database is the bundled one, Docker holds no volume or container
-of the Compose project, and no legacy `AGENT_SESSION_SECRET` serves as the
-settings root. It never replaces a value that is set; a deployment that is
-missing one and may hold data stops and names what to set. The control plane
-then creates its settings with random `AGENT_CONTROL_TOKEN_SECRET`,
-`AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` and `AGENT_COMPUTE_SECRET_KEY` values when
-the environment supplies none; an existing settings row is never given one.
+A new installation has no `.env` and no keys to invent. The values every
+control-plane process needs before it can read a setting — `AGENT_DATABASE_URL`,
+`AGENT_POSTGRES_PASSWORD`, `AGENT_LOCAL_SESSION_SECRET` and
+`AGENT_SETTINGS_ENCRYPTION_KEY` (or an older deployment's `AGENT_SESSION_SECRET`
+root) — live in the `agent-keys` Docker volume, one file each, readable only by
+the user that reads it. The Compose `keys` service
+(`cloud_agent.deployment.deployment_keys`) runs before anything that needs one:
+
+- a value set in the environment or `.env` is stored there, so an existing
+  deployment can delete those lines after one start on this release. A
+  settings root key that differs from the stored one stops the start instead:
+  the stored root may be the only copy of the key every saved secret needs;
+- a stored value is kept;
+- a missing value is generated only while the bundled database volume holds no
+  database. With an existing database, or `AGENT_DATABASE_URL` naming another
+  database, the start stops and names what to set; it never invents a value.
+  A missing settings root is a warning instead, since a legacy
+  `AGENT_SESSION_SECRET` may be supplied another way.
+
+Every control-plane process fills each of those variables the environment
+leaves empty from its file when it imports `cloud_agent`, so `docker compose exec`
+and `docker compose run` commands see them too, and Postgres reads
+`POSTGRES_PASSWORD_FILE`. Back the keys up apart from the
+database ([Disaster recovery](docs/developer/disaster-recovery.md)):
+`docker exec <project>-control-plane-1 python -m cloud_agent.deployment.deployment_keys export`
+prints them as `.env` lines that restore them on another machine. The values are stored and exported byte for byte, each
+exported line single-quoted, because Compose reads an unquoted `.env` value's
+`$` as interpolation. The control plane then creates its settings with random
+`AGENT_CONTROL_TOKEN_SECRET`, `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY`,
+`AGENT_COMPUTE_SECRET_KEY` and `AGENT_SANDBOX_MANAGER_TOKEN` values when the
+environment supplies none (server setup writes that sandbox manager credential
+into each host it deploys); an existing settings row is never given one.
 
 Keep bootstrap configuration in deployment files: database access; the settings
 encryption root (`AGENT_SETTINGS_ENCRYPTION_KEY`, with the legacy environment
@@ -676,7 +698,7 @@ Existing host credentials and retained sandboxes stay in place.
 | `AGENT_SANDBOX_BACKEND` | Defaults to `kata`. `container` is the explicit trusted-repository downgrade. `process` is a non-claimable test seam and cannot serve retained chats. |
 | `AGENT_SANDBOX_RUNTIME` | Unset selects `io.containerd.kata.v2` with backend `kata`, or Docker's default runtime with backend `container`. Set `runc` only for the trusted execution profile. The untrusted profile requires exactly `io.containerd.kata.v2`; gVisor needs a separate execution profile. |
 | `AGENT_SANDBOX_IMAGE` | Required sandbox image, with no application default. Use distinct tags for sibling environments, such as `cloud-agent-job:staging` / `:prod`, so one rebuild cannot replace the other's image. This is the job image, distinct from the runner image. |
-| `AGENT_SANDBOX_IMAGE_PULL` | `true` makes a source deployment (`sandbox_host.sh`) pull `AGENT_SANDBOX_IMAGE` instead of building it; default `false`. Use it with the image published for the deployed commit, for example `ghcr.io/harvardmadsys/cloud-agent-sandbox:sandbox-<sha>` (an autoscaling deployment template can write `{deployment_sha}`). A pulled image is recorded by its registry digest, which is what lets another host restore this host's chats from their checkpoints; a locally built image is recorded by a local name no other host can fetch, so its groups stay on this host. The extra runtime version menus need a local build and are refused with this set. Artifact deployments always pull. |
+| `AGENT_SANDBOX_IMAGE_PULL` | `true` makes a source deployment (`sandbox_host.sh`) pull `AGENT_SANDBOX_IMAGE` instead of building it; default `false`. Use it with the image published for the deployed commit, for example `ghcr.io/harvardmadsys/cloud-agent-sandbox:sandbox-<sha>` (an autoscaling deployment template can write `{deployment_sha}`). A pulled image is recorded by its registry digest, which is what lets another host restore this host's chats from their checkpoints; a locally built image is recorded by a local name no other host can fetch, so its groups stay on this host. Artifact deployments always pull. |
 | `AGENT_SANDBOX_NAMESPACE` | *Required.* Stable deployment namespace stamped onto retained containers and group bridges so sibling Compose stacks on one Docker daemon cannot discover, stop, or prune each other's chats. It also names this deployment's host nftables table and bridge-interface prefix, so a runner or sandbox manager without one refuses to start rather than sharing a default. The host stack uses its unique Compose project; the complete local stack derives it from `LOCAL_PROJECT_NAME`. |
 | `AGENT_SANDBOX_DOCKER` | Docker executable used by the host backend, default `docker`. With the default, the runner and sandbox manager read container and network state from that daemon's Engine API, on the unix socket that `DOCKER_HOST` or the default context names, instead of starting the executable for every read. Any other executable keeps every Docker call on it. |
 | `AGENT_SANDBOX_HOME` | Sandbox user home, default `/home/agent`. |
@@ -775,57 +797,41 @@ patch. The defaults above stay what a host without a selection runs. See the
 | `AGENT_RUNTIME_REGISTRY_URL` | Host side of the control-plane row above. A host downloads updated agents from the registry its heartbeat answer names; this value is only the registry it uses before its first answer. Default `https://registry.npmjs.org`. |
 | `AGENT_RUNTIME_DOWNLOAD_NETWORK` | The Docker network the download step runs on. Default `bridge`. Only npm runs there, with install scripts disabled; the packages' own scripts and the check run later with no network. Name another network only when the host's default bridge cannot reach the registry. |
 
-Each runtime takes a `*_EXTRA_VERSIONS` deployment setting — comma-separated,
-blank by default — naming **additional** versions the same image carries beside
-the reviewed default. That list is the *menu*: build time decides what the image
-holds, and an admin picks which item new sandboxes run under _Agent versions_
-on the admin Settings page (`agent_runner_policy.runtime_versions`). Blank leaves an image holding exactly
-its defaults, which is where every deployment starts.
+The image carries exactly these pins: there is no build-time menu of extra
+versions (the `*_EXTRA_VERSIONS` build arguments were removed). Another version
+of Claude Code, Codex, OpenCode or pi is installed from _Agent versions_ as
+above; Kilo runs only its pin.
 
-Every added version must be exact and its event stream must be compatible with
-its adapter in `cloud_agent_host/runtimes/`.
-
+Changing a pin is a claim that the new version's event stream is compatible
+with its adapter in `cloud_agent_host/runtimes/`.
 `tests/external/test_runtime_stream_conformance.py` is the gate for that claim,
 and the way to point it at a candidate is to **put the version on the
 Dockerfile's `ARG` line**:
 
 ```bash
-# deploy/sandbox/Dockerfile.agent-sandbox, beside the reviewed default
-ARG CLAUDE_CODE_VERSION=2.1.220
-ARG CLAUDE_CODE_EXTRA_VERSIONS=2.2.0
+# deploy/sandbox/Dockerfile.agent-sandbox
+ARG CLAUDE_CODE_VERSION=2.2.0
 
 # then, from the checkout — no image build and no deployment needed
 uv run pytest -m external tests/external/test_runtime_stream_conformance.py
 ```
 
-The suite derives its parametrization from those `ARG` lines
+The suite derives its parametrization from that `ARG` line
 (`test_runtime_stream_conformance.py::_menu`, `_DOCKERFILE`), not from an
-environment variable, not from a built image and not from the deployed `.env`:
-setting `CLAUDE_CODE_EXTRA_VERSIONS=2.2.0` in the shell changes nothing about
-what runs. It then fetches each version with `npx` at exactly that version and
-drives it against a fake model provider, so the measurement is of the real binary — but
-it is a measurement of the **repository's** Dockerfile, so the candidate must be
-on that `ARG` line first.
+environment variable or a built image. It fetches the version with `npx` at
+exactly that version and drives it against a fake model provider, so the
+measurement is of the real binary — but it is a measurement of the
+**repository's** Dockerfile, so the candidate must be on that `ARG` line first.
 
 Interpret a passing conformance run within these limits:
 
 - **`claude-code` only.** This is the one runtime with a stream-conformance
   suite; the other four have contract fixtures and their adapters' unit tests,
-  and no equivalent gate. Adding a version for them is currently a review
+  and no equivalent gate. Changing their pins is currently a review
   obligation rather than a test.
 - **It proves the parser, not the option.** A pass means the version's event
   shape is intelligible to our normalizer. It does not exercise the deployed
   image, the sandbox, or the dropdown.
-
-Verify stream compatibility before offering a version to users.
-
-| Variable | Notes |
-|---|---|
-| `CLAUDE_CODE_EXTRA_VERSIONS` | Extra `@anthropic-ai/claude-code` versions. ~300 MB each. |
-| `CODEX_EXTRA_VERSIONS` | Extra `@openai/codex` versions. |
-| `PI_EXTRA_VERSIONS` | Extra `@mariozechner/pi-coding-agent` versions. |
-| `OPENCODE_EXTRA_VERSIONS` | Extra `opencode-ai` versions. |
-| `KILO_EXTRA_VERSIONS` | Extra `@kilocode/cli` versions. |
 
 ## Web (`apps/frontend/`)
 

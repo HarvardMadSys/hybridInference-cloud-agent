@@ -230,13 +230,17 @@ python3.12 -m venv /opt/cloud-agent/deployer
   -r /opt/cloud-agent/release/recipe/deploy/release/requirements.txt
 ```
 
-Keep `DEPLOY_ROOT` stable across releases. Its `.env`, `.deployed-sha`, and
-`.shared-live-ready` describe the persistent deployment, while each extracted
-recipe can live elsewhere. For a new installation, create that root and fill
-its `.env` using the appropriate recipe's control-plane or host `.env.example`.
-On the control plane, leave the database, account and settings keys empty: the
-first `prepare` phase generates them into that `.env`, as described in
-[the new-installation steps](../../docs/developer/operations.md#admin-settings).
+Keep `DEPLOY_ROOT` stable across releases. Its optional `.env`,
+`.deployed-sha`, and `.shared-live-ready` describe the persistent deployment,
+while each extracted recipe can live elsewhere. For a new installation, create
+that root. The control plane needs no `.env`: its first `prepare` phase starts
+the `keys` service, which generates the database, account and settings keys
+into the `agent-keys` volume, as described in
+[the new-installation steps](../../docs/developer/operations.md#admin-settings);
+a `.env` holds only the overrides the deployment chooses. A host's `.env` is
+the one server setup writes; a downstream deployer that manages its hosts
+itself writes the same variables
+([host configuration](../../docs/developer/operations.md#host-configuration-reference)).
 For an existing installation, retain its configuration, Compose project name,
 host enrollment root, and Docker data root. Generated Compose files stay under
 `DEPLOY_ROOT` so relative mounts preserve their data paths; the edge proxy

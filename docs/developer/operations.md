@@ -123,44 +123,49 @@ shows the value in effect; save a valid value or confirm **Restore default**
 to clear the warning. Undecryptable or unencrypted stored credentials still
 stop the listener.
 
-For a new installation, copy `deploy/control-plane/.env.example` to `.env` and
-adjust only the web path and network lines if the defaults do not fit. Nothing
-secret is filled in by hand. Run the deployer's preparation phase once; on a
-root that has never deployed, with the bundled database and no Docker volume
-or container of the Compose project yet, it writes a random database password
-and matching `AGENT_DATABASE_URL`, `AGENT_LOCAL_SESSION_SECRET` and
-`AGENT_SETTINGS_ENCRYPTION_KEY` into `.env`. From the deployment checkout:
-
-```bash
-SOURCE_REPO="$PWD" DEPLOY_ROOT="$PWD" \
-  deploy/control-plane/deploy.sh --phase prepare "$(git rev-parse HEAD)"
-```
-
-An artifact deployment's `prepare` phase does the same
-([release artifacts](../../deploy/release/README.md)).
-
-To use another database, set `AGENT_DATABASE_URL` and `AGENT_POSTGRES_PASSWORD`
-yourself first; the deployer then cannot prove the database is new and asks for
-the account key and settings root key as well. It never replaces a value that
-is set. Back up `.env` with the database from now on: the settings root key in
-it decrypts every saved secret.
-
-Bootstrap the web application before enrolling execution hosts or running the
-normal deployment readiness gate:
+A new installation needs no `.env`: nothing is filled in by hand. Start the
+web application before enrolling execution hosts or running the normal
+deployment readiness gate. From the deployment checkout:
 
 ```bash
 AGENT_DEPLOYMENT_SHA=$(git rev-parse HEAD) docker compose -p cloudagent \
-  --env-file .env -f deploy/control-plane/docker-compose.yml \
-  up -d --build control-plane mcp-relay web
+  -f deploy/control-plane/docker-compose.yml --profile edge \
+  up -d --build control-plane mcp-relay web edge
 ```
 
+The browser reaches the web app and the API on one origin, with the API at
+`/api`. The `edge` profile is the nginx that splits that origin, on
+`127.0.0.1:3003` (`AGENT_EDGE_BIND`, `AGENT_EDGE_PORT`); point the TLS proxy or
+tunnel in front of the hostname at it. Leave the profile out only when that
+proxy already routes `/api/*` to the control plane with the prefix stripped and
+everything else to the web app.
+
+Before anything else starts, the `keys` service sees that the bundled
+database volume holds no database yet and generates a random database password
+with its matching `AGENT_DATABASE_URL`, `AGENT_LOCAL_SESSION_SECRET` and
+`AGENT_SETTINGS_ENCRYPTION_KEY` into the `agent-keys` volume
+([how the keys are kept](../../ENVIRONMENT.md#settings-and-bootstrap-configuration)).
+An artifact deployment's first `prepare` phase does the same
+([release artifacts](../../deploy/release/README.md)).
+
+To use another database, set `AGENT_DATABASE_URL` in the deployment's
+environment or a `.env` beside it, together with an `AGENT_LOCAL_SESSION_SECRET`
+and an `AGENT_SETTINGS_ENCRYPTION_KEY`: the `keys` service cannot prove such a
+database is new, so it refuses to generate them. It stores every value it is
+given, never replaces a stored value with a generated one, and after one start
+the lines can be deleted. Back the keys up apart from the database from now on
+([Disaster recovery](disaster-recovery.md)): the settings root key decrypts
+every saved secret.
+
 On its first start the control plane creates its settings with a random host
-signing key and user and compute credential encryption keys, and logs a
-one-time setup code (`agent_local_setup_pending`). Create the first
-administrator at `/setup/administrator` with that code, sign
-in, and complete the remaining required settings in Admin → Settings: the
-public web address and the sandbox manager credential your hosts share. Then
-enroll hosts and run the usual deployment command.
+signing key, user and compute credential encryption keys and sandbox manager
+credential (server setup writes that credential into each host), and logs a
+one-time setup code (`agent_local_setup_pending`). Open `/setup/administrator`,
+enter that code and create the first administrator, then confirm the site
+address the page offers (the public web address account emails link to). Setup
+ends on Admin → Servers: add the first server there with **Add server**, which
+writes that host's configuration ([Compute resources](operations-compute.md)),
+and run the usual deployment command.
 Optional integrations need setup only when their configuration has been started.
 The shared-live deployment gate continues to require qualified host readiness.
 
@@ -1409,13 +1414,16 @@ runner cannot claim until its exact replica attests the retained protocol,
 container image/runtime pins, sandbox manager configuration, execution profile, and
 host capacity.
 
-Standalone, the host stack needs more than an enrolment credential. Start from
-`deploy/host/.env.example`: `COMPOSE_PROJECT`, `AGENT_SANDBOX_IMAGE`,
-`AGENT_EGRESS_CHAT_NETWORK_POOL` and `AGENT_EGRESS_DNS_SERVER` are required
-(`docker-compose.sandbox.yml` interpolates each with `:?`, so an unset value
-stops the render), alongside `AGENT_SANDBOX_MANAGER_TOKEN`, the two tunnel
-destinations with their own keys and known-hosts files, and the sandbox manager
-reverse-forward trio for the separate control-plane and host Compose stacks.
+Standalone, the host stack needs more than an enrolment credential, and none of
+it is written by hand: Admin → Servers → **Add server** writes the host's `.env`
+([Compute resources](operations-compute.md)). `COMPOSE_PROJECT`,
+`AGENT_SANDBOX_IMAGE`, `AGENT_EGRESS_CHAT_NETWORK_POOL` and
+`AGENT_EGRESS_DNS_SERVER` are required (`docker-compose.sandbox.yml`
+interpolates each with `:?`, so an unset value stops the render), alongside
+`AGENT_SANDBOX_MANAGER_TOKEN`, the two tunnel destinations with their own keys
+and known-hosts files, and the sandbox manager reverse-forward trio for the
+separate control-plane and host Compose stacks. A unit test holds server setup
+to writing every required one.
 
 ### 2. Credentials
 
@@ -1622,7 +1630,11 @@ Existing retained sandboxes remain on their original Host when this selection
 changes; neither Host Remove nor Forget destroys the underlying machine.
 
 Run the host agent as a **standing service** so queued jobs can be claimed after
-crashes and reboots. Configure enrollment and the shared sandbox manager token in `.env`.
+crashes and reboots. **Add server** writes the host's `.env` and runs the
+commands below for you; installing a host by hand from a hand-written `.env` is
+no longer a supported way to add one. What follows describes a host's
+configuration and lifecycle for operating one that exists. Its `.env` holds
+enrollment and the shared sandbox manager token.
 The example below includes the shared-kernel setting for trusted internal
 repositories. For untrusted repositories, use the default `kata` backend and
 complete [Kata provisioning](#provisioning-kata-on-a-runner-host).
@@ -1671,11 +1683,10 @@ network rules installed and read back) instead of leaving it in a detached
 log. Equivalent by hand:
 
 ```bash
-# Put a tested alternate version in the corresponding *_EXTRA_VERSIONS build
-# argument, then select it in Admin. Default versions are shared protocol pins
-# and change in source together with SHARED_SANDBOX_RUNTIME_PINS.
+# The image carries exactly the source-reviewed pins, which change together
+# with SHARED_SANDBOX_RUNTIME_PINS. Other agent versions are installed from
+# Admin -> Settings -> Agent versions, without a rebuild.
 docker build -f deploy/sandbox/Dockerfile.agent-sandbox \
-             --build-arg CLAUDE_CODE_EXTRA_VERSIONS="<exact-version>" \
              -t freeinference-cloud-agent-job:latest .
 
 AGENT_SANDBOX_IMAGE=freeinference-cloud-agent-job:latest \
@@ -1697,7 +1708,6 @@ with no leader and no sharding.
 | --- | --- | --- |
 | `AGENT_SANDBOX_BACKEND` | `kata` | `process` (no isolation) refuses to start unless `AGENT_SANDBOX_ALLOW_UNISOLATED=1`. On the default `kata`, deploy refuses until the host has the shim and one real container proves it gets its own kernel; `container` is an explicit, and loudly restated, shared-kernel downgrade |
 | `AGENT_SANDBOX_IMAGE` | required | Image built from `Dockerfile.agent-sandbox` or an equivalent deployment-owned image |
-| `*_EXTRA_VERSIONS` | blank | Comma-separated tested versions to bake beside each source-reviewed default. Select one for new chats in Admin; retained chats keep the version they started with. The five defaults are not host settings because runner/control-plane capability admission attests them as one protocol unit |
 | `AGENT_RUNTIME_DOWNLOAD_NETWORK` | `bridge` | Docker network for the download step of an agent update from the admin Settings page. Only npm runs there, with package scripts off; the scripts and the check run with no network ([design](../agents/specs/2026-10-15-agent-cli-updates-design.zh-CN.md)) |
 | `AGENT_RUNTIME_REGISTRY_URL` | public npm | Registry a host downloads updated agents from before its first heartbeat answer. Afterwards the host uses **Agent package registry** in Admin → Settings → Agent versions, which the control plane also lists versions from. pi updates come from `@earendil-works/pi-coding-agent`; a private mirror must carry that package as well as the image's `@mariozechner` one |
 | `AGENT_EGRESS_CHAT_NETWORK_POOL` | required | This deployment's RFC1918 IPv4 pool, one daemon-arbitrated `/29` per active group bridge. No default: it must be disjoint from every other deployment's pool on the machine — of two that overlap, the host rules refuse the one installed later — and from the host's Docker, VPN and private-service routes. A group's bridge is removed on stop and rebuilt on wake |
@@ -4064,7 +4074,7 @@ leave it, and leave anything you cannot attribute.
    the cleanup. A `down` run from the previous release will already have
    removed some of them.
 
-7. Update `.env` from the new `deploy/host/.env.example`. Set
+7. Update the host's `.env`. Set
    `AGENT_EGRESS_CHAT_NETWORK_POOL`, which no longer has a default, and
    `AGENT_EGRESS_DNS_SERVER`. The old default pool was `10.240.0.0/16`: if two
    deployments on this machine both kept it, give one of them another, or the

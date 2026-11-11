@@ -254,7 +254,7 @@ operation, which uses the host recipe's drain. External process/HTTP monitoring
 remains necessary because a dead API cannot monitor itself.
 
 Events are logged even without external delivery. To enable notifications, set
-`AGENT_ALERT_WEBHOOK_URL` in the control-plane `.env` to an operator-owned
+`AGENT_ALERT_WEBHOOK_URL` in the control plane's environment or `.env` to an operator-owned
 receiver. Queue alerts send JSON with `text`, `event`, `deployment_sha` and
 aggregate `queue` counts. The receiver must accept that contract; chat providers
 may need an adapter. Deployment-workflow alerts belong to the downstream

@@ -12,12 +12,48 @@
 # database. Models run on each owner's own model connections, reached from the
 # sandboxes over public egress; this machine holds no provider key of its own.
 #
-# Start it with:
-#   docker compose -f deploy/control-plane/docker-compose.yml up -d
-# after filling in an env file; see ENVIRONMENT.md for every variable and
-# `docs/developer/smoke.md` for a first run.
+# A new installation needs no env file: the `keys` service generates the
+# deployment's keys into their own volume, and everything else is set from the
+# web app (`/setup/administrator`, then Admin). Start it with `deploy.sh`, or by
+# hand with:
+#   AGENT_DEPLOYMENT_SHA=$(git rev-parse HEAD) \
+#     docker compose -f deploy/control-plane/docker-compose.yml up -d
+# ENVIRONMENT.md lists the optional overrides; `docs/developer/smoke.md` walks
+# through a first run.
 
 services:
+  # Runs to completion before anything that needs a key. It stores each
+  # deployment key the environment sets, keeps the stored ones, and generates
+  # the missing ones only while the bundled database volume holds no database
+  # (apps/backend/cloud_agent/deployment/deployment_keys.py). Root, to give
+  # each file to the one user that reads it, but with no network and only the
+  # capabilities that needs.
+  keys:
+    build:
+      context: ../..
+      dockerfile: deploy/control-plane/Dockerfile
+      args:
+        SOURCE_COMMIT: ${AGENT_DEPLOYMENT_SHA:-unknown}
+    entrypoint: ["python", "-m", "cloud_agent.deployment.deployment_keys"]
+    command: ["prepare"]
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_READ_SEARCH]
+    environment:
+      AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:-}
+      AGENT_POSTGRES_PASSWORD: ${AGENT_POSTGRES_PASSWORD:-}
+      AGENT_POSTGRES_USER: ${AGENT_POSTGRES_USER:-cloudagent}
+      AGENT_POSTGRES_DB: ${AGENT_POSTGRES_DB:-cloudagent}
+      AGENT_LOCAL_SESSION_SECRET: ${AGENT_LOCAL_SESSION_SECRET:-}
+      AGENT_SETTINGS_ENCRYPTION_KEY: ${AGENT_SETTINGS_ENCRYPTION_KEY:-}
+      AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET:-}
+    volumes:
+      - agent-keys:/run/cloud-agent/keys
+      - agent-postgres:/run/cloud-agent/database:ro
+    restart: "no"
+
   # Runs to completion before the API is allowed to start. Alembic owns the
   # schema — the service creates no tables at startup — so an API container
   # racing an unmigrated database is not a slow start, it is a crash loop
@@ -30,8 +66,12 @@ services:
         SOURCE_COMMIT: ${AGENT_DEPLOYMENT_SHA:-unknown}
     command: ["alembic", "upgrade", "head"]
     environment:
-      AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:?Postgres DSN for the agent-owned database}
+      AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:-}
+    volumes:
+      - agent-keys:/run/cloud-agent/keys:ro
     depends_on:
+      keys:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
     restart: "no"
@@ -63,7 +103,7 @@ services:
       AGENT_RUNTIME_REGISTRY_URL: ${AGENT_RUNTIME_REGISTRY_URL:-}
       # --- Database ---------------------------------------------------------
       # A database this service owns outright, holding its accounts too.
-      AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:?Postgres DSN for the agent-owned database}
+      AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:-}
 
       # --- Public addresses -------------------------------------------------
       # This API's public address, such as https://agents.example.org/api.
@@ -87,7 +127,7 @@ services:
       # --- Accounts ----------------------------------------------------------
       # The key every session, emailed token and abuse counter is hashed under.
       # Required: at least 32 bytes, and different from AGENT_SESSION_SECRET.
-      AGENT_LOCAL_SESSION_SECRET: ${AGENT_LOCAL_SESSION_SECRET:?the account system key; openssl rand -base64 32}
+      AGENT_LOCAL_SESSION_SECRET: ${AGENT_LOCAL_SESSION_SECRET:-}
       AGENT_LOCAL_SIGNUP_ENABLED: ${AGENT_LOCAL_SIGNUP_ENABLED:-true}
       AGENT_SMTP_HOST: ${AGENT_SMTP_HOST:-}
       AGENT_SMTP_PORT: ${AGENT_SMTP_PORT:-}
@@ -275,6 +315,7 @@ services:
       # AGENT_BROKER_URL_ALLOWED_HOSTS; check each deploy root's .env.
       AGENT_SANDBOX_MANAGER_URL_ALLOWED_HOSTS: ${AGENT_SANDBOX_MANAGER_URL_ALLOWED_HOSTS:-${AGENT_BROKER_URL_ALLOWED_HOSTS:-}}
     volumes:
+      - agent-keys:/run/cloud-agent/keys:ro
       - agent-pgadmin-bootstrap:/var/lib/cloud-agent/pgadmin-bootstrap
       # The GitHub App key, read-only, as a file. `AGENT_GITHUB_APP_PRIVATE_KEY_PATH`
       # names a path *inside* this container, so setting it without mounting
@@ -323,11 +364,11 @@ services:
       # should be able to.
       - "${AGENT_MCP_RELAY_BIND:-127.0.0.1}:${AGENT_MCP_RELAY_PORT:-8001}:8001"
     environment:
-      AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:?Postgres DSN for the agent-owned database}
+      AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:-}
       # Both listeners decrypt the shared admin settings using the same key.
       AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET:-}
       # The relay answers owner identity the same way the main API does.
-      AGENT_LOCAL_SESSION_SECRET: ${AGENT_LOCAL_SESSION_SECRET:?the account system key; openssl rand -base64 32}
+      AGENT_LOCAL_SESSION_SECRET: ${AGENT_LOCAL_SESSION_SECRET:-}
       AGENT_SETTINGS_ENCRYPTION_KEY: ${AGENT_SETTINGS_ENCRYPTION_KEY:-}
       AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:-}
       # The relay resolves each owner's stored MCP connection and therefore
@@ -337,6 +378,8 @@ services:
       AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:-}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
       AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
+    volumes:
+      - agent-keys:/run/cloud-agent/keys:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -378,9 +421,9 @@ services:
       # Loopback, like the MCP relay: only the hosts' github-tunnel reaches it.
       - "${AGENT_GITHUB_RELAY_BIND:-127.0.0.1}:${AGENT_GITHUB_RELAY_PORT:-8443}:8443"
     environment:
-      AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:?Postgres DSN for the agent-owned database}
+      AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:-}
       AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET:-}
-      AGENT_LOCAL_SESSION_SECRET: ${AGENT_LOCAL_SESSION_SECRET:?the account system key; openssl rand -base64 32}
+      AGENT_LOCAL_SESSION_SECRET: ${AGENT_LOCAL_SESSION_SECRET:-}
       AGENT_SETTINGS_ENCRYPTION_KEY: ${AGENT_SETTINGS_ENCRYPTION_KEY:-}
       AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:-}
       # The owner's GitHub user token is stored encrypted under this key, and
@@ -394,6 +437,7 @@ services:
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
       AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
     volumes:
+      - agent-keys:/run/cloud-agent/keys:ro
       - ${AGENT_GITHUB_APP_PRIVATE_KEY_FILE:-/dev/null}:/etc/cloud-agent/github-app.pem:ro
       # relay.pem (the leaf for github.com and api.github.com) and relay.key.
       # The CA's own key is not needed here and should not be mounted.
@@ -456,7 +500,7 @@ services:
   # the prefix stripped, everything else to the web app. One origin for both
   # is what lets the session cookie travel; two hostnames would not.
   #
-  # Enable with `COMPOSE_PROFILES=edge` in .env. Loopback by default, like every other published port here: the tunnel is on this host.
+  # Enable with `COMPOSE_PROFILES=edge` (or `--profile edge`). Loopback by default, like every other published port here: the tunnel is on this host.
   edge:
     profiles: [edge]
     image: nginx:1.27.5-alpine
@@ -507,10 +551,16 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${AGENT_POSTGRES_USER:-cloudagent}
-      POSTGRES_PASSWORD: ${AGENT_POSTGRES_PASSWORD:?a password for the agent database}
+      # Read only when the volume is new: the `keys` service stores the
+      # deployment's password, or generates one for a new installation.
+      POSTGRES_PASSWORD_FILE: /run/cloud-agent/keys/AGENT_POSTGRES_PASSWORD
       POSTGRES_DB: ${AGENT_POSTGRES_DB:-cloudagent}
     volumes:
       - agent-postgres:/var/lib/postgresql/data
+      - agent-keys:/run/cloud-agent/keys:ro
+    depends_on:
+      keys:
+        condition: service_completed_successfully
     healthcheck:
       # `migrate` gates the API, and `migrate` waits on this. Without a real
       # check both would start against a Postgres that has accepted a TCP
@@ -533,6 +583,8 @@ networks:
     driver: bridge
 
 volumes:
+  # The deployment keys, one file each; see the `keys` service.
+  agent-keys:
   agent-postgres:
   agent-pgadmin:
   agent-pgadmin-bootstrap:

@@ -87,47 +87,16 @@ FROM node:22-bookworm-slim
 # paths from one value, but the supported host deploy deliberately refuses a
 # per-machine override. These defaults are part of the shared protocol
 # attestation and must change in source together with
-# `SHARED_SANDBOX_RUNTIME_PINS`. To soak another reviewed CLI without changing
-# the default, add its exact version to the matching `*_EXTRA_VERSIONS` menu and
-# select it through runner policy. The check at the end still proves every
-# advertised default is exact and matches the binary on PATH.
+# `SHARED_SANDBOX_RUNTIME_PINS`. The image carries exactly these versions:
+# another version of Claude Code, Codex, pi or OpenCode is downloaded at runtime
+# from Admin -> Settings -> Agent versions, and Kilo runs only its reviewed
+# build. The check at the end still proves every advertised default is exact and
+# matches the binary on PATH.
 ARG CLAUDE_CODE_VERSION=2.1.220
 ARG CODEX_VERSION=0.145.0
 ARG PI_VERSION=0.73.1
 ARG OPENCODE_VERSION=1.18.9
 ARG KILO_VERSION=7.4.17
-
-# Extra versions this image also carries, comma-separated, so an admin can
-# switch a deployment between them from the admin page without a rebuild
-# (`agent_runner_policy.runtime_versions`; the runner selects one by PATH).
-#
-# Empty by default, and an empty list means this image holds exactly the pins
-# above — the shape every deployment is in today, byte for byte.
-#
-# Separate from the pin rather than folded into one list because the pin
-# answers a different question and must keep answering it alone: it is the
-# *default*, what a job runs when nothing has selected anything, and what the
-# `.version` label below reports. A single list would make "the default" the
-# first element of a string, which nothing downstream could read.
-#
-# **Every extra version is a version the event parser must handle.**
-# `runtimes.py` normalizes one shape per runtime, and offering a version is a
-# claim that it parses — see the conformance suite in `tests/external/`. Adding
-# an entry here without running it is how a broken option reaches the menu.
-ARG CLAUDE_CODE_EXTRA_VERSIONS=
-ARG CODEX_EXTRA_VERSIONS=
-ARG PI_EXTRA_VERSIONS=
-ARG OPENCODE_EXTRA_VERSIONS=
-ARG KILO_EXTRA_VERSIONS=
-
-# The menu: default first, extras after. Derived, never passed — a caller that
-# could set these directly could put a version in a label that the install
-# below never installed.
-ARG CLAUDE_CODE_VERSIONS=${CLAUDE_CODE_VERSION}${CLAUDE_CODE_EXTRA_VERSIONS:+,${CLAUDE_CODE_EXTRA_VERSIONS}}
-ARG CODEX_VERSIONS=${CODEX_VERSION}${CODEX_EXTRA_VERSIONS:+,${CODEX_EXTRA_VERSIONS}}
-ARG PI_VERSIONS=${PI_VERSION}${PI_EXTRA_VERSIONS:+,${PI_EXTRA_VERSIONS}}
-ARG OPENCODE_VERSIONS=${OPENCODE_VERSION}${OPENCODE_EXTRA_VERSIONS:+,${OPENCODE_EXTRA_VERSIONS}}
-ARG KILO_VERSIONS=${KILO_VERSION}${KILO_EXTRA_VERSIONS:+,${KILO_EXTRA_VERSIONS}}
 
 # Tools an agent legitimately needs to understand and change a repository.
 # Ship GitHub CLI so it is available as soon as a sandbox starts. Installing
@@ -295,11 +264,11 @@ COPY deploy/sandbox/install-runtimes.sh /tmp/install-runtimes.sh
 RUN --mount=type=cache,id=cloud-agent-sandbox-npm,target=/root/.npm,sharing=locked \
     --mount=type=bind,from=kilo-build,source=/opt/kilo,target=/opt/kilo \
     chmod 0755 /tmp/install-runtimes.sh \
-    && /tmp/install-runtimes.sh claude-code @anthropic-ai/claude-code claude "${CLAUDE_CODE_VERSIONS}" \
-    && /tmp/install-runtimes.sh codex @openai/codex codex "${CODEX_VERSIONS}" \
-    && /tmp/install-runtimes.sh pi @mariozechner/pi-coding-agent pi "${PI_VERSIONS}" \
-    && /tmp/install-runtimes.sh opencode opencode-ai opencode "${OPENCODE_VERSIONS}" \
-    && /tmp/install-runtimes.sh kilo @kilocode/cli kilo "${KILO_VERSIONS}" \
+    && /tmp/install-runtimes.sh claude-code @anthropic-ai/claude-code claude "${CLAUDE_CODE_VERSION}" \
+    && /tmp/install-runtimes.sh codex @openai/codex codex "${CODEX_VERSION}" \
+    && /tmp/install-runtimes.sh pi @mariozechner/pi-coding-agent pi "${PI_VERSION}" \
+    && /tmp/install-runtimes.sh opencode opencode-ai opencode "${OPENCODE_VERSION}" \
+    && /tmp/install-runtimes.sh kilo @kilocode/cli kilo "${KILO_VERSION}" \
     && rm /tmp/install-runtimes.sh
 
 # Claude's CLI has a live stdin transport but no prompt-free public fork RPC.
@@ -329,18 +298,13 @@ RUN python3 -m venv /opt/claude-agent-sdk \
 # each attempt, and native-session admission compares them before handing a
 # session to a resumed turn. An unlabeled image is ineligible to claim work.
 #
-# Two labels per runtime, answering two questions that diverge the moment an
-# image carries more than one version:
+# Two labels per runtime:
 #
 #   .version   what a job gets when nothing selected anything — the default,
 #              and the only one an older control plane knows how to read.
-#   .versions  the whole menu, which is what the admin page offers and what the
-#              claim checks a selection against before honouring it.
-#
-# `.version` is deliberately still a single exact version rather than the first
-# element of `.versions`: every existing reader parses it as one, and a reader
-# that has not been taught about menus must degrade to "the default", not to a
-# comma-separated string it will happily stamp onto an attempt.
+#   .versions  the versions the image itself holds, which the runner reports
+#              beside the ones it downloaded at runtime. The image holds only
+#              its pin, so the two labels carry the same value.
 LABEL org.freeinference.runtime.claude-code.version="${CLAUDE_CODE_VERSION}" \
       org.freeinference.helper.claude-agent-sdk.version="0.2.148" \
       org.freeinference.helper.http-agent-live-bridge.version="5" \
@@ -356,11 +320,11 @@ LABEL org.freeinference.runtime.claude-code.version="${CLAUDE_CODE_VERSION}" \
       org.freeinference.runtime.kilo.version="${KILO_VERSION}" \
       org.freeinference.runtime.kilo.source="a0364858a6e1b69a2e2dc5434a82d5cefbe79ea7" \
       org.freeinference.runtime.kilo.mcp-isolation="1" \
-      org.freeinference.runtime.claude-code.versions="${CLAUDE_CODE_VERSIONS}" \
-      org.freeinference.runtime.codex.versions="${CODEX_VERSIONS}" \
-      org.freeinference.runtime.pi.versions="${PI_VERSIONS}" \
-      org.freeinference.runtime.opencode.versions="${OPENCODE_VERSIONS}" \
-      org.freeinference.runtime.kilo.versions="${KILO_VERSIONS}"
+      org.freeinference.runtime.claude-code.versions="${CLAUDE_CODE_VERSION}" \
+      org.freeinference.runtime.codex.versions="${CODEX_VERSION}" \
+      org.freeinference.runtime.pi.versions="${PI_VERSION}" \
+      org.freeinference.runtime.opencode.versions="${OPENCODE_VERSION}" \
+      org.freeinference.runtime.kilo.versions="${KILO_VERSION}"
 
 # pi, OpenCode, and Kilo all ignore OPENAI_BASE_URL; each one's supported
 # route to a custom gateway is a provider config file whose content (gateway

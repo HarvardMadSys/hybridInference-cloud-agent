@@ -1055,10 +1055,9 @@ def test_runner_mounts_the_storage_verdict_read_only(compose: dict) -> None:
 
 def test_the_storage_probe_is_documented_and_kept_out_of_git() -> None:
     """The verdict is deployment metadata, like the readiness marker beside it."""
-    assert (
-        "AGENT_HOST_STORAGE_PROBE=overlay_root"
-        in (REPO_ROOT / "deploy/host/.env.example").read_text()
-    )
+    assert "`AGENT_HOST_STORAGE_PROBE`" in (REPO_ROOT / "ENVIRONMENT.md").read_text()
+    setup = REPO_ROOT / "apps/backend/cloud_agent/application/compute_setup.py"
+    assert '"AGENT_HOST_STORAGE_PROBE": "overlay_root"' in setup.read_text()
     assert ".storage-probe/" in (REPO_ROOT / ".gitignore").read_text()
 
 

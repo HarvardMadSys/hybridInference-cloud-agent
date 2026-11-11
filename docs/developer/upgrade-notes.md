@@ -19,6 +19,49 @@ After migrating, start the main control-plane listener with its existing
 complete environment: it imports newly registered settings once, as described
 in [Admin Settings](operations.md#admin-settings).
 
+## No `.env` needed
+
+A control plane no longer needs a `.env`, and releases no longer ship
+`deploy/control-plane/.env.example` or `deploy/host/.env.example`. The database
+connection, the bundled database's password, the account key and the settings
+root key now live in the `agent-keys` Docker volume, kept by the Compose
+`keys` service ([how](../../ENVIRONMENT.md#settings-and-bootstrap-configuration)).
+A host's `.env` is written by Admin → Servers → **Add server**; a host is no
+longer installed from a hand-written one.
+
+An existing deployment keeps working unchanged. On its first start on this
+release, the `keys` service stores the values its `.env` sets for
+`AGENT_DATABASE_URL`, `AGENT_POSTGRES_PASSWORD`, `AGENT_LOCAL_SESSION_SECRET`,
+`AGENT_SETTINGS_ENCRYPTION_KEY` and `AGENT_SESSION_SECRET` in that volume. After
+that start, those lines can be deleted; a value still set in `.env` keeps
+winning over the stored one, as before. Keep them until rolling back to an
+earlier release is no longer an option: an earlier release reads them only from
+`.env`, and its Compose file refuses to start without them. Before deleting
+them, save the keys apart from the database
+([Disaster recovery](disaster-recovery.md)): they now live in a Docker volume,
+and `docker compose down -v` deletes it. `deploy.sh` no longer refuses a
+deployment root without a `.env`, and no longer writes keys into one. A new
+deployment's control plane also generates the sandbox manager credential into
+its settings, since server setup writes it into each host; an existing
+deployment keeps its own.
+
+The host build-time `*_EXTRA_VERSIONS` menus were removed: the sandbox image
+carries exactly its reviewed pins, and other versions of Claude Code, Codex,
+OpenCode and pi are installed from Admin → Settings → Agent versions. Before
+upgrading a host, check its `.env` for `CLAUDE_CODE_EXTRA_VERSIONS`,
+`CODEX_EXTRA_VERSIONS`, `PI_EXTRA_VERSIONS`, `OPENCODE_EXTRA_VERSIONS` and
+`KILO_EXTRA_VERSIONS`. A version listed there and selected in Admin, or in use
+by a retained chat, is no longer in the new image, and selecting or updating to
+it before the upgrade is not enough: while the old image still carries it, the
+update marks it ready without downloading it. After the new image is deployed,
+open Admin → Settings → Agent versions and check that every online host offers
+the version; where one does not, run **Update** to it again, and until it
+reports ready, new chats there run the default version and chats that need the
+old one cannot be forked. The lines are then ignored and can be deleted.
+
+First-run setup now also asks for the site address, prefilled from the page's
+own address, and ends on Admin → Servers.
+
 ## The audit log names who acted on whom
 
 **Admin → Audit log** now names the administrator and the account of each

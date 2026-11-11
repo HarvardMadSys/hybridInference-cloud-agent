@@ -624,11 +624,6 @@ _ALLOWED_NON_AGENT_ENV = {
     "COMPOSE_PROJECT",
     "SIBLING_COMPOSE_PROJECTS",
     "SHARED_READY_TIMEOUT",
-    "CLAUDE_CODE_EXTRA_VERSIONS",
-    "CODEX_EXTRA_VERSIONS",
-    "PI_EXTRA_VERSIONS",
-    "OPENCODE_EXTRA_VERSIONS",
-    "KILO_EXTRA_VERSIONS",
 }
 #: The relays a host's sandboxes and runner reach: the MCP-only relay and the
 #: control-plane API. Each has its own key and known_hosts file.

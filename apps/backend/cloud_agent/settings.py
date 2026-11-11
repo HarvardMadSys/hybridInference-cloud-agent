@@ -1240,10 +1240,14 @@ def weak_credentials() -> list[str]:
 #: is first created and the environment supplies none, each is generated into
 #: it; a seed racing that one keeps whichever row was stored first. Never into
 #: an existing row: what it holds, empty included, is the deployment's.
+#:
+#: The sandbox manager credential is among them because no person copies it
+#: any more: server setup writes the stored value into each host it deploys.
 GENERATED_ON_FIRST_START = (
     "control_signing_secret",
     "source_control_encryption_key",
     "compute_encryption_key",
+    "sandbox_manager_token",
 )
 
 

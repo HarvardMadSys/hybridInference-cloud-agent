@@ -78,20 +78,55 @@ def test_missing_migrated_secrets_allow_setup_without_using_a_public_default(
         operation()
 
 
-def test_the_database_is_required_and_the_service_owns_it(control_plane_env: dict) -> None:
+#: The services that read the deployment keys, and so wait for the `keys` service.
+KEY_READERS = ("migrate", "control-plane", "mcp-relay", "github-relay")
+
+
+def _waits_for_keys(compose: dict, service: str) -> bool:
+    """Whether ``service`` starts only after ``keys``, directly or through Postgres."""
+    depends = compose["services"][service].get("depends_on", {})
+    if depends.get("keys", {}).get("condition") == "service_completed_successfully":
+        return True
+    return any(_waits_for_keys(compose, name) for name in depends)
+
+
+def test_the_database_comes_from_the_keys_volume_never_a_default(compose: dict) -> None:
     """Defaulting the DSN points a fresh deployment at whatever is on
-    localhost, which in a co-located cutover is the gateway's own database."""
-    assert ":?" in control_plane_env["AGENT_DATABASE_URL"]
+    localhost, which in a co-located cutover is the gateway's own database.
+    Only the deployment's environment or its own keys volume supplies it."""
+    for service in KEY_READERS:
+        definition = compose["services"][service]
+        assert definition["environment"]["AGENT_DATABASE_URL"] == "${AGENT_DATABASE_URL:-}"
+        assert "agent-keys:/run/cloud-agent/keys:ro" in definition["volumes"]
+        assert _waits_for_keys(compose, service), service
 
 
-def test_both_listeners_require_the_account_key_and_no_gateway_setting(compose: dict) -> None:
-    """Both listeners read sessions; neither is handed anything of the removed Gateway."""
+def test_both_listeners_read_the_account_key_and_no_gateway_setting(compose: dict) -> None:
+    """Both listeners read sessions; neither is handed anything of the removed Gateway.
+    The key has no default: the keys volume supplies it where the environment does not."""
     for service in ("control-plane", "mcp-relay"):
         environment = compose["services"][service]["environment"]
-        assert environment["AGENT_LOCAL_SESSION_SECRET"].startswith(
-            "${AGENT_LOCAL_SESSION_SECRET:?"
-        )
+        assert environment["AGENT_LOCAL_SESSION_SECRET"] == "${AGENT_LOCAL_SESSION_SECRET:-}"
         assert not set(environment) & set(RETIRED_GATEWAY_VARIABLES)
+
+
+def test_the_keys_service_is_isolated_and_the_postgres_password_is_its_file(
+    compose: dict,
+) -> None:
+    """Root to give each key file to its reader, and nothing else."""
+    keys = compose["services"]["keys"]
+    assert keys["network_mode"] == "none"
+    assert keys["read_only"] is True
+    assert keys["cap_drop"] == ["ALL"]
+    assert sorted(keys["cap_add"]) == ["CHOWN", "DAC_READ_SEARCH"]
+    assert "agent-postgres:/run/cloud-agent/database:ro" in keys["volumes"]
+    assert "ports" not in keys
+    postgres = compose["services"]["postgres"]
+    assert "POSTGRES_PASSWORD" not in postgres["environment"]
+    assert postgres["environment"]["POSTGRES_PASSWORD_FILE"] == (
+        "/run/cloud-agent/keys/AGENT_POSTGRES_PASSWORD"
+    )
+    assert _waits_for_keys(compose, "postgres")
 
 
 def test_postgres_publishes_no_port(compose: dict) -> None:

@@ -525,8 +525,9 @@ def _control_environment(dsn: str) -> dict[str, str]:
     return {
         "AGENT_DATABASE_URL": dsn,
         # The account system's key. It must differ from any settings root, which
-        # two independent draws do. `deploy/control-plane/.env.example` is the
-        # authority for this list, and a deployment supplies it in `.env`.
+        # two independent draws do. A Compose deployment keeps both in its
+        # agent-keys volume (`cloud_agent.deployment.deployment_keys`); this
+        # single container has no volume, so they are supplied here.
         "AGENT_LOCAL_SESSION_SECRET": base64.b64encode(os.urandom(32)).decode(),
         "AGENT_SETTINGS_ENCRYPTION_KEY": base64.b64encode(os.urandom(32)).decode(),
         "AGENT_CONTROL_TOKEN_SECRET": base64.b64encode(os.urandom(32)).decode(),

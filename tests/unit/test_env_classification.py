@@ -21,9 +21,11 @@ on. These tests hold the code to it:
   child says where.
 * **Imported.** A new registration with an environment name joins
   ``MIGRATED_SETTINGS``, the only list an existing database imports from.
-* **Out of the examples.** The ``.env.example`` an operator copies for a
-  production stack offers nothing Admin manages: such a line would only be an
-  initial import, and the file is meant to hold what Admin cannot.
+* **Out of the template.** The managed host template
+  (``deploy/control-plane/compute-host.env.example``) offers nothing Admin
+  manages: such a line would only be an initial import, and the file is meant
+  to hold what Admin cannot. Production stacks ship no other example: a new
+  control plane needs no env file, and a host's is written by server setup.
 
 The scan (``tests/support/env_scan.py``) follows the spellings this repository
 uses; what it cannot see is listed in its docstring and in the P1 spec. The
@@ -63,20 +65,15 @@ REPO = Path(__file__).resolve().parents[2]
 BACKEND = "apps/backend/"
 #: Where a variable an operator sets for a production stack is named.
 PRODUCTION_TEMPLATES = ("deploy/control-plane/", "deploy/host/")
-#: The example env files an operator copies for a production stack.
-PRODUCTION_EXAMPLES = (
-    "deploy/control-plane/.env.example",
-    "deploy/host/.env.example",
-    "deploy/control-plane/compute-host.env.example",
-)
+#: The example env files for a production stack: only the managed host
+#: template a deployment profile writes a host's .env from.
+PRODUCTION_EXAMPLES = ("deploy/control-plane/compute-host.env.example",)
 #: Admin-managed names an example still offers, by (file, variable), and why.
 EXAMPLE_ADMIN_NAMES: dict[tuple[str, str], str] = {
-    ("deploy/host/.env.example", "AGENT_SANDBOX_MANAGER_TOKEN"): (
-        "the host's own copy: its sandbox manager checks the control plane's saved "
-        "value against it, so it must exist on the machine before the first heartbeat"
-    ),
     ("deploy/control-plane/compute-host.env.example", "AGENT_SANDBOX_MANAGER_TOKEN"): (
-        "the same host copy, written into a managed host's .env by its deployment profile"
+        "the host's own copy, written into a managed host's .env by its deployment "
+        "profile: its sandbox manager checks the control plane's saved value against "
+        "it, so it must exist on the machine before the first heartbeat"
     ),
 }
 _EXAMPLE_LINE = re.compile(r"\s*#?\s*([A-Z][A-Z0-9_]*)=")

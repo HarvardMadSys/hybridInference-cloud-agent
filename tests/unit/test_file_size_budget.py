@@ -40,10 +40,10 @@ TEST_BASELINE = {
     "tests/unit/test_agent_sandbox_manager.py": 3437,
     "tests/unit/test_chat_sandbox.py": 3137,
     "tests/unit/test_compute_providers.py": 2002,
-    "tests/unit/test_deploy_config.py": 2058,
+    "tests/unit/test_deploy_config.py": 2057,
     "tests/unit/test_host_pool_api.py": 3377,
     "tests/unit/test_mcp_connections_api.py": 2880,
-    "tests/unit/test_retained_deploy.py": 2231,
+    "tests/unit/test_retained_deploy.py": 2220,
     "tests/unit/test_runner_host_service.py": 2822,
     "tests/unit/test_shared_session_supervisor.py": 5146,
 }
