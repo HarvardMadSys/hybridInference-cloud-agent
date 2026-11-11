@@ -125,6 +125,7 @@
     "tests/unit/test_other_runtime_plugins.py": 3,
     "tests/unit/test_platform_instructions.py": 4,
     "tests/unit/test_plugin_installation.py": 4,
+    "tests/unit/test_runtime_version_pins.py": 2,
     "tests/unit/test_runtime_version_selection.py": 2,
     "tests/unit/test_sandbox_archive_bundle.py": 5,
     "tests/unit/test_sandbox_archive_runtime.py": 3,
@@ -177,6 +178,7 @@
     "docs/agents/specs/2026-11-05-freeinference-account-import.zh-CN.md": 13,
     "docs/agents/specs/2026-11-05-upstream-reasoning-effort.md": 1,
     "docs/agents/specs/2026-11-09-neutral-runtime-identifiers.md": 136,
+    "docs/agents/specs/2026-11-09-no-env-file.zh-CN.md": 1,
     "docs/agents/specs/2026-11-09-operator-provided-model-connections.md": 31,
     "docs/agents/specs/cutover.md": 1,
     "docs/agents/specs/gateway-removal.md": 3
@@ -211,7 +213,6 @@
     "apps/frontend/src/components/features/agents/conversation/TurnFooter.test.tsx": 1,
     "apps/frontend/src/components/features/agents/sidebar/AccountMenu.test.tsx": 2,
     "deploy/control-plane/github-relay-certs.sh": 1,
-    "deploy/host/.env.example": 6,
     "deploy/host/deploy.sh": 1,
     "deploy/local/Dockerfile.repo": 2,
     "deploy/preflight/check_model_context.py": 1,
@@ -221,7 +222,6 @@
     "tests/unit/test_kilo_mcp.py": 2,
     "tests/unit/test_runner_host_settings.py": 2,
     "tests/unit/test_runtime_downloads.py": 2,
-    "tests/unit/test_runtime_version_pins.py": 4,
     "tests/unit/test_sandbox_github_auth.py": 8,
     "tests/unit/test_sandbox_network.py": 4,
     "tests/unit/test_sandbox_stack_project.py": 10
