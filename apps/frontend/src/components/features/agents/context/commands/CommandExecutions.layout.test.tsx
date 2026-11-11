@@ -133,13 +133,13 @@ describe('compact Command Executions card', () => {
   it('bounds the card and scrolls the list inside it, not the page', async () => {
     mocked.mockResolvedValue(page(Array.from({ length: 40 }, (_, index) => execution(index))));
     renderSection();
-    await screen.findByRole('heading', { name: 'Command Executions' });
+    // The card's heading renders before the first page; wait for the rows.
+    const list = await screen.findByRole('list', { name: 'Command Executions' });
     const panel = card();
     // The card owns a bounded height (DSH's 560px) and hides overflow.
     expect(panel.className).toContain('max-h-[560px]');
     expect(panel.className).toContain('overflow-hidden');
     // The list is its own scroll container with overscroll containment.
-    const list = screen.getByRole('list', { name: 'Command Executions' });
     expect(list.className).toContain('overflow-y-auto');
     expect(list.className).toContain('overscroll-contain');
     expect(list.className).toContain('flex-1');
@@ -149,8 +149,7 @@ describe('compact Command Executions card', () => {
   it('keeps the programs list independently scrollable and bounded', async () => {
     mocked.mockResolvedValue(page(Array.from({ length: 6 }, (_, index) => execution(index))));
     renderSection();
-    await screen.findByRole('heading', { name: 'Command Executions' });
-    const programs = screen.getByRole('list', {
+    const programs = await screen.findByRole('list', {
       name: /Programs/,
     });
     expect(programs.className).toContain('overflow-y-auto');
@@ -175,8 +174,8 @@ describe('compact Command Executions card', () => {
   it('keeps Attention before Programs in the rail', async () => {
     mocked.mockResolvedValue(page([execution(0)]));
     renderSection();
-    await screen.findByRole('heading', { name: 'Command Executions' });
-    const attention = screen.getByRole('heading', { name: 'Attention' });
+    // The rail fills only once the first page has loaded.
+    const attention = await screen.findByRole('heading', { name: 'Attention' });
     const programs = screen.getByRole('heading', { name: /Programs ·/ });
     expect(
       attention.compareDocumentPosition(programs) & Node.DOCUMENT_POSITION_FOLLOWING,
@@ -216,7 +215,8 @@ describe('compact Command Executions card', () => {
       ),
     );
     renderSection();
-    await screen.findByRole('heading', { name: 'Command Executions' });
+    // The show-more action and the chip counts wait for the first page.
+    await screen.findByRole('button', { name: 'Show more' });
     const controls = [
       screen.getByRole('button', { name: /^All\s*3$/ }),
       screen.getByRole('searchbox', {
@@ -293,8 +293,7 @@ describe('compact Command Executions card', () => {
   it('draws each program share as a thin track inside its row', async () => {
     mocked.mockResolvedValue(page([execution(0), execution(1)]));
     renderSection();
-    await screen.findByRole('heading', { name: 'Command Executions' });
-    const programs = screen.getByRole('list', { name: /Programs/ });
+    const programs = await screen.findByRole('list', { name: /Programs/ });
     const first = within(programs).getAllByRole('button')[0];
     expect(first.className).toContain('relative');
     const track = first.querySelector('[aria-hidden="true"]') as HTMLElement | null;
@@ -307,7 +306,8 @@ describe('compact Command Executions card', () => {
   it('collapses the rail on a narrow card and keeps the list primary', async () => {
     mocked.mockResolvedValue(page([execution(0)]));
     renderSection();
-    await screen.findByRole('heading', { name: 'Command Executions' });
+    // Collapsed with its contents loaded, not merely before they arrive.
+    await screen.findByRole('heading', { name: 'Attention' });
     const toggle = screen.getByRole('button', { name: 'Details' });
     const rail = document.getElementById(toggle.getAttribute('aria-controls')!)!;
     expect(toggle).toHaveAttribute('aria-expanded', 'false');
