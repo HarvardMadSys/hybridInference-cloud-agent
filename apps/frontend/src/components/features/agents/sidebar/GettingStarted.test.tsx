@@ -147,6 +147,32 @@ describe('GettingStarted', () => {
     expect(screen.getByRole('textbox', { name: 'task' })).toHaveFocus();
   });
 
+  it('starts with the model connection, and goes to its settings for it', async () => {
+    newcomer({ model_connections_enabled: true, model_connection_required: true });
+
+    sidebar();
+
+    expect(await screen.findByRole('region', { name: 'Getting started' })).toHaveTextContent('0/4');
+    expect(screen.getByRole('link', { name: 'Connect a model' })).toHaveAttribute(
+      'href',
+      '/settings/models',
+    );
+    expect(screen.queryByText('Run your first task')).not.toBeInTheDocument();
+  });
+
+  it('goes from the model to the first task where there is no GitHub to connect', async () => {
+    newcomer({
+      model_connections_enabled: true,
+      model_connection_required: false,
+      github_install_url: null,
+    });
+
+    sidebar();
+
+    expect(await screen.findByRole('region', { name: 'Getting started' })).toHaveTextContent('1/2');
+    expect(screen.getByRole('link', { name: 'Run your first task' })).toHaveAttribute('href', '/');
+  });
+
   it('stays away for someone with a conversation, even an archived one', async () => {
     vi.mocked(listAgentConversations).mockResolvedValue({
       conversations: [conversation(true)],

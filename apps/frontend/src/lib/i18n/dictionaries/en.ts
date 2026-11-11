@@ -471,7 +471,7 @@ export const en = {
   'sidebar.moved': 'Order updated',
   'sidebar.newTask': 'New task',
   'sidebar.archived': 'Archived',
-  'sidebar.noJobs': 'No jobs yet.',
+  'sidebar.noJobs': 'No tasks yet.',
   'sidebar.resize': 'Resize task list',
   'sidebar.newTaskIn': 'New task in {project}',
   'sidebar.runningOrQueued': '{count} running or queued',
@@ -553,10 +553,11 @@ export const en = {
   'settings.environmentsDescription':
     'Manage repository environments, setup scripts, and personal variables.',
   'settings.helpDescription':
-    'Connect a repository, prepare its environment, and start your first chat.',
-  'settings.helpConnect': '1. Connect your GitHub account and choose repositories',
-  'settings.helpEnvironment': '2. Set up a repository environment (optional)',
-  'settings.helpChat': '3. Start a chat',
+    'Connect a model and a repository, prepare its environment, and start your first chat.',
+  'settings.helpModel': '1. Connect a model with your provider’s API key',
+  'settings.helpConnect': '2. Connect your GitHub account and choose repositories',
+  'settings.helpEnvironment': '3. Set up a repository environment (optional)',
+  'settings.helpChat': '4. Start a chat',
   'settings.title': 'My Settings',
   'settings.shortcuts.title': 'Keyboard shortcuts',
   'settings.shortcuts.description':
@@ -714,7 +715,7 @@ export const en = {
   'settings.language.title': 'Language',
 
   'settings.gettingStarted.about': 'What is getting started?',
-  'settings.gettingStarted.help': 'Takes you from connecting GitHub to your first task.',
+  'settings.gettingStarted.help': 'Takes you from connecting a model to your first task.',
   'settings.gettingStarted.show': 'Show again',
   'settings.gettingStarted.shown': 'Shown',
 
@@ -825,7 +826,7 @@ export const en = {
   'composer.heading': 'What should the agent do?',
   'composer.subheading': 'Runs in an isolated sandbox.',
   'composer.subheadingFirstVisit':
-    'Describe a task. The agent works in an isolated sandbox and opens a draft pull request in your repository.',
+    'Describe a task. The agent works on a copy of your repository in an isolated sandbox, and opens a pull request when you ask.',
   'composer.subheadingTemporary':
     'Describe a task. The agent works in an isolated sandbox that starts empty.',
   'composer.repository': 'Repository',
@@ -874,7 +875,7 @@ export const en = {
   'composer.workflowReviewTitle': 'Review',
   'composer.workflowReview': 'Follow progress, review the changes, and continue the conversation.',
   'composer.loadConfigFailed': 'could not load config',
-  'composer.startFailed': 'could not start the job',
+  'composer.startFailed': 'could not start the task',
 
   // ── Start from scratch ─────────────────────────────────────────────────
   'temporaryWorkspace.name': 'Start from scratch',
@@ -1064,6 +1065,7 @@ export const en = {
   'gettingStarted.skip': 'Skip',
   'gettingStarted.hidden': 'Hidden. Bring it back in Settings.',
   'gettingStarted.undo': 'Undo',
+  'gettingStarted.model': 'Connect a model',
   'gettingStarted.connect': 'Connect GitHub',
   'gettingStarted.repository': 'Grant a repository',
   'gettingStarted.firstTask': 'Run your first task',
@@ -1075,7 +1077,7 @@ export const en = {
     'Your repository is cloned into the sandbox. The agent only edits this copy.',
   'firstRun.workspaceCreated':
     'The sandbox starts from an empty folder. Nothing is cloned, and nothing is published.',
-  'firstRun.doneTitle': 'Your first draft PR is ready',
+  'firstRun.doneTitle': 'Your first pull request is ready',
   'firstRun.doneBody':
     'Review it on GitHub; merging is up to you. Want changes? Reply below and ask the agent to push them to the PR.',
 

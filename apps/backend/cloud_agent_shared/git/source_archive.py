@@ -235,7 +235,7 @@ def build_source_archive(
         raise SandboxError("source preparer produced no Git checkout")
 
     try:
-        with tempfile.TemporaryFile(prefix="freeinference-source-manifest-") as manifest:
+        with tempfile.TemporaryFile(prefix="cloud-agent-source-manifest-") as manifest:
             _write_source_manifest(
                 str(root),
                 manifest,

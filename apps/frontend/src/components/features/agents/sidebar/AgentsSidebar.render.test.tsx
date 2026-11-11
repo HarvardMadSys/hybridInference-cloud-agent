@@ -121,7 +121,7 @@ describe('AgentsSidebar layout', () => {
 
   it('renders at the remembered width and resizes from the seam', async () => {
     render(<AgentsSidebar />);
-    await waitFor(() => expect(screen.getByText('No jobs yet.')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('No tasks yet.')).toBeInTheDocument());
 
     const sidebar = document.getElementById('agents-sidebar');
     expect(sidebar).toHaveStyle({ width: '288px' });
@@ -146,7 +146,7 @@ describe('AgentsSidebar layout', () => {
 
   it('ends with the account menu instead of separate settings and documentation links', async () => {
     render(<AgentsSidebar />);
-    await waitFor(() => expect(screen.getByText('No jobs yet.')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('No tasks yet.')).toBeInTheDocument());
 
     const sidebar = document.getElementById('agents-sidebar')!;
     const archived = within(sidebar).getByRole('link', { name: 'Archived' });

@@ -5,6 +5,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 
 import { useT } from '@/components/providers';
+import { SETTINGS_PATHS } from '@/components/features/settings/navigation';
 
 import { NEW_TASK_PROMPT_ID, useFirstRun, type FirstRunStep } from '../firstRun';
 import { githubAccessUrl, leaveFor } from '../githubAccess';
@@ -15,13 +16,33 @@ import { rememberReturn, requestGitHubAccess } from '../githubReturn';
 //
 // It is not a second place to explain anything, and it decides nothing: which
 // step is next comes from the app's first-run answer (see firstRun.tsx). Each
-// step goes to the screen that does it — GitHub, or the new-task box. Skip is
-// undone here for a few seconds, and from Settings after that.
+// step goes to the screen that does it — the Models settings, GitHub, or the
+// new-task box. Skip is undone here for a few seconds, and from Settings after
+// that.
 
 const ROW =
   'ui-focus-ring group mt-2 flex min-h-10 w-full items-center gap-2.5 rounded-xl px-2 py-2 text-left text-[13px] font-medium text-foreground transition-colors hover:bg-surface-hover disabled:cursor-wait disabled:opacity-70 [@media(pointer:coarse)]:min-h-11';
 
 function StepIcon({ step }: { step: FirstRunStep['next'] }) {
+  if (step === 'model') {
+    // The Models settings entry's chip.
+    return (
+      <svg
+        aria-hidden="true"
+        className="h-4 w-4 shrink-0 text-muted"
+        fill="none"
+        viewBox="0 0 24 24"
+        stroke="currentColor"
+        strokeWidth={2}
+      >
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M7 5h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2ZM9.5 9.5h5v5h-5zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"
+        />
+      </svg>
+    );
+  }
   if (step === 'task') {
     return (
       <svg
@@ -51,6 +72,13 @@ function StepIcon({ step }: { step: FirstRunStep['next'] }) {
     </svg>
   );
 }
+
+const STEP_LABELS = {
+  model: 'gettingStarted.model',
+  connect: 'gettingStarted.connect',
+  repository: 'gettingStarted.repository',
+  task: 'gettingStarted.firstTask',
+} as const satisfies Record<FirstRunStep['next'], string>;
 
 /** How long the note after Skip stays, once nothing is holding it. */
 export const UNDO_SKIP_MS = 6000;
@@ -149,12 +177,7 @@ export function GettingStarted() {
 
   if (!step) return null;
 
-  const label =
-    step.next === 'connect'
-      ? t('gettingStarted.connect')
-      : step.next === 'repository'
-        ? t('gettingStarted.repository')
-        : t('gettingStarted.firstTask');
+  const label = t(STEP_LABELS[step.next]);
 
   async function goToGitHub(kind: 'connect' | 'manage') {
     // The new-task box holds the draft: when it is on screen, it makes the trip.
@@ -226,7 +249,11 @@ export function GettingStarted() {
           />
         ))}
       </div>
-      {step.next === 'task' ? (
+      {step.next === 'model' ? (
+        <Link href={SETTINGS_PATHS.models} className={ROW}>
+          {content}
+        </Link>
+      ) : step.next === 'task' ? (
         <Link
           href="/"
           onClick={(event) => {

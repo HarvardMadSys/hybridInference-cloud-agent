@@ -380,6 +380,18 @@ def test_a_url_policy_is_declared_only_on_url_settings():
     assert misdeclared == []
 
 
+def test_what_an_operator_reads_names_no_one_deployment():
+    """Labels, descriptions and hints describe the product, not a deployment of it."""
+    read = ("label", "description", "hint", "apply_description")
+    named = [
+        (definition.key, field)
+        for definition in settings.SETTINGS
+        for field in read
+        if "freeinference" in getattr(definition, field).lower()
+    ]
+    assert named == []
+
+
 @pytest.mark.parametrize(
     ("key", "url"),
     [

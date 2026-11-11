@@ -2787,7 +2787,7 @@ describe('JobDetail', () => {
     );
   }
 
-  it('says where an owner’s first draft PR is, and that the agent can push more to it', async () => {
+  it('says where an owner’s first pull request is, and that the agent can push more to it', async () => {
     vi.mocked(listAgentConversations).mockResolvedValue({
       conversations: [ownedConversation('ajob_1')],
       next_cursor: null,
@@ -2796,7 +2796,7 @@ describe('JobDetail', () => {
 
     inApp(makeJob({ state: 'done', prUrl }));
 
-    expect(await screen.findByText('Your first draft PR is ready')).toBeInTheDocument();
+    expect(await screen.findByText('Your first pull request is ready')).toBeInTheDocument();
     expect(screen.getByText(/ask the agent to push them to the PR/)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Open PR' })).toHaveAttribute('href', prUrl);
     // Its milestones say what they mean, this once.
@@ -2816,7 +2816,7 @@ describe('JobDetail', () => {
 
     await waitFor(() => expect(listAgentConversations).toHaveBeenCalled());
     expect(screen.getByRole('link', { name: 'Open PR' })).toBeInTheDocument();
-    expect(screen.queryByText('Your first draft PR is ready')).not.toBeInTheDocument();
+    expect(screen.queryByText('Your first pull request is ready')).not.toBeInTheDocument();
     expect(screen.queryByText(/keeps going if you close this page/)).not.toBeInTheDocument();
   });
 
@@ -2832,7 +2832,7 @@ describe('JobDetail', () => {
 
     await waitFor(() => expect(listAgentConversations).toHaveBeenCalled());
     expect(screen.getByRole('link', { name: 'Open PR' })).toBeInTheDocument();
-    expect(screen.queryByText('Your first draft PR is ready')).not.toBeInTheDocument();
+    expect(screen.queryByText('Your first pull request is ready')).not.toBeInTheDocument();
   });
 
   it('keeps the empty workspace free of change and absent-PR placeholders', () => {

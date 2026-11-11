@@ -39,7 +39,7 @@ export const modelConnectionsEn = {
     "The provider's answer could not be read in the expected format.",
   'connections.title': 'Personal model connections',
   'connections.description':
-    'Run your tasks on your own provider’s API key. Connections are private to you, and your provider bills that key separately from platform inference.',
+    'Run your tasks on your own provider’s API key. Connections are private to you, and your provider bills that key and sets its usage limits.',
   'connections.add': 'Add connection',
   'connections.empty': 'No personal connections yet.',
   'connections.unavailable': 'Personal model connections are not available on this deployment yet.',
@@ -161,7 +161,7 @@ export const modelConnectionsZhCN: Record<keyof typeof modelConnectionsEn, strin
   'connections.reason.invalid_response': '无法解析服务商返回的数据。',
   'connections.title': '个人模型连接',
   'connections.description':
-    '用自己服务商的 API key 运行任务。连接只有你自己能用，费用由服务商按这个 key 单独计费，与平台推理额度无关。',
+    '用自己服务商的 API key 运行任务。连接只有你自己能用，费用和使用额度由服务商按这个 key 管理。',
   'connections.add': '添加连接',
   'connections.empty': '还没有个人模型连接。',
   'connections.unavailable': '当前部署尚未开放个人模型连接。',
