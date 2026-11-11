@@ -3131,7 +3131,8 @@ leaves the database with no writer.
 
    ```bash
    export AGENT_DEPLOYMENT_SHA="$(git rev-parse HEAD)"
-   docker compose -p cloudagent --env-file .env -f deploy/control-plane/docker-compose.yml build migrate
+   # `keys` builds the control-plane image that `migrate` runs.
+   docker compose -p cloudagent --env-file .env -f deploy/control-plane/docker-compose.yml build keys
    docker compose -p cloudagent --env-file .env -f deploy/control-plane/docker-compose.yml \
      run --rm --no-deps migrate
    ```

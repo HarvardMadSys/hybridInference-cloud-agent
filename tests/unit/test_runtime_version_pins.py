@@ -91,9 +91,9 @@ def test_every_pin_is_verified_against_the_installed_binary() -> None:
 
 _BASE_ENV = "\n".join(
     [
-        "COMPOSE_PROJECT=freeinference-cloud-agent-sandbox-staging",
+        "COMPOSE_PROJECT=cloud-agent-sandbox-staging",
         "AGENT_ENROLL_TOKEN=test-enrollment-token",
-        "AGENT_SANDBOX_IMAGE=freeinference-cloud-agent-job:staging",
+        "AGENT_SANDBOX_IMAGE=cloud-agent-job:staging",
         "AGENT_MCP_TUNNEL_SSH_DESTINATION=user@control",
         "AGENT_MCP_TUNNEL_SSH_KEY=/dev/null",
         "AGENT_MCP_TUNNEL_SSH_KNOWN_HOSTS=/etc/hosts",
@@ -192,7 +192,7 @@ def test_no_override_builds_the_reviewed_image(tmp_path: Path) -> None:
 def test_compose_receives_the_built_image(tmp_path: Path) -> None:
     invocations = _up(tmp_path, _BASE_ENV)
 
-    assert "compose-env image=freeinference-cloud-agent-job:staging" in invocations
+    assert "compose-env image=cloud-agent-job:staging" in invocations
 
 
 def test_a_per_host_default_override_is_refused_before_build(tmp_path: Path) -> None:

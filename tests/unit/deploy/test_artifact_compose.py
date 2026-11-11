@@ -2,7 +2,9 @@
 
 `build` is gone and `image` is set from the manifest; everything else — ports,
 mounts, networks, dependencies, third-party images — has to be identical, which
-is what most of this file checks. The awkward half is `build`: Compose
+is what most of this file checks. The one other key that may go is the
+`pull_policy: never` of a service that runs the image another service of its
+role builds: a release pulls that image instead. The awkward half is `build`: Compose
 interpolates a file before it does anything else, so a build argument that
 required a variable would stop a deployment that has the image, and no build
 arguments, from even parsing the file. `up --no-build` does not skip that,
@@ -90,8 +92,11 @@ def test_nothing_but_the_build_and_the_image_changed(stack: str, variant: str | 
 
     assert set(after["services"]) == set(before["services"])
     for name, service in before["services"].items():
-        expected = {k: v for k, v in service.items() if k not in {"build", "image"}}
-        actual = {k: v for k, v in after["services"][name].items() if k not in {"build", "image"}}
+        moved = {"build", "image"} | (
+            {"pull_policy"} if _follows_a_builder(before, name) else set()
+        )
+        expected = {k: v for k, v in service.items() if k not in moved}
+        actual = {k: v for k, v in after["services"][name].items() if k not in moved}
         assert actual == expected, f"{name} changed beyond its image"
         if name not in release_services:
             assert after["services"][name]["image"] == service["image"], (
@@ -103,6 +108,14 @@ def test_nothing_but_the_build_and_the_image_changed(stack: str, variant: str | 
     assert after.get("volumes") == before.get("volumes")
 
 
+def _follows_a_builder(document: dict[str, Any], name: str) -> bool:
+    service = document["services"][name]
+    return "build" not in service and any(
+        "build" in other and other.get("image") == service.get("image")
+        for other in document["services"].values()
+    )
+
+
 @pytest.mark.parametrize(("stack", "variant"), CASES)
 def test_each_role_supplies_the_services_that_run_it(stack: str, variant: str | None) -> None:
     document = rendered(stack, variant)
@@ -112,6 +125,72 @@ def test_each_role_supplies_the_services_that_run_it(stack: str, variant: str | 
             if role == "web" and variant is None:
                 continue
             assert document["services"][name]["image"] == images[role], f"{name} != {role}"
+
+
+CONTROL_FOLLOWERS = ("migrate", "control-plane", "mcp-relay", "github-relay")
+
+
+def test_the_control_image_is_pulled_once_for_every_service_that_runs_it() -> None:
+    """The source builds it in `keys` alone; the release pulls it for all five.
+
+    `pull_policy: never` is what keeps a source deployment from pulling a name
+    only `keys` builds. Left in a release file, it would stop `compose pull`
+    fetching the image for the services that carry it.
+    """
+    before = source("control-plane")["services"]
+    assert [name for name in ac.STACKS["control-plane"]["control"] if "build" in before[name]] == [
+        "keys"
+    ]
+    for name in CONTROL_FOLLOWERS:
+        assert before[name]["image"] == before["keys"]["image"], name
+        assert before[name]["pull_policy"] == "never", name
+
+    for document in (
+        rendered("control-plane", "root"),
+        ac.recipe_template(source("control-plane"), "control-plane"),
+    ):
+        services = document["services"]
+        for name in ("keys", *CONTROL_FOLLOWERS):
+            assert services[name]["image"] == services["keys"]["image"], name
+            assert "pull_policy" not in services[name], name
+            assert "build" not in services[name], name
+
+    # The packaged recipe is rendered again at deploy time, its followers now
+    # carrying the placeholder like their builder.
+    template = ac.recipe_template(source("control-plane"), "control-plane")
+    images = ac.images_from_manifest(manifest(), "root")
+    deployed = ac.render(template, "control-plane", images, "root")["services"]
+    assert {deployed[name]["image"] for name in ("keys", *CONTROL_FOLLOWERS)} == {images["control"]}
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(
+            lambda services: services["mcp-relay"].update(image="cloudagent-mcp-relay:latest"),
+            id="a follower names an image nobody here builds",
+        ),
+        pytest.param(
+            lambda services: services["mcp-relay"].pop("pull_policy"),
+            id="a follower that may pull a name only the builder makes",
+        ),
+        pytest.param(
+            lambda services: services["mcp-relay"].update(image=services["web"]["image"]),
+            id="a follower of another role's build",
+        ),
+        pytest.param(
+            lambda services: services["keys"].pop("image"),
+            id="a builder that names no image",
+        ),
+    ],
+)
+def test_a_follower_must_run_exactly_its_roles_built_image(mutate) -> None:
+    document = source("control-plane")
+    document["services"]["web"]["image"] = "cloudagent-web:local"
+    mutate(document["services"])
+    images = ac.images_from_manifest(manifest(), "root")
+    with pytest.raises(ac.ComposeError, match="drifted apart"):
+        ac.render(document, "control-plane", images, "root")
 
 
 def test_kata_epoch_mount_is_host_wide_read_only_and_tracks_atomic_replacements():

@@ -446,7 +446,8 @@ case "$command" in
     if [ "${1:-}" = --no-build ]; then
       build_flag=--no-build
     else
-      compose build sandbox-image migrate
+      # `keys` builds the control-plane image `migrate` runs below.
+      compose build sandbox-image keys
     fi
     start_database_and_probe
     retire_legacy_sandbox_manager

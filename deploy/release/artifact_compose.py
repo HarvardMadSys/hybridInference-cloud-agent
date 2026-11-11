@@ -14,6 +14,14 @@ to write a result in which either half of that is untrue. `test_artifact_compose
 compares the output against the source to show that nothing else moved: the same
 services, the same ports, mounts, networks and dependencies.
 
+A source file may build a role's image once and run it in several services: the
+builder names the image, and the others name the same one with
+`pull_policy: never` and no `build` of their own (the control plane's `keys`
+and its four followers). A follower gets the manifest's image like its builder,
+and loses its `pull_policy`, because a release pulls the image it deploys rather
+than finding it built. A service with no `build` whose image is neither the
+recipe's placeholder nor its builder's is still refused.
+
 Comments do not survive the round trip through YAML, which is why the generated
 file is written next to the recipe's own README rather than published as a
 document — the annotated source stays the place to read about a service.
@@ -129,20 +137,28 @@ def render(
                 f"the manifest carries no {role!r} artifact, and this stack runs "
                 f"{list(names)} from it"
             )
+        built = _built_images(services, role, names)
         for name in names:
-            service = services.get(name)
-            if service is None:
+            service = services[name]
+            follows_builder = (
+                "build" not in service
+                and service.get("image") in built
+                and service.get("pull_policy") == "never"
+            )
+            if (
+                "build" not in service
+                and not follows_builder
+                and service.get("image") != image_placeholder(role)
+            ):
                 raise ComposeError(
-                    f"service {name!r} is mapped to role {role!r} but the Compose file has "
-                    "no such service; the mapping and the stack have drifted apart"
-                )
-            if "build" not in service and service.get("image") != image_placeholder(role):
-                raise ComposeError(
-                    f"service {name!r} has neither a source build nor the recipe's {role!r} "
-                    "image placeholder; the mapping and the stack have drifted apart"
+                    f"service {name!r} has neither a source build, nor the image a {role!r} "
+                    "service builds with `pull_policy: never`, nor the recipe's "
+                    f"{role!r} image placeholder; the mapping and the stack have drifted apart"
                 )
             rendered["services"][name]["image"] = images[role]
             rendered["services"][name].pop("build", None)
+            if follows_builder:
+                rendered["services"][name].pop("pull_policy", None)
 
     leftovers = sorted(
         name
@@ -155,6 +171,26 @@ def render(
             f"source: {leftovers}. Add them to STACKS under the role that supplies them."
         )
     return rendered
+
+
+def _built_images(services: Mapping[str, Any], role: str, names: Sequence[str]) -> set[str]:
+    """The images this role's own source builds name, which its followers may run.
+
+    Only a builder that names its image can be followed, and a follower must name
+    exactly that image: an image built by another role's service, or one nobody
+    here builds, is not this role's artifact.
+    """
+    built: set[str] = set()
+    for name in names:
+        service = services.get(name)
+        if service is None:
+            raise ComposeError(
+                f"service {name!r} is mapped to role {role!r} but the Compose file has "
+                "no such service; the mapping and the stack have drifted apart"
+            )
+        if "build" in service and service.get("image"):
+            built.add(service["image"])
+    return built
 
 
 def main(argv: Sequence[str] | None = None) -> int:

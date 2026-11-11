@@ -1761,6 +1761,12 @@ jobs:
               mounts = {(m["source"], m["target"]) for m in services[name]["volumes"]}
               assert ("agent-keys", "/run/cloud-agent/keys") in mounts, (name, mounts)
               assert not services[name]["environment"].get("AGENT_DATABASE_URL"), name
+          # One build, one image: automatic Server setup refuses an API and MCP
+          # relay that run different images.
+          builders = sorted(name for name, service in services.items() if "build" in service)
+          assert builders == ["keys", "web"], builders
+          images = {services[name]["image"] for name in ("keys", "migrate", "control-plane", "mcp-relay")}
+          assert len(images) == 1, images
           print("a new installation renders with its keys left to the keys service")
           PY
 

@@ -24,6 +24,7 @@ rule, so the list of forbidden names has exactly one definition.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -198,6 +199,63 @@ def test_the_image_ships_the_migrations_it_is_told_to_run() -> None:
 def test_the_container_does_not_run_as_root() -> None:
     """It holds a git credential and a database connection."""
     assert re.search(r"^USER (?!root)", DOCKERFILE_PATH.read_text(), re.MULTILINE)
+
+
+#: The services that run the control-plane image `keys` builds.
+CONTROL_IMAGE_FOLLOWERS = ("migrate", "control-plane", "mcp-relay", "github-relay")
+
+
+def test_one_service_builds_the_control_plane_image_and_the_rest_run_it(compose: dict) -> None:
+    """Five builds of one Dockerfile are five images: Compose labels each with its
+    service. Automatic Server setup refuses an API and MCP relay that run
+    different images, so a source deployment could not add a server. `keys`
+    builds it because every follower waits for `keys`, so any `up` of one of them
+    builds it first; `pull_policy: never` keeps Compose from looking for a name
+    only this machine makes in a registry."""
+    services = compose["services"]
+    builders = [
+        name
+        for name, service in services.items()
+        if (service.get("build") or {}).get("dockerfile") == "deploy/control-plane/Dockerfile"
+    ]
+    assert builders == ["keys"]
+    image = services["keys"]["image"]
+    assert image == "${COMPOSE_PROJECT_NAME}-control-plane:${AGENT_DEPLOYMENT_SHA:-unknown}"
+    assert services["keys"]["build"]["args"]["SOURCE_COMMIT"] == "${AGENT_DEPLOYMENT_SHA:-unknown}"
+    for name in CONTROL_IMAGE_FOLLOWERS:
+        service = services[name]
+        assert "build" not in service, name
+        assert service["image"] == image, name
+        assert service["pull_policy"] == "never", name
+        assert _waits_for_keys(compose, name), name
+
+
+def _resolved_images(project: str) -> dict[str, str]:
+    docker = shutil.which("docker")
+    if not docker or subprocess.run([docker, "compose", "version"], capture_output=True).returncode:
+        pytest.skip("Docker Compose CLI is needed for its actual interpolation")
+    rendered = subprocess.run(
+        [
+            *(docker, "compose", "-p", project, "-f", str(COMPOSE_PATH)),
+            *("--profile", "github-relay", "config", "--format", "json"),
+        ],
+        env={"PATH": os.environ["PATH"], "AGENT_DEPLOYMENT_SHA": "0" * 40},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    services = json.loads(rendered.stdout)["services"]
+    return {name: services[name]["image"] for name in ("keys", *CONTROL_IMAGE_FOLLOWERS)}
+
+
+def test_compose_resolves_every_control_plane_service_to_one_image_per_project() -> None:
+    """What setup compares is the running containers' image, so check what
+    Compose itself resolves: one name for all five, and another project's own."""
+    images = _resolved_images("one-image-a")
+    assert set(images.values()) == {"one-image-a-control-plane:" + "0" * 40}
+    assert set(_resolved_images("one-image-b").values()) == {
+        "one-image-b-control-plane:" + "0" * 40
+    }
 
 
 def test_the_compose_only_sets_variables_the_code_reads(control_plane_env: dict) -> None:
