@@ -489,12 +489,24 @@ def test_a_launch_without_its_token_key_or_https_upstream_starts_nothing():
     assert _KEY not in repr(binding) and binding.token not in repr(binding)
 
 
+#: A CLI stand-in that reports what it was started with. The report appears
+#: whole: the test polls for it, and a file opened for writing exists, empty,
+#: before its contents are written.
 _CLI = """\
 import json, os, sys, time
-with open(sys.argv[1], "w") as out:
+with open(sys.argv[1] + ".partial", "w") as out:
     json.dump({"argv": sys.argv, "env": dict(os.environ), "pid": os.getpid()}, out)
+os.replace(sys.argv[1] + ".partial", sys.argv[1])
 time.sleep(float(sys.argv[2]))
 """
+
+
+def _wait_for_report(report: Path, process: subprocess.Popen[bytes]) -> dict[str, Any]:
+    deadline = time.monotonic() + 10
+    while not report.exists() and time.monotonic() < deadline:
+        assert process.poll() is None, f"the launcher exited with {process.returncode}"
+        time.sleep(0.05)
+    return json.loads(report.read_text())
 
 
 def test_the_launcher_becomes_the_cli_and_its_service_leaves_with_it(tmp_path: Path):
@@ -526,10 +538,7 @@ def test_the_launcher_becomes_the_cli_and_its_service_leaves_with_it(tmp_path: P
         ],
         env=env,
     )
-    deadline = time.monotonic() + 10
-    while not report.exists() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    seen = json.loads(report.read_text())
+    seen = _wait_for_report(report, process)
     # The process the host spawned is the CLI itself.
     assert seen["pid"] == process.pid
     origin = seen["env"]["ANTHROPIC_BASE_URL"]
@@ -561,12 +570,8 @@ def test_the_service_leaves_when_the_cli_is_killed(tmp_path: Path):
             "OPENAI_BASE_URL": f"{ORIGIN_PLACEHOLDER}/v1",
         },
     )
-    deadline = time.monotonic() + 10
-    while not report.exists() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    port = int(
-        json.loads(report.read_text())["env"]["OPENAI_BASE_URL"].rsplit(":", 1)[1].split("/")[0]
-    )
+    seen = _wait_for_report(report, process)
+    port = int(seen["env"]["OPENAI_BASE_URL"].rsplit(":", 1)[1].split("/")[0])
     process.kill()
     process.wait(timeout=10)
     _assert_closed(port)
