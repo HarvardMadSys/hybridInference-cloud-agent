@@ -17,6 +17,10 @@ Compose ``keys`` service runs this module before anything else starts:
   else the start stops and names what to set, because the settings root key
   decrypts every stored secret and a new one would lock them all.
 
+It also warns, on every start, when the connection uses a database on the
+bundled server other than the one ``AGENT_POSTGRES_DB`` names
+(:func:`database_mismatch`).
+
 Each file is readable only by the user that needs it: the database password by
 the Postgres image's ``postgres`` user, everything else by the control-plane
 image's ``cloudagent`` user. Every control-plane process fills each variable
@@ -139,9 +143,46 @@ def _bundled_password(url: str) -> str:
     return unquote(password) if password else ""
 
 
+def _bundled_database(environ: Mapping[str, str]) -> str:
+    """The database ``AGENT_POSTGRES_DB`` names, with the Compose file's default."""
+    return (environ.get("AGENT_POSTGRES_DB") or "").strip() or "cloudagent"
+
+
+def database_mismatch(environ: Mapping[str, str], url: str) -> str:
+    """Why the bundled database's own tools miss the one ``url`` uses; empty when they do not.
+
+    The Postgres healthcheck, pgAdmin's bundled server and the documented
+    backup, drain and undrain commands open the database ``AGENT_POSTGRES_DB``
+    names, and a new installation's connection is generated from it. A
+    deployment that later moved to another database on the bundled server (the
+    independent-accounts cutover's new, empty one) and changed only
+    ``AGENT_DATABASE_URL`` left all of them on the database it moved from:
+    pgAdmin and ``psql`` show its old state, and the backup dumps it. The name
+    is reported, never the connection, which holds the password.
+    """
+    if not url or not bundled(url):
+        return ""
+    try:
+        parts = urlsplit(url)
+        # A connection that names no database opens the one named after its user.
+        used = unquote(parts.path.lstrip("/")) or unquote(parts.username or "")
+    except ValueError:
+        return ""
+    named = _bundled_database(environ)
+    if not used or used == named:
+        return ""
+    return (
+        f"{DATABASE_URL} uses the bundled database {used}, but AGENT_POSTGRES_DB is {named}: "
+        f"the Postgres healthcheck, pgAdmin's bundled server and the documented backup open "
+        f"{named}, not the database this deployment uses. Set AGENT_POSTGRES_DB={used} in the "
+        "deployment's environment (its .env); docs/developer/upgrade-notes.md"
+        "#the-bundled-database-is-the-one-agent_postgres_db-names has the steps."
+    )
+
+
 def _bundled_url(environ: Mapping[str, str], password: str) -> str:
     user = (environ.get("AGENT_POSTGRES_USER") or "").strip() or "cloudagent"
-    database = (environ.get("AGENT_POSTGRES_DB") or "").strip() or "cloudagent"
+    database = _bundled_database(environ)
     if not (_IDENTIFIER.fullmatch(user) and _IDENTIFIER.fullmatch(database)):
         raise KeysRefused(
             "AGENT_POSTGRES_USER and AGENT_POSTGRES_DB must be letters, digits and _ "
@@ -316,6 +357,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     for warning in outcome.warnings:
         print(f"[keys] WARNING: {warning}", file=sys.stderr)
+    # Stored by now, whether the environment gave it, the volume kept it or
+    # this run generated it.
+    try:
+        url = _read(arguments.keys_dir, DATABASE_URL)
+    except OSError:
+        url = ""
+    if mismatch := database_mismatch(os.environ, url):
+        print(f"[keys] WARNING: {mismatch}", file=sys.stderr)
     if outcome.stored:
         print(f"[keys] stored from the environment: {' '.join(outcome.stored)}")
     if outcome.generated:
