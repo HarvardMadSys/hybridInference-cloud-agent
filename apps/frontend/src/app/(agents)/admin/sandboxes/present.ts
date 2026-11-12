@@ -28,6 +28,19 @@ export function formatCpu(value: number | null | undefined): string {
   return amount === null ? 'Unavailable' : `${amount.toFixed(2)} cores`;
 }
 
+export type SandboxDeletionStatus = 'pending' | 'deleted' | 'failed';
+
+/**
+ * Where an administrator's deletion of a sandbox stands, or null when none was requested.
+ * A request whose automatic retries stopped waits for an administrator, as a failed one does.
+ */
+export function deletionStatus(sandbox: AdminSandbox): SandboxDeletionStatus | null {
+  const state = sandbox.deletion_state ?? 'none';
+  if (state === 'none') return null;
+  if (state === 'deleted' || state === 'failed') return state;
+  return sandbox.deletion_retry_exhausted_at ? 'failed' : 'pending';
+}
+
 export function formatDiskLimit(value: number | undefined): string {
   if (value === undefined || value === 0) return 'No disk quota';
   const amount = finiteMetric(value);

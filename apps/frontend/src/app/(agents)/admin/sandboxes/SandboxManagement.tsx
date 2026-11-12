@@ -4,7 +4,11 @@ import Link from 'next/link';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { conversationHref } from '@/lib/api/adminConversations';
-import { getAdminSandbox, type AdminSandboxDetail } from '@/lib/api/adminSandboxes';
+import {
+  getAdminSandbox,
+  type AdminSandbox,
+  type AdminSandboxDetail,
+} from '@/lib/api/adminSandboxes';
 import { getErrorMessage } from '@/lib/utils/errors';
 
 import { accessDenied, BUTTON, dateTime, ErrorNotice } from '../runs/shared';
@@ -18,6 +22,13 @@ import {
 } from './sandboxActions';
 
 const REFRESH_MS = 30_000;
+
+/** What a deleted sandbox leaves: its chat history, and its S3 archive unless it was discarded. */
+function deletedRemains(sandbox: AdminSandbox): string {
+  return sandbox.deletion_discard
+    ? 'Chat history remains available. It was deleted without an S3 archive.'
+    : 'Its S3 archive and chat history remain available.';
+}
 
 export function SandboxManagement({
   sandboxId,
@@ -144,7 +155,7 @@ export function SandboxManagement({
       kind === 'archive' &&
       !window.confirm(
         deletionComplete
-          ? 'Remove this deleted sandbox from the admin inventory? Its S3 archive and chat history remain available. ' +
+          ? `Remove this deleted sandbox from the admin inventory? ${deletedRemains(sandbox)} ` +
               'You can restore its inventory entry using Include removed.'
           : staleInventoryEntry
             ? `Remove the stale sandbox entry shared by ${sandbox.member_count} ${sandbox.member_count === 1 ? 'session' : 'sessions'} from the admin inventory? ` +
@@ -251,7 +262,7 @@ export function SandboxManagement({
             <p role="status" className="mt-2 text-sm text-gray-700 dark:text-gray-200">
               Removed from the admin inventory.{' '}
               {deletionComplete
-                ? 'Its S3 archive and chat history remain available.'
+                ? deletedRemains(sandbox)
                 : sandbox.state !== 'stopped'
                   ? 'Any retained container and workspace files are unchanged. Chat history and recorded native state remain.'
                   : 'Workspace files, native sessions, and chat history are retained.'}
@@ -415,7 +426,7 @@ export function SandboxManagement({
                   (sandbox.archived_at
                     ? 'Makes this sandbox visible in the admin inventory again.'
                     : deletionComplete
-                      ? 'Hides this deleted sandbox. Its S3 archive and chat history remain available.'
+                      ? `Hides this deleted sandbox. ${deletedRemains(sandbox)}`
                       : staleInventoryEntry
                         ? 'Removes only the offline host’s inventory entry. Retained containers and files are not deleted; chat history and recorded native state remain. If the host reports it running or new work resumes, the entry returns.'
                         : 'Hides this stopped sandbox. Workspace files, native sessions, and chat history are retained.')}
