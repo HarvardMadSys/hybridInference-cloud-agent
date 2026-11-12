@@ -2,7 +2,7 @@
 import '@testing-library/jest-dom/vitest';
 
 import { useState } from 'react';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Picker } from './Picker';
 
@@ -158,6 +158,90 @@ describe('Picker', () => {
     fireEvent.click(trigger);
     fireEvent.focusIn(screen.getByRole('button', { name: 'Next' }));
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it('groups options under their headings, and reads a note as part of the option', () => {
+    render(
+      <Picker
+        label="Model"
+        value="house-fast"
+        options={['house-fast', 'house-spent', 'mine']}
+        optionGroups={{
+          'house-fast': 'Provided by this deployment',
+          'house-spent': 'Provided by this deployment',
+          mine: 'Your connections',
+        }}
+        optionNotes={{ 'house-fast': '42 left today', 'house-spent': 'Resets at 8:00 AM' }}
+        onChange={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Model' }));
+    const provided = screen.getByRole('group', { name: 'Provided by this deployment' });
+    expect(
+      within(provided)
+        .getAllByRole('option')
+        .map((option) => option.textContent),
+    ).toEqual(['house-fast 42 left today', 'house-spent Resets at 8:00 AM']);
+    const own = screen.getByRole('group', { name: 'Your connections' });
+    expect(
+      within(own)
+        .getAllByRole('option')
+        .map((option) => option.textContent),
+    ).toEqual(['mine']);
+    // Without groups the list is flat, as before.
+    expect(screen.getAllByRole('group')).toHaveLength(2);
+  });
+
+  it('shows a disabled option without letting the pointer or the keyboard choose it', () => {
+    const onChange = vi.fn();
+    render(
+      <Picker
+        label="Model"
+        value="first"
+        options={['first', 'spent', 'last']}
+        disabledOptions={['spent']}
+        onChange={onChange}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Model' }));
+    const spent = screen.getByRole('option', { name: 'spent' });
+    expect(spent).toHaveAttribute('aria-disabled', 'true');
+    fireEvent.click(spent);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+
+    // The arrows pass over it, and typing its name does not land on it.
+    const list = screen.getByRole('listbox');
+    fireEvent.keyDown(list, { key: 'ArrowDown' });
+    expect(list).toHaveAttribute(
+      'aria-activedescendant',
+      screen.getByRole('option', { name: 'last' }).id,
+    );
+    fireEvent.keyDown(list, { key: 's' });
+    fireEvent.keyDown(list, { key: 'Enter' });
+    expect(onChange).toHaveBeenCalledExactlyOnceWith('last');
+  });
+
+  it('highlights the first option that can be chosen when the current one cannot', () => {
+    const onChange = vi.fn();
+    render(
+      <Picker
+        label="Model"
+        value="spent"
+        options={['spent', 'open']}
+        disabledOptions={['spent']}
+        onChange={onChange}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Model' }));
+    const list = screen.getByRole('listbox');
+    expect(screen.getByRole('option', { name: 'spent' })).toHaveAttribute('aria-selected', 'true');
+    expect(list).toHaveAttribute(
+      'aria-activedescendant',
+      screen.getByRole('option', { name: 'open' }).id,
+    );
+    fireEvent.keyDown(list, { key: 'Enter' });
+    expect(onChange).toHaveBeenCalledExactlyOnceWith('open');
   });
 
   it('removes an open panel when its options disappear', () => {

@@ -22,8 +22,8 @@ export function isModelId(text: string): boolean {
 /** A field the owner can fix, as the form and the server name it. */
 export type ConnectionField = 'name' | 'base_url' | 'api_key' | 'models';
 
-/** What is wrong with each field before anything is sent; empty when nothing is. */
-function validBaseUrl(value: string): boolean {
+/** A Base URL the server accepts: HTTPS on 443, with no credentials, query or fragment. */
+export function validBaseUrl(value: string): boolean {
   try {
     const url = new URL(value);
     return (
@@ -45,6 +45,7 @@ function validKey(value: string): boolean {
   return Boolean(value) && !/[^\x21-\x7e]/.test(value);
 }
 
+/** What is wrong with each field before anything is sent; empty when nothing is. */
 export function fieldProblems(fields: ConnectionFields): Partial<Record<ConnectionField, true>> {
   const problems: Partial<Record<ConnectionField, true>> = {};
   if (!fields.name || fields.name.length > 64) problems.name = true;
@@ -66,11 +67,11 @@ export function withModel(models: readonly string[], model: string): string[] {
   return !clean || models.includes(clean) ? [...models] : [...models, clean];
 }
 
-function sameList(a: readonly string[], b: readonly string[]): boolean {
+export function sameList(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
-function sameBaseUrl(typed: string, stored: string): boolean {
+export function sameBaseUrl(typed: string, stored: string): boolean {
   // The server drops trailing slashes; the same address typed with one is unchanged.
   return typed.replace(/\/+$/, '') === stored;
 }

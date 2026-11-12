@@ -1,5 +1,6 @@
 import type { HostSettingDefinition } from '@/lib/api/admin';
 import type { AgentAdminSettings } from '@/lib/api/adminSettings';
+import type { Translator } from '@/lib/i18n/translate';
 
 import { agentName } from './AgentVersions';
 import {
@@ -205,6 +206,41 @@ export function buildSettingsSearchItems({
       : []),
     ...staticItems(CLOUDLAB_FIELDS, 'cloudlab', 'CloudLab', 'cloudlab'),
   ];
+}
+
+/**
+ * Where search sends its reader on the Models tab: the section's heading, which
+ * is there before the list has loaded and can take focus.
+ */
+export const PROVIDED_MODELS_TARGET = 'provided-models-setting-connections';
+
+/**
+ * The Models tab, as search finds it. Its text follows the administrator's
+ * language like the tab does, and the words an administrator would look for
+ * lead to it in either.
+ */
+export function providedModelsSearchItem(t: Translator): SettingsSearchItem {
+  return {
+    id: 'provided-models:connections',
+    label: t('adminModels.search.label'),
+    description: t('adminModels.search.description'),
+    section: t('adminModels.tab'),
+    tab: 'models',
+    targetId: PROVIDED_MODELS_TARGET,
+    keywords: [
+      'models',
+      'provided models',
+      'model connection',
+      'API key',
+      'Base URL',
+      'allowance',
+      'daily requests',
+      'request limit',
+      'concurrency',
+      'model relay',
+      'usage',
+    ],
+  };
 }
 
 function normalizeSearch(text: string): string {

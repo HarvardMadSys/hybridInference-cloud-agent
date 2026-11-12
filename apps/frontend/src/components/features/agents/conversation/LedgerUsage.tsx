@@ -10,6 +10,7 @@ import {
 
 import { useT } from '@/components/providers';
 import type { AgentJob } from '../types';
+import { usageSourceKey } from '../composer/providedModels';
 import {
   isOlderUsage,
   onAgentRecordsChanged,
@@ -172,7 +173,7 @@ export function useLedgerUsage(job: AgentJob): LoadedUsage | null {
   return loaded?.jobId === job.id ? loaded : null;
 }
 
-/** The runtime's counters, and that the owner's provider bills the turn. */
+/** The runtime's counters, and who meters the turn: the owner's provider or this deployment. */
 export function LedgerUsage({ usage }: { usage: LoadedUsage | null }) {
   const t = useT();
   const totals = runtimeTotals(usage?.data?.runtime);
@@ -190,7 +191,7 @@ export function LedgerUsage({ usage }: { usage: LoadedUsage | null }) {
           </span>
         </>
       ) : null}
-      <span>{t('modelSource.usageExternal')}</span>
+      <span>{t(usageSourceKey(usage?.data))}</span>
     </section>
   );
 }

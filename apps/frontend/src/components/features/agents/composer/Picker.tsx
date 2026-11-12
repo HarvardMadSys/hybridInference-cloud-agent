@@ -15,6 +15,7 @@ import { popoverContainer, useAnchoredPopover } from '@/components/ui/anchoredPo
 import { useTopLayerEscape } from '@/components/ui/useTopLayerEscape';
 import {
   MENU_EMPTY,
+  MENU_HEADING,
   MENU_LABEL,
   MENU_POSITIONED,
   MENU_SCROLL,
@@ -108,6 +109,24 @@ function typeAhead(
   if (match) setActive(match);
 }
 
+/** Consecutive options under one heading; `label` is `''` for options that have none. */
+interface OptionRun {
+  label: string;
+  items: { option: string; index: number }[];
+}
+
+/** The shown options as runs of one group each, keeping each option's place in the list. */
+function optionRuns(matches: string[], groups: Record<string, string>): OptionRun[] {
+  const runs: OptionRun[] = [];
+  matches.forEach((option, index) => {
+    const label = groups[option] ?? '';
+    const last = runs[runs.length - 1];
+    if (last && last.label === label) last.items.push({ option, index });
+    else runs.push({ label, items: [{ option, index }] });
+  });
+  return runs;
+}
+
 /** The menu width follows the control: form fields match themselves, chips stay compact. */
 function pickerPlacement(variant: 'compact' | 'field', searchable: boolean) {
   return {
@@ -188,6 +207,9 @@ export function Picker({
   variant = 'compact',
   disabled = false,
   optionLabels = {},
+  optionGroups = {},
+  optionNotes = {},
+  disabledOptions = [],
 }: {
   label: string;
   value: string;
@@ -210,6 +232,12 @@ export function Picker({
   variant?: 'compact' | 'field';
   disabled?: boolean;
   optionLabels?: Record<string, string>;
+  /** A heading per option; consecutive options with the same one are grouped under it. */
+  optionGroups?: Record<string, string>;
+  /** A second, quieter line under an option's label. */
+  optionNotes?: Record<string, string>;
+  /** Options that are listed but cannot be chosen; the keyboard passes over them. */
+  disabledOptions?: string[];
 }) {
   const t = useT();
   const options = suppliedOptions.filter((option) => typeof option === 'string');
@@ -228,8 +256,10 @@ export function Picker({
   const matches = options.filter((option) =>
     (optionLabels[option] ?? option).toLocaleLowerCase().includes(needle),
   );
-  const current = matches.includes(active) ? active : (matches[0] ?? '');
-  const activeId = matches.length ? `${id}-option-${matches.indexOf(current)}` : undefined;
+  // What can be chosen: the highlight and the keyboard move over these alone.
+  const enabled = matches.filter((option) => !disabledOptions.includes(option));
+  const current = enabled.includes(active) ? active : (enabled[0] ?? '');
+  const activeId = enabled.length ? `${id}-option-${matches.indexOf(current)}` : undefined;
   const visible = open && !disabled && options.length > 0;
   const classes = pickerClasses(variant, visible, Boolean(value));
   const style = useAnchoredPopover(visible, trigger, panel, pickerPlacement(variant, searchable));
@@ -259,6 +289,7 @@ export function Picker({
   }
 
   function choose(option: string) {
+    if (disabledOptions.includes(option)) return;
     onChange(option);
     close();
   }
@@ -266,9 +297,9 @@ export function Picker({
   function onKeyDown(event: KeyboardEvent) {
     pickerKeyDown(event, {
       searchable,
-      matches,
+      matches: enabled,
       current,
-      options,
+      options: options.filter((option) => !disabledOptions.includes(option)),
       optionLabels,
       typeahead,
       setActive,
@@ -382,34 +413,58 @@ export function Picker({
               aria-activedescendant={searchable ? undefined : activeId}
               className={MENU_SCROLL}
             >
-              {matches.map((option, index) => (
-                <div
-                  key={option}
-                  id={`${id}-option-${index}`}
-                  role="option"
-                  aria-selected={option === value}
-                  onPointerMove={() => setActive(option)}
-                  onPointerDown={(event) => event.preventDefault()}
-                  onClick={() => choose(option)}
-                  className={menuOptionClass(option === value, option === current, false)}
-                >
-                  <span className="min-w-0 flex-1 break-words">
-                    {optionLabels[option] ?? option}
-                  </span>
-                  {option === value ? (
-                    <svg
-                      aria-hidden
-                      viewBox="0 0 20 20"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth={1.8}
-                      className="h-4 w-4 shrink-0"
+              {optionRuns(matches, optionGroups).map((run) => {
+                const rows = run.items.map(({ option, index }) => {
+                  const unavailable = disabledOptions.includes(option);
+                  return (
+                    <div
+                      key={option}
+                      id={`${id}-option-${index}`}
+                      role="option"
+                      aria-selected={option === value}
+                      aria-disabled={unavailable || undefined}
+                      onPointerMove={() => {
+                        if (!unavailable) setActive(option);
+                      }}
+                      onPointerDown={(event) => event.preventDefault()}
+                      onClick={() => choose(option)}
+                      className={menuOptionClass(option === value, option === current, unavailable)}
                     >
-                      <path strokeLinecap="round" strokeLinejoin="round" d="m5 10 3 3 7-7" />
-                    </svg>
-                  ) : null}
-                </div>
-              ))}
+                      <span className="min-w-0 flex-1 break-words">
+                        {optionLabels[option] ?? option}
+                        {/* A space, so the two lines read as two phrases when read as one name. */}
+                        {optionNotes[option] ? ' ' : null}
+                        {optionNotes[option] ? (
+                          <span className="block text-[11px] leading-4 text-muted">
+                            {optionNotes[option]}
+                          </span>
+                        ) : null}
+                      </span>
+                      {option === value ? (
+                        <svg
+                          aria-hidden
+                          viewBox="0 0 20 20"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth={1.8}
+                          className="h-4 w-4 shrink-0"
+                        >
+                          <path strokeLinecap="round" strokeLinejoin="round" d="m5 10 3 3 7-7" />
+                        </svg>
+                      ) : null}
+                    </div>
+                  );
+                });
+                if (!run.label) return rows;
+                return (
+                  <div key={`group-${run.items[0].index}`} role="group" aria-label={run.label}>
+                    <div aria-hidden className={MENU_HEADING}>
+                      {run.label}
+                    </div>
+                    {rows}
+                  </div>
+                );
+              })}
               {!matches.length ? (
                 <p role="status" className={MENU_EMPTY}>
                   {t('picker.noResults')}

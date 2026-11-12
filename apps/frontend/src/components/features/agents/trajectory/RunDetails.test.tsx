@@ -369,6 +369,27 @@ describe('RunDetails', () => {
     expect(screen.queryByRole('button', { name: 'Refresh' })).toBeNull();
   });
 
+  it('says a turn on a provided model counts against the allowance, not the owner’s provider', async () => {
+    vi.mocked(getAgentJobUsage).mockResolvedValue({
+      ...usage(),
+      external_provider: true,
+      source: 'provided',
+    });
+    renderPanel(
+      <RunDetails
+        jobId="ajob_0"
+        turnNo={2}
+        tab="usage"
+        job={HISTORY_JOB}
+        events={[]}
+        onOpenGitDiff={vi.fn()}
+      />,
+    );
+    expect(await screen.findByText(/a model this deployment provides/)).toBeInTheDocument();
+    expect(screen.queryByText(/your provider bills it/)).toBeNull();
+    expect(screen.queryByText(/\$/)).toBeNull();
+  });
+
   it('says a turn on an owner connection is billed by that provider, and stops polling', async () => {
     vi.useFakeTimers();
     vi.mocked(getAgentJobUsage).mockResolvedValue({ ...usage(), external_provider: true });

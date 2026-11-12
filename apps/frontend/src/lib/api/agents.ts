@@ -6,6 +6,8 @@ export type {
   AgentConfigApi,
   ModelConnectionOptionApi,
   ModelEffortOfferApi,
+  ProvidedModelAllowanceApi,
+  ProvidedModelSourceApi,
 } from './agents/config';
 
 export { getAgentConfig } from './agents/config';

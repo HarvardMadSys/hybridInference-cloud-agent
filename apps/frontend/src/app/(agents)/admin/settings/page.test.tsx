@@ -423,8 +423,8 @@ describe('admin Settings', () => {
     await screen.findByText('No application settings are available.');
     const tablist = screen.getByRole('tablist', { name: 'Settings sections' });
     const names: SettingsTab[] = ['Application', 'Agent versions', 'Sandbox', 'CloudLab'];
-    expect(within(tablist).getAllByRole('tab')).toHaveLength(4);
-    expect(screen.getAllByRole('tabpanel', { hidden: true })).toHaveLength(4);
+    expect(within(tablist).getAllByRole('tab')).toHaveLength(names.length + 1);
+    expect(screen.getAllByRole('tabpanel', { hidden: true })).toHaveLength(names.length + 1);
 
     for (const name of names) {
       selectSettingsTab(name);
@@ -772,13 +772,13 @@ describe('application category tabs', () => {
       within(tablist)
         .getAllByRole('tab')
         .map((tab) => tab.textContent),
-    ).toEqual(names);
+    ).toEqual([...names.slice(0, -1), 'Models', ...names.slice(-1)]);
     expect(screen.getAllByRole('tablist')).toEqual([tablist]);
     expect(screen.queryByRole('tab', { name: 'Application' })).not.toBeInTheDocument();
     expect(
       screen.queryByRole('navigation', { name: 'Application setting categories' }),
     ).not.toBeInTheDocument();
-    expect(screen.getAllByRole('tabpanel', { hidden: true })).toHaveLength(names.length);
+    expect(screen.getAllByRole('tabpanel', { hidden: true })).toHaveLength(names.length + 1);
     expect(screen.getAllByRole('button', { name: 'Refresh settings', hidden: true })).toHaveLength(
       1,
     );
