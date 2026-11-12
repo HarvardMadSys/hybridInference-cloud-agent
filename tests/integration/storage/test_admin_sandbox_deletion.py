@@ -97,15 +97,34 @@ async def test_discard_deletes_without_an_archive_receipt(db, store):
     assert detail.sandbox.state == "lost"
     assert detail.sandbox.deletion_archive_key is None
     assert detail.sandbox.deleted_at is not None
-    assert detail.sandbox.archived_at is None
+    # Like an archived deletion, a finished discard leaves the default
+    # inventory and is listed only with removed sandboxes.
+    assert detail.sandbox.archived_at is not None
+    listed = await store.admin_sandboxes.list_sandboxes(cursor=None, limit=100, state="all")
+    assert listed.sandboxes == [] and listed.total_count == 0
+    removed = await store.admin_sandboxes.list_sandboxes(
+        cursor=None, limit=100, state="all", include_archived=True
+    )
+    assert [row.id for row in removed.sandboxes] == ["asbx_discard"]
+    assert removed.sandboxes[0].deletion_state == "deleted"
     native = await store.sandbox.thread_sandbox(thread_id=origin["thread_id"])
     assert native is not None and native["native_state"] == "lost"
     async with db.acquire() as conn:
         actions = await conn.fetch("SELECT action FROM agent_admin_audit_log ORDER BY id")
         result = await final_result(conn)
+        visibility = await conn.fetch(
+            "SELECT from_state, to_state FROM agent_sandbox_events "
+            "WHERE sandbox_id='asbx_discard' AND event_type='inventory_visibility_changed'"
+        )
     # The administrator's request is the row; the worker reports its result.
     assert [row["action"] for row in actions] == ["agent.sandbox.delete.requested"]
     assert result == ("applied", "sandbox-deletion-worker", {"discarded": True})
+    assert [tuple(row) for row in visibility] == [("visible", "archived")]
+    # Its inventory entry can be restored and removed again, as an archived one can.
+    assert await archive_request(store, "asbx_discard", archived=False) == "accepted"
+    listed = await store.admin_sandboxes.list_sandboxes(cursor=None, limit=100, state="all")
+    assert [row.id for row in listed.sandboxes] == ["asbx_discard"]
+    assert await archive_request(store, "asbx_discard", archived=True) == "accepted"
 
 
 async def test_deletion_requires_verified_archive_and_retains_native_and_job_ledger(db, store):
@@ -1131,7 +1150,7 @@ async def test_reclaimed_discard_recovers_after_automatic_retries_stop(db, store
     async with db.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT state, deletion_state, deletion_retry_count, "
-            "deletion_retry_exhausted_at, deletion_error "
+            "deletion_retry_exhausted_at, deletion_error, archived_at IS NOT NULL AS removed "
             "FROM agent_sandboxes WHERE id=$1",
             sandbox_id,
         )
@@ -1152,6 +1171,7 @@ async def test_reclaimed_discard_recovers_after_automatic_retries_stop(db, store
         "deletion_retry_count": expected_retry_count,
         "deletion_retry_exhausted_at": None,
         "deletion_error": None,
+        "removed": True,
     }
     assert dict(attempt_counts) == {"total": expected_retry_count, "running": 0}
     assert event["host_reclaimed"] == "true"

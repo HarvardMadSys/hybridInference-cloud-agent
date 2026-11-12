@@ -11,6 +11,7 @@ import { BUTTON, dateTime, ErrorNotice } from '../runs/shared';
 import type { SandboxInventorySnapshot } from './inventorySync';
 import { finiteMetric, formatBytes, formatCpu, type SandboxObservation } from './present';
 import { SandboxIncidentBadge } from './SandboxIncidentBadge';
+import { SandboxStatus } from './SandboxStatus';
 import { useSandboxInventory } from './useSandboxInventory';
 import {
   FleetSummary,
@@ -68,7 +69,8 @@ export function SandboxResults({ onDenied }: { onDenied: () => void }) {
   }, [onDenied]);
   const refresh = useCallback(() => setRevision((value) => value + 1), []);
   const stopped = useCallback(() => {
-    // Keep pending and confirmed stops visible while the host applies them.
+    // Keep pending and confirmed stops, and pending deletions, visible while the
+    // host applies them. A finished deletion leaves this view as a removal does.
     setStateFilter('all');
     setRevision((value) => value + 1);
   }, []);
@@ -544,25 +546,7 @@ function SandboxRowView({
           </Link>
         </td>
         <td className="whitespace-nowrap px-3 py-3 text-xs">
-          <span
-            className={
-              sandbox.active_attempt_count > 0
-                ? 'text-blue-700 dark:text-blue-400'
-                : 'text-gray-500 dark:text-gray-400'
-            }
-          >
-            {sandbox.state !== 'running'
-              ? sandbox.state.replaceAll('_', ' ')
-              : sandbox.active_attempt_count > 0
-                ? 'Executing'
-                : 'Retained'}
-          </span>
-          {sandbox.active_attempt_count > 0 && (
-            <span className="mt-1 block tabular-nums text-gray-500 dark:text-gray-400">
-              {sandbox.active_attempt_count} active{' '}
-              {sandbox.active_attempt_count === 1 ? 'turn' : 'turns'}
-            </span>
-          )}
+          <SandboxStatus sandbox={sandbox} />
           <span className="mt-1 block text-gray-500 dark:text-gray-400">{sandbox.runtime_id}</span>
           {sandbox.runtime_version && <span className="mt-1 block">{sandbox.runtime_version}</span>}
         </td>

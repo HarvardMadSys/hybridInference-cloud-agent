@@ -207,10 +207,12 @@ COMPLETE_ADMIN_SANDBOX_DELETION_MEMBERS_SQL = """
                 WHERE sandbox_id = $1
                 """
 
-#: Executed by ``_complete_admin_sandbox_discard_in_transaction``.
+#: Executed by ``_complete_admin_sandbox_discard_in_transaction``. A finished
+#: discard leaves the default admin inventory as an archived deletion does.
 COMPLETE_ADMIN_SANDBOX_DISCARD_GROUP_SQL = f"""
             UPDATE agent_sandboxes
             SET state = {GroupState.LOST.sql}, deletion_state = {DeletionState.DELETED.sql}, deleted_at = NOW(),
+                archived_at = COALESCE(archived_at, NOW()),
                 deletion_error = NULL, idle_deadline = NULL, stop_requested_at = NULL,
                 deletion_retry_at = NULL, deletion_claim_expires_at = NULL,
                 deletion_retry_exhausted_at = NULL,

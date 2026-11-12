@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { AdminSandbox, AdminSandboxResourceUsage } from '@/lib/api/adminSandboxes';
 
 import {
+  deletionStatus,
   finiteMetric,
   formatBytes,
   formatCpu,
@@ -209,5 +210,22 @@ describe('sandbox resource freshness and fleet totals', () => {
         100_000,
       ),
     ).toMatchObject({ cpuCores: 0, cpuCoverage: 1, memoryCoverage: 1, sampleCoverage: 1 });
+  });
+});
+
+describe('sandbox deletion status', () => {
+  it.each<[Partial<AdminSandbox>, ReturnType<typeof deletionStatus>]>([
+    [{}, null],
+    [{ deletion_state: 'none' }, null],
+    [{ deletion_state: 'pending' }, 'pending'],
+    [{ deletion_state: 'archived' }, 'pending'],
+    [{ deletion_state: 'deleted', state: 'lost' }, 'deleted'],
+    [{ deletion_state: 'deleted', state: 'lost', deletion_discard: true }, 'deleted'],
+    [{ deletion_state: 'failed' }, 'failed'],
+    // Stopped retries wait for an administrator to resume them.
+    [{ deletion_state: 'pending', deletion_retry_exhausted_at: '2026-10-10T10:00:00Z' }, 'failed'],
+    [{ deletion_state: 'archived', deletion_retry_exhausted_at: '2026-10-10T10:00:00Z' }, 'failed'],
+  ])('reads %j as %s', (overrides, status) => {
+    expect(deletionStatus(sandbox(overrides))).toBe(status);
   });
 });
