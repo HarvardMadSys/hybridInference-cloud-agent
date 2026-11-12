@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import fcntl
 import importlib.util
 import json
 import logging
 import os
+import re
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
 import time
+import warnings
 from dataclasses import replace
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
@@ -32,12 +35,13 @@ from cloud_agent_host.sandbox_browser import LAUNCHER, ensure_browser_service
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HELPER = REPO_ROOT / "deploy" / "sandbox" / "cloud-agent-browser"
+GATEWAY = REPO_ROOT / "deploy" / "sandbox" / "cloud-agent-mcp"
 DOCKERFILE = REPO_ROOT / "deploy" / "sandbox" / "Dockerfile.agent-sandbox"
 BROWSER_STATE_DIR = "/run/agent-browser"
 
 
-def _load_helper():
-    loader = SourceFileLoader("cloud_agent_browser", str(HELPER))
+def _load_helper(path=HELPER, name="cloud_agent_browser"):
+    loader = SourceFileLoader(name, str(path))
     spec = importlib.util.spec_from_loader(loader.name, loader)
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
@@ -599,11 +603,34 @@ def test_malformed_commands_end_the_connection():
 
 
 FAKE_CHROMIUM = r"""
-import json, os, sys
+import json, os, signal, sys, time
 # Answers CDP on fds 3/4 like Chromium's --remote-debugging-pipe, minimally.
+# FAKE_LAUNCHES names a file each launch adds a line to, FAKE_START_S is how
+# long it takes to start, and with FAKE_SILENT it never answers. With
+# FAKE_STUBBORN it is slow to stop: SIGTERM only gets a line in its log, and
+# where it would exit, it closes its pipe and waits to be killed.
+def told_to_stop(*_):
+    sys.stderr.write("told to stop (fake)\n")
+def linger():
+    while os.environ.get("FAKE_STUBBORN"):
+        time.sleep(1)
+if os.environ.get("FAKE_STUBBORN"):
+    signal.signal(signal.SIGTERM, told_to_stop)
+if os.environ.get("FAKE_LAUNCHES"):
+    with open(os.environ["FAKE_LAUNCHES"], "a") as handle:
+        handle.write(" ".join(sys.argv[1:]) + "\n")
+time.sleep(float(os.environ.get("FAKE_START_S", "0")))
 if os.environ.get("FAKE_NEEDS_NO_SANDBOX") and "--no-sandbox" not in sys.argv:
     sys.stderr.write("No usable sandbox! (fake)\n")
+    os.close(3)
+    os.close(4)
+    linger()
     sys.exit(1)
+if os.environ.get("FAKE_SILENT"):
+    while os.read(3, 65536):
+        pass
+    linger()
+    sys.exit(0)
 sessions = 0
 downloads = 0
 behavior = ("", "")
@@ -868,6 +895,455 @@ def test_chromium_that_cannot_use_its_sandbox_falls_back_once(fake_paths, monkey
     assert "starting it with --no-sandbox" in capfd.readouterr().err
 
 
+# -- how long a start keeps its clients ------------------------------------------
+#
+# The MCP gateway gives `cloud-agent-browser start` BROWSER_START_TIMEOUT_S. A
+# start that fails must answer every client before that, or the gateway's own
+# timeout replaces the reason.
+
+#: How late past its bound a refusal may reach a client on a busy machine.
+LATE_S = 0.8
+
+
+async def _refused(url):
+    """How long the service took to refuse a client, and the reason it gave."""
+    began = time.monotonic()
+    with pytest.raises(browser.BrowserError) as refused:
+        await browser.CdpClient.connect(url)
+    return time.monotonic() - began, str(refused.value)
+
+
+def test_clients_that_ask_during_a_start_that_fails_take_its_outcome(
+    fake_paths, monkeypatch, tmp_path
+):
+    """A client queued behind a start that failed started Chromium again, waiting twice."""
+    monkeypatch.setattr(browser, "READY_TIMEOUT_S", 1.5)
+    launches = tmp_path / "launches"
+    monkeypatch.setenv("FAKE_LAUNCHES", str(launches))
+    monkeypatch.setenv("FAKE_SILENT", "1")
+
+    async def after(delay, url):
+        await asyncio.sleep(delay)
+        return await _refused(url)
+
+    async def scenario():
+        async with _running(fake_paths) as (_daemon, url):
+            refusals = await asyncio.gather(*(after(delay, url) for delay in (0, 0.1, 0.2)))
+            assert len(launches.read_text().splitlines()) == 1
+            for waited, reason in refusals:
+                assert "Chromium did not answer within 1.5 s" in reason
+                assert waited < browser.READY_TIMEOUT_S + LATE_S
+            # A client that asks once that start is over gets a start of its own.
+            await _refused(url)
+            assert len(launches.read_text().splitlines()) == 2
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "aborts", [False, True], ids=["slow-sandboxed-is-not-restarted", "fallback-gets-what-is-left"]
+)
+def test_one_start_waits_for_chromium_once_sandbox_fallback_included(
+    fake_paths, monkeypatch, tmp_path, aborts
+):
+    """A sandboxed start that failed fell back with a wait of its own: two waits in one."""
+    monkeypatch.setattr(browser, "READY_TIMEOUT_S", 2.5)
+    launches = tmp_path / "launches"
+    monkeypatch.setenv("FAKE_LAUNCHES", str(launches))
+    monkeypatch.setenv("FAKE_SILENT", "1")
+    if aborts:
+        # Aborts sandboxed 1.2 s in, then never answers without its sandbox.
+        # With a wait of its own, the fallback would end 1.2 s late, past LATE_S.
+        monkeypatch.setenv("FAKE_NEEDS_NO_SANDBOX", "1")
+        monkeypatch.setenv("FAKE_START_S", "1.2")
+
+    async def scenario():
+        async with _running(fake_paths, sandboxed=True) as (daemon, url):
+            waited, reason = await _refused(url)
+            assert "Chromium did not answer within 2.5 s" in reason
+            assert waited < browser.READY_TIMEOUT_S + LATE_S
+            unsandboxed = ["--no-sandbox" in line for line in launches.read_text().splitlines()]
+            assert unsandboxed == ([False, True] if aborts else [False])
+            # Only an exit says the sandbox is unusable. A slow start would be
+            # as slow without it, and the next start tries it again.
+            assert daemon.sandboxed is not aborts
+
+    asyncio.run(scenario())
+
+
+def test_the_idle_stop_leaves_a_chromium_that_is_starting_alone(fake_paths, monkeypatch, capfd):
+    """A start long after the last client has no client yet; the idle stop killed it."""
+    monkeypatch.setenv("FAKE_START_S", "1.5")
+
+    async def scenario():
+        # The idle stop checks every second, so at least once during the start.
+        async with _running(fake_paths, idle_s=0.5) as (daemon, url):
+            daemon.last_active -= 60
+            client = await browser.CdpClient.connect(url)
+            assert (await client.call("Browser.getVersion"))["product"] == "FakeChrome/1"
+            await client.socket.close()
+
+    asyncio.run(scenario())
+    # An idle stop once its client has left is the service's job.
+    before, started, _after = capfd.readouterr().err.partition("chromium started")
+    assert started
+    assert "chromium stopped: idle" not in before
+
+
+def _log(paths):
+    """What Chromium has written to the service's log so far."""
+    try:
+        return Path(paths.log).read_text(errors="replace")
+    except FileNotFoundError:
+        return ""
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        OSError(errno.ENOSPC, os.strerror(errno.ENOSPC)),
+        subprocess.SubprocessError("Exception occurred in preexec_fn."),
+    ],
+    ids=["oserror", "subprocess-error"],
+)
+def test_a_start_that_raises_still_answers_every_client_waiting_on_it(
+    fake_paths, monkeypatch, capfd, error
+):
+    """Only a BrowserError answered them: anything else dropped them, or on 3.11 kept them."""
+    start_chromium = browser.Daemon._start_chromium
+    failures = [error]
+
+    async def failing_once(self, loop):
+        if failures:
+            await asyncio.sleep(0.3)  # the clients below join this start meanwhile
+            raise failures.pop()
+        return await start_chromium(self, loop)
+
+    monkeypatch.setattr(browser.Daemon, "_start_chromium", failing_once)
+
+    async def after(delay, url):
+        await asyncio.sleep(delay)
+        # Unanswered, a client on 3.11 waited here until its own timeout.
+        return await asyncio.wait_for(_refused(url), 5)
+
+    async def scenario():
+        async with _running(fake_paths) as (_daemon, url):
+            refusals = await asyncio.gather(*(after(delay, url) for delay in (0, 0.1, 0.2)))
+            for waited, reason in refusals:
+                assert f"cannot start Chromium: {type(error).__name__}: {error}" in reason
+                assert waited < 0.3 + LATE_S
+            assert browser.status(fake_paths)["last_error"].startswith("cannot start Chromium")
+            # That start is over, and the next one works.
+            client = await browser.CdpClient.connect(url)
+            assert (await client.call("Browser.getVersion"))["product"] == "FakeChrome/1"
+            await client.socket.close()
+
+    asyncio.run(scenario())
+    # The log has what a client cannot use: where it was raised.
+    err = capfd.readouterr().err
+    assert "Traceback (most recent call last)" in err
+    assert f"{type(error).__name__}: {error}" in err
+
+
+def _pipe_ends():
+    """How many pipe descriptors this process holds."""
+    ends = 0
+    for fd in os.listdir("/proc/self/fd"):
+        with contextlib.suppress(OSError):  # the listing's own descriptor is gone
+            ends += os.readlink(f"/proc/self/fd/{fd}").startswith("pipe:")
+    return ends
+
+
+def test_a_launch_that_fails_in_the_child_leaves_no_pipe_open(fake_paths, monkeypatch):
+    """A preexec_fn that failed left the service two pipe ends, at every start retried."""
+    child_setup = browser._child_setup
+
+    def failing(_read_fd, _write_fd):
+        # As placing the pipe does with no descriptor left (EMFILE).
+        raise OSError(errno.EMFILE, os.strerror(errno.EMFILE))
+
+    monkeypatch.setattr(browser, "_child_setup", failing)
+
+    async def scenario():
+        async with _running(fake_paths) as (_daemon, url):
+            before = _pipe_ends()
+            for _ in range(3):
+                _waited, reason = await asyncio.wait_for(_refused(url), 5)
+                assert "cannot start Chromium: SubprocessError" in reason
+            assert _pipe_ends() == before
+            monkeypatch.setattr(browser, "_child_setup", child_setup)
+            client = await browser.CdpClient.connect(url)
+            assert (await client.call("Browser.getVersion"))["product"] == "FakeChrome/1"
+            await client.socket.close()
+
+    asyncio.run(scenario())
+
+
+# A full disk. The service's log and its record are in the state directory,
+# with the downloads it stages, and a large download can leave no room for
+# either.
+
+
+class _FullLog:
+    """The service's stderr, its log, on a full disk."""
+
+    def write(self, _text):
+        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+    def flush(self):
+        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+
+@contextlib.contextmanager
+def _disk_full(directory, *, log_full):
+    """While it lasts, writing to a file in ``directory`` fails, and with ``log_full`` the log.
+
+    Creating the file still works, as it does on a full disk.
+    """
+    full = os.path.realpath(directory) + os.sep
+    write = os.write
+
+    def refused(fd, data):
+        try:
+            target = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            target = ""
+        if target.startswith(full):
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+        return write(fd, data)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "write", refused)
+        if log_full:
+            patch.setattr(sys, "stderr", _FullLog())
+        yield
+
+
+def test_a_write_that_failed_leaves_nothing_in_the_next_ones_way(tmp_path):
+    """Its temporary file stayed, and every later write failed on it: FileExistsError."""
+    record = tmp_path / "daemon.json"
+    with _disk_full(tmp_path, log_full=False), pytest.raises(OSError) as full:
+        browser.write_shared(str(record), "{}")
+    assert full.value.errno == errno.ENOSPC
+    assert os.listdir(tmp_path) == []
+    browser.write_shared(str(record), '{"running": true}')
+    assert json.loads(record.read_text()) == {"running": True}
+
+
+@pytest.mark.parametrize(
+    ("log_full", "sandboxed"),
+    [(False, False), (True, False), (True, True)],
+    ids=["record-full", "log-full-too", "log-full-too-after-the-sandbox-fallback"],
+)
+def test_a_full_disk_does_not_stop_a_chromium_that_answered(
+    fake_paths, monkeypatch, capfd, log_full, sandboxed
+):
+    """A record or log the disk had no room for, once Chromium answered, kept its client out."""
+    # Sandboxed, it exits as with no usable sandbox, and the start falls back.
+    monkeypatch.setenv("FAKE_NEEDS_NO_SANDBOX", "1")
+
+    async def scenario():
+        async with _running(fake_paths, sandboxed=sandboxed) as (daemon, url):
+            with _disk_full(fake_paths.state, log_full=log_full):
+                client = await asyncio.wait_for(browser.CdpClient.connect(url), 5)
+                assert (await client.call("Browser.getVersion"))["product"] == "FakeChrome/1"
+            await client.socket.close()
+            assert daemon.browser_running
+            # Room again: a member's stop works (the record still holds the
+            # service's startup state, so it cannot show whether the stop
+            # wrote it)...
+            assert await asyncio.to_thread(browser.stop, fake_paths) is True
+            # ...and the record catches up at the next start.
+            client = await browser.CdpClient.connect(url)
+            assert browser.status(fake_paths)["running"] is True
+            await client.socket.close()
+
+    asyncio.run(scenario())
+    assert not [name for name in os.listdir(fake_paths.state) if name.endswith(".tmp")]
+    if not log_full:
+        assert f"cannot update {fake_paths.record}: [Errno 28]" in capfd.readouterr().err
+
+
+@pytest.mark.parametrize("failure", ["raises", "never-answers", "exits-with-no-time-left"])
+def test_a_full_disk_does_not_keep_a_failed_start_from_saying_why(fake_paths, monkeypatch, failure):
+    """With the log full, a start that failed raised again saying so, and its clients heard nothing."""
+    ready_s = browser.READY_TIMEOUT_S
+    sandboxed = failure == "exits-with-no-time-left"
+    if failure == "raises":
+        start_chromium = browser.Daemon._start_chromium
+        failures = [OSError(errno.EMFILE, os.strerror(errno.EMFILE))]
+
+        async def failing_once(self, loop):
+            if failures:
+                await asyncio.sleep(0.3)  # the clients below join this start meanwhile
+                raise failures.pop()
+            return await start_chromium(self, loop)
+
+        monkeypatch.setattr(browser.Daemon, "_start_chromium", failing_once)
+        expected = f"cannot start Chromium: OSError: [Errno {errno.EMFILE}]"
+        bound = 0.3
+    elif failure == "never-answers":
+        monkeypatch.setattr(browser, "READY_TIMEOUT_S", 1.0)
+        monkeypatch.setenv("FAKE_SILENT", "1")
+        expected = "Chromium did not answer within 1 s"
+        bound = browser.READY_TIMEOUT_S
+    else:
+        # As in test_a_sandbox_fallback_with_no_time_left_waits_for_the_next_start.
+        monkeypatch.setattr(browser, "READY_TIMEOUT_S", 1.5)
+        monkeypatch.setattr(browser, "STOP_TIMEOUT_S", 1.2)
+        monkeypatch.setenv("FAKE_NEEDS_NO_SANDBOX", "1")
+        monkeypatch.setenv("FAKE_START_S", "0.5")
+        monkeypatch.setenv("FAKE_STUBBORN", "1")
+        expected = "Chromium exited before it answered"
+        bound = browser.READY_TIMEOUT_S + browser.STOP_TIMEOUT_S
+
+    async def after(delay, url):
+        await asyncio.sleep(delay)
+        # Unanswered, a client on 3.11 waited here until its own timeout.
+        return await asyncio.wait_for(_refused(url), 10)
+
+    async def scenario():
+        async with _running(fake_paths, sandboxed=sandboxed) as (daemon, url):
+            with _disk_full(fake_paths.state, log_full=True):
+                refusals = await asyncio.gather(*(after(delay, url) for delay in (0, 0.1, 0.2)))
+            for waited, reason in refusals:
+                assert expected in reason
+                assert waited < bound + LATE_S
+            assert expected in daemon.last_error
+            # Room again, and the next start works.
+            monkeypatch.setattr(browser, "READY_TIMEOUT_S", ready_s)
+            for name in ("FAKE_SILENT", "FAKE_START_S", "FAKE_STUBBORN"):
+                monkeypatch.delenv(name, raising=False)
+            client = await browser.CdpClient.connect(url)
+            assert (await client.call("Browser.getVersion"))["product"] == "FakeChrome/1"
+            await client.socket.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_sandbox_fallback_with_no_time_left_waits_for_the_next_start(
+    fake_paths, monkeypatch, capfd
+):
+    """It was launched with 0.0 s left, only to be stopped at once: a stop more to wait for."""
+    monkeypatch.setattr(browser, "READY_TIMEOUT_S", 1.5)
+    monkeypatch.setattr(browser, "STOP_TIMEOUT_S", 1.2)
+    # Aborts sandboxed 0.5 s in, and its stop takes STOP_TIMEOUT_S: past the deadline.
+    monkeypatch.setenv("FAKE_NEEDS_NO_SANDBOX", "1")
+    monkeypatch.setenv("FAKE_START_S", "0.5")
+    monkeypatch.setenv("FAKE_STUBBORN", "1")
+    launched = []
+    chromium_argv = browser.chromium_argv
+
+    def counted(profile, *, sandboxed):
+        # Counted here: one stopped at once never gets as far as saying it started.
+        launched.append(sandboxed)
+        return chromium_argv(profile, sandboxed=sandboxed)
+
+    monkeypatch.setattr(browser, "chromium_argv", counted)
+
+    async def scenario():
+        async with _running(fake_paths, sandboxed=True) as (daemon, url):
+            waited, reason = await _refused(url)
+            assert "Chromium exited before it answered" in reason
+            assert launched == [True]
+            # The next start goes without the sandbox.
+            assert daemon.sandboxed is False
+            return waited
+
+    waited = asyncio.run(scenario())
+    assert waited < browser.READY_TIMEOUT_S + browser.STOP_TIMEOUT_S + LATE_S
+    assert "no time is left to start it with --no-sandbox" in capfd.readouterr().err
+
+
+def test_the_log_says_how_long_a_start_that_failed_kept_its_clients(fake_paths, monkeypatch, capfd):
+    """It said 60.1 s for a client that got its refusal at 65.1 s: it left out the stop."""
+    monkeypatch.setattr(browser, "READY_TIMEOUT_S", 1.0)
+    monkeypatch.setattr(browser, "STOP_TIMEOUT_S", 1.0)
+    monkeypatch.setenv("FAKE_SILENT", "1")
+    monkeypatch.setenv("FAKE_STUBBORN", "1")
+
+    async def scenario():
+        async with _running(fake_paths) as (_daemon, url):
+            return await _refused(url)
+
+    waited, _reason = asyncio.run(scenario())
+    # The stop that ended the start is part of the wait.
+    assert waited >= browser.READY_TIMEOUT_S + browser.STOP_TIMEOUT_S
+    logged = re.search(r"chromium did not start in ([0-9.]+) s", capfd.readouterr().err)
+    assert logged
+    assert waited < float(logged[1]) + LATE_S
+
+
+def test_a_client_is_refused_when_its_chromium_stopped_as_its_start_ended(fake_paths, monkeypatch):
+    """It joined the run that had ended, and heard nothing until its own timeout."""
+    start_browser = browser.Daemon._start_browser
+
+    async def started_then_stopped(self):
+        started = await start_browser(self)
+        # A member's stop, handled before the clients waiting on this start resume.
+        self._close_browser("stopped by a member")
+        return started
+
+    monkeypatch.setattr(browser.Daemon, "_start_browser", started_then_stopped)
+
+    async def scenario():
+        async with _running(fake_paths) as (_daemon, url):
+            _waited, reason = await asyncio.wait_for(_refused(url), 5)
+            assert "Chromium stopped before this client was connected" in reason
+
+    asyncio.run(scenario())
+
+
+def _worst_wait():
+    """The longest a start that fails keeps a client, from when the client asks.
+
+    A start ends within READY_TIMEOUT_S and the stop of the Chromium it
+    stopped last. A stop holds up the whole service, so a client that asks
+    during one waits for that one first.
+    """
+    return browser.READY_TIMEOUT_S + 2 * browser.STOP_TIMEOUT_S
+
+
+def test_the_mcp_gateway_waits_out_a_start_that_fails(fake_paths, monkeypatch, tmp_path):
+    """Its own timeout, not the browser's reason, reached the agent when a start outlasted it."""
+    gateway = _load_helper(GATEWAY, "cloud_agent_mcp_for_the_browser_tests")
+    # The rest of `start` needs a little: Python's start-up, the courier, the connection.
+    assert gateway.BROWSER_START_TIMEOUT_S - _worst_wait() >= 10
+
+    # That worst case, scaled down: a client that asks just as a start that
+    # failed stops its Chromium waits for that stop, then a start of its own.
+    monkeypatch.setattr(browser, "READY_TIMEOUT_S", 1.0)
+    monkeypatch.setattr(browser, "STOP_TIMEOUT_S", 0.6)
+    launches = tmp_path / "launches"
+    monkeypatch.setenv("FAKE_LAUNCHES", str(launches))
+    monkeypatch.setenv("FAKE_SILENT", "1")
+    monkeypatch.setenv("FAKE_STUBBORN", "1")
+
+    def as_the_first_stop_begins(url):
+        # On a thread of its own: the stop holds up the service's loop, this test's too.
+        deadline = time.monotonic() + 10
+        while "told to stop" not in _log(fake_paths):
+            assert time.monotonic() < deadline, "the first start never stopped its Chromium"
+            time.sleep(0.01)
+        return asyncio.run(_refused(url))
+
+    async def scenario():
+        async with _running(fake_paths) as (_daemon, url):
+            return await asyncio.gather(
+                _refused(url), asyncio.to_thread(as_the_first_stop_begins, url)
+            )
+
+    (first, first_reason), (second, second_reason) = asyncio.run(scenario())
+    assert len(launches.read_text().splitlines()) == 2
+    for reason in (first_reason, second_reason):
+        assert "Chromium did not answer within 1 s" in reason
+    assert first < browser.READY_TIMEOUT_S + browser.STOP_TIMEOUT_S + LATE_S
+    # The second waited for more than its own start and that start's stop...
+    assert second > browser.READY_TIMEOUT_S + browser.STOP_TIMEOUT_S
+    # ...and no longer than the worst case.
+    assert second < _worst_wait() + LATE_S
+
+
 def test_the_probe_asks_for_a_user_mapping_not_just_a_namespace(monkeypatch):
     seen = []
 
@@ -1021,15 +1497,21 @@ def test_self_test_against_a_real_chromium(tmp_path):
         "CLOUD_AGENT_ARTIFACTS_DIR": str(tmp_path / "artifacts"),
     }
 
-    def helper(*args, timeout=120):
-        return subprocess.run(
-            [sys.executable, "-I", str(HELPER), *args],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
+    def helper(*args, timeout):
+        try:
+            return subprocess.run(
+                [sys.executable, "-I", str(HELPER), *args],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.fail(
+                f"cloud-agent-browser {' '.join(args)} did not finish within {timeout:g} s"
+                f"\n--- daemon.log\n{log_tail()}"
+            )
 
     def log_tail():
         # What Chromium itself said: CI keeps none of tmp_path.
@@ -1037,10 +1519,23 @@ def test_self_test_against_a_real_chromium(tmp_path):
         return log.read_text(errors="replace")[-6000:] if log.exists() else "(no daemon log)"
 
     try:
-        started = helper("service", "start")
+        # Bounds that end within pytest's 300 s. The service starts without
+        # Chromium. The self-test's first client starts it, and the service
+        # waits up to READY_TIMEOUT_S for it; the checks get two minutes more.
+        started = helper("service", "start", timeout=60)
         assert started.returncode == 0, f"{started.stderr}\n--- daemon.log\n{log_tail()}"
-        result = helper("self-test")
+        result = helper("self-test", timeout=browser.READY_TIMEOUT_S + 120)
         assert result.returncode == 0, f"{result.stderr}\n--- daemon.log\n{log_tail()}"
         assert result.stdout.startswith("self-test ok")
+        # A test that passes shows nothing else, so say when the start came
+        # near its bound: on GitHub's runners it has taken more than 30 s.
+        log = (tmp_path / "run" / "daemon.log").read_text(errors="replace")
+        started = re.search(r"chromium started in ([0-9.]+) s", log)
+        if started and float(started[1]) > browser.READY_TIMEOUT_S / 2:
+            warnings.warn(
+                f"Chromium took {started[1]} s to start, of the {browser.READY_TIMEOUT_S:g} s "
+                "a start may take",
+                stacklevel=1,
+            )
     finally:
         helper("service", "stop", timeout=30)
