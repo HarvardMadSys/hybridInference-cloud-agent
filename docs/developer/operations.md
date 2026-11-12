@@ -360,13 +360,15 @@ Concurrent setup attempts cannot replace the first credentials. The private
 `agent-pgadmin` during deployments. pgAdmin mounts the bootstrap volume read-only.
 
 Sign in with the pgAdmin email and password you chose. The initial server
-definition points to `postgres:5432`, database/user `cloudagent`. Enter the
-deployment's PostgreSQL password when connecting. If the database name or user
-differs, supply a custom `AGENT_PGADMIN_SERVERS_FILE` before initialization, or
-edit the connection in pgAdmin. Database passwords are not preloaded or exposed
-in the dashboard. Saved accounts and connections persist in the separate
-`agent-pgadmin` volume. Setup does not reset an existing account, including on a
-container restart. Manage later accounts and password changes in pgAdmin.
+definition points to `postgres:5432`, with the database `AGENT_POSTGRES_DB`
+names and the user `AGENT_POSTGRES_USER` names (`cloudagent` unless the
+deployment sets them). Enter the deployment's PostgreSQL password when
+connecting. pgAdmin imports that definition only at its first setup, so after
+changing either variable, edit the connection in pgAdmin to match. Database
+passwords are not preloaded or exposed in the dashboard. Saved accounts and
+connections persist in the separate `agent-pgadmin` volume. Setup does not
+reset an existing account, including on a container restart. Manage later
+accounts and password changes in pgAdmin.
 
 For the HTTP-only local stack, use `AGENT_PGADMIN_COOKIE_SECURE=False` alongside
 the existing local Agent-cookie setting. Keep the default `True` for HTTPS.
@@ -3103,14 +3105,19 @@ The runner holds no database connection — its heartbeats are HTTP calls to the
 control plane — so stopping the control plane, the MCP relay and the web tier
 leaves the database with no writer.
 
+The `psql` commands below run in the bundled Postgres container and open its
+`POSTGRES_DB`, the database `AGENT_POSTGRES_DB` names. That must be the one
+`AGENT_DATABASE_URL` uses ([database settings](../../ENVIRONMENT.md#database)).
+
 1. Drain the hosts, keep the generated `cloudagent-undrain-*.sql`, and wait for
    two counts to reach zero. Neither can be settled once the writers stop, so
    both are waited out here, as in step 1 of the rebuild above:
 
    ```bash
-   docker exec cloudagent-postgres-1 psql -U cloudagent -d cloudagent -Atc \
-     "SELECT count(*) FROM agent_attempts WHERE status = 'running'; \
-      SELECT count(*) FROM agent_session_forks WHERE state IN ('preparing', 'materialized')"
+   docker exec -i cloudagent-postgres-1 sh -c 'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At' <<'SQL'
+   SELECT count(*) FROM agent_attempts WHERE status = 'running';
+   SELECT count(*) FROM agent_session_forks WHERE state IN ('preparing', 'materialized');
+   SQL
    ```
 
    A fork still `preparing` or `materialized` is one its coordinator has not
@@ -3142,7 +3149,8 @@ leaves the database with no writer.
    claim:
 
    ```bash
-   docker exec -i cloudagent-postgres-1 psql -U cloudagent -d cloudagent -v ON_ERROR_STOP=1 < cloudagent-undrain-$(date +%F).sql
+   docker exec -i cloudagent-postgres-1 sh -c 'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' \
+     < cloudagent-undrain-$(date +%F).sql
    deploy/control-plane/deploy.sh "${AGENT_DEPLOYMENT_SHA}"
    ```
 

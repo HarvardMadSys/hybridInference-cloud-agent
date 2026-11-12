@@ -258,6 +258,113 @@ def test_compose_resolves_every_control_plane_service_to_one_image_per_project()
     }
 
 
+def _rendered_services(environment: dict[str, str]) -> dict:
+    docker = shutil.which("docker")
+    if not docker or subprocess.run([docker, "compose", "version"], capture_output=True).returncode:
+        pytest.skip("Docker Compose CLI is needed for its actual interpolation")
+    rendered = subprocess.run(
+        [
+            *(docker, "compose", "-p", "bundled-database", "-f", str(COMPOSE_PATH)),
+            *("--profile", "pgadmin", "config", "--format", "json"),
+        ],
+        env={"PATH": os.environ["PATH"], "AGENT_DEPLOYMENT_SHA": "0" * 40, **environment},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(rendered.stdout)["services"]
+
+
+@pytest.mark.parametrize("named", ["", "cloudagent_accounts"])
+def test_everything_that_opens_the_bundled_database_opens_the_one_named(named: str) -> None:
+    """One setting, `AGENT_POSTGRES_DB`, rather than a literal in each place.
+
+    A deployment that moved `AGENT_DATABASE_URL` to another database on the
+    bundled server (the independent-accounts cutover's new one) sets it to that
+    database; a new installation leaves it unset and gets `cloudagent` for both.
+    """
+    services = _rendered_services({"AGENT_POSTGRES_DB": named} if named else {})
+
+    database = named or "cloudagent"
+    assert services["postgres"]["environment"]["POSTGRES_DB"] == database
+    assert services["postgres"]["healthcheck"]["test"] == [
+        "CMD-SHELL",
+        f"pg_isready -U cloudagent -d {database}",
+    ]
+    # The new installation's generated connection, and pgAdmin's bundled server.
+    assert services["keys"]["environment"]["AGENT_POSTGRES_DB"] == database
+    assert services["pgadmin"]["environment"]["AGENT_POSTGRES_DB"] == database
+
+
+#: Pages an operator copies database commands from. Records under docs/agents
+#: keep the commands they were written with.
+OPERATOR_DOCS = (
+    REPO_ROOT / "ENVIRONMENT.md",
+    REPO_ROOT / "README.md",
+    *sorted((REPO_ROOT / "docs" / "developer").rglob("*.md")),
+    *sorted((REPO_ROOT / "deploy").rglob("*.md")),
+)
+_DATABASE_TOOL = re.compile(r"\b(?:psql|pg_dump|pg_restore|pg_isready)\b")
+#: The name on its own: not `cloudagent-postgres-1` or `cloudagent-undrain-*.sql`.
+_LITERAL_DATABASE = re.compile(r"(?<![\w-])cloudagent(?![\w-])")
+
+
+def _documented_commands(text: str) -> list[str]:
+    """Each command in the fenced code blocks, its continuation lines joined."""
+    commands, current, fenced = [], "", False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            fenced, current = not fenced, ""
+            continue
+        if not fenced:
+            continue
+        current += line.strip()
+        if current.endswith("\\"):
+            current = current[:-1].rstrip() + " "
+            continue
+        commands.append(current)
+        current = ""
+    return commands
+
+
+def test_documented_database_commands_open_the_one_agent_postgres_db_names() -> None:
+    """`-d cloudagent` is the deployment's database only until it moves.
+
+    After the independent-accounts cutover the old `cloudagent` database stays
+    on the bundled server as the archive, so a command naming it counts, drains
+    and dumps the archive while reporting success. The Postgres container's own
+    `POSTGRES_DB` and `POSTGRES_USER` are what `AGENT_POSTGRES_DB` and
+    `AGENT_POSTGRES_USER` set.
+    """
+    offenders = [
+        f"{path.relative_to(REPO_ROOT)}: {command}"
+        for path in OPERATOR_DOCS
+        for command in _documented_commands(path.read_text())
+        if _DATABASE_TOOL.search(command) and _LITERAL_DATABASE.search(command)
+    ]
+    assert not offenders, offenders
+
+
+def test_a_command_naming_the_database_is_found_across_its_continuation_lines() -> None:
+    text = (
+        "```bash\n"
+        'docker exec cloudagent-postgres-1 psql -U "$POSTGRES_USER" \\\n'
+        "  -d cloudagent -Atc 'SELECT 1'\n"
+        "docker exec -i cloudagent-postgres-1 psql < cloudagent-undrain-x.sql\n"
+        "```\n"
+    )
+
+    found = [
+        command
+        for command in _documented_commands(text)
+        if _DATABASE_TOOL.search(command) and _LITERAL_DATABASE.search(command)
+    ]
+
+    assert found == [
+        "docker exec cloudagent-postgres-1 psql -U \"$POSTGRES_USER\" -d cloudagent -Atc 'SELECT 1'"
+    ]
+
+
 def test_the_compose_only_sets_variables_the_code_reads(control_plane_env: dict) -> None:
     """A configured variable nothing consumes is documentation that lies.
 

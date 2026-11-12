@@ -5,8 +5,8 @@
       "Group": "Cloud Agent",
       "Host": "postgres",
       "Port": 5432,
-      "MaintenanceDB": "cloudagent",
-      "Username": "cloudagent",
+      "MaintenanceDB": "${AGENT_POSTGRES_DB}",
+      "Username": "${AGENT_POSTGRES_USER}",
       "SSLMode": "prefer"
     }
   }

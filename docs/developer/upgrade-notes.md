@@ -62,6 +62,30 @@ old one cannot be forked. The lines are then ignored and can be deleted.
 First-run setup now also asks for the site address, prefilled from the page's
 own address, and ends on Admin → Servers.
 
+## The bundled database is the one `AGENT_POSTGRES_DB` names
+
+The bundled `postgres` service's healthcheck, pgAdmin's bundled server and the
+documented backup, drain and undrain commands open the database
+`AGENT_POSTGRES_DB` names, `cloudagent` by default. A deployment that went
+through the [cutover](#independent-accounts-cutover) on the bundled service by
+pointing `AGENT_DATABASE_URL` at a new database there, and left
+`AGENT_POSTGRES_DB` unset, still has all of them on the archived database:
+pgAdmin and `psql` show its old state, and the documented backup dumps it. The
+`keys` service now logs a warning at every start while the two differ. To fix
+such a deployment:
+
+1. Set `AGENT_POSTGRES_DB` in its `.env` to the database `AGENT_DATABASE_URL`
+   uses, and deploy. Postgres restarts with its healthcheck on that database.
+   Both databases stay as they are: `POSTGRES_DB` creates nothing in a data
+   directory that already holds one.
+2. pgAdmin imported its server once, at its first setup. Edit that server in
+   pgAdmin and set its maintenance database to the same name.
+3. Take a new backup. Every dump taken before step 1 is of the archive.
+4. Optionally, after step 1, rename the archive so nothing opens it by default,
+   for example `ALTER DATABASE cloudagent RENAME TO cloudagent_archive`, run
+   from another database with no session connected to the archive. Its
+   contents do not change; record the new name with its dump and keys.
+
 ## The audit log names who acted on whom
 
 **Admin → Audit log** now names the administrator and the account of each
@@ -213,7 +237,10 @@ model connections. Nothing migrates old tasks, connections or identities.
    It exits non-zero, names this runbook, and changes nothing.
 
 2. **Create a new, empty Agent database** and point `AGENT_DATABASE_URL` at
-   it. The same check must now report an empty database that will be bound on
+   it. On the bundled `postgres` service, also set `AGENT_POSTGRES_DB` to its
+   name, or its healthcheck, pgAdmin and the documented backup stay on the
+   archive ([why](#the-bundled-database-is-the-one-agent_postgres_db-names)).
+   The same check must now report an empty database that will be bound on
    first start. `deploy/control-plane/deploy.sh` runs it read-only before it
    migrates, and stops if it refuses.
 
