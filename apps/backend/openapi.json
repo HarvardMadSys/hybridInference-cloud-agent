@@ -1884,6 +1884,17 @@
             ],
             "title": "Host Last Heartbeat At"
           },
+          "host_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Host Status"
+          },
           "id": {
             "title": "Id",
             "type": "string"
@@ -2180,6 +2191,42 @@
           "recorded_at"
         ],
         "title": "AdminSandboxCheckpoint",
+        "type": "object"
+      },
+      "AdminSandboxDeleteRequest": {
+        "additionalProperties": false,
+        "description": "The exact sandbox and activity the administrator reviewed for deletion.\n\n``container_id`` may be ``None`` only for a ``cold`` sandbox, which lives in\nits checkpoint and may have no container at all; every other deletion\nnames the exact container its host removes.",
+        "properties": {
+          "container_id": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Container Id"
+          },
+          "generation": {
+            "minimum": 1.0,
+            "title": "Generation",
+            "type": "integer"
+          },
+          "last_activity_at": {
+            "format": "date-time",
+            "title": "Last Activity At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "generation",
+          "container_id",
+          "last_activity_at"
+        ],
+        "title": "AdminSandboxDeleteRequest",
         "type": "object"
       },
       "AdminSandboxDeletionAttempt": {
@@ -32496,7 +32543,7 @@
     },
     "/admin/agent/sandboxes/{sandbox_id}/delete": {
       "post": {
-        "description": "Queue deletion, with fail-closed recovery for a stale running or dead container.\n\nThe discard query removes the exact stopped or dead container without an S3 upload.\nThe default path still requires a configured archive bucket.",
+        "description": "Queue deletion, with fail-closed recovery for a stale running or dead container.\n\nThe discard query removes the exact stopped or dead container without an S3 upload.\nThe default path still requires a configured archive bucket. A discard of a\n``cold`` sandbox, which only its checkpoint holds, completes immediately once\nits host is gone: no host holds anything to remove.",
         "operationId": "delete_admin_sandbox_admin_agent_sandboxes__sandbox_id__delete_post",
         "parameters": [
           {
@@ -32549,7 +32596,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AdminSandboxStopRequest"
+                "$ref": "#/components/schemas/AdminSandboxDeleteRequest"
               }
             }
           },

@@ -627,4 +627,79 @@ describe('admin sandbox trajectory', () => {
     ).toBeInTheDocument();
     expect(screen.queryByText('owner-one')).not.toBeInTheDocument();
   });
+
+  it('deletes a cold sandbox of a removed host at once, without asking any host', async () => {
+    const deleted = sandbox({
+      state: 'lost',
+      deletion_state: 'deleted',
+      deletion_discard: true,
+      deleted_at: '2026-10-10T10:01:00Z',
+    });
+    vi.mocked(getAdminSandboxTrajectory)
+      .mockResolvedValueOnce(
+        trajectory({
+          sandbox: sandbox({
+            state: 'cold',
+            stop_requested_at: null,
+            host_status: 'disabled',
+            host_last_heartbeat_at: '2026-10-01T00:00:00Z',
+          }),
+        }),
+      )
+      .mockResolvedValue(trajectory({ sandbox: deleted }));
+    vi.mocked(deleteAdminSandbox).mockResolvedValue({
+      sandbox: deleted,
+      members: [],
+      observed_at: '2026-10-10T10:01:00Z',
+    });
+    render(<AdminSandboxTrajectoryPage />);
+
+    const discard = await screen.findByRole('button', { name: 'Delete without archive' });
+    expect(discard).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Archive to S3 and delete' })).toBeDisabled();
+    expect(screen.getByText(/so there is no container to archive/)).toBeInTheDocument();
+    expect(screen.getByText(/so deleting it asks no host/)).toBeInTheDocument();
+    expect(screen.queryByText(/clean stop/)).not.toBeInTheDocument();
+
+    fireEvent.click(discard);
+    expect(window.confirm).toHaveBeenCalledWith(
+      expect.stringContaining('it is deleted at once and no host is asked'),
+    );
+    expect(deleteAdminSandbox).toHaveBeenCalledWith(
+      'sandbox/one',
+      {
+        generation: 4,
+        container_id: 'container-one',
+        last_activity_at: '2026-10-10T09:59:00Z',
+      },
+      expect.any(AbortSignal),
+      false,
+      true,
+    );
+    expect(
+      await screen.findByText(/The retained container was removed without/),
+    ).toBeInTheDocument();
+    expect(getAdminSandboxTrajectory).toHaveBeenCalledTimes(2);
+  });
+
+  it('explains that a cold sandbox whose host still reports waits for its next message', async () => {
+    vi.mocked(getAdminSandboxTrajectory).mockResolvedValue(
+      trajectory({
+        sandbox: sandbox({ state: 'cold', stop_requested_at: null, host_status: 'online' }),
+      }),
+    );
+    render(<AdminSandboxTrajectoryPage />);
+
+    expect(await screen.findByRole('button', { name: 'Delete without archive' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Archive to S3 and delete' })).toBeDisabled();
+    expect(
+      screen.getByText(/Until then, the next message to one of its chats restores it\./),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/once the host it names is gone, it is deleted at once/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/its host is gone/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/clean stop/)).not.toBeInTheDocument();
+    expect(deleteAdminSandbox).not.toHaveBeenCalled();
+  });
 });

@@ -2,7 +2,8 @@
 
 The archive flag, the deletion request, the worker's claim on a due
 deletion and its attempt telemetry, and the archive, completion, discard and
-failure that settle a deletion.
+failure that settle a deletion. A ``cold`` group whose host is gone is
+discarded at once, by the request itself.
 """
 
 from __future__ import annotations
@@ -11,6 +12,8 @@ import asyncio
 import re
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
+
+import asyncpg
 
 from cloud_agent.domain.sandbox_deletion import (
     DELETION_RETRY_MAX_ATTEMPTS,
@@ -25,7 +28,7 @@ from cloud_agent.domain.sandbox_group import (
 from cloud_agent.ports.sandbox import DeletionFailureDecision
 from cloud_agent.schemas.capacity_protocol import FRESH_AFTER_SECONDS
 from cloud_agent.storage._sql.admin_audit import insert_audit_row, report_final_outcome
-from cloud_agent.storage._sql.hosts import RECLAIMED_HOST_SQL
+from cloud_agent.storage._sql.hosts import GONE_HOST_SQL, RECLAIMED_HOST_SQL
 from cloud_agent.storage._sql.jobs import fail_unrunnable_follow_ups
 from cloud_agent.storage._sql.sandbox_transitions import (
     CLAIM_DUE_DELETION_SQL,
@@ -51,8 +54,6 @@ from cloud_agent.storage.repositories.sandbox._common import (
 if TYPE_CHECKING:
     from datetime import datetime
 
-    import asyncpg
-
     from cloud_agent.domain.audit import FinalOutcome
 
 #: The rows a deletion's final result is reported against: the request, and
@@ -63,6 +64,25 @@ _DELETION_REQUESTS = ("agent.sandbox.delete.requested", "agent.sandbox.delete.re
 _DELETION_WORKER = "sandbox-deletion-worker"
 _DELETION_ATTEMPT_TELEMETRY_TIMEOUT_SECONDS = 0.25
 _DELETION_RETRY_EXHAUSTION_BATCH = 50
+
+#: The queued turns of a group's chats, taken without waiting. A restore claim
+#: holds the queued turn it hands out while it waits for the group's row, so a
+#: deletion holding that row must not wait for the turn: it gives way to the
+#: claim instead. A ``NOWAIT`` lock may come after the group (``cloud_agent.storage``).
+_LOCK_QUEUED_TURNS_NOWAIT_SQL = """
+    SELECT id FROM agent_jobs
+    WHERE thread_id = ANY($1::text[]) AND state = 'queued'
+    ORDER BY id FOR UPDATE NOWAIT
+"""
+
+#: Retire a deleted group's checkpoint receipts: none of them backs a group
+#: any more. The objects they name stay in S3, under the bucket's lifecycle
+#: rules, as archives do; the control plane does not delete them.
+_RETIRE_CHECKPOINTS_SQL = """
+    UPDATE agent_sandbox_checkpoints SET state = 'superseded'
+    WHERE sandbox_id = $1 AND state IN ('reported', 'verified')
+    RETURNING id
+"""
 
 
 class AdminDeletionMixin(SandboxRepositoryBase):
@@ -180,7 +200,7 @@ class AdminDeletionMixin(SandboxRepositoryBase):
         *,
         sandbox_id: str,
         generation: int,
-        container_id: str,
+        container_id: str | None,
         last_activity_at: datetime,
         actor_id: str,
         admin_ip: str,
@@ -198,7 +218,34 @@ class AdminDeletionMixin(SandboxRepositoryBase):
         A stale RUNNING row may be repaired only after the API proves the exact
         host container is stopped or dead, and idle. ``source`` is ``system`` when
         the request removes the sandbox of chats their owner deleted.
+
+        A ``cold`` group has no container to archive (``checkpoint_only``). A
+        discard deletes it immediately once its host is gone, without asking any
+        host (:meth:`_discard_cold_group`); its ``container_id`` may be
+        ``None``. Every other deletion names the exact container its host
+        removes (``no_container`` otherwise).
         """
+        async with self._pool.acquire() as conn:
+            # Read without a lock only to choose the path: each path checks the
+            # group again under its own locks.
+            cold = await conn.fetchval(
+                f"SELECT state = {GroupState.COLD.sql} FROM agent_sandboxes WHERE id = $1",
+                sandbox_id,
+            )
+        if cold:
+            if not discard:
+                return "checkpoint_only"
+            return await self._discard_cold_group(
+                sandbox_id=sandbox_id,
+                generation=generation,
+                container_id=container_id,
+                last_activity_at=last_activity_at,
+                actor_id=actor_id,
+                admin_ip=admin_ip,
+                source=source,
+            )
+        if container_id is None:
+            return "no_container"
         async with self._pool.acquire() as conn, conn.transaction():
             await conn.execute("SET LOCAL statement_timeout = '5s'")
             await conn.fetch(
@@ -215,6 +262,9 @@ class AdminDeletionMixin(SandboxRepositoryBase):
                 group["generation"] != generation
                 or group["container_id"] != container_id
                 or group["last_activity_at"] != last_activity_at
+                # Handed over to its checkpoint since the read above: the
+                # administrator reviews it again, as a cold sandbox.
+                or group["state"] == GroupState.COLD
             ):
                 return "stale"
             resumable_failed = (
@@ -299,6 +349,122 @@ class AdminDeletionMixin(SandboxRepositoryBase):
                 admin_ip=admin_ip,
                 sandbox_manager_confirmed_stopped=forced_stopped_recovery,
                 confirmed_docker_status=confirmed_docker_status,
+            )
+        return "accepted"
+
+    async def _discard_cold_group(
+        self,
+        *,
+        sandbox_id: str,
+        generation: int,
+        container_id: str | None,
+        last_activity_at: datetime,
+        actor_id: str,
+        admin_ip: str,
+        source: str,
+    ) -> str:
+        """Delete a ``cold`` group whose host is gone, at once and without that host.
+
+        Only its checkpoint holds the group. The host it still names was
+        removed, forgotten or long silent (``GONE_HOST_SQL``), so no host can
+        be asked to remove anything, and none has to be. The request and its
+        completion commit together, as the deletion worker completes a discard
+        on a machine its provider reclaimed: the group becomes ``lost`` and
+        ``deleted``, its chats lose their native context and their queued turns
+        fail, and its checkpoint receipts are retired. The checkpoint objects
+        stay in S3 under the bucket's lifecycle rules.
+
+        The one writer that can take a cold group is a restore claim, and it
+        locks the queued turn it hands out before the group. Under the group's
+        row lock this checks the group is still the reviewed cold one: a claim
+        that committed first advanced its generation (``stale``). The queued
+        turns are then taken without waiting. A claim holding one while it
+        waits for this group wins, and this changes nothing (``claimed``); a
+        claim that comes later skips the turns held here, and once this commits
+        its own check under the group's lock finds the group deleted.
+        """
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute("SET LOCAL statement_timeout = '5s'")
+            # Conversations, then memberships, then the group: the order every
+            # writer of these rows keeps, deletion's completion included. The
+            # conversations are taken ``NO KEY``: that still waits for every
+            # writer that locks them, but not for a foreign-key check. A claim
+            # restoring the group writes the group twice, and Postgres checks
+            # the group's key to its origin conversation again on the second
+            # write, after the group; waiting on that would close a cycle.
+            await conn.fetch(
+                "SELECT t.id FROM agent_threads t "
+                "JOIN agent_thread_sandbox_memberships m ON m.thread_id = t.id "
+                "WHERE m.sandbox_id = $1 ORDER BY t.id FOR NO KEY UPDATE OF t",
+                sandbox_id,
+            )
+            members = await conn.fetch(
+                "SELECT thread_id FROM agent_thread_sandbox_memberships "
+                "WHERE sandbox_id = $1 ORDER BY thread_id FOR UPDATE",
+                sandbox_id,
+            )
+            group = await conn.fetchrow(
+                "SELECT * FROM agent_sandboxes WHERE id = $1 FOR UPDATE", sandbox_id
+            )
+            if group is None:
+                return "not_found"
+            if (
+                group["generation"] != generation
+                or group["container_id"] != container_id
+                or group["last_activity_at"] != last_activity_at
+            ):
+                return "stale"
+            if group["deletion_state"] == "deleted":
+                return "accepted"
+            if group["state"] != GroupState.COLD or group["deletion_state"] in {
+                "pending",
+                "archived",
+            }:
+                return "stale"
+            if not await conn.fetchval("SELECT " + GONE_HOST_SQL.format(host="$1"), group["host"]):
+                return "host_present"
+            busy = await conn.fetchval(_GROUP_WORK_PENDING_SQL, sandbox_id)
+            if busy or group["active_operation_count"]:
+                return "busy"
+            try:
+                # A savepoint: a refused lock leaves this transaction usable.
+                async with conn.transaction():
+                    await conn.fetch(
+                        _LOCK_QUEUED_TURNS_NOWAIT_SQL,
+                        [member["thread_id"] for member in members],
+                    )
+            except asyncpg.LockNotAvailableError:
+                return "claimed"
+            request_id = str(uuid4())
+            await self._record_trajectory_event(
+                conn,
+                group=group,
+                event_type="admin_delete_requested",
+                source=source,
+                actor_id=actor_id,
+                from_state=str(group["deletion_state"]),
+                to_state="pending",
+                details={"request_id": request_id, "discard": True, "checkpoint_only": True},
+            )
+            await conn.execute(REQUEST_ADMIN_DELETION_SQL, sandbox_id, request_id, False, True)
+            await self._audit_admin_deletion(
+                conn,
+                group=group,
+                request_id=request_id,
+                action="agent.sandbox.delete.requested",
+                actor_id=actor_id,
+                admin_ip=admin_ip,
+            )
+            retired = await conn.fetch(_RETIRE_CHECKPOINTS_SQL, sandbox_id)
+            await self._complete_admin_sandbox_discard_in_transaction(
+                conn,
+                group=dict(group) | {"deletion_request_id": request_id},
+                members=members,
+                attempt_correlation_id=None,
+                host_reclaimed=False,
+                retired_checkpoints=len(retired),
+                actor_id=actor_id,
+                source=source,
             )
         return "accepted"
 
@@ -903,20 +1069,33 @@ class AdminDeletionMixin(SandboxRepositoryBase):
         members: Any,
         attempt_correlation_id: str | None,
         host_reclaimed: bool,
+        retired_checkpoints: int | None = None,
+        actor_id: str = _DELETION_WORKER,
+        source: str = "system",
     ) -> None:
-        """Apply one locked discard finalization and its durable audit trail."""
+        """Apply one locked discard finalization and its durable audit trail.
+
+        ``retired_checkpoints`` marks a ``cold`` group's discard, which its own
+        request completes, as ``actor_id``; it counts the receipts retired.
+        """
         request_id = str(group["deletion_request_id"])
         sandbox_id = str(group["id"])
+        without_host = (
+            {"host_reclaimed": True}
+            if host_reclaimed
+            else {"checkpoint_only": True, "retired_checkpoints": retired_checkpoints}
+            if retired_checkpoints is not None
+            else {}
+        )
         await self._record_trajectory_event(
             conn,
             group=group,
             event_type="deletion_completed",
-            source="system",
-            actor_id="sandbox-deletion-worker",
+            source=source,
+            actor_id=actor_id,
             from_state="pending",
             to_state="deleted",
-            details={"request_id": request_id, "discard": True}
-            | ({"host_reclaimed": True} if host_reclaimed else {}),
+            details={"request_id": request_id, "discard": True} | without_host,
         )
         await conn.execute(
             COMPLETE_ADMIN_SANDBOX_DISCARD_GROUP_SQL,
@@ -938,7 +1117,8 @@ class AdminDeletionMixin(SandboxRepositoryBase):
             conn,
             request_id=request_id,
             outcome="applied",
-            details={"discarded": True} | ({"host_reclaimed": True} if host_reclaimed else {}),
+            details={"discarded": True} | without_host,
+            reported_by=actor_id,
         )
 
     async def fail_admin_sandbox_deletion(
@@ -1122,6 +1302,7 @@ class AdminDeletionMixin(SandboxRepositoryBase):
         request_id: str,
         outcome: FinalOutcome,
         details: dict[str, Any] | None = None,
+        reported_by: str = _DELETION_WORKER,
     ) -> None:
         """The deletion request's final result; the worker's steps stay in the trajectory."""
         await report_final_outcome(
@@ -1129,6 +1310,6 @@ class AdminDeletionMixin(SandboxRepositoryBase):
             requested_actions=_DELETION_REQUESTS,
             correlation_id=request_id,
             outcome=outcome,
-            reported_by=_DELETION_WORKER,
+            reported_by=reported_by,
             details=details,
         )

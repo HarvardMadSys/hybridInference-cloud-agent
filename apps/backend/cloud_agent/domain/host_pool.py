@@ -72,6 +72,12 @@ HEARTBEAT_INTERVAL_S = 30.0
 #: offline stops it claiming — an over-eager reaper empties the pool during a
 #: blip that would have healed itself.
 MISSED_HEARTBEATS_BEFORE_OFFLINE = 3
+#: How long a Host may stay silent before it counts as gone. Far longer than
+#: ``offline``: a network blip or a restart must not move anything, but a
+#: machine that died should not keep its chats waiting for a return that never
+#: comes. Another Host may then take its covered stopped groups, and an
+#: administrator may delete a ``cold`` group that still names it.
+SILENT_HOST_HANDOVER_SECONDS = 1800
 #: Enrollment tokens are typed (or pasted) into a machine that is being set up
 #: right now. Long enough to survive walking to the rack; short enough that a
 #: token left in a terminal scrollback is worthless by morning.
