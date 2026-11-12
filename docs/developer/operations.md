@@ -750,6 +750,12 @@ visibility control for stopped sandboxes. Use **Include removed sandboxes**
 with **All states**, then **Restore to inventory**, to inspect retained entries.
 Resuming a sandbox removed only from inventory makes it visible again.
 
+Each inventory row shows a requested deletion as pending, failed, or deleted; a
+request whose automatic retries stopped shows as failed. A finished deletion,
+with or without an S3 archive, leaves the default inventory as a removal does:
+**Include removed sandboxes** lists it, and **Restore to inventory** shows it
+again.
+
 For batch operations, select individual inventory rows or **Select all visible
 sandboxes**, choose an action, then **Review selected sandboxes**. Selection
 applies only to the current state, search, host, and activity filters; hidden

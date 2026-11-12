@@ -944,6 +944,34 @@ describe('archive before physical sandbox deletion', () => {
     expect(deleteAdminSandbox).not.toHaveBeenCalled();
   });
 
+  it('does not claim an S3 archive for a sandbox deleted without one', async () => {
+    const discarded = {
+      state: 'lost',
+      deletion_state: 'deleted',
+      deletion_discard: true,
+      deleted_at: observedAt,
+    } as const;
+    // A finished discard leaves the inventory; an administrator may restore its entry.
+    vi.mocked(getAdminSandbox).mockResolvedValue(detail({ ...discarded, archived_at: null }));
+    vi.mocked(archiveAdminSandbox).mockResolvedValue(
+      detail({ ...discarded, archived_at: observedAt }),
+    );
+    mount();
+    expect(await screen.findByText(/Hides this deleted sandbox\./)).toHaveTextContent(
+      'Chat history remains available. It was deleted without an S3 archive.',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Remove from inventory' }));
+    expect(window.confirm).toHaveBeenCalledWith(
+      expect.stringContaining('It was deleted without an S3 archive.'),
+    );
+    expect(vi.mocked(window.confirm).mock.calls[0][0]).not.toMatch(/Its S3 archive/);
+    expect(await screen.findByText(/Removed from the admin inventory\./)).toHaveTextContent(
+      'Chat history remains available. It was deleted without an S3 archive.',
+    );
+    expect(screen.queryByText(/S3 archive and chat history/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Restore to inventory' })).toBeEnabled();
+  });
+
   it('keeps deletion progress visible with paused polling and allows manual refresh', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     vi.mocked(getAdminSandbox)
