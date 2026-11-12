@@ -56,7 +56,15 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, and they are strings
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-SOURCE_REPOSITORY = "HarvardMadSys/hybridInference-cloud-agent"
+#: The repository a release is built and published from, spelled exactly as
+#: GitHub spells `GITHUB_REPOSITORY`, from which the publication workflow builds
+#: `--publisher-run-url`. It was `HarvardMadSys/hybridInference-cloud-agent`
+#: until 2026-11-10 (one repository, GitHub id 1318346112), and the releases
+#: published before then carry that name. The schema accepts both names so those
+#: releases still validate; this generator writes, and accepts a run URL under,
+#: this one only. It is the trust anchor, so it is typed here rather than read
+#: from the environment.
+SOURCE_REPOSITORY = "HarvardMadSys/cloud-agent"
 SCHEMA_VERSION = 1
 RECIPE_FORMAT_VERSION = 1
 if artifact_catalog.manifest_schema_version() != SCHEMA_VERSION:

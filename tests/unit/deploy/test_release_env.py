@@ -69,13 +69,13 @@ def full_manifest() -> dict[str, Any]:
     del platforms
     return {
         "schema_version": 1,
-        "source_repository": "HarvardMadSys/hybridInference-cloud-agent",
+        "source_repository": "HarvardMadSys/cloud-agent",
         "source_commit": COMMIT,
         "deploy_protocol": "shared-live-exact-sha-v4",
         "artifacts": artifacts,
         "runtime_catalog": {"codex": {"default": "0.145.0", "versions": ["0.145.0"]}},
         "recipe": {
-            "url": "https://github.com/HarvardMadSys/hybridInference-cloud-agent/releases/download/x/r.tgz",
+            "url": "https://github.com/HarvardMadSys/cloud-agent/releases/download/x/r.tgz",
             "sha256": "a" * 64,
             "format_version": 1,
         },
@@ -85,10 +85,51 @@ def full_manifest() -> dict[str, Any]:
             "verified_upgrade_from": [],
             "verified_rollback_to": [],
         },
-        "publisher_run_url": (
-            "https://github.com/HarvardMadSys/hybridInference-cloud-agent/actions/runs/1"
-        ),
+        "publisher_run_url": "https://github.com/HarvardMadSys/cloud-agent/actions/runs/1",
     }
+
+
+def named(repository: str) -> dict[str, Any]:
+    """`full_manifest()` with every field that names the source repository set to one name."""
+    document = full_manifest()
+    document["source_repository"] = repository
+    document["recipe"]["url"] = f"https://github.com/{repository}/releases/download/x/r.tgz"
+    document["publisher_run_url"] = f"https://github.com/{repository}/actions/runs/1"
+    return document
+
+
+@pytest.mark.parametrize(
+    "repository", ["HarvardMadSys/cloud-agent", "HarvardMadSys/hybridInference-cloud-agent"]
+)
+def test_a_release_under_either_name_of_the_repository_is_a_manifest(repository: str) -> None:
+    """The repository was renamed on 2026-11-10, and its releases carry both names.
+
+    Releases published before then name `HarvardMadSys/hybridInference-cloud-agent`
+    and keep it, because a deployment pins their bytes; later ones name
+    `HarvardMadSys/cloud-agent`. A rollback may run an older release with a
+    newer, tested compatible recipe (docs/developer/disaster-recovery.md), so
+    the schema a recipe ships accepts both.
+    """
+    re_.validate_manifest(named(repository))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        pytest.param("source_repository", "HarvardMadSys/other", id="another repository"),
+        pytest.param("source_repository", "harvardmadsys/cloud-agent", id="respelled"),
+        pytest.param(
+            "publisher_run_url",
+            "https://github.com/HarvardMadSys/other/actions/runs/1",
+            id="a run of another repository",
+        ),
+    ],
+)
+def test_a_release_from_another_repository_is_not_a_manifest(field: str, value: str) -> None:
+    document = full_manifest()
+    document[field] = value
+    with pytest.raises(re_.ReleaseEnvError, match=field):
+        re_.validate_manifest(document)
 
 
 def test_a_partial_document_is_not_a_manifest(tmp_path: Path) -> None:
