@@ -52,7 +52,7 @@ def manifest() -> dict:
         artifacts.append(entry)
     return {
         "schema_version": 1,
-        "source_repository": "HarvardMadSys/hybridInference-cloud-agent",
+        "source_repository": "HarvardMadSys/cloud-agent",
         "source_commit": COMMIT,
         "deploy_protocol": "shared-live-exact-sha-v4",
         "artifacts": artifacts,
@@ -63,7 +63,7 @@ def manifest() -> dict:
             }
         },
         "recipe": {
-            "url": "https://github.com/HarvardMadSys/hybridInference-cloud-agent/releases/download/test/recipe.tgz",
+            "url": "https://github.com/HarvardMadSys/cloud-agent/releases/download/test/recipe.tgz",
             "sha256": "b" * 64,
             "format_version": 1,
         },
@@ -73,7 +73,7 @@ def manifest() -> dict:
             "verified_upgrade_from": [],
             "verified_rollback_to": [],
         },
-        "publisher_run_url": "https://github.com/HarvardMadSys/hybridInference-cloud-agent/actions/runs/1",
+        "publisher_run_url": "https://github.com/HarvardMadSys/cloud-agent/actions/runs/1",
     }
 
 

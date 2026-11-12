@@ -51,6 +51,13 @@ The `agents` web variant (base path `/agents`) is retired: it is no longer
 built, and the schema keeps accepting it in published v1 manifests
 (`manifest_contract.retired_web_variants`) so a rollback still validates.
 
+New manifests name the source repository `HarvardMadSys/cloud-agent`, and the
+generator accepts a `publisher_run_url` only under that name. The repository
+was `HarvardMadSys/hybridInference-cloud-agent` until 2026-11-10, and releases
+published before then carry that name in `source_repository`,
+`publisher_run_url`, and the recipe URL. The schema accepts exactly these two
+names, so those releases still validate.
+
 Image references must use digests under this organization's registry. The
 schema enforces role and web-variant cardinality, and the generator validates
 its output against that schema before writing it. The generator also checks
@@ -109,7 +116,7 @@ uv run python deploy/release/build_recipe.py \
 RECIPE_SHA256=$(sha256sum release/recipe.tar.gz | cut -d' ' -f1)
 uv run python -m deploy.release.release_manifest \
   --inputs release/inputs.json \
-  --recipe-url "https://github.com/HarvardMadSys/hybridInference-cloud-agent/releases/download/agent-${SOURCE_COMMIT}/recipe.tar.gz" \
+  --recipe-url "https://github.com/HarvardMadSys/cloud-agent/releases/download/agent-${SOURCE_COMMIT}/recipe.tar.gz" \
   --recipe-sha256 "${RECIPE_SHA256}" \
   --publisher-run-url "${PUBLISHER_RUN_URL:?Set the publisher Actions run URL}" \
   --output release/release.json

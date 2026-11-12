@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/HarvardMadSys/hybridInference-cloud-agent/deploy/release/manifest.schema.json",
+  "$id": "https://github.com/HarvardMadSys/cloud-agent/deploy/release/manifest.schema.json",
   "title": "Cloud Agent release manifest",
   "description": "One Cloud Agent release: the commit it was built from, every artifact the deployment must run, pinned by digest, and what those artifacts claim about themselves. Written by deploy/release/release_manifest.py. FreeInference pins the sha256 of this document's bytes and nothing else, so the fields here are the whole contract between the two repositories.",
   "type": "object",
@@ -23,8 +23,11 @@
       "description": "Manifest format version. A consumer that does not know this number must refuse the document rather than guess."
     },
     "source_repository": {
-      "const": "HarvardMadSys/hybridInference-cloud-agent",
-      "description": "The repository whose commit produced every artifact below."
+      "enum": [
+        "HarvardMadSys/cloud-agent",
+        "HarvardMadSys/hybridInference-cloud-agent"
+      ],
+      "description": "The repository whose commit produced every artifact below. Both values name one repository (GitHub repository id 1318346112), renamed from HarvardMadSys/hybridInference-cloud-agent to HarvardMadSys/cloud-agent on 2026-11-10. Releases published before then carry the former name, and keep it because their bytes are pinned; the generator writes only the current one. A consumer compares the repository the value names, not its spelling, and accepts no other value: these exact strings, with no case folding."
     },
     "source_commit": {
       "type": "string",
@@ -159,8 +162,8 @@
     },
     "publisher_run_url": {
       "type": "string",
-      "pattern": "^https://github\\.com/HarvardMadSys/hybridInference-cloud-agent/actions/runs/[0-9]+$",
-      "description": "The trusted workflow run that built and published this release, so the document points at the process that produced it rather than at whoever handed it over."
+      "pattern": "^https://github\\.com/HarvardMadSys/(cloud-agent|hybridInference-cloud-agent)/actions/runs/[0-9]+$",
+      "description": "The trusted workflow run that built and published this release, so the document points at the process that produced it rather than at whoever handed it over. Either name of the source repository is accepted, as in source_repository; the generator writes the current one."
     }
   },
   "$defs": {
