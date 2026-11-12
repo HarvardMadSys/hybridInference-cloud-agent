@@ -62,7 +62,7 @@ class SandboxRepository(Protocol):
         *,
         sandbox_id: str,
         generation: int,
-        container_id: str,
+        container_id: str | None,
         last_activity_at: datetime,
         actor_id: str,
         admin_ip: str,
@@ -80,6 +80,15 @@ class SandboxRepository(Protocol):
         An admin recovery may also repair a stale RUNNING row, but only after
         the API independently proves the exact host container is stopped or dead, and idle.
         ``source`` is ``system`` when it removes the sandbox of deleted chats.
+
+        A ``cold`` group lives only in its checkpoint, so there is nothing to
+        archive (``checkpoint_only``). Once the host it names is gone (removed,
+        forgotten, or silent for ``SILENT_HOST_HANDOVER_SECONDS``), ``discard``
+        deletes it at once without any host; until then it answers
+        ``host_present``, and ``claimed`` when a host is claiming one of its
+        turns to restore it. Its ``container_id`` may be ``None``; any other
+        deletion without one answers ``no_container``. Other results:
+        ``accepted``, ``not_found``, ``stale``, ``busy`` and ``not_stopped``.
         """
         ...
 

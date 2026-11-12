@@ -944,6 +944,34 @@ describe('archive before physical sandbox deletion', () => {
     expect(deleteAdminSandbox).not.toHaveBeenCalled();
   });
 
+  it('does not claim an S3 archive for a sandbox deleted without one', async () => {
+    const discarded = {
+      state: 'lost',
+      deletion_state: 'deleted',
+      deletion_discard: true,
+      deleted_at: observedAt,
+    } as const;
+    // A finished discard leaves the inventory; an administrator may restore its entry.
+    vi.mocked(getAdminSandbox).mockResolvedValue(detail({ ...discarded, archived_at: null }));
+    vi.mocked(archiveAdminSandbox).mockResolvedValue(
+      detail({ ...discarded, archived_at: observedAt }),
+    );
+    mount();
+    expect(await screen.findByText(/Hides this deleted sandbox\./)).toHaveTextContent(
+      'Chat history remains available. It was deleted without an S3 archive.',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Remove from inventory' }));
+    expect(window.confirm).toHaveBeenCalledWith(
+      expect.stringContaining('It was deleted without an S3 archive.'),
+    );
+    expect(vi.mocked(window.confirm).mock.calls[0][0]).not.toMatch(/Its S3 archive/);
+    expect(await screen.findByText(/Removed from the admin inventory\./)).toHaveTextContent(
+      'Chat history remains available. It was deleted without an S3 archive.',
+    );
+    expect(screen.queryByText(/S3 archive and chat history/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Restore to inventory' })).toBeEnabled();
+  });
+
   it('keeps deletion progress visible with paused polling and allows manual refresh', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     vi.mocked(getAdminSandbox)
@@ -1049,5 +1077,101 @@ describe('archive before physical sandbox deletion', () => {
     await act(async () => resolve(detail({ state: 'stopped', deletion_state: 'pending' })));
     expect(onChanged).not.toHaveBeenCalled();
     expect(onDenied).not.toHaveBeenCalled();
+  });
+});
+
+describe('a cold sandbox, which only its checkpoint holds', () => {
+  const longAgo = '2026-10-01T00:00:00Z';
+
+  it('is deleted without its removed host instead of waiting for a stop that never comes', async () => {
+    vi.mocked(getAdminSandbox).mockResolvedValue(
+      detail({ state: 'cold', host_status: 'disabled', host_last_heartbeat_at: longAgo }),
+    );
+    vi.mocked(deleteAdminSandbox).mockResolvedValue(
+      detail({ state: 'lost', deletion_state: 'deleted', deletion_discard: true }),
+    );
+    mount();
+
+    const discard = await screen.findByRole('button', { name: 'Delete without archive' });
+    expect(discard).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Archive to S3 and delete' })).toBeDisabled();
+    expect(screen.getByText(/so there is no container to archive/)).toBeInTheDocument();
+    expect(screen.getByText(/so deleting it asks no host/)).toBeInTheDocument();
+    expect(screen.queryByText(/clean stop/)).not.toBeInTheDocument();
+
+    fireEvent.click(discard);
+    await waitFor(() => expect(deleteAdminSandbox).toHaveBeenCalledOnce());
+    expect(window.confirm).toHaveBeenCalledWith(
+      expect.stringContaining('it is deleted at once and no host is asked'),
+    );
+    expect(deleteAdminSandbox).toHaveBeenCalledWith(
+      'sandbox-one',
+      { generation: 4, container_id: 'container-one', last_activity_at: observedAt },
+      expect.any(AbortSignal),
+      false,
+      true,
+    );
+  });
+
+  it('names no container when a failed restore left it none', async () => {
+    vi.mocked(getAdminSandbox).mockResolvedValue(
+      detail({
+        state: 'cold',
+        container_id: null,
+        host_status: null,
+        host_last_heartbeat_at: null,
+      }),
+    );
+    vi.mocked(deleteAdminSandbox).mockResolvedValue(
+      detail({ state: 'lost', container_id: null, deletion_state: 'deleted' }),
+    );
+    mount();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete without archive' }));
+    await waitFor(() => expect(deleteAdminSandbox).toHaveBeenCalledOnce());
+    expect(vi.mocked(deleteAdminSandbox).mock.calls[0][1]).toEqual({
+      generation: 4,
+      container_id: null,
+      last_activity_at: observedAt,
+    });
+  });
+
+  it('says its next message restores it while its host still reports', async () => {
+    vi.mocked(getAdminSandbox).mockResolvedValue(
+      detail({ state: 'cold', host_status: 'online', host_last_heartbeat_at: observedAt }),
+    );
+    mount();
+
+    expect(await screen.findByRole('button', { name: 'Delete without archive' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Archive to S3 and delete' })).toBeDisabled();
+    expect(
+      screen.getByText(
+        /deleted only once its host host-one is removed from the pool or has been silent for 30 minutes\. Until then, the next message to one of its chats restores it\./,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove from inventory' })).toBeDisabled();
+    expect(
+      screen.getByText(/It can be removed from inventory once that host is offline\./),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/clean stop/)).not.toBeInTheDocument();
+    expect(deleteAdminSandbox).not.toHaveBeenCalled();
+  });
+
+  it('points to removing it from inventory while its offline host may still return', async () => {
+    vi.mocked(getAdminSandbox).mockResolvedValue(
+      detail({
+        state: 'cold',
+        host_status: 'offline',
+        host_last_heartbeat_at: '2026-10-10T09:50:00Z',
+      }),
+    );
+    mount();
+
+    expect(await screen.findByRole('button', { name: 'Delete without archive' })).toBeDisabled();
+    expect(
+      screen.getByText(/Until then, remove it from inventory to hide it\./),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove stale entry' })).toBeEnabled();
+    expect(screen.queryByText(/clean stop/)).not.toBeInTheDocument();
   });
 });

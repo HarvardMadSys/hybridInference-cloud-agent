@@ -667,6 +667,24 @@ checks for this provider-confirmed outcome. That recovery makes no host call and
 does not consume another retry; it requires the same provider termination and
 10-minute silence conditions.
 
+A `cold` sandbox lives only in its
+[checkpoint](#restoring-a-removed-hosts-sandboxes), so it never stops and has no
+container to archive: **Archive to S3 and delete** refuses it. **Delete without
+archive** deletes it at once, with no host call and no deletion worker, once the
+host it still names is gone: removed from the pool, forgotten, or silent for 30
+minutes. One transaction marks the sandbox `lost` and deleted, marks its chats'
+native context lost, fails their queued turns, and retires its checkpoint
+receipts (`superseded`); its trajectory and audit record `checkpoint_only`. The
+checkpoint objects stay in S3 under the bucket's lifecycle and retention rules,
+as archives do; the control plane does not delete objects. A failed restore can
+leave a cold sandbox with no container at all; it is deleted the same way.
+Until its host is gone, the details say so: the next message to one of its chats
+restores it, and **Remove stale entry** hides it once that host has not reported
+for 90 seconds. A host claiming one of its turns to restore it at the same
+moment wins, and the deletion changes nothing; a deletion that commits first
+leaves no turn to restore. Should a removed host come back, a container it kept
+for a deleted sandbox is removable as superseded.
+
 One deletion worker handles requests one at a time, in the order they became
 due. Only transient failures retry automatically, with exponential backoff from
 one minute to one hour; retries stop after eight claims or 24 hours from the
@@ -734,6 +752,12 @@ visibility control for stopped sandboxes. Use **Include removed sandboxes**
 with **All states**, then **Restore to inventory**, to inspect retained entries.
 Resuming a sandbox removed only from inventory makes it visible again.
 
+Each inventory row shows a requested deletion as pending, failed, or deleted; a
+request whose automatic retries stopped shows as failed. A finished deletion,
+with or without an S3 archive, leaves the default inventory as a removal does:
+**Include removed sandboxes** lists it, and **Restore to inventory** shows it
+again.
+
 For batch operations, select individual inventory rows or **Select all visible
 sandboxes**, choose an action, then **Review selected sandboxes**. Selection
 applies only to the current state, search, host, and activity filters; hidden
@@ -743,7 +767,9 @@ eligible entries. Stop, archive-and-delete, deletion without an archive,
 inventory removal, and inventory restoration use the same checks as individual
 controls. Up to four requests run at once, and each result is reported
 separately. A stop or deletion result means the request was accepted; host
-completion is still asynchronous. Failed or skipped entries remain selected
+completion is still asynchronous, except for a cold sandbox's deletion, which is
+done when accepted. Every skipped entry says why, and the confirmation counts
+them. Failed or skipped entries remain selected
 for a new explicit review. Expired reviews and changed containers are refused,
 without automatically retrying a new container identity. No batch feature flag
 or additional migration is required.
@@ -2503,7 +2529,9 @@ credential and any deployment drain fence are left to the removal flow.
 A `cold` group does not keep its old host from being forgotten, by **Forget**
 or by permanently removing the server: it no longer needs that machine. It
 keeps naming the host it last ran on until a claim moves it to the claiming
-host. Every other undeleted group still blocks forgetting.
+host. Every other undeleted group still blocks forgetting. Once that host is
+gone, **Delete without archive** deletes a `cold` group at once, without any
+host (see [sandbox inventory](#sandbox-inventory-resource-usage-and-controls)).
 
 The next turn of any chat in a `cold` group is claimed by any host that
 advertises `sandbox-restore-v1` with archives enabled, except the host that

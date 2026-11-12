@@ -20,7 +20,12 @@ the same two rows in opposite orders deadlock, and Postgres aborts one of them:
 A foreign key counts: inserting a row that references a conversation or a job,
 or pointing a row's reference at another one, share-locks it. So a transcript
 message is written after its conversation is locked, and a chat's first
-reservation takes its conversation before its turn. Rows that only ever change
+reservation takes its conversation before its turn. Writing a row again in the
+transaction that already wrote it checks every foreign key of the row again,
+changed or not: a claim restoring a cold group writes the group twice, and so
+key-share-locks the group's origin conversation after the group. A writer that
+holds that conversation while it waits for the group takes it ``FOR NO KEY
+UPDATE``, which such a check does not wait for. Rows that only ever change
 under their conversation's lock, such as its waiting messages, are ordered by
 that lock. A lock taken with ``SKIP LOCKED`` or
 ``NOWAIT`` never waits, so it may come out of order; the locks after it may not.
@@ -56,7 +61,11 @@ turns then -- the turn ahead of them is still running, or their group is being
 deleted -- and a claim, the one writer that holds a queued turn while it waits
 for a group and a host, takes neither kind. Deleting a conversation does hold
 its queued turns on the way to their membership, so each late failure first
-takes the turns' conversation, where deletion starts.
+takes the turns' conversation, where deletion starts. Deleting a ``cold``
+group requests and completes in one transaction, so a claim restoring that
+group may hold one of its queued turns while it waits for the group: that
+deletion takes the queued turns ``NOWAIT`` after the group, and gives way to
+the claim when it cannot have them.
 
 A cycle is fixed by fixing the order. An event append, whose loss its runner
 takes for a lost turn, is also run again when Postgres aborts it as a

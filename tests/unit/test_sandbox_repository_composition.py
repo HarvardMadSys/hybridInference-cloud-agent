@@ -73,6 +73,7 @@ BEFORE_SPLIT = frozenset(
 ADDED_SINCE = frozenset(
     {
         "_report_deletion_result",  # the admin audit trail's final results (#1117)
+        "_discard_cold_group",  # deleting a cold sandbox without its gone host
     }
 )
 
