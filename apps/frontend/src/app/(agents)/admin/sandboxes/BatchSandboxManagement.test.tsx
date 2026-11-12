@@ -391,3 +391,93 @@ describe('reviewed batch sandbox changes', () => {
     expect(onDenied).not.toHaveBeenCalled();
   });
 });
+
+describe('cold sandboxes in a batch', () => {
+  const longAgo = '2026-10-01T00:00:00Z';
+  const cold = {
+    gone: { state: 'cold', host_status: 'disabled', host_last_heartbeat_at: longAgo },
+    reporting: { state: 'cold', host_status: 'online', host_last_heartbeat_at: observedAt },
+  } as const;
+
+  it('deletes cold sandboxes whose host is gone at once and says why the others were skipped', async () => {
+    vi.mocked(getAdminSandbox).mockImplementation(async (id) =>
+      detail(id, id === 'running' ? {} : id === 'gone' ? cold.gone : cold.reporting),
+    );
+    vi.mocked(deleteAdminSandbox).mockImplementation(async (id) =>
+      id === 'gone'
+        ? detail(id, { state: 'lost', deletion_state: 'deleted', deletion_discard: true })
+        : detail(id, { deletion_state: 'pending', deletion_discard: true }),
+    );
+    render(controls(['gone', 'reporting', 'running'].map((id) => observation(id))));
+    choose('discard');
+    await review(2);
+    const reviewList = screen.getByRole('list', { name: 'Sandbox batch review' });
+    expect(reviewList).toHaveTextContent('the next message to one of its chats restores it');
+    expect(reviewList).not.toHaveTextContent('clean stop');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Apply to 2 sandboxes' }));
+    await waitFor(() => expect(onCompleted).toHaveBeenCalledWith(['gone', 'running']));
+    expect(window.confirm).toHaveBeenCalledWith(
+      expect.stringContaining('1 other selected sandbox is skipped; the review lists why.'),
+    );
+    expect(window.confirm).toHaveBeenCalledWith(
+      expect.stringContaining('1 of them exist only as a checkpoint in S3'),
+    );
+    expect(deleteAdminSandbox).toHaveBeenCalledWith(
+      'gone',
+      { generation: 4, container_id: 'container-gone', last_activity_at: observedAt },
+      expect.any(AbortSignal),
+      false,
+      true,
+    );
+    expect(deleteAdminSandbox).not.toHaveBeenCalledWith(
+      'reporting',
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    );
+    const results = screen.getByRole('list', { name: 'Sandbox batch results' });
+    expect(results).toHaveTextContent(
+      'completed — Deleted at once: only its checkpoint in S3 held it, so no host was asked.',
+    );
+    expect(results).toHaveTextContent('requested — Deletion requested. Waiting for the host.');
+    expect(results).toHaveTextContent(/skipped — Only its checkpoint in S3 holds this sandbox/);
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Batch finished. 2 of 3 sandboxes accepted. 1 skipped; each says why below.',
+    );
+  });
+
+  it('skips cold sandboxes when archiving, since there is no container to archive', async () => {
+    vi.mocked(getAdminSandbox).mockImplementation(async (id) =>
+      detail(id, id === 'gone' ? cold.gone : {}),
+    );
+    render(controls([observation('gone'), observation('running')]));
+    choose('delete');
+    await review(1);
+    expect(screen.getByRole('list', { name: 'Sandbox batch review' })).toHaveTextContent(
+      'so there is no container to archive. Use Delete without archive',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Apply to 1 sandboxes' }));
+    await waitFor(() => expect(onCompleted).toHaveBeenCalledWith(['running']));
+    expect(deleteAdminSandbox).toHaveBeenCalledOnce();
+  });
+
+  it('reports every skipped sandbox even when none can be applied any more', async () => {
+    render(controls([observation('one'), observation('two')]));
+    await review(2);
+    // The review ages between the last render and the click.
+    vi.mocked(performance.now).mockReturnValue(91_001);
+    fireEvent.click(screen.getByRole('button', { name: 'Apply to 2 sandboxes' }));
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Batch finished. 0 of 2 sandboxes accepted. 2 skipped; each says why below.',
+    );
+    const results = screen.getByRole('list', { name: 'Sandbox batch results' });
+    expect(
+      within(results).getAllByText(/Refresh details before changing this sandbox/),
+    ).toHaveLength(2);
+    expect(window.confirm).not.toHaveBeenCalled();
+    for (const operation of mutations()) expect(operation).not.toHaveBeenCalled();
+  });
+});

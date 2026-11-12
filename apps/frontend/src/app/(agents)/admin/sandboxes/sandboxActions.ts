@@ -10,8 +10,108 @@ import {
 const TERMINAL_FRESHNESS_MS = 90_000;
 export const REVIEW_FRESHNESS_MS = 90_000;
 const HOST_FRESHNESS_MS = 90_000;
+/** A host silent this long is gone: the control plane's `SILENT_HOST_HANDOVER_SECONDS`. */
+export const HOST_GONE_MS = 30 * 60_000;
+
+const CHECKPOINT_ONLY = 'Only its checkpoint in S3 holds this sandbox';
 
 export type SandboxAction = 'stop' | 'archive' | 'restore' | 'delete' | 'discard';
+
+/** The server's clock when it observed a sandbox, in milliseconds; NaN before any. */
+export function observedAt(observed: string | undefined): number {
+  return Date.parse(observed ?? '');
+}
+
+function heartbeatAge(sandbox: AdminSandbox, serverNow: number): number {
+  return serverNow - Date.parse(sandbox.host_last_heartbeat_at ?? '');
+}
+
+/**
+ * Whether the host a cold sandbox names is gone, as the server decides before it
+ * deletes the sandbox without that host: no longer registered, removed from the
+ * pool (`disabled`), or silent for 30 minutes.
+ */
+export function hostGone(sandbox: AdminSandbox, serverNow: number): boolean {
+  return (
+    sandbox.host_status === null ||
+    sandbox.host_status === 'disabled' ||
+    heartbeatAge(sandbox, serverNow) > HOST_GONE_MS
+  );
+}
+
+/** Why a cold sandbox whose host may still report cannot be deleted yet. */
+function coldWaitReason(sandbox: AdminSandbox, serverNow: number): string {
+  const removable =
+    sandbox.host_last_heartbeat_at === null || heartbeatAge(sandbox, serverNow) > HOST_FRESHNESS_MS;
+  const until = removable
+    ? 'Until then, remove it from inventory to hide it.'
+    : 'Until then, the next message to one of its chats restores it.';
+  return `${CHECKPOINT_ONLY}, so there is nothing to archive, and it can be deleted only once its host ${sandbox.host} is removed from the pool or has been silent for 30 minutes. ${until}`;
+}
+
+/**
+ * Why a sandbox that has not stopped cannot be removed from inventory or deleted
+ * yet. A cold one never stops: only its checkpoint holds it, and the host it
+ * names is asked nothing.
+ */
+export function notStoppedReason(
+  sandbox: AdminSandbox | undefined,
+  action: 'removing' | 'deleting',
+  serverNow: number,
+): string {
+  if (sandbox?.state !== 'cold')
+    return `Wait for the host to confirm a clean stop before ${action} this sandbox.`;
+  if (action === 'removing')
+    return `${CHECKPOINT_ONLY}, and its host ${sandbox.host} still reports: the next message to one of its chats restores it. It can be removed from inventory once that host is offline.`;
+  if (!hostGone(sandbox, serverNow)) return coldWaitReason(sandbox, serverNow);
+  return `${CHECKPOINT_ONLY}, so there is no container to archive. Use Delete without archive: no host holds it, so it is deleted at once.`;
+}
+
+/**
+ * Why Delete without archive is blocked. A cold sandbox is deleted at once,
+ * without any host, once the host it names is gone; any other sandbox is
+ * blocked exactly as Archive and delete is.
+ */
+export function discardBlockedReason(
+  sandbox: AdminSandbox | undefined,
+  deleteBlocked: string | null,
+  controlsBlocked: string | null,
+  idleBlocked: string | null,
+  serverNow: number,
+): string | null {
+  if (sandbox?.state !== 'cold') return deleteBlocked;
+  if (controlsBlocked) return controlsBlocked;
+  return hostGone(sandbox, serverNow) ? idleBlocked : coldWaitReason(sandbox, serverNow);
+}
+
+/** What Delete without archive does to a cold sandbox, and `otherwise` to any other. */
+export function discardDescription(sandbox: AdminSandbox | undefined, otherwise: string): string {
+  if (sandbox?.state !== 'cold') return otherwise;
+  return `${CHECKPOINT_ONLY}, so deleting it asks no host: once the host it names is gone, it is deleted at once. Its chats’ queued messages fail, and the checkpoint stays in S3 under the bucket’s lifecycle rules.`;
+}
+
+const DISCARD_DESCRIPTION =
+  'Removes the retained container without uploading workspace files or native session history. The host copy cannot be restored.';
+
+/** The hint under Delete without archive, unless the one above it already says it. */
+export function discardHint(
+  sandbox: AdminSandbox | undefined,
+  deleteBlocked: string | null,
+  discardBlocked: string | null,
+): string | null {
+  if (discardBlocked === null) return discardDescription(sandbox, DISCARD_DESCRIPTION);
+  return discardBlocked === deleteBlocked ? null : discardBlocked;
+}
+
+/** The confirmation for Delete without archive: `otherwise` unless the sandbox is cold. */
+export function discardConfirmation(
+  sandbox: AdminSandbox,
+  sessions: string,
+  otherwise: string,
+): string {
+  if (sandbox.state !== 'cold') return otherwise;
+  return `Permanently delete sandbox ${sandbox.id}, shared by ${sessions}? ${CHECKPOINT_ONLY} and its host is gone, so it is deleted at once and no host is asked. Its chats’ queued messages fail, and live native resume will no longer be available. Chat history remains. The checkpoint stays in S3 under the bucket’s lifecycle rules.`;
+}
 
 /** Keep individual and batch controls on the same reviewed eligibility rules. */
 export function sandboxActionState(
@@ -82,7 +182,7 @@ export function sandboxActionState(
             : null);
   const removalBlocked =
     sandbox?.state !== 'stopped' && !deletionComplete && !staleInventoryEntry
-      ? 'Wait for the host to confirm a clean stop before removing this sandbox.'
+      ? notStoppedReason(sandbox, 'removing', serverNow)
       : idleBlocked;
   const inventoryBlocked =
     reviewBlocked ?? deletionBusyReason ?? (sandbox?.archived_at ? null : removalBlocked);
@@ -91,16 +191,24 @@ export function sandboxActionState(
     deletionBusyReason ??
     (deletionComplete ? 'This sandbox has already been deleted.' : null) ??
     (sandbox?.state !== 'stopped' && sandbox?.state !== 'running'
-      ? 'Wait for the host to confirm a clean stop before deleting this sandbox.'
+      ? notStoppedReason(sandbox, 'deleting', serverNow)
       : null) ??
     idleBlocked ??
     (!sandbox?.container_id ? 'The retained container identity is unavailable.' : null);
   const controlsBlocked = reviewBlocked ?? deletionBusyReason;
+  const discardBlocked = discardBlockedReason(
+    sandbox,
+    deleteBlocked,
+    controlsBlocked,
+    idleBlocked,
+    serverNow,
+  );
 
   return {
     stopBlocked,
     inventoryBlocked,
     deleteBlocked,
+    discardBlocked,
     controlsBlocked,
     forceDelete,
     staleInventoryEntry,
@@ -116,9 +224,11 @@ export function sandboxActionBlocked(
 ): string | null {
   return kind === 'stop'
     ? state.stopBlocked
-    : kind === 'delete' || kind === 'discard'
+    : kind === 'delete'
       ? state.deleteBlocked
-      : state.inventoryBlocked;
+      : kind === 'discard'
+        ? state.discardBlocked
+        : state.inventoryBlocked;
 }
 
 /** Submit only the exact identity and activity that the administrator reviewed. */
@@ -141,9 +251,10 @@ export function applySandboxAction(
     );
   }
   if (kind === 'delete' || kind === 'discard') {
+    // A cold sandbox may have no container; every other deletion is blocked without one.
     return deleteAdminSandbox(
       sandbox.id,
-      { ...reviewed, container_id: sandbox.container_id! },
+      reviewed,
       signal,
       sandbox.state === 'running',
       kind === 'discard',

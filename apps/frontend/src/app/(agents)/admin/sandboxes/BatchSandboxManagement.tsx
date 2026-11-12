@@ -63,27 +63,76 @@ function blockedReason(item: ReviewedSandbox, kind: SandboxAction, nowMs: number
   return null;
 }
 
-function confirmation(kind: SandboxAction, items: ReviewedSandbox[]): string {
-  const sessions = items.reduce((sum, item) => sum + (item.detail?.sandbox.member_count ?? 0), 0);
-  const label = ACTIONS.find((action) => action.value === kind)!.label;
-  const scope = `${label} for ${items.length} sandboxes shared by ${sessions} member sessions? `;
+function consequence(kind: SandboxAction, items: ReviewedSandbox[]): string {
   if (kind === 'stop')
-    return `${scope}This stops each idle container for every member and retains its workspace files. New work is blocked until the host confirms the stop.`;
+    return 'This stops each idle container for every member and retains its workspace files. New work is blocked until the host confirms the stop.';
   if (kind === 'archive')
-    return `${scope}Only inventory entries are hidden. Retained containers, workspace files, native sessions, and chat history are kept. Offline entries can return when their host reports or new work resumes.`;
+    return 'Only inventory entries are hidden. Retained containers, workspace files, native sessions, and chat history are kept. Offline entries can return when their host reports or new work resumes.';
   if (kind === 'restore')
-    return `${scope}This makes the selected entries visible in the admin inventory again.`;
+    return 'This makes the selected entries visible in the admin inventory again.';
   const running = items.some((item) => item.detail?.sandbox.state === 'running');
   const verification = running
     ? 'For entries recorded as running, the server must verify that the exact container is already stopped or dead, and idle. This does not stop a running container. '
     : '';
-  return (
-    scope +
-    verification +
-    (kind === 'discard'
-      ? 'Workspace files and native session history on the host will be permanently destroyed without uploading an S3 archive and cannot be restored. Live native resume will no longer be available. Chat history remains.'
-      : 'Workspace files and native session history will be uploaded to S3 and verified before deletion. Live native resume will no longer be available. Chat history remains.')
-  );
+  if (kind === 'delete')
+    return `${verification}Workspace files and native session history will be uploaded to S3 and verified before deletion. Live native resume will no longer be available. Chat history remains.`;
+  const cold = items.filter((item) => item.detail?.sandbox.state === 'cold').length;
+  const coldNote = cold
+    ? ` ${cold} of them exist only as a checkpoint in S3 and their hosts are gone: they are deleted at once, with no host asked, their chats’ queued messages fail, and the checkpoints stay in S3 under the bucket’s lifecycle rules.`
+    : '';
+  return `${verification}Workspace files and native session history on the host will be permanently destroyed without uploading an S3 archive and cannot be restored. Live native resume will no longer be available. Chat history remains.${coldNote}`;
+}
+
+function confirmation(kind: SandboxAction, items: ReviewedSandbox[], skipped: number): string {
+  const sessions = items.reduce((sum, item) => sum + (item.detail?.sandbox.member_count ?? 0), 0);
+  const label = ACTIONS.find((action) => action.value === kind)!.label;
+  const scope = `${label} for ${items.length} sandboxes shared by ${sessions} member sessions? `;
+  const skipping = skipped
+    ? `${skipped} other selected ${skipped === 1 ? 'sandbox is' : 'sandboxes are'} skipped; the review lists why. `
+    : '';
+  return scope + skipping + consequence(kind, items);
+}
+
+/** Each reviewed sandbox's starting result: skipped, with why, or queued. */
+function planBatch(review: ReviewedSandbox[], kind: SandboxAction, nowMs: number) {
+  const results = review.map((item): BatchResult => {
+    const blocked = blockedReason(item, kind, nowMs);
+    return {
+      id: item.id,
+      title: item.title,
+      status: blocked ? 'skipped' : 'queued',
+      message: blocked ?? 'Waiting to submit.',
+    };
+  });
+  const eligible = review.filter((_, index) => results[index].status === 'queued');
+  return { eligible, results };
+}
+
+/** What the server's answer to an accepted change means for its sandbox. */
+function appliedResult(
+  kind: SandboxAction,
+  next: AdminSandboxDetail | undefined,
+): Pick<BatchResult, 'status' | 'message'> {
+  if (kind === 'stop')
+    return { status: 'requested', message: 'Stop requested. Waiting for the host.' };
+  if (kind === 'archive') return { status: 'completed', message: 'Removed from inventory.' };
+  if (kind === 'restore') return { status: 'completed', message: 'Restored to inventory.' };
+  // Only a cold sandbox is deleted by the request itself: no host holds it.
+  if (next?.sandbox?.deletion_state !== 'deleted')
+    return { status: 'requested', message: 'Deletion requested. Waiting for the host.' };
+  return {
+    status: 'completed',
+    message: 'Deleted at once: only its checkpoint in S3 held it, so no host was asked.',
+  };
+}
+
+function batchStatus(applying: boolean, results: BatchResult[]): string {
+  const accepted = results.filter(
+    (item) => item.status === 'completed' || item.status === 'requested',
+  ).length;
+  const skipped = results.filter((item) => item.status === 'skipped').length;
+  const skippedNote = skipped ? ` ${skipped} skipped; each says why below.` : '';
+  return `${applying ? 'Batch in progress.' : 'Batch finished.'} ${accepted} of ${results.length} sandboxes accepted.${skippedNote}`;
 }
 
 export function BatchSandboxManagement({
@@ -163,23 +212,18 @@ export function BatchSandboxManagement({
 
   async function applyReviewed() {
     if (!review || request.current) return;
-    const eligible = review.filter((item) => blockedReason(item, kind, performance.now()) === null);
-    if (eligible.length === 0 || !window.confirm(confirmation(kind, eligible))) return;
+    const { eligible, results: planned } = planBatch(review, kind, performance.now());
+    if (eligible.length === 0) {
+      // Nothing is refused without a reason: each sandbox says why it was skipped.
+      setResults(planned);
+      return;
+    }
+    if (!window.confirm(confirmation(kind, eligible, planned.length - eligible.length))) return;
     const controller = new AbortController();
     request.current = controller;
     setBusy('apply');
     onBusyChange(true);
-    setResults(
-      review.map((item) => {
-        const blocked = blockedReason(item, kind, performance.now());
-        return {
-          id: item.id,
-          title: item.title,
-          status: blocked ? 'skipped' : 'queued',
-          message: blocked ?? 'Waiting to submit.',
-        };
-      }),
-    );
+    setResults(planned);
     const accepted: string[] = [];
     try {
       await runBounded(eligible, controller.signal, async (item) => {
@@ -193,20 +237,16 @@ export function BatchSandboxManagement({
         try {
           const sandbox = item.detail!.sandbox;
           const state = sandboxActionState(item.detail, item.observedAtMs, performance.now());
-          await applySandboxAction(kind, sandbox, controller.signal, state.staleInventoryEntry);
+          const next = await applySandboxAction(
+            kind,
+            sandbox,
+            controller.signal,
+            state.staleInventoryEntry,
+          );
           if (controller.signal.aborted) return;
           accepted.push(item.id);
-          updateResult(
-            item.id,
-            kind === 'stop' || kind === 'delete' || kind === 'discard' ? 'requested' : 'completed',
-            kind === 'stop'
-              ? 'Stop requested. Waiting for the host.'
-              : kind === 'delete' || kind === 'discard'
-                ? 'Deletion requested. Waiting for the host.'
-                : kind === 'archive'
-                  ? 'Removed from inventory.'
-                  : 'Restored to inventory.',
-          );
+          const result = appliedResult(kind, next);
+          updateResult(item.id, result.status, result.message);
         } catch (cause) {
           if (controller.signal.aborted) return;
           if (accessDenied(cause)) {
@@ -233,9 +273,6 @@ export function BatchSandboxManagement({
 
   const eligibleCount =
     review?.filter((item) => blockedReason(item, kind, nowMs) === null).length ?? 0;
-  const finishedCount = results.filter(
-    (item) => item.status === 'completed' || item.status === 'requested',
-  ).length;
   return (
     <section aria-label="Batch sandbox operations" className="ui-card mt-4 p-4">
       <div className="flex flex-wrap items-center gap-3">
@@ -290,8 +327,7 @@ export function BatchSandboxManagement({
       {results.length > 0 && (
         <>
           <p role="status" className="mt-3 text-sm text-gray-700 dark:text-gray-200">
-            {busy === 'apply' ? 'Batch in progress.' : 'Batch finished.'} {finishedCount} of{' '}
-            {results.length} sandboxes accepted.
+            {batchStatus(busy === 'apply', results)}
           </p>
           <ul
             aria-label="Sandbox batch results"
