@@ -42,6 +42,11 @@ ENV_TOKEN = "AGENT_COMPAT_TOKEN"
 #: what the upstream declares; absent or empty is Auto. A changed level starts
 #: a new member process, and with it a new helper.
 ENV_REASONING_EFFORT = "AGENT_COMPAT_REASONING_EFFORT"
+#: Set to ``1`` when the upstream is the host's own model relay on the group
+#: bridge, for a member on a connection the deployment provides. Only then is
+#: a plain ``http`` upstream accepted: the relay is reached on the group's own
+#: bridge, and what the member holds is a placeholder, never a provider key.
+ENV_UPSTREAM_RELAY = "AGENT_COMPAT_UPSTREAM_RELAY"
 #: Every variable the launcher consumes; none reaches the CLI.
 LAUNCH_ENV = (
     ENV_CLIENT,
@@ -50,6 +55,7 @@ LAUNCH_ENV = (
     ENV_MODEL,
     ENV_TOKEN,
     ENV_REASONING_EFFORT,
+    ENV_UPSTREAM_RELAY,
 )
 
 
@@ -63,6 +69,26 @@ def passthrough_authority(host: str, port: int | None) -> str:
     return host if port in (None, 443) else f"{host}:{port}"
 
 
+def upstream_port(scheme: str, port: int | None) -> int:
+    """The port an upstream URL means: its own, or its scheme's default.
+
+    Both sides resolve it here, so an ``http`` relay written without a port
+    is named ``host:80`` by the host and by the launcher alike.
+    """
+    return port or (80 if scheme == "http" else 443)
+
+
+def upstream_scheme(relay: str, scheme: str) -> str:
+    """The scheme a launch's upstream may use, or an empty string for one it may not.
+
+    ``https`` always. ``http`` only for the host's model relay, which the
+    launch says with :data:`ENV_UPSTREAM_RELAY`; and a relay is never
+    ``https``, so the flag cannot be put on a provider's URL to no effect.
+    """
+    expected = "http" if relay == "1" else "https"
+    return scheme if scheme == expected and relay in ("", "1") else ""
+
+
 __all__ = [
     "ANTHROPIC_MESSAGES",
     "CHAT_COMPLETIONS",
@@ -72,6 +98,7 @@ __all__ = [
     "ENV_REASONING_EFFORT",
     "ENV_TOKEN",
     "ENV_UPSTREAM_KEY",
+    "ENV_UPSTREAM_RELAY",
     "ENV_UPSTREAM_URL",
     "LAUNCH_ENV",
     "ORIGIN_PLACEHOLDER",
@@ -79,4 +106,6 @@ __all__ = [
     "RESPONSES",
     "TOKEN_PLACEHOLDER",
     "passthrough_authority",
+    "upstream_port",
+    "upstream_scheme",
 ]

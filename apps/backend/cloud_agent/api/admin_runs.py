@@ -26,7 +26,7 @@ from cloud_agent.schemas.admin_observability import (
     RunFilters,
     resolve_run_window,
 )
-from cloud_agent.usage.turn_report import summarize_job_usage
+from cloud_agent.usage.turn_report import summarize_job_usage, usage_source
 from cloud_agent_shared.turn_resources import summarize_turn_resources
 
 if TYPE_CHECKING:
@@ -150,6 +150,7 @@ async def get_admin_run(
         # Which connection stays the owner's; the reader learns only that the
         # turn's provider bills it.
         external_provider=bool(run.get("model_connection_id")),
+        source=usage_source(run.get("model_connection_id")),
     )
     return AdminRunDetail(
         run=AdminRun.model_validate(run),

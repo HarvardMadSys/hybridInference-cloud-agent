@@ -175,6 +175,51 @@
     "kind": "change"
   },
   {
+    "action": "agent.operator_model_connection.create",
+    "category": "settings",
+    "kind": "change"
+  },
+  {
+    "action": "agent.operator_model_connection.update",
+    "category": "settings",
+    "kind": "change"
+  },
+  {
+    "action": "agent.operator_model_connection.rotate_key",
+    "category": "settings",
+    "kind": "change"
+  },
+  {
+    "action": "agent.operator_model_connection.enable",
+    "category": "settings",
+    "kind": "change"
+  },
+  {
+    "action": "agent.operator_model_connection.disable",
+    "category": "settings",
+    "kind": "change"
+  },
+  {
+    "action": "agent.operator_model_connection.delete",
+    "category": "settings",
+    "kind": "change"
+  },
+  {
+    "action": "agent.operator_model_connection.set_limit",
+    "category": "settings",
+    "kind": "change"
+  },
+  {
+    "action": "agent.operator_model_user_limit.set",
+    "category": "accounts",
+    "kind": "change"
+  },
+  {
+    "action": "agent.operator_model_user_limit.clear",
+    "category": "accounts",
+    "kind": "change"
+  },
+  {
     "action": "agent.runner_host.set_active",
     "category": "servers",
     "kind": "change"

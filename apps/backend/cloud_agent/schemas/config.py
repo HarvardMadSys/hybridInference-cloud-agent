@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime  # noqa: TC003 — Pydantic resolves annotations at runtime.
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -59,6 +60,38 @@ class ModelConnectionOption(BaseModel):
     model_efforts: dict[str, dict[str, ModelEffortOffer]] = Field(default_factory=dict)
 
 
+class ProvidedModelAllowance(BaseModel):
+    """One owner's allowance on one provided model, for the current UTC day."""
+
+    #: Requests the owner may send today; ``None`` is unlimited.
+    daily_requests: int | None = None
+    #: Requests the model relay has accepted from this owner today.
+    used_today: int = 0
+
+
+class ProvidedModelSource(BaseModel):
+    """One connection the deployment provides, as the composer offers it to this owner.
+
+    The same shape as an owner's own connection option, plus the owner's
+    allowances. Only the models this owner may use are listed: one whose
+    allowance is zero is absent, as if it were not provided.
+    """
+
+    id: str
+    name: str
+    #: Whether a new owner with no history starts here.
+    is_default: bool = False
+    #: The model a new owner starts on, when this owner may use it.
+    default_model: str | None = None
+    models: list[str]
+    model_runtimes: dict[str, list[str]] = Field(default_factory=dict)
+    model_efforts: dict[str, dict[str, ModelEffortOffer]] = Field(default_factory=dict)
+    #: Per listed model: this owner's allowance and today's use.
+    allowances: dict[str, ProvidedModelAllowance] = Field(default_factory=dict)
+    #: When today's counts start over: the next midnight, UTC.
+    resets_at: datetime
+
+
 class AgentConfigResponse(BaseModel):
     """What this deployment will actually accept, for the task composer.
 
@@ -84,8 +117,9 @@ class AgentConfigResponse(BaseModel):
     model_connection_required: bool = Field(
         default=False,
         description=(
-            "True while none of this owner's enabled model connections has a model "
-            "verified for any Agent: nothing can run until one is set up."
+            "True while neither one of this owner's enabled model connections nor a "
+            "connection the deployment provides has a model this owner can run: "
+            "nothing can run until one is set up."
         ),
     )
     runtime_reasoning_efforts: dict[str, list[str]] = Field(
@@ -112,6 +146,14 @@ class AgentConfigResponse(BaseModel):
         description=(
             "This owner's enabled model connections, the only inference source. A "
             "model chosen from one is submitted with its `model_connection_id`."
+        ),
+    )
+    provided_sources: list[ProvidedModelSource] = Field(
+        default_factory=list,
+        description=(
+            "Connections this deployment provides to every admitted owner, each with "
+            "this owner's daily request allowance per model. A model chosen from one "
+            "is submitted with the source's id as `model_connection_id`."
         ),
     )
     model_connections_enabled: bool = Field(

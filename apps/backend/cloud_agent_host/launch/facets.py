@@ -51,6 +51,7 @@ def launch_facets(launch: ResidentLaunch) -> tuple[LaunchFacet, ...]:
             source=launch.inference_source,
             client_protocol=launch.inference_client_protocol,
             local_token=launch.inference_local_token,
+            relayed=launch.inference_relayed,
             # A translated plan's helper measures every request already; a
             # direct one is metered unless its CLI treats the provider's host
             # as its vendor's own.

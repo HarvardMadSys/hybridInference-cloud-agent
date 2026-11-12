@@ -450,6 +450,56 @@ services:
         condition: service_healthy
     networks: [control-plane]
 
+  # The model relay: where a turn on a connection the deployment provides
+  # sends its model requests. A fourth listener of the same image, containing
+  # the model relay's one catch-all route and a health check. It resolves a
+  # residency placeholder to the running turn it speaks for, counts the
+  # request against its owner's allowance, and forwards it to the provider
+  # with the deployment's key, which exists nowhere else. Behind a profile:
+  # `COMPOSE_PROFILES=model-relay` turns it on, together with the hosts'
+  # model-tunnel and AGENT_SANDBOX_MODEL_RELAY_URL.
+  #
+  # In-flight caps are kept per process: one replica, unless a cap enforced
+  # per replica is what is wanted.
+  model-relay:
+    profiles: [model-relay]
+    # The image `keys` builds; see there.
+    image: ${COMPOSE_PROJECT_NAME}-control-plane:${AGENT_DEPLOYMENT_SHA:-unknown}
+    pull_policy: never
+    command:
+      - uvicorn
+      - cloud_agent.app:create_model_relay_app
+      - --factory
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8002"
+    restart: unless-stopped
+    ports:
+      # Loopback, like the other relays: only the hosts' model-tunnel reaches it.
+      - "${AGENT_MODEL_RELAY_BIND:-127.0.0.1}:${AGENT_MODEL_RELAY_PORT:-8002}:8002"
+    environment:
+      AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:-}
+      AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET:-}
+      AGENT_LOCAL_SESSION_SECRET: ${AGENT_LOCAL_SESSION_SECRET:-}
+      # A provided connection's key is stored encrypted under this key.
+      AGENT_SETTINGS_ENCRYPTION_KEY: ${AGENT_SETTINGS_ENCRYPTION_KEY:-}
+      # The placeholder a sandbox presents is signed with this secret.
+      AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:-}
+      # Addresses a provider's Base URL may never resolve to, beside the
+      # private and special-purpose ranges that are always refused.
+      AGENT_EGRESS_PROTECTED_CIDRS: ${AGENT_EGRESS_PROTECTED_CIDRS:-}
+      AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
+      AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
+    volumes:
+      - agent-keys:/run/cloud-agent/keys:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    networks: [control-plane]
+
   # The browser-facing app. Two classes of configuration meet here, and the
   # difference is deliberate: the browser's API prefix is a property of the
   # image, resolved when the bundle is compiled, so it is a build argument and

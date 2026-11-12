@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage, require_store
 from cloud_agent.api.errors import typed_error
-from cloud_agent.usage.turn_report import JobUsageResponse, summarize_job_usage
+from cloud_agent.usage.turn_report import JobUsageResponse, summarize_job_usage, usage_source
 
 if TYPE_CHECKING:
     from cloud_agent.ports import ConversationQueries, LedgerRepository
@@ -51,6 +51,7 @@ async def job_usage_response(
         runtime_inputs=reads["inputs"],
         runtime=job.get("runtime"),
         external_provider=bool(job.get("model_connection_id")),
+        source=usage_source(job.get("model_connection_id")),
     )
     usage.version = reads["version"]
     return usage

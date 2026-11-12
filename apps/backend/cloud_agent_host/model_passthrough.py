@@ -7,8 +7,10 @@ only so that each model request can be measured
 (:mod:`cloud_agent_shared.request_prefix`): what it sends ahead of the
 conversation, its system prompt and tool schemas, which no CLI reports.
 
-The service is bound at launch to one upstream origin, ``https://<authority>``,
-and a request cannot choose another. Its CLI is told
+The service is bound at launch to one upstream origin, ``https://<authority>``
+(or, for a member on a connection the deployment provides, the host's model
+relay at ``http://<authority>`` on the group's own bridge), and a request
+cannot choose another. Its CLI is told
 ``http://127.0.0.1:<port>/<authority><path>``: the provider's authority stays in
 the URL the CLI reads, so a CLI that recognizes its provider from the URL's
 text still does, and the service answers only paths under ``/<authority>``,
@@ -68,10 +70,13 @@ from cloud_agent_shared.protocol_compat import (
     ENV_MODEL,
     ENV_TOKEN,
     ENV_UPSTREAM_KEY,
+    ENV_UPSTREAM_RELAY,
     ENV_UPSTREAM_URL,
     LAUNCH_ENV,
     PASSTHROUGH,
     passthrough_authority,
+    upstream_port,
+    upstream_scheme,
 )
 from cloud_agent_shared.request_prefix import MAX_MEASURED_BODY_BYTES, protocol_for_path
 
@@ -111,6 +116,9 @@ _BODY_METHODS = frozenset({"POST", "PUT", "PATCH"})
 #: ``HTTPSConnection`` with the system trust store; only in-process test code
 #: replaces this, never a launch variable or a request.
 UPSTREAM_CONNECTION: Callable[..., http.client.HTTPConnection] = http.client.HTTPSConnection
+#: How the service reaches the host's model relay, the one upstream it speaks
+#: to in the clear. Replaced only by in-process test code, like the above.
+RELAY_CONNECTION: Callable[..., http.client.HTTPConnection] = http.client.HTTPConnection
 
 
 def _log(category: str) -> None:
@@ -124,11 +132,18 @@ class PassthroughBinding:
 
     host: str
     port: int
+    #: False only for the host's model relay, reached in the clear.
+    tls: bool = True
 
     @property
     def authority(self) -> str:
         """``host[:port]``, as the CLI's URL names it."""
         return passthrough_authority(self.host, self.port)
+
+    @property
+    def origin(self) -> str:
+        """The upstream's origin, for a CLI that must reach it without the meter."""
+        return f"{'https' if self.tls else 'http'}://{self.authority}"
 
     @classmethod
     def from_launch(cls, env: MutableMapping[str, str]) -> PassthroughBinding:
@@ -139,8 +154,9 @@ class PassthroughBinding:
         if values[ENV_UPSTREAM_KEY] or values[ENV_TOKEN] or values[ENV_MODEL]:
             raise LaunchError("a passthrough holds no key, token or model")
         parts = urlsplit(values[ENV_UPSTREAM_URL])
+        scheme = upstream_scheme(values[ENV_UPSTREAM_RELAY], parts.scheme)
         if (
-            parts.scheme != "https"
+            not scheme
             or not parts.hostname
             or parts.path not in {"", "/"}
             or parts.query
@@ -148,8 +164,12 @@ class PassthroughBinding:
             or parts.username is not None
             or parts.password is not None
         ):
-            raise LaunchError("the upstream must be a plain https origin")
-        return cls(host=parts.hostname, port=parts.port or 443)
+            raise LaunchError(
+                "the upstream must be a plain https origin, or the host's model relay"
+            )
+        return cls(
+            host=parts.hostname, port=upstream_port(scheme, parts.port), tls=scheme == "https"
+        )
 
     def upstream_path(self, path: str) -> str | None:
         """The origin's path for a request to ``path``; None outside this binding."""
@@ -384,8 +404,12 @@ class _PassthroughHandler(BaseHTTPRequestHandler):
             self._drop_upstream()
         if self._upstream is None:
             binding = self.server.binding
-            self._upstream = UPSTREAM_CONNECTION(
-                binding.host, binding.port, timeout=CONNECT_TIMEOUT_S, context=self.server.tls
+            self._upstream = (
+                UPSTREAM_CONNECTION(
+                    binding.host, binding.port, timeout=CONNECT_TIMEOUT_S, context=self.server.tls
+                )
+                if binding.tls
+                else RELAY_CONNECTION(binding.host, binding.port, timeout=CONNECT_TIMEOUT_S)
             )
         return self._upstream
 

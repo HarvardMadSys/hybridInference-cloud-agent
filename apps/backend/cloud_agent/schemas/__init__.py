@@ -175,6 +175,8 @@ from cloud_agent.schemas.config import (
     AgentConfigResponse,
     ModelConnectionOption,
     ModelEffortOffer,
+    ProvidedModelAllowance,
+    ProvidedModelSource,
 )
 from cloud_agent.schemas.conversations import (
     AgentConversation,
@@ -287,6 +289,17 @@ from cloud_agent.schemas.messages import (
 from cloud_agent.schemas.model_preferences import ModelPreferenceView
 from cloud_agent.schemas.notification_state import (
     NotificationStateCursor,
+)
+from cloud_agent.schemas.operator_models import (
+    OperatorModelConnectionList,
+    OperatorModelConnectionView,
+    OperatorModelLimit,
+    OperatorModelLimitWrite,
+    OperatorModelUsageResponse,
+    OperatorModelUsageRow,
+    OperatorModelUserLimitWrite,
+    OperatorModelUserList,
+    OperatorModelUserRow,
 )
 from cloud_agent.schemas.resources import (
     MAX_TRAJECTORY_TIMING_ATTEMPTS,
@@ -630,6 +643,15 @@ __all__ = [
     "NotificationStateCursor",
     "OAuthConnectRequest",
     "OkResponse",
+    "OperatorModelConnectionList",
+    "OperatorModelConnectionView",
+    "OperatorModelLimit",
+    "OperatorModelLimitWrite",
+    "OperatorModelUsageResponse",
+    "OperatorModelUsageRow",
+    "OperatorModelUserLimitWrite",
+    "OperatorModelUserList",
+    "OperatorModelUserRow",
     "OwnJoinRequestListResponse",
     "OwnJoinRequestResponse",
     "OwnedTeamEntry",
@@ -643,6 +665,8 @@ __all__ = [
     "PhoneVerifyRequest",
     "ProcessObservation",
     "ProfileView",
+    "ProvidedModelAllowance",
+    "ProvidedModelSource",
     "PurgedResponse",
     "QueuePausedReason",
     "ReleaseHostDrainFenceRequest",

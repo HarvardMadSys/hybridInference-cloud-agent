@@ -51,6 +51,7 @@ from typing import Any
 from cloud_agent_shared.shared_protocol import (
     RESIDENCY_GITHUB_CREDENTIAL_PREFIX,
     RESIDENCY_MCP_CREDENTIAL_PREFIX,
+    RESIDENCY_MODEL_CREDENTIAL_PREFIX,
 )
 
 # Domain separation: a signature over this prefix is meaningless anywhere else.
@@ -68,6 +69,9 @@ _RESIDENCY_MCP_PREFIX = RESIDENCY_MCP_CREDENTIAL_PREFIX.rstrip(".")
 # ``mint_residency_github_token``. A prefix of its own, so neither residency
 # parser accepts the other's credential.
 _RESIDENCY_GITHUB_PREFIX = RESIDENCY_GITHUB_CREDENTIAL_PREFIX.rstrip(".")
+# A resident process's model relay placeholder — see
+# ``mint_residency_model_token``. A third prefix, for the same reason.
+_RESIDENCY_MODEL_PREFIX = RESIDENCY_MODEL_CREDENTIAL_PREFIX.rstrip(".")
 
 
 class InvalidAgentToken(Exception):
@@ -155,6 +159,12 @@ SCOPE_MCP_RESIDENCY = "mcp_residency"
 # ``mcp_residency`` credential. A separate scope and prefix, so a tool
 # credential cannot push and a GitHub credential cannot call tools.
 SCOPE_GITHUB_RESIDENCY = "github_residency"
+# ``model_residency`` is the placeholder a resident process hands its CLI as an
+# API key on a connection the deployment provides. No provider accepts it: the
+# model relay exchanges it for the deployment's key while that residency is
+# serving a running turn on that connection. A separate scope and prefix, so
+# neither an MCP nor a GitHub credential is ever read as it, or it as them.
+SCOPE_MODEL_RESIDENCY = "model_residency"
 
 
 def mint_worker_token(
@@ -397,3 +407,30 @@ def parse_residency_github_token(token: str) -> dict[str, Any]:
     authorizes anything.
     """
     return _parse_residency(token, _RESIDENCY_GITHUB_PREFIX, SCOPE_GITHUB_RESIDENCY)
+
+
+def mint_residency_model_token(*, thread_id: str, residency_generation: int) -> str:
+    """Mint the model relay placeholder a chat's resident process keeps.
+
+    Stateless and deterministic like the other residency credentials. It is
+    not a provider key: every provider refuses it. The model relay accepts it
+    only while that residency is the chat's current one and is serving a
+    running turn on a connection the deployment provides, and only then sends
+    the request on with the deployment's own key.
+    """
+    return _mint_residency(
+        _RESIDENCY_MODEL_PREFIX,
+        SCOPE_MODEL_RESIDENCY,
+        thread_id=thread_id,
+        residency_generation=residency_generation,
+    )
+
+
+def parse_residency_model_token(token: str) -> dict[str, Any]:
+    """Verify a model relay placeholder and return the residency it names.
+
+    Returns ``{"thread_id", "residency_generation"}``. The signature proves only
+    that this service minted it; the relay's lookup decides whether it still
+    authorizes anything.
+    """
+    return _parse_residency(token, _RESIDENCY_MODEL_PREFIX, SCOPE_MODEL_RESIDENCY)

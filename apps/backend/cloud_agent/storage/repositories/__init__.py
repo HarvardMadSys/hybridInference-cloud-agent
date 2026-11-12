@@ -44,6 +44,7 @@ from cloud_agent.storage.repositories.notification_maintenance import (
 from cloud_agent.storage.repositories.operation_measurements import (
     PostgresOperationMeasurementRepository,
 )
+from cloud_agent.storage.repositories.operator_models import PostgresOperatorModelRepository
 from cloud_agent.storage.repositories.owner_usage import PostgresOwnerUsageRepository
 from cloud_agent.storage.repositories.owner_work import PostgresOwnerWorkRepository
 from cloud_agent.storage.repositories.pending_messages import PostgresPendingMessageRepository
@@ -91,6 +92,7 @@ __all__ = [
     "PostgresModelPreferenceRepository",
     "PostgresNotificationMaintenanceRepository",
     "PostgresOperationMeasurementRepository",
+    "PostgresOperatorModelRepository",
     "PostgresOwnerUsageRepository",
     "PostgresOwnerWorkRepository",
     "PostgresPendingMessageRepository",

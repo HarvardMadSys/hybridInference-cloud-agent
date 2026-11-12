@@ -98,6 +98,7 @@ def _hand_list(held: ResidentLaunch, launch: ResidentLaunch) -> tuple[str, ...]:
             held.inference_client_protocol == launch.inference_client_protocol,
         ),
         ("inference_local_token", held.inference_local_token == launch.inference_local_token),
+        ("inference_relayed", held.inference_relayed == launch.inference_relayed),
         ("mcp", same_mcp),
         ("github", same_github),
         ("github_repo", held.github_repo == launch.github_repo),
@@ -174,6 +175,7 @@ _CHANGES: dict[str, list[dict[str, object]]] = {
         {"inference_client_protocol": "responses"},
     ],
     "inference_local_token": [{"inference_local_token": "b" * 64}],
+    "inference_relayed": [{"inference_relayed": "1"}],
 }
 
 #: What the runner's probe looks like: no residency credentials, no identity.

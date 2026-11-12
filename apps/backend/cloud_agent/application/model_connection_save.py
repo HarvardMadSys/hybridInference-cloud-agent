@@ -135,6 +135,18 @@ async def verify_for_save(
     )
     if not reserved:
         raise CheckLimitReached
+    return await verify_endpoint(base_url=base_url, api_key=api_key, models=models)
+
+
+async def verify_endpoint(
+    *, base_url: str, api_key: str, models: list[str]
+) -> dict[str, dict[str, Any]]:
+    """Verify ``models`` at this endpoint, with nothing reserved against anybody.
+
+    The provider calls of :func:`verify_for_save`, for a caller whose checks
+    are not an owner's to count: an administrator saving a connection the
+    deployment provides. The same bound and the same refusals.
+    """
     try:
         async with asyncio.timeout(SAVE_TIMEOUT_S):
             results, efforts = await asyncio.gather(
@@ -158,5 +170,6 @@ __all__ = [
     "VerificationTimedOut",
     "kept_checks",
     "plan_edit",
+    "verify_endpoint",
     "verify_for_save",
 ]

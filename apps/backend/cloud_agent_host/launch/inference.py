@@ -32,6 +32,9 @@ class InferenceFacet(LaunchFacet):
     client_protocol: str
     # That member's loopback token on a translated plan.
     local_token: str = field(repr=False, metadata=SECRET)
+    # ``"1"`` when the URL is this host's model relay and the credential a
+    # residency placeholder for it (a connection the deployment provides).
+    relayed: str = ""
     # A direct plan whose CLI runs behind the member's request meter
     # (``cloud_agent_host.model_passthrough``). Not a fingerprint of its own:
     # it follows from the runtime and the Base URL, both already compared.
@@ -45,6 +48,7 @@ class InferenceFacet(LaunchFacet):
             "inference_protocol": self.protocol,
             "inference_client_protocol": self.client_protocol,
             "inference_local_token": self.local_token,
+            "inference_relayed": self.relayed,
         }
 
     @override

@@ -206,8 +206,14 @@ def test_nothing_on_the_relay_network_reaches_the_control_plane(compose: dict) -
         if "agent-relays" in (svc.get("networks") or {})
     }
     # 8443 is the GitHub relay's own listener, which holds nothing but its
-    # catch-all route (``create_github_relay_app``): never 8000.
-    assert on_relays == {"mcp-tunnel": "8001", "github-tunnel": "8443"}, on_relays
+    # catch-all route (``create_github_relay_app``), and 8002 the model
+    # relay's, which holds nothing but its own (``create_model_relay_app``):
+    # never 8000.
+    assert on_relays == {
+        "mcp-tunnel": "8001",
+        "github-tunnel": "8443",
+        "model-tunnel": "8002",
+    }, on_relays
 
 
 # ---------------------------------------------------------------------------

@@ -9,7 +9,7 @@ this page. The deployment order itself, and how to roll back, are in
 ## Before starting this release
 
 Before starting this release, run `alembic upgrade head` through
-`0115_mcp_retire_dead_locations`. The supported deployment scripts run migrations
+`0116_operator_model_connections`. The supported deployment scripts run migrations
 before replacing the API; every migration listed here is additive and safe
 under the running previous release unless it says otherwise. The few
 transitions that need stopped writers are listed in
@@ -61,6 +61,27 @@ old one cannot be forked. The lines are then ignored and can be deleted.
 
 First-run setup now also asks for the site address, prefilled from the page's
 own address, and ends on Admin → Servers.
+
+## A deployment can provide models
+
+An administrator can now save a provider's endpoint and key once, under
+**Admin → Settings → Models**, and every admitted owner runs on those models
+with no setup, within a daily request allowance per model
+([Provided models](operations.md#provided-models)). Owners' own model
+connections work as before, and nothing changes for a deployment that adds no
+provided connection.
+
+`0116_operator_model_connections` only adds tables. The feature needs two new
+services, both behind the `model-relay` Compose profile: `model-relay` on the
+control plane and `model-tunnel` on each host, with
+`AGENT_SANDBOX_MODEL_RELAY_URL` set there. Roll hosts first, as usual. A host
+without the tunnel keeps working and is not handed turns on provided models;
+a host from the previous release does not advertise `model-relay-v1` and is
+not handed them either.
+
+Rolling back to the previous release needs no downgrade while no provided
+connection was created. Once one exists, delete it and let its conversations
+go first: the previous release cannot read a turn that names one.
 
 ## The audit log names who acted on whom
 
@@ -307,6 +328,7 @@ Newest first.
 
 | Migration | What it changes |
 |---|---|
+| `0116_operator_model_connections` | Adds the models a deployment provides: `agent_operator_model_connections` (endpoint, encrypted key, models and their verification), `agent_operator_model_limits` (each model's default daily request allowance and concurrency cap), `agent_operator_model_user_limits` (one account's own allowance), `agent_operator_model_usage` (requests the model relay accepted per account, model and UTC day) and `agent_operator_connection_residencies` (which revision a member's process started on). Only new tables; a turn names a provided connection in the existing `model_connection_id` columns. The previous release runs beside it. A downgrade refuses while any provided connection exists or any turn or waiting message names one ([A deployment can provide models](#a-deployment-can-provide-models)). |
 | `0115_mcp_retire_dead_locations` | Moves every MCP connection stored at `managed-worker` or `user-connector` to `sandbox`, with its launch, credentials and connector link unchanged; moves its `config_revision` and `authorization_epoch` on by one, as a location edit does; and clears a failing diagnosis (an `error` status becomes `draft`). It then narrows `agent_mcp_connections_location_check` to `remote` and `sandbox`, under the table lock it took first, so no removed value lands in between. No row is deleted. The previous release runs beside it, except that its writes of a removed location are refused. A downgrade restores the four-location constraint; moved rows stay `sandbox` ([MCP servers run in two places](#mcp-servers-run-in-two-places)). |
 | `0114_admin_audit_attribution` | Gives `agent_admin_audit_log` its attribution: `actor_type`, generated from `actor_id`, and `actor_label`, `target_type`, `target_id`, `target_label`, `subject_label`, `outcome`, `reason` and `correlation_id`, backfilled from the rows' own actions and details and the current account names; and two tables, `agent_admin_audit_outcomes` (a requested sandbox deletion's final result) and `agent_admin_audit_write_failures`. It deletes the Servers page's polling reads and connection checks, and turns the sandbox deletion worker's per-step rows into one result per request, deleting those rows; a worker row that names no request is kept. Adding the generated column rewrites the table under a brief lock. The previous release keeps writing and reading the original columns unchanged, and its rows are classified by the generated column. A downgrade drops the columns and the two tables; deleted rows are not restored, and the deletion steps remain in `agent_sandbox_events`. |
 | `0113_sandbox_incidents` | Makes sandbox incidents idempotent and tracks what each chat's agent was told: a unique index on `agent_sandbox_events (sandbox_id, details->>'incident_id')` for `incident.*` rows, and two tables, `agent_thread_incident_cursors` and `agent_attempt_incident_marks`. A trigger on `agent_thread_sandbox_memberships` starts a chat's cursor when it joins or moves sandbox, and every existing membership gets one. The previous release never reads them and no existing row has an `incident.*` type, so it runs unchanged beside it; its membership inserts only start cursors. A downgrade drops the triggers, the tables and the index; incident rows stay. |

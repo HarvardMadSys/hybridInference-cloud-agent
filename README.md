@@ -103,6 +103,8 @@ flowchart TD
     Host[Enrolled host: runner and sandbox manager] <-->|Claims, heartbeats, workspace| Control
     Host -->|Container lifecycle| Sandbox[Retained sandbox group: shared workspace, native CLI sessions]
     Sandbox -->|The owner's provider key, over public HTTPS| Provider[The owner's model provider]
+    Sandbox -->|A placeholder, for a model the deployment provides| ModelRelay[Control plane model relay]
+    ModelRelay -->|The deployment's provider key| Provided[The deployment's model provider]
     Sandbox -->|Scoped tool credential via relay| MCP[Control plane MCP-only listener]
     Sandbox -->|git and gh with a placeholder credential| GitHubRelay[Control plane GitHub relay]
     GitHubRelay -->|The owner's GitHub token| GitHub[GitHub]
@@ -122,9 +124,14 @@ member to the same group. See
 states and their limits.
 
 Cloud Agent keeps its own accounts and admission; the owner's provider keeps
-the API key's quota and bill, and there is no per-task dollar budget. The Usage
+the API key's quota and bill, and there is no per-task dollar budget. A
+deployment may also provide models of its own: an administrator saves a
+provider's endpoint and key once, every admitted owner runs on it with no
+setup, within a daily request allowance per model, and that key stays in the
+control plane. The Usage
 pages show the tokens agents reported, not a provider bill. A member sandbox
-holds the owner's provider key for the turn it runs, a scoped MCP token, and,
+holds the owner's provider key for the turn it runs (or, on a provided model,
+a placeholder only the model relay accepts), a scoped MCP token, and,
 when the GitHub App is configured, an hour-long token for the job's repository;
 it never holds a platform credential. Read [SECURITY.md](SECURITY.md) and the
 [sandbox network runbook](docs/developer/operations.md#the-sandbox-network)

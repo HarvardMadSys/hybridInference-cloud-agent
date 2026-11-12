@@ -97,6 +97,8 @@ async def test_usage_is_what_the_agent_reported_and_nothing_else(app, store):
             "normalized_input_tokens": None,
         },
         "external_provider": False,
+        # Whose connection the turn ran on; this one named none.
+        "source": None,
         "version": VERSION,
     }
     store.job_usage_reads.assert_awaited_once_with(job_id="ajob_1", user_id="owner")

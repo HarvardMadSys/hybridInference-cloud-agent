@@ -686,11 +686,11 @@ def test_the_relay_network_name_is_pinned(compose: dict):
         assert compose["services"][service]["environment"]["AGENT_RELAY_NETWORK"] == name
 
 
-def test_exactly_the_two_relays_are_discoverable(compose: dict):
+def test_exactly_the_three_relays_are_discoverable(compose: dict):
     """A relay found here is attached to every group bridge, so the set is narrow.
 
-    Tool calls go to the MCP tunnel, git and gh to the GitHub relay's; model calls
-    leave for the owner's provider over public egress and need no relay.
+    Tool calls go to the MCP tunnel, git and gh to the GitHub relay's, model calls
+    on a provided connection to the model relay's; an owner's own need no relay.
     """
     on_relays = {
         name
@@ -701,7 +701,7 @@ def test_exactly_the_two_relays_are_discoverable(compose: dict):
     # non-empty set" is the natural way to make it pass after adding a
     # service, and it would let the next addition be attached to every group
     # bridge without a word.
-    assert on_relays == {"mcp-tunnel", "github-tunnel"}
+    assert on_relays == {"mcp-tunnel", "github-tunnel", "model-tunnel"}
 
 
 def test_the_mcp_name_resolves_on_every_network_that_is_given_it(compose: dict):
@@ -832,7 +832,7 @@ def test_only_the_control_tunnel_key_may_listen_and_only_where_it_must(compose: 
     (`permitlisten="none"` is not something OpenSSH accepts on a key line).
     """
     control = _tunnel_remote_port(compose, "control-plane-tunnel")
-    relays = {_tunnel_remote_port(compose, "mcp-tunnel")}
+    relays = {_tunnel_remote_port(compose, name) for name in ("mcp-tunnel", "model-tunnel")}
     documented_controls = set()
     for path in _KEY_LINE_DOCS:
         rel = path.relative_to(REPO_ROOT)
@@ -1947,12 +1947,12 @@ def remote_compose() -> dict:
 def test_remote_compose_starts_only_the_host_stack(remote_compose: dict):
     """A runner host runs jobs and nothing else."""
     assert set(remote_compose["services"]) == {
-        # One tunnel per destination: the MCP relay, the GitHub relay (behind its
-        # profile), the control plane for claims. Separate permissions; see
-        # `test_deploy_security.py` for which reaches what.
+        # One tunnel per destination: the MCP relay, the GitHub and model relays
+        # (each behind its profile), the control plane for claims.
         "mcp-tunnel",
         "control-plane-tunnel",
         "github-tunnel",
+        "model-tunnel",
         "sandbox-manager",
         "runner",
     }

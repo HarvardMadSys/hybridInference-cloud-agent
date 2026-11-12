@@ -98,6 +98,37 @@ services:
           - github.com
           - api.github.com
 
+  # The model relay's tunnel, the third relay a sandbox reaches. A member on a
+  # connection the deployment provides sends its model requests here, with a
+  # residency placeholder in place of a key; the far end is the control
+  # plane's model relay, the only place the deployment's key exists. Plain
+  # HTTP on the group's own bridge, like the MCP tunnel, and SSH from there.
+  #
+  # Its own key and permitopen, for the reason the other tunnels have theirs.
+  # Behind the model-relay profile, with AGENT_SANDBOX_MODEL_RELAY_URL set for
+  # the runner and sandbox manager below; without both, this host advertises
+  # no model relay and is handed no turn on a provided connection.
+  model-tunnel:
+    profiles: [model-relay]
+    build:
+      context: ../..
+      dockerfile: deploy/host/Dockerfile.agent-ssh-tunnel
+    restart: unless-stopped
+    environment:
+      TUNNEL_SSH_DESTINATION: ${AGENT_MODEL_TUNNEL_SSH_DESTINATION:-}
+      TUNNEL_SSH_PORT: ${AGENT_MODEL_TUNNEL_SSH_PORT:-22}
+      TUNNEL_REMOTE_HOST: ${AGENT_MODEL_TUNNEL_REMOTE_HOST:-127.0.0.1}
+      # The model relay's listener, never 8000, 8001 or 8443.
+      TUNNEL_REMOTE_PORT: ${AGENT_MODEL_TUNNEL_REMOTE_PORT:-8002}
+      TUNNEL_LISTEN_PORT: ${AGENT_MODEL_TUNNEL_LISTEN_PORT:-8000}
+    volumes:
+      - ${AGENT_MODEL_TUNNEL_SSH_KEY:-/etc/hybridinference/model-tunnel-id}:/etc/agent-tunnel/id:ro
+      - ${AGENT_MODEL_TUNNEL_SSH_KNOWN_HOSTS:-/etc/hybridinference/model-tunnel-known-hosts}:/etc/agent-tunnel/known_hosts:ro
+    networks:
+      agent-relays:
+        aliases:
+          - ${AGENT_MODEL_RELAY_HOSTNAME:-agent-models}
+
   # The second destination, and the one no sandbox may reach. The runner claims
   # jobs, registers this host and heartbeats against the control plane's main
   # listener — the same 8000 the MCP tunnel deliberately stopped pointing at.
@@ -209,6 +240,9 @@ services:
       AGENT_SANDBOX_MCP_URL: http://${AGENT_MCP_HOSTNAME:-agent-mcp}:${AGENT_MCP_TUNNEL_LISTEN_PORT:-8000}
       # Set, groups carry the GitHub relay's names and members trust its CA.
       AGENT_SANDBOX_GITHUB_RELAY_CA_FILE: ${AGENT_SANDBOX_GITHUB_RELAY_CA_FILE:+/etc/hybridinference/github-relay-ca.pem}
+      # Set (http://<model-tunnel alias>:<port>), groups carry the model
+      # relay and this host takes turns on connections the deployment provides.
+      AGENT_SANDBOX_MODEL_RELAY_URL: ${AGENT_SANDBOX_MODEL_RELAY_URL:-}
       AGENT_SANDBOX_BACKEND: ${AGENT_SANDBOX_BACKEND:-kata}
       AGENT_SANDBOX_IMAGE: ${AGENT_SANDBOX_IMAGE:?name the sandbox image this deployment runs}
       # The sandbox manager wakes groups on its own (Fork, files, terminals), so it
@@ -285,6 +319,9 @@ services:
       AGENT_SANDBOX_MCP_URL: http://${AGENT_MCP_HOSTNAME:-agent-mcp}:${AGENT_MCP_TUNNEL_LISTEN_PORT:-8000}
       # Set, groups carry the GitHub relay's names and members trust its CA.
       AGENT_SANDBOX_GITHUB_RELAY_CA_FILE: ${AGENT_SANDBOX_GITHUB_RELAY_CA_FILE:+/etc/hybridinference/github-relay-ca.pem}
+      # Set (http://<model-tunnel alias>:<port>), groups carry the model
+      # relay and this host takes turns on connections the deployment provides.
+      AGENT_SANDBOX_MODEL_RELAY_URL: ${AGENT_SANDBOX_MODEL_RELAY_URL:-}
       # --- Enrolled host identity (required) ---
       # A one-time token, spent at first start for a lasting per-host
       # credential. Once that credential exists the runner claims with it and

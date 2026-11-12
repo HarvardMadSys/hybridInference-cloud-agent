@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-11 21:27-0500\n"
+"POT-Creation-Date: 2026-11-12 10:26-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -1508,9 +1508,9 @@ msgid ""
 "inventory as a removal does: **Include removed sandboxes** lists it, and "
 "**Restore to inventory** shows it again."
 msgstr ""
-"清单里的每一行都会标出已请求的删除是等待中、失败还是已删除；自动重试已停止的请求显示为失败。删除一旦完成，无论有没有"
-" S3 归档，沙箱都会像从清单隐藏的条目一样离开默认清单：勾选 **Include removed sandboxes** "
-"就能看到它，点 **Restore to inventory** 能让它重新显示。"
+"清单里的每一行都会标出已请求的删除是等待中、失败还是已删除；自动重试已停止的请求显示为失败。删除一旦完成，无论有没有 S3 "
+"归档，沙箱都会像从清单隐藏的条目一样离开默认清单：勾选 **Include removed sandboxes** 就能看到它，点 "
+"**Restore to inventory** 能让它重新显示。"
 
 #: ../developer/operations.md:741
 msgid ""
@@ -3454,7 +3454,7 @@ msgstr ""
 " GitHub App 用户令牌转发；针对其他任何东西的请求则不带任何凭据转发；仓库管理、secrets、GraphQL、删除分支和推 tag "
 "一律拒绝。中继看到创建 PR 的请求成功时，会把这个 PR 记到对话上。所有者的令牌在控制平面里续期，所以轮次跑得再久也不会遇到令牌过期。"
 
-#: ../developer/operations.md:1597
+#: ../developer/operations.md:1597 ../developer/operations.md:4447
 msgid "To turn it on:"
 msgstr "启用步骤："
 
@@ -7604,6 +7604,12 @@ msgstr "这个组自己的 MCP 中继，按确切的网桥、地址和端口匹�
 
 #: ../developer/operations.md:3681
 msgid ""
+"the model relay, the same way, on a host configured with one ([Provided "
+"models](#provided-models));"
+msgstr "模型中继，同样按网桥、地址和端口精确放行，前提是这台主机配置了它（[部署提供的模型](#provided-models)）；"
+
+#: ../developer/operations.md:3683
+msgid ""
 "the exact public IPv4 address and port of each SSH server the group's "
 "owner registered, checked and enabled for one of its chats, by exact "
 "bridge, in the `ssh_targets` set. It is consulted after the protected "
@@ -7614,17 +7620,17 @@ msgstr ""
 "`ssh_targets` 集合里。它在受保护地址段之后才检查，所以不管集合里写了什么，受保护的地址照样拒绝（[SSH 服务器](#ssh-"
 "servers)）。"
 
-#: ../developer/operations.md:3686
+#: ../developer/operations.md:3688
 msgid "Refused:"
 msgstr "拒绝："
 
-#: ../developer/operations.md:3688
+#: ../developer/operations.md:3690
 msgid ""
 "every address of this host, the bridge's own gateway included, except the"
 " resolver above when it runs here;"
 msgstr "本主机的每一个地址，包括网桥自己的网关；唯一的例外是上面那个解析器正好跑在本机上的情况；"
 
-#: ../developer/operations.md:3690
+#: ../developer/operations.md:3692
 msgid ""
 "every IPv4 address that is not ordinary public unicast — IANA's special-"
 "purpose blocks `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10`, `127.0.0.0/8`,"
@@ -7641,22 +7647,22 @@ msgstr ""
 "`168.63.129.16`，这是一个放在公网地址上的平台服务；以及 `AGENT_EGRESS_PROTECTED_CIDRS` "
 "额外加上的地址。这些地址的任何端口都拒绝；"
 
-#: ../developer/operations.md:3698
+#: ../developer/operations.md:3700
 msgid "other groups, this deployment's or another's;"
 msgstr "其他沙箱组，不管是本部署的还是别的部署的；"
 
-#: ../developer/operations.md:3699
+#: ../developer/operations.md:3701
 msgid "every other port and protocol: UDP 443 (QUIC), ping, all IPv6;"
 msgstr "其他所有端口和协议：UDP 443（QUIC）、ping，以及所有 IPv6；"
 
-#: ../developer/operations.md:3700
+#: ../developer/operations.md:3702
 msgid ""
 "connections started from outside. A reply is accepted only for a "
 "connection the group opened, and one from a protected address is dropped "
 "even then; there is no blanket \"established\" accept."
 msgstr "从外部主动发起的连接。只有这个组自己发起的连接，回包才会被接受；而且即使是这样，来自受保护地址的回包也会被丢弃。没有那种笼统的\"已建立连接一律放行\"。"
 
-#: ../developer/operations.md:3704
+#: ../developer/operations.md:3706
 msgid ""
 "The rules judge the address a packet is actually sent to, so a name that "
 "resolves — or is rebound — to a private address is refused like the "
@@ -7668,7 +7674,7 @@ msgstr ""
 "reset，或者 ICMP 的 \"administratively "
 "prohibited\"，所以被挡住的请求会马上失败，而不是一直等到超时；IPv6 则直接静默丢弃。"
 
-#: ../developer/operations.md:3710
+#: ../developer/operations.md:3712
 msgid ""
 "**What it does not promise** (design §2). TCP 80/443 is a port rule: "
 "nothing inspects what travels inside, so DNS over HTTPS or a tunnel on "
@@ -7682,11 +7688,11 @@ msgstr ""
 "HTTPS，也拦不住在这些端口上搭的隧道。也没有任何东西能阻止沙箱把仓库内容、它自己的短期令牌或其所有者的服务商密钥，发到某个公网主机上。平台自己的公网地址也可能访问得到。MCP"
 " 工具调用仍然不在公开的主 API 上；所有者密钥的暴露按下文所述被接受。"
 
-#: ../developer/operations.md:3718
+#: ../developer/operations.md:3720
 msgid "MCP prerequisite and accepted owner-key exposure"
 msgstr "MCP 的前提条件，以及已接受的所有者密钥暴露"
 
-#: ../developer/operations.md:3720
+#: ../developer/operations.md:3722
 msgid ""
 "**MCP isolation remains required.** Done in #327: the main API no longer "
 "mounts the tool-call router, so the MCP tunnel must point at 8001 (see "
@@ -7695,7 +7701,7 @@ msgstr ""
 "**MCP 隔离仍然是必须的。** 已经在 #327 里完成：主 API 不再挂载工具调用的路由，所以 MCP 隧道必须指向 8001（见 "
 "[MCP 服务器](#mcp-servers)）。"
 
-#: ../developer/operations.md:3724
+#: ../developer/operations.md:3726
 msgid ""
 "**Model calls go to the owner's provider.** The member's CLI holds its "
 "owner's provider key for the turn it runs (see [owner model connections"
@@ -7709,17 +7715,17 @@ msgstr ""
 "connections)）。任务遇到的代码或指令可能导致这把密钥离开沙箱。用它发起的调用消耗的是所有者自己的服务商配额；它不会获得任何其他用户的身份、MCP"
 " 工具或平台管理权限。所有者在服务商处撤销它；在这里删除连接不会在上游撤销它。"
 
-#: ../developer/operations.md:3732
+#: ../developer/operations.md:3734
 msgid ""
 "This decision does not waive Kata/network acceptance, member isolation, "
 "long-lived credential restrictions or other release gates."
 msgstr "这个决定并不免除 Kata 和网络的验收、成员隔离、长期凭据的限制，以及其他任何发布关卡。"
 
-#: ../developer/operations.md:3735
+#: ../developer/operations.md:3737
 msgid "The host tables"
 msgstr "主机上的防火墙表"
 
-#: ../developer/operations.md:3737
+#: ../developer/operations.md:3739
 msgid ""
 "The rules are two nftables tables of this deployment's: an `inet` table "
 "for routed traffic — to the internet, the host, another bridge — and a "
@@ -7733,7 +7739,7 @@ msgstr ""
 "`AGENT_SANDBOX_NAMESPACE` 的 SHA-256 的前五位十六进制数；在主机服务上，这个命名空间就是 Compose "
 "项目名，所以设好 `COMPOSE_PROJECT` 之后："
 
-#: ../developer/operations.md:3749
+#: ../developer/operations.md:3751
 msgid ""
 "The runner and the sandbox manager hold no `NET_ADMIN` and are not in the"
 " host's network namespace. They change host rules through a helper: their"
@@ -7773,7 +7779,7 @@ msgstr ""
 "`network_guard_helper_discarded`，并在接下来的五分钟里，每一步都单独用辅助容器执行。不管守护进程的默认运行时是什么，所有辅助容器都在"
 " runc 下运行，因为如果在 Kata 虚拟机里跑，改的是虚拟机自己内核的规则，而不是主机的。"
 
-#: ../developer/operations.md:3772
+#: ../developer/operations.md:3774
 msgid ""
 "**Installed before anything joins a bridge.** The runner's and the "
 "sandbox manager's startup preflight install the tables and read them back"
@@ -7804,14 +7810,14 @@ msgstr ""
 "的检查失败了，或者结果缺失、读不懂，就拒绝这个轮次。如果进程启动得太慢，读到结果时它已满 60 秒，进程就会记一条 "
 "`network_guard_verification_aged_out`，自己做一次安装和读回，只有这次检查通过才接这个轮次。"
 
-#: ../developer/operations.md:3789
+#: ../developer/operations.md:3791
 msgid ""
 "**Scoped to this deployment.** The tables recognise traffic by the bridge"
 " interface prefix. They never flush or edit another deployment's rules, "
 "so several deployments can share a host."
 msgstr "**只作用于本部署。** 这些表通过网桥接口名的前缀来识别流量。它们绝不会清空或修改别的部署的规则，所以多个部署可以共用一台主机。"
 
-#: ../developer/operations.md:3792
+#: ../developer/operations.md:3794
 msgid ""
 "**Relays by exact endpoint.** When a group's relay is attached, its "
 "bridge, address and port are written to a `relays` set in both tables, "
@@ -7829,7 +7835,7 @@ msgstr ""
 "秒内（两次巡检）的读回中确认仍然有效，就不会再做一遍。重新安装、检查失败，或者读回时看到了别的内容，都会让它忘掉这条记录，下一次更新就会去读内核。中继自己的默认路由，仍然走它所在服务的网络，因为它是以网关优先级"
 " -1 接入每个组网桥的。"
 
-#: ../developer/operations.md:3800
+#: ../developer/operations.md:3802
 msgid ""
 "**Watched while groups run.** While any group of this deployment is "
 "running, the sandbox manager reads the tables back on every five-second "
@@ -7854,18 +7860,18 @@ msgstr ""
 "`chat_group_exceptions_not_restored`，等它下一次激活时再同步。如果连续两次检查都失败，它会记一条 "
 "`shared_chat_network_unguarded`，并停掉所有正在运行的沙箱组（工作区和原生会话都保留），而不是让某个沙箱组在失去启动时依赖的那道边界之后继续跑。唤醒沙箱组时，会先重新安装并核实规则；做不到的话，唤醒就失败。"
 
-#: ../developer/operations.md:3813
+#: ../developer/operations.md:3815
 msgid ""
 "**Kept by the kernel.** A runner exiting leaves the tables in place; a "
 "reboot clears them, and no group starts until they have been installed "
 "again."
 msgstr "**规则保存在内核里。** runner 退出时，这些表还在；机器重启会把它们清掉，在重新装好之前，任何沙箱组都不会启动。"
 
-#: ../developer/operations.md:3817
+#: ../developer/operations.md:3819
 msgid "To look at them, read-only, use the same shape of helper:"
 msgstr "要以只读方式查看它们，用同样形态的辅助容器："
 
-#: ../developer/operations.md:3831
+#: ../developer/operations.md:3833
 msgid ""
 "Keep `--runtime runc`: on a host whose Docker default runtime is Kata the"
 " listing would otherwise come from a VM. The counters are totals across "
@@ -7875,11 +7881,11 @@ msgstr ""
 "`--runtime runc` 不能省：如果主机的 Docker 默认运行时是 "
 "Kata，不加的话列出来的就是某个虚拟机里的规则。计数器是本部署所有沙箱组的总和。不会保留按连接记录的日志（设计 §10）。"
 
-#: ../developer/operations.md:3835
+#: ../developer/operations.md:3837
 msgid "Overlapping pools"
 msgstr "地址池重叠"
 
-#: ../developer/operations.md:3837
+#: ../developer/operations.md:3839
 msgid ""
 "Each deployment registers its pool in its own `inet` table, and after "
 "installing it compares its pool with those of the `cloud_agent_*` tables "
@@ -7896,7 +7902,7 @@ msgstr ""
 "registered earlier by …`，并要求给每个部署各自分配一个 "
 "`AGENT_EGRESS_CHAT_NETWORK_POOL`。先装的那个继续运行，所以一个照抄了地址池的邻居启动时，没法把一个正在工作的部署搞垮；而且因为每个部署都是装好之后才检查，两个同时启动的部署也不会互相漏掉对方。"
 
-#: ../developer/operations.md:3846
+#: ../developer/operations.md:3848
 msgid ""
 "The pool must also stay clear of every network the host already routes. "
 "Docker takes an explicit subnet as given — it checks other Docker "
@@ -7920,7 +7926,7 @@ msgstr ""
 "还宽的兜底路由（比如全隧道 VPN 的两个 "
 "`/1`），以及这个部署自己的网桥，都不算冲突。只通过默认网关才能到达的网络，没有自己的路由可查，所以选地址池时，也要考虑站点本身的地址规划。"
 
-#: ../developer/operations.md:3859
+#: ../developer/operations.md:3861
 msgid ""
 "A retired deployment's tables stay until the host reboots, and keep its "
 "pool registered. Once that deployment is gone for good, delete its two "
@@ -7939,11 +7945,11 @@ msgstr ""
 "会对每个组网桥做路由和地址伪装，限制它的正是这张表。任何清空主机整套规则的操作，也会把这些表删掉；下一次检查时会重新装上，连同每个运行中沙箱组的中继和"
 " SSH 例外，但不要在有活跃沙箱组的主机上做这种重新加载。"
 
-#: ../developer/operations.md:3869
+#: ../developer/operations.md:3871
 msgid "Choosing the resolver"
 msgstr "选择解析器"
 
-#: ../developer/operations.md:3871
+#: ../developer/operations.md:3873
 msgid ""
 "`AGENT_EGRESS_DNS_SERVER` is one IPv4 address, and the only DNS a sandbox"
 " can use. A public resolver works anywhere. A site resolver on a private "
@@ -7955,7 +7961,7 @@ msgstr ""
 "DNS。公共解析器在哪里都能用。站点自己的解析器，即使在私有地址上，或者就在本机上，也能用，它会成为沙箱唯一能访问的私有地址，而且只限 53 "
 "端口。它不能是回环地址（沙箱访问不到主机的 `127.0.0.53`），不能是未指定地址，也不能在地址池里面。"
 
-#: ../developer/operations.md:3877
+#: ../developer/operations.md:3879
 msgid ""
 "Under runc, a sandbox is created with `--dns` set to it: Docker's "
 "embedded resolver at `127.0.0.11` answers the relay aliases and forwards "
@@ -7974,11 +7980,11 @@ msgstr ""
 "`/etc/hosts` 里的中继条目放在一起。每次冷启动时在 guest 里做的检查，会同时确认两件事：guest "
 "配置的确实是这个解析器，并且它能正常应答；具体做法是查询一次根域名服务器，任何正常工作的递归解析器都会在三秒内回答。"
 
-#: ../developer/operations.md:3887
+#: ../developer/operations.md:3889
 msgid "Protecting more addresses"
 msgstr "保护更多的地址"
 
-#: ../developer/operations.md:3889
+#: ../developer/operations.md:3891
 msgid ""
 "`AGENT_EGRESS_PROTECTED_CIDRS` takes comma-separated IPv4 blocks to "
 "refuse on top of the built-in ones — an institution's services on public "
@@ -7993,11 +7999,11 @@ msgstr ""
 "端口也仍然能访问，因为 DNS 是最先检查的。改了这个值，要等 runner 和 sandbox manager "
 "带着新值重新部署，才会在主机上生效：每次安装都会替换受保护的地址集合，读回时会拿它和配置对比。"
 
-#: ../developer/operations.md:3896
+#: ../developer/operations.md:3898
 msgid "When something is refused"
 msgstr "被拒绝时怎么排查"
 
-#: ../developer/operations.md:3898
+#: ../developer/operations.md:3900
 msgid ""
 "Settings first. `sandbox_host.sh prepare` reads them with the candidate "
 "image's own parser before any runner is drained, and a refusal prints "
@@ -8008,7 +8014,7 @@ msgstr ""
 "之前，用候选镜像自己的解析器读取这些设置；如果被拒绝，会在下面某条错误之后打印 `the sandbox network settings "
 "were refused (see the error above)`："
 
-#: ../developer/operations.md:3903
+#: ../developer/operations.md:3905
 msgid ""
 "`AGENT_EGRESS_CHAT_NETWORK_POOL must name this deployment's group address"
 " pool` or `… must be RFC1918 space holding at least one /29` — unset, "
@@ -8021,7 +8027,7 @@ msgstr ""
 "`10.0.0.0/8`、`172.16.0.0/12` 和 `192.168.0.0/16` "
 "范围内（链路本地、回环和其他特殊用途的地址段也会被拒绝）；或者比一个 `/29` 还小；"
 
-#: ../developer/operations.md:3907
+#: ../developer/operations.md:3909
 msgid ""
 "`AGENT_EGRESS_DNS_SERVER='…' must be one IPv4 resolver address` or `… "
 "must be reachable from a group bridge` — unset, not IPv4, loopback, "
@@ -8030,7 +8036,7 @@ msgstr ""
 "`AGENT_EGRESS_DNS_SERVER='…' must be one IPv4 resolver address` 或 `… must"
 " be reachable from a group bridge`：没设置、不是 IPv4、是回环地址、是未指定地址，或者落在地址池里；"
 
-#: ../developer/operations.md:3910
+#: ../developer/operations.md:3912
 msgid ""
 "`AGENT_SANDBOX_MCP_URL='…' names a relay by IP; use its network alias` — "
 "each group bridge gives the relay a fresh address, so only its name "
@@ -8039,13 +8045,13 @@ msgstr ""
 "`AGENT_SANDBOX_MCP_URL='…' names a relay by IP; use its network "
 "alias`：每个组网桥都会给中继分配一个新地址，只有名字是不变的。"
 
-#: ../developer/operations.md:3914
+#: ../developer/operations.md:3916
 msgid ""
 "Preflight — until it passes, the runner claims nothing and the sandbox "
 "manager does not start:"
 msgstr "然后是预检。预检通过之前，runner 不会认领任何任务，sandbox manager 也不会启动："
 
-#: ../developer/operations.md:3917
+#: ../developer/operations.md:3919
 msgid ""
 "`the relay network '…' does not exist` — the stack is not up, or "
 "`AGENT_RELAY_NETWORK` names something else;"
@@ -8053,7 +8059,7 @@ msgstr ""
 "`the relay network '…' does not exist`：服务还没起来，或者 `AGENT_RELAY_NETWORK` "
 "指向了别的网络；"
 
-#: ../developer/operations.md:3919
+#: ../developer/operations.md:3921
 msgid ""
 "`` the relay network '…' is not `internal` `` — it must not route "
 "anywhere; let Compose recreate it as declared;"
@@ -8061,7 +8067,7 @@ msgstr ""
 "`` the relay network '…' is not `internal` ``：中继网络绝不能路由到任何地方，让 Compose "
 "按声明重新创建它；"
 
-#: ../developer/operations.md:3921
+#: ../developer/operations.md:3923
 msgid ""
 "`nft failed: …` or `network guard helper could not run: …` — the helper "
 "could not install the rules: the host kernel lacks nftables support, or "
@@ -8070,7 +8076,7 @@ msgstr ""
 "`nft failed: …` 或 `network guard helper could not run: "
 "…`：辅助容器没能装上规则，要么是主机内核不支持 nftables，要么是 Docker 拒绝了这个辅助容器；"
 
-#: ../developer/operations.md:3924
+#: ../developer/operations.md:3926
 msgid ""
 "`the network guard runs its helper from this container's own image` — the"
 " runner finds its image by inspecting its own container, named by "
@@ -8079,7 +8085,7 @@ msgstr ""
 "`the network guard runs its helper from this container's own "
 "image`：runner 是通过检查自己的容器（按 `HOSTNAME` 找）来确定镜像的，自定义了 `hostname:` 就会找不到；"
 
-#: ../developer/operations.md:3927
+#: ../developer/operations.md:3929
 msgid ""
 "`… is missing chain …`, `… holds N rules, expected M`, `… is not hooked "
 "on …`, `… protects …, not the configured set` or `… registers pool …, not"
@@ -8092,7 +8098,7 @@ msgstr ""
 "…`，每条都会写明是哪张表：这些表在装好之后被人改过，或者设置不一样的 runner 和 sandbox manager 在互相覆盖。用同一份 "
 "`.env` 把两者重新部署一遍；"
 
-#: ../developer/operations.md:3932
+#: ../developer/operations.md:3934
 msgid ""
 "`this deployment's pool … overlaps …` — another deployment's pool, or `… "
 "overlaps the host route … on …` — a network the host already has; see "
@@ -8101,7 +8107,7 @@ msgstr ""
 "`this deployment's pool … overlaps …`：和另一个部署的地址池重叠；或者 `… overlaps the "
 "host route … on …`：和主机已有的某个网络重叠；见[地址池重叠](#overlapping-pools)；"
 
-#: ../developer/operations.md:3935
+#: ../developer/operations.md:3937
 msgid ""
 "`the sandbox network needs Docker 28 or newer, client and daemon` — the "
 "relay's gateway priority needs both; see §0."
@@ -8109,13 +8115,13 @@ msgstr ""
 "`the sandbox network needs Docker 28 or newer, client and "
 "daemon`：中继的网关优先级要求客户端和守护进程都满足；见 §0。"
 
-#: ../developer/operations.md:3938
+#: ../developer/operations.md:3940
 msgid ""
 "Group lifecycle. These fail the turn or operation that needed the group's"
 " network; the workspace is kept:"
 msgstr "最后是沙箱组的生命周期。下面这些错误，会让需要这个组网络的轮次或操作失败，工作区会保留："
 
-#: ../developer/operations.md:3941
+#: ../developer/operations.md:3943
 msgid ""
 "`relay alias '…' has no running container on relay network '…'` (or "
 "`multiple running containers`) — a tunnel is down or restarting, or two "
@@ -8124,7 +8130,7 @@ msgstr ""
 "`relay alias '…' has no running container on relay network '…'`（或者 "
 "`multiple running containers`）：某条隧道挂了或正在重启，或者两套服务共用了同一个中继网络；"
 
-#: ../developer/operations.md:3944
+#: ../developer/operations.md:3946
 msgid ""
 "`AGENT_EGRESS_CHAT_NETWORK_POOL … has no free /29 subnet` — every `/29` "
 "in the pool is taken, by this deployment's groups or by other Docker "
@@ -8133,7 +8139,7 @@ msgstr ""
 "`AGENT_EGRESS_CHAT_NETWORK_POOL … has no free /29 subnet`：地址池里的每个 `/29` "
 "都被占满了，要么是本部署的沙箱组占的，要么是同一地址段里的其他 Docker 网络占的；"
 
-#: ../developer/operations.md:3947
+#: ../developer/operations.md:3949
 msgid ""
 "`group network check failed inside the sandbox: …` — the in-guest check "
 "after a cold start found one of:"
@@ -8141,11 +8147,11 @@ msgstr ""
 "`group network check failed inside the sandbox: …`：冷启动之后在 guest "
 "里做的检查，发现了下面某个问题："
 
-#: ../developer/operations.md:3949
+#: ../developer/operations.md:3951
 msgid "`no default route`, `resolver is […], expected […]`;"
 msgstr "`no default route`、`resolver is […], expected […]`；"
 
-#: ../developer/operations.md:3950
+#: ../developer/operations.md:3952
 msgid ""
 "`resolver … did not answer: …` or `… did not answer the query usefully` —"
 " the resolver is down, refuses recursion, or (under runc) the container "
@@ -8154,11 +8160,11 @@ msgstr ""
 "`resolver … did not answer: …` 或 `… did not answer the query "
 "usefully`：解析器挂了、拒绝递归查询，或者（在 runc 下）容器创建时用的解析器，已经不被现在的规则允许了；"
 
-#: ../developer/operations.md:3953
+#: ../developer/operations.md:3955
 msgid "`relay host:port unreachable: …`;"
 msgstr "`relay host:port unreachable: …`；"
 
-#: ../developer/operations.md:3954
+#: ../developer/operations.md:3956
 msgid ""
 "`the host at …:9/udp was refused by ECONNREFUSED, not by the network "
 "rules`, `the metadata address 169.254.169.254:80 answered; the network "
@@ -8174,13 +8180,13 @@ msgstr ""
 "168.63.129.16:80` 也会有同样的提示），或者 `… was not refused within "
 "2s`：主机地址和两个平台地址，都应该立即被规则自己回复的 ICMP 拒绝，结果没有，说明 guest 的流量没有经过本部署的表。"
 
-#: ../developer/operations.md:3962
+#: ../developer/operations.md:3964
 msgid ""
 "The sandbox is stopped, not deleted. Reaching the public internet is not "
 "part of the check — an outside outage is not a broken boundary;"
 msgstr "沙箱会被停掉，但不会删除。能不能访问公网不在检查范围内，因为外部服务出故障，并不代表边界坏了；"
 
-#: ../developer/operations.md:3964
+#: ../developer/operations.md:3966
 msgid ""
 "`fixed relay joined the chat network without its gateway priority` — the "
 "Docker daemon ignored `--gw-priority`; it needs Docker 28 or newer;"
@@ -8188,7 +8194,7 @@ msgstr ""
 "`fixed relay joined the chat network without its gateway priority`：Docker"
 " 守护进程忽略了 `--gw-priority`，需要 Docker 28 或更新版本；"
 
-#: ../developer/operations.md:3966
+#: ../developer/operations.md:3968
 msgid ""
 "`Kata guest network sync failed: …` — the guest-root helper could not "
 "write `/etc/hosts` or `/etc/resolv.conf`;"
@@ -8196,7 +8202,7 @@ msgstr ""
 "`Kata guest network sync failed: …`：guest-root 辅助程序没能写入 `/etc/hosts` 或 "
 "`/etc/resolv.conf`；"
 
-#: ../developer/operations.md:3968
+#: ../developer/operations.md:3970
 msgid ""
 "`retained chat is attached to network '…', which is not its group "
 "bridge`, ending `needs the one-time cleanup` — a chat from the previous "
@@ -8207,7 +8213,7 @@ msgstr ""
 "bridge`，结尾是 `needs the one-time cleanup`：这是旧网络时代留下的对话；sandbox manager "
 "启动时遇到它，会直接无法启动。见下一节；"
 
-#: ../developer/operations.md:3971
+#: ../developer/operations.md:3973
 msgid ""
 "`a running retained chat is not on exactly its group bridge` — a running "
 "guest is never rewired underneath it; stop it first."
@@ -8215,7 +8221,7 @@ msgstr ""
 "`a running retained chat is not on exactly its group bridge`：运行中的 guest "
 "绝不会在底下被重新接线，先把它停掉。"
 
-#: ../developer/operations.md:3974
+#: ../developer/operations.md:3976
 msgid ""
 "In the sandbox manager's log, `chat_legacy_network_found` names a bridge "
 "of this deployment from the previous per-phase topology; it is reported, "
@@ -8228,11 +8234,11 @@ msgstr ""
 "指的是本部署里一个来自以前\"按阶段分网络\"拓扑的网桥；它只会被报告出来，绝不会被接管或修复。`chat_group_relay_exceptions_left`"
 " 表示某个已删除网桥的中继条目，没能从表里撤掉。网桥没了之后，这些条目什么都匹配不上；如果辅助容器一直运行不了，下一次激活会失败。"
 
-#: ../developer/operations.md:3980
+#: ../developer/operations.md:3982
 msgid "One-time cleanup when upgrading to the one network"
 msgstr "升级到单一网络时的一次性清理"
 
-#: ../developer/operations.md:3982
+#: ../developer/operations.md:3984
 msgid ""
 "Only for a host that ran the previous network — per-phase bridges and the"
 " Squid proxy. A host that never did needs none of this. The new version "
@@ -8251,7 +8257,7 @@ msgstr ""
 "就完全起不来；旧的网桥则只会被记日志。设计上把这次切换定位为开发和测试主机上的一步操作，那些主机上没有需要迁移的用户（§8），所以下面的步骤会丢弃旧的保留对话。**在第"
 " 4 步之前，把你需要的工作区都导出来。**"
 
-#: ../developer/operations.md:3992
+#: ../developer/operations.md:3994
 msgid ""
 "**Remove only this deployment's resources.** Every listing below filters "
 "by this deployment's own labels: the Compose project for the stack's own "
@@ -8267,24 +8273,24 @@ msgstr ""
 "Compose "
 "项目名）。删任何东西之前，先看一遍列出来的内容。带着别的项目名或命名空间的资源，属于这台机器上的另一个部署，不要动它；分不清归属的东西，也不要动。"
 
-#: ../developer/operations.md:4000
+#: ../developer/operations.md:4002
 msgid ""
 "Drain the host (**Admin → Servers**) and wait until it runs nothing, then"
 " stop this stack:"
 msgstr "排空主机（**Admin → Servers**），等它上面什么都不跑了，再停掉这套服务："
 
-#: ../developer/operations.md:4008
+#: ../developer/operations.md:4010
 msgid ""
 "If the checkout already holds the new release, add the two settings from "
 "step 7 to `.env` first: the new compose file does not render without "
 "them."
 msgstr "如果代码目录里已经是新版本了，先把第 7 步里的两个设置加进 `.env`，否则新的 compose 文件渲染不出来。"
 
-#: ../developer/operations.md:4011
+#: ../developer/operations.md:4013
 msgid "List this deployment's chat containers:"
 msgstr "列出本部署的对话容器："
 
-#: ../developer/operations.md:4020
+#: ../developer/operations.md:4022
 msgid ""
 "Stopping the stack leaves chat containers as they were, so some may still"
 " be running. Every one of them predates the upgrade. The new version "
@@ -8295,17 +8301,17 @@ msgstr ""
 "停掉服务并不会改变对话容器的状态，所以有些可能还在运行。它们全都是升级之前创建的。新版本会拒绝任何还接在旧网络上的容器，而且它们没有一个是用 "
 "`AGENT_EGRESS_DNS_SERVER` 创建的，在 runc 下，容器的解析器在创建时就固定了。所以它们都得删掉。"
 
-#: ../developer/operations.md:4026
+#: ../developer/operations.md:4028
 msgid ""
 "Export what you want to keep. A chat's workspace exists only in its "
 "container's writable layer, and `docker cp` reads a stopped container:"
 msgstr "先把想保留的东西导出来。对话的工作区只存在于容器的可写层里，`docker cp` 可以读取已停止的容器："
 
-#: ../developer/operations.md:4033
+#: ../developer/operations.md:4035
 msgid "Remove the containers from step 2, by ID:"
 msgstr "按 ID 删除第 2 步列出的那些容器："
 
-#: ../developer/operations.md:4039
+#: ../developer/operations.md:4041
 msgid ""
 "This is the one sanctioned `docker rm` of chat containers; everywhere "
 "else [Retained Docker storage on a host](#retained-docker-storage-"
@@ -8315,11 +8321,11 @@ msgstr ""
 "这是唯一一处被允许对对话容器执行 `docker rm` 的地方；其他任何场合，[主机上的保留 Docker 存储](#retained-"
 "docker-storage-on-a-host)都禁止这么做。这些对话无法再继续（上下文显示为 `LOST`）；新任务会用新的容器。"
 
-#: ../developer/operations.md:4044
+#: ../developer/operations.md:4046
 msgid "List this deployment's chat networks, and remove the old ones:"
 msgstr "列出本部署的对话网络，删掉旧的："
 
-#: ../developer/operations.md:4055
+#: ../developer/operations.md:4057
 msgid ""
 "Each line is a name, whether the network is internal, and its bridge "
 "interface name. An old `freeinference-chat-net-*` network is internal "
@@ -8331,13 +8337,13 @@ msgstr ""
 "internal 的（`true`），并且没有接口名；新版本的组网桥不是 internal 的，接口名以 `ca…` "
 "开头。新版本运行之前，列出来的全都是旧的。"
 
-#: ../developer/operations.md:4061
+#: ../developer/operations.md:4063
 msgid ""
 "Remove the proxy and the old Compose networks and volume. List what "
 "Compose created for this project:"
 msgstr "删掉代理，以及旧的 Compose 网络和卷。先列出 Compose 为这个项目创建的东西："
 
-#: ../developer/operations.md:4073
+#: ../developer/operations.md:4075
 msgid ""
 "Remove, with `docker rm -f`, `docker network rm` and `docker volume rm`: "
 "the containers of the services `agent-egress-proxy` and `agent-egress-"
@@ -8358,7 +8364,7 @@ msgstr ""
 "egress-proxy-config` 卷，它里面只有生成的 Squid 配置。列表里的其他东西都不属于这次清理。如果之前用上一个版本执行过 "
 "`down`，其中一部分可能已经删掉了。"
 
-#: ../developer/operations.md:4084
+#: ../developer/operations.md:4086
 msgid ""
 "Update the host's `.env`. Set `AGENT_EGRESS_CHAT_NETWORK_POOL`, which no "
 "longer has a default, and `AGENT_EGRESS_DNS_SERVER`. The old default pool"
@@ -8375,7 +8381,7 @@ msgstr ""
 "`10.240.0.0/16`：如果这台机器上有两个部署都保留了它，请给其中一个换一个，否则后启动的那个会拒绝启动。删除已退役的设置——`AGENT_EGRESS_SETUP_TIER`、`AGENT_EGRESS_AGENT_TIER`、`AGENT_EGRESS_ALLOWLIST`、`AGENT_EGRESS_NETWORK_*`、`AGENT_EGRESS_PROXY_*`、`AGENT_EGRESS_STOP_GRACE`、`AGENT_SANDBOX_NETWORK`"
 " 和 `AGENT_SANDBOX_ALLOW_OPEN_NETWORK`。已经没有任何东西读取它们。"
 
-#: ../developer/operations.md:4094
+#: ../developer/operations.md:4096
 msgid ""
 "Undrain the host (**Admin → Servers**, or `POST /admin/agent/runner-"
 "hosts/<host>/undrain`) — with its runners stopped it claims nothing yet, "
@@ -8393,24 +8399,24 @@ msgstr ""
 "tables`（见[主机上的防火墙表](#the-host-tables)）确认本部署的 `inet` 和 `bridge` "
 "两张表都在，然后跑一个 setup 里会安装软件包的新任务。"
 
-#: ../developer/operations.md:4103
+#: ../developer/operations.md:4105
 msgid "Runtime verification"
 msgstr "运行时验证"
 
-#: ../developer/operations.md:4105
+#: ../developer/operations.md:4107
 msgid ""
 "Run the adapter contract tests after changing runtime integration code. "
 "They replay recorded and synthetic events to pin normalized mapping "
 "without a live model or deployment credential:"
 msgstr "改了运行时集成代码之后，要跑适配器的契约测试。它们会重放录下来的事件和合成的事件，在不需要真实模型、也不需要部署凭据的情况下，锁定事件规范化后的映射："
 
-#: ../developer/operations.md:4113
+#: ../developer/operations.md:4115
 msgid ""
 "The MCP suites live here with the catalogue, per-user registry, relay, "
 "filters, API and runtime adapter. After changing that path, run at least:"
 msgstr "MCP 的测试套件也在这里，和目录、每用户的注册表、中继、过滤器、API 以及运行时适配器放在一起。改了这条路径之后，至少要跑："
 
-#: ../developer/operations.md:4123
+#: ../developer/operations.md:4125
 msgid ""
 "These tests do not invoke the installed agent binaries. An installed-CLI "
 "smoke test and full live-model matrix belong to the deployment operating "
@@ -8422,7 +8428,7 @@ msgstr ""
 "的冒烟测试，以及完整的真实模型测试矩阵，归运营这些二进制、模型和凭据的部署方负责。那套一致性测试的配置放在部署 overlay "
 "里，不要放进中立的上游仓库。"
 
-#: ../developer/operations.md:4128
+#: ../developer/operations.md:4130
 msgid ""
 "What the first staging and production runs exercised, and what they left "
 "unverified, is kept as a [dated record](../agents/reviews/2026-08-04"
@@ -8432,11 +8438,11 @@ msgstr ""
 "运行实际验证了哪些东西、又留下了哪些没验证，保存为一份[带日期的记录](../agents/reviews/2026-08-04-sandbox-"
 "operations-verification-baseline.md)。"
 
-#: ../developer/operations.md:4132
+#: ../developer/operations.md:4134
 msgid "SSH servers"
 msgstr "SSH 服务器"
 
-#: ../developer/operations.md:4134
+#: ../developer/operations.md:4136
 msgid ""
 "An owner registers their own Linux servers under **Settings → SSH "
 "connections** (`/settings/ssh-connections`), checks each one, and turns "
@@ -8452,7 +8458,7 @@ msgstr ""
 "服务器设计](../agents/specs/2026-10-15-user-ssh-servers-design.zh-CN.md)，以及 "
 "[AGENTS.md](../../AGENTS.md) §7 里关于所有者 SSH 服务器的那一条。"
 
-#: ../developer/operations.md:4142
+#: ../developer/operations.md:4144
 msgid ""
 "**Migration and key.** `0080_user_ssh_servers` adds `agent_ssh_servers`, "
 "`agent_ssh_thread_bindings`, `agent_ssh_server_events` and the "
@@ -8467,7 +8473,7 @@ msgstr ""
 "`AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` 在它专用的 `hybridinference/ssh-server-"
 "key/v1` 域下加密；没有这把密钥时，这一部分会如实提示，并且无法添加任何服务器。"
 
-#: ../developer/operations.md:4148
+#: ../developer/operations.md:4150
 #, python-brace-format
 msgid ""
 "**Rollout.** Runners and sandbox managers advertise `ssh-access-v1`, and "
@@ -8485,7 +8491,7 @@ msgstr ""
 " 这个接口，这一轮会失败，而不是在缺了服务器的情况下照样启动 "
 "agent。先把主机升级好，再让所有者在上面开启服务器；已经固定在旧主机上的沙箱组会等着。"
 
-#: ../developer/operations.md:4155
+#: ../developer/operations.md:4157
 msgid ""
 "**What a turn does.** Before setup and the agent start, the runner sends "
 "the sandbox manager the group's whole SSH state from the claim, marked as"
@@ -8512,7 +8518,7 @@ msgstr ""
 "最上面加一行 "
 "`Include`。其他成员只会失去服务器，不会多出服务器。如果一个沙箱组里从来没有对话选过服务器，这些都不会发生，也不会发送任何状态。"
 
-#: ../developer/operations.md:4168
+#: ../developer/operations.md:4170
 msgid ""
 "**Taking access away is immediate; granting it waits for the next turn.**"
 " Turning a server on or off for a chat, editing, checking, rekeying or "
@@ -8546,7 +8552,7 @@ msgstr ""
 "把沙箱组标记为运行中时，控制平面会再推送一次这个组的状态；它比认领时读到的更新，不管两者谁先到，manager "
 "都会保留这一份。控制平面连不上的主机，会随下一轮的认领拿到状态。"
 
-#: ../developer/operations.md:4187
+#: ../developer/operations.md:4189
 msgid ""
 "**Checks dial out from the control plane.** A check resolves the address,"
 " refuses it whole if any answer is private, reserved or protected, reads "
@@ -8565,17 +8571,17 @@ msgstr ""
 "设成和主机一样的值，这样检查拒绝的地址块就和沙箱一致。控制平面需要能向外连接所有者服务器的 SSH 端口（TCP）。每个所有者每小时最多做 20 "
 "次检查。每次检查对每个输出流最多读 64 KB，超过就杀掉客户端，所以一台用大量输出刷屏的服务器，只会让检查失败，而不会把控制平面的内存撑满。"
 
-#: ../developer/operations.md:4197
+#: ../developer/operations.md:4199
 msgid ""
 "**Owner firewalls.** A server that limits who may connect must allow both"
 " the control plane (for checks) and every host its chats may run on."
 msgstr "**所有者的防火墙。** 如果服务器限制了谁能连接，就必须同时放行控制平面（用于检查），以及它的对话可能运行的每一台主机。"
 
-#: ../developer/operations.md:4200
+#: ../developer/operations.md:4202
 msgid "Owner model connections"
 msgstr "所有者模型连接"
 
-#: ../developer/operations.md:4202
+#: ../developer/operations.md:4204
 msgid ""
 "An owner adds their own inference endpoint under **Settings → My settings"
 " → Personal model connections** (`/settings/my-settings`): a name, a Base"
@@ -8595,7 +8601,7 @@ msgstr ""
 "-user-model-connections.zh-CN.md)，以及 [AGENTS.md](../../AGENTS.md) §7 "
 "中的所有者模型连接条目。"
 
-#: ../developer/operations.md:4212
+#: ../developer/operations.md:4214
 msgid ""
 "**Turning it off.** `AGENT_MODEL_CONNECTIONS_ENABLED` is on unless it is "
 "set to `0`, `false` or `no`, and connections are the only inference, so "
@@ -8611,7 +8617,7 @@ msgstr ""
 " "
 "`false`，之后再取消设置。这个设置只控制准入。关闭它会停止新建连接、重新启用连接以及在连接上的新轮次或新消息；已经准入的轮次仍在原连接上运行或失败。它不能用来停止正在运行的工作。"
 
-#: ../developer/operations.md:4219
+#: ../developer/operations.md:4221
 msgid ""
 "**Rolling back.** Do not run a release from before independent accounts "
 "against this database: it would read neither the accounts nor the "
@@ -8624,7 +8630,7 @@ msgstr ""
 "不要针对这个数据库运行独立账号版本之前的版本：它既读不了账号，也读不了连接来源。只要还存在任何连接、任何指向连接的轮次或等待中的消息、或任何驻留在连接上的成员（包括已结束的会话），降级"
 " `0106` 就会拒绝执行。是否删除这些数据，需要事先作为数据决策来定。"
 
-#: ../developer/operations.md:4224
+#: ../developer/operations.md:4226
 msgid ""
 "**Migration and key.** `0106_user_model_connections` adds the tables and "
 "the source columns. Keys are encrypted with "
@@ -8640,7 +8646,7 @@ msgstr ""
 "域下加密；没有这个密钥时，页面会说明原因，什么都无法保存。所有者接口不会返回密钥，被拒绝的请求只指出出错的字段，不回显其内容。主机经过授权的领取和驻留响应确实带有密钥：成员的"
 " CLI 就是这样拿到它的。"
 
-#: ../developer/operations.md:4231
+#: ../developer/operations.md:4233
 msgid ""
 "**Verification and protocols.** Owners are not asked which APIs their "
 "provider offers, and cannot declare them. Verifying a model streams a "
@@ -8675,7 +8681,7 @@ msgstr ""
 "都不能用，输入框也不会提供它。模型无法支持的组合会在提交任务或消息时被拒绝，在每次领取和驻留时还会再检查一次；不会退回到其他连接、模型或 "
 "API，推理时也不会边试边换。"
 
-#: ../developer/operations.md:4251
+#: ../developer/operations.md:4253
 msgid ""
 "**Reasoning levels come from the provider's declaration.** Beside every "
 "verification, and when the owner chooses **Refresh reasoning levels** on "
@@ -8725,7 +8731,7 @@ msgstr ""
 " Chat 请求中以 `reasoning_effort` 发送该轮的级别；CLI 自己的推理强度字段（Claude Code 在自动时也会填 "
 "`high`）从不转发。"
 
-#: ../developer/operations.md:4278
+#: ../developer/operations.md:4280
 msgid ""
 "**Verify before saving.** Creating a connection, and an edit that changes"
 " its key or Base URL or adds models, verifies inside the saving request "
@@ -8761,7 +8767,7 @@ msgstr ""
 " 48 次服务商请求、分两批各四个模型进行。 验证的总时限为 240 秒，超时返回 `504 "
 "model_connection_verification_timeout`，不写入任何内容。部署自带的边缘代理允许此时长，额外的代理也必须允许。保存期间禁用取消按钮，因为服务端仍可能提交请求。"
 
-#: ../developer/operations.md:4302
+#: ../developer/operations.md:4304
 msgid ""
 "**Where requests go.** The OpenAI CLIs append `/chat/completions` or "
 "`/responses` to the Base URL exactly as written. Claude Code's SDK "
@@ -8781,7 +8787,7 @@ msgstr ""
 "`anthropic-version: 2023-06-01` 认证；验证用同样的 URL 和同样的请求头。CLI 还可能在同一主机上调用 "
 "`count_tokens`、`/v1/models` 和 `HEAD /api/hello`；服务商没有这些接口也能正常运行。"
 
-#: ../developer/operations.md:4311
+#: ../developer/operations.md:4313
 msgid ""
 "**Model ID suggestions.** The add and edit forms can load the provider's "
 "model list on request to pick IDs from: `POST /v1/agent/model-connections"
@@ -8807,7 +8813,7 @@ msgstr ""
 "`…/v1/models`（最多两次请求）。失败时只返回类别。它不写入任何内容，列出的 ID "
 "在表单保存并验证之前不代表任何结论；读取列表是可选的，任何 ID 都可以手动输入。"
 
-#: ../developer/operations.md:4325
+#: ../developer/operations.md:4327
 msgid ""
 "**Host rollout.** Runners advertise `model-connections-v1`, and `model-"
 "protocol-translation-v1` when they can run a translated member. A claim "
@@ -8819,7 +8825,7 @@ msgstr ""
 "**主机发布。** 运行器会声明 `model-connections-v1`，能运行需要转换的成员时还会声明 `model-protocol-"
 "translation-v1`。连接上的轮次或需要转换的轮次如果被没有声明所需能力的运行器领取，会被释放且不消耗尝试次数，所以要先发布主机。连接被停用、删除或不再适用时，轮次在领取时以相应原因失败。"
 
-#: ../developer/operations.md:4331
+#: ../developer/operations.md:4333
 msgid ""
 "**What a turn does.** The claim carries the connection's exact Base URL, "
 "protocol, credential revision and key; the runner masks the key. The "
@@ -8840,7 +8846,7 @@ msgstr ""
 " 的 CLI 绝不会拿到 Messages 连接的密钥，Claude Code 也不会拿到 OpenAI 连接的密钥。密钥、Base URL "
 "或该模型经验证的路径变了之后，下一轮会启动新进程，因为计划和令牌都属于进程复用的身份。领取和它的驻留必须在凭据版本和计划（`client>upstream`）两方面都一致；如果轮次启动期间路径变了，这次启动会失败，而不会把两者混在一起。"
 
-#: ../developer/operations.md:4342
+#: ../developer/operations.md:4344
 msgid ""
 "**Scan history.** When a key is bound to a residency, an encrypted "
 "scanning copy is still recorded under a separate domain against that "
@@ -8855,7 +8861,7 @@ msgstr ""
 "时，仍会在独立的加密域下记录一份加密的扫描副本，归属于该沙箱组和连接版本，但已经没有任何东西读取它：用到它的工作区快照扫描已经随平台发布器一起删除，平台也不会扫描"
 " agent 推送的内容。删除连接后，副本仍随沙箱组记录保留；它仍然是真实的服务商密钥，在这里删除连接并不会在服务商处撤销它。"
 
-#: ../developer/operations.md:4350
+#: ../developer/operations.md:4352
 msgid ""
 "**Translated turns.** For Codex or Claude Code on a model whose only "
 "usable API is Chat Completions, the host installs `/usr/local/libexec"
@@ -8899,7 +8905,7 @@ msgstr ""
 "Code 不带 WebSearch 工具；其他工具照常可用，包括 Codex 子智能体和 MCP 工具。之前的推理或 thinking 不会发给 "
 "Chat Completions 服务商。`AGENT_COMPAT_*` 变量属于启动器，永远不会传到 CLI。"
 
-#: ../developer/operations.md:4374
+#: ../developer/operations.md:4376
 msgid ""
 "**Changes take effect at once.** A verified new key or Base URL, "
 "disabling or deleting a connection releases every residency started on "
@@ -8916,7 +8922,7 @@ msgstr ""
 " "
 "会替换所有模型的验证结果。保存时与已存值相同的字段（包括重新填入的同一个密钥）不算变更：重命名连接或移除模型不会关闭任何进程，其他模型的验证结果也保持不变。控制平面暂时联系不上的主机，会在下一次驻留心跳被拒绝时关闭进程。"
 
-#: ../developer/operations.md:4382
+#: ../developer/operations.md:4384
 msgid ""
 "**Verification dials out from the control plane.** It runs only on the "
 "owner's explicit save, never when a page opens or a field is typed in. "
@@ -8944,7 +8950,7 @@ msgstr ""
 " 端口 HTTPS：每个解析出的地址都必须通过 MCP 连接策略和沙箱的受保护网段（包括 "
 "`AGENT_EGRESS_PROTECTED_CIDRS`），连接固定到检查过的地址，不跟随重定向，不使用代理，也不回显或记录上游响应体和密钥。"
 
-#: ../developer/operations.md:4397
+#: ../developer/operations.md:4399
 msgid ""
 "**Usage.** The owner's provider bills these turns. A run's usage footer, "
 "the admin run detail and the Usage pages show the tokens the agent "
@@ -8954,11 +8960,208 @@ msgstr ""
 "**用量。** 这些轮次由所有者的服务商计费。运行的用量页脚、管理端的运行详情和用量页面显示智能体上报的 token "
 "数，并注明由服务商计费；不显示费用。哪些计入、哪些不计入，见[用量](#usage)。"
 
-#: ../developer/operations.md:4402
+#: ../developer/operations.md:4404
+msgid "Provided models"
+msgstr "部署提供的模型"
+
+#: ../developer/operations.md:4406
+msgid ""
+"A deployment can offer models of its own beside owners' connections. An "
+"administrator saves a provider's Base URL, the deployment's key and the "
+"model ids under **Admin → Settings → Models**; every admitted owner then "
+"finds those models in the composer with nothing to set up. Design and the"
+" boundaries it changes: [provided models](../agents/specs/2026-11-12"
+"-platform-model-relay.zh-CN.md), and the provided models entry in "
+"[AGENTS.md](../../AGENTS.md) §7."
+msgstr ""
+"除了所有者自己的连接，部署也可以提供自己的模型。管理员在 **Admin → Settings → Models** 里保存服务商的 Base "
+"URL、部署的密钥和模型 "
+"id，之后每个获准的所有者都能在输入框的模型列表里看到这些模型，不用做任何设置。设计和它改动的边界见[部署提供的模型](../agents/specs/2026-11-12"
+"-platform-model-relay.zh-CN.md)，以及 [AGENTS.md](../../AGENTS.md) §7 "
+"里“Provided models”一条。"
+
+#: ../developer/operations.md:4413
+msgid ""
+"**Where the key is.** Only in the control plane, encrypted under the "
+"settings root key. A member's CLI on a provided model is told its "
+"provider is the host's `model-tunnel` (at the connection's own path) and "
+"holds a residency placeholder (`amd.`) as its API key. The tunnel ends at"
+" the control plane's model relay, a listener of its own "
+"(`create_model_relay_app`, port 8002). On every request the relay "
+"resolves the placeholder to the running turn it speaks for, checks the "
+"turn runs on that connection and its owner may send the model another "
+"request today, and forwards the request to the connection's Base URL with"
+" the deployment's key. It forwards only the inference and model-listing "
+"paths an agent CLI calls, for the models the connection lists. Stop, a "
+"finished turn, a rotated residency and a removed host take effect on the "
+"next request; nothing has to be revoked at the provider."
+msgstr ""
+"**密钥在哪里。** 只在控制平面，用设置根密钥加密保存。成员的 CLI 用部署提供的模型时，得到的服务商地址是主机上的 `model-"
+"tunnel`（路径和连接自己的一样），拿到的 API key 是一个 residency "
+"占位凭据（`amd.`）。隧道的另一头是控制平面上的模型中继，它是一个单独的监听器（`create_model_relay_app`，端口 "
+"8002）。每个请求到达时，中继把占位凭据解析成它所代表的运行中轮次，确认这个轮次确实跑在这个连接上，而且它的所有者今天还能再向这个模型发一次请求，然后带上部署的密钥，把请求转发到连接的"
+" Base URL。它只转发 agent CLI 会调用的推理和模型列表路径，而且只限连接列出的模型。Stop、轮次结束、residency "
+"轮换、主机被移除，都从下一个请求起生效；不需要到服务商那边撤销任何东西。"
+
+#: ../developer/operations.md:4426
+msgid ""
+"**Allowances.** Each model has a default: how many requests each owner "
+"may send it per UTC day. Empty is unlimited; `0` offers the model only to"
+" accounts given a number of their own, which an administrator sets per "
+"account and model on the same page. A model with no default is offered to"
+" nobody, and a connection cannot be enabled until every model has one. A "
+"request is one inference call the relay let through, so one turn spends "
+"many. A request the provider did not serve (unreachable, `429`, `5xx`) is"
+" not counted. When an allowance is used up the relay answers `403`, the "
+"turn ends with the agent's own error, and new turns on that model are "
+"refused until 00:00 UTC. Two more caps limit requests in flight: per "
+"owner (4 by default) and, optionally, per model across everyone. Both are"
+" kept in the relay process, so they apply per replica of it."
+msgstr ""
+"**用量上限。** 每个模型有一个默认值：每个所有者每个 UTC 日可以向它发多少次请求。留空表示不限；`0` "
+"表示这个模型只提供给另外单独设了次数的账号，管理员在同一个页面上按账号和模型设置。没有默认值的模型不提供给任何人，连接里每个模型都设了默认值之后才能启用。一次请求是指中继放行的一次推理调用，所以一个轮次会用掉很多次。服务商没有处理的请求（连不上、`429`、`5xx`）不计数。次数用完后，中继返回"
+" `403`，这个轮次以 agent 自己的报错结束，在 00:00 UTC "
+"之前这个模型上的新轮次都会被拒绝。另外还有两个上限约束同时进行中的请求：每个所有者一个（默认 "
+"4），以及可选的、每个模型在所有人范围内的一个。两者都记在中继进程里，所以是按中继的每个副本分别生效的。"
+
+#: ../developer/operations.md:4439
+msgid ""
+"**What it is not.** There is no token or dollar accounting here: a "
+"request may be small or large. Give the deployment's key a budget and a "
+"model list at the provider; an owner who sends many large requests can "
+"exhaust that budget for everyone before running out of requests. A "
+"connection may name an **end-user header**: the relay then sends, with "
+"every request, an opaque tag for the owner's account (a keyed digest, not"
+" the account id or email), which a provider that supports it can "
+"attribute or limit by."
+msgstr ""
+"**它不做什么。** 这里不核算 "
+"token，也不核算金额：一次请求可大可小。请在服务商那边给部署的密钥设好预算和可用的模型；一个所有者连发很多大请求，可以在自己的次数用完之前就耗尽所有人共用的这份预算。连接可以指定一个**终端用户请求头**：指定后，中继会在每个请求上带一个代表所有者账号的不透明标签（一个带密钥的摘要，不是账号"
+" id 或邮箱），支持的服务商可以按它归因或限额。"
+
+#: ../developer/operations.md:4449
+msgid ""
+"On the control plane, add `model-relay` to `COMPOSE_PROFILES`. The "
+"`model-relay` service binds `127.0.0.1:8002` (`AGENT_MODEL_RELAY_BIND` / "
+"`AGENT_MODEL_RELAY_PORT`); keep it off the public edge."
+msgstr ""
+"在控制平面上，把 `model-relay` 加进 `COMPOSE_PROFILES`。`model-relay` 服务绑定在 "
+"`127.0.0.1:8002`（`AGENT_MODEL_RELAY_BIND` / "
+"`AGENT_MODEL_RELAY_PORT`）；不要把它放到公网入口后面。"
+
+#: ../developer/operations.md:4453
+msgid ""
+"On each host that should run these turns, add `model-relay` to "
+"`COMPOSE_PROFILES`, set `AGENT_SANDBOX_MODEL_RELAY_URL=http://agent-"
+"models:8000` and give the `model-tunnel` an SSH key of its own "
+"(`AGENT_MODEL_TUNNEL_*`), on an account of its own on the control-plane "
+"machine, allowed that one forward and nothing else:"
+msgstr ""
+"在每台要运行这类轮次的主机上，把 `model-relay` 加进 `COMPOSE_PROFILES`，设置 "
+"`AGENT_SANDBOX_MODEL_RELAY_URL=http://agent-models:8000`，并给 `model-"
+"tunnel` 单独一把 SSH "
+"密钥（`AGENT_MODEL_TUNNEL_*`）。这把密钥在控制平面机器上用一个专门的账号，只允许这一条转发，别的都不允许："
+
+#: ../developer/operations.md:4463
+msgid ""
+"The host then advertises `model-relay-v1`; a host without it is never "
+"handed a turn on a provided model, and the admin page warns while no host"
+" advertises it."
+msgstr ""
+"之后这台主机会通告 `model-"
+"relay-v1`；没有通告的主机永远领不到跑在部署提供的模型上的轮次，而且只要没有任何主机通告它，管理页面就会给出警告。"
+
+#: ../developer/operations.md:4466
+msgid ""
+"Roll hosts before the control plane, as always ([rolling deployment order"
+"](#rolling-deployment-order))."
+msgstr "和平时一样，先发布主机，再发布控制平面（[滚动部署顺序](#rolling-deployment-order)）。"
+
+#: ../developer/operations.md:4468
+msgid ""
+"In **Admin → Settings → Models**, add the connection. The save verifies "
+"every model with the key, as an owner's save does, and stores nothing if "
+"one fails. Set each model's default allowance, then enable it."
+msgstr ""
+"在 **Admin → Settings → Models** "
+"里添加连接。保存时会用这把密钥验证每个模型，和所有者保存自己的连接时一样，只要有一个不通过就什么都不保存。给每个模型设好默认上限，然后启用。"
+
+#: ../developer/operations.md:4472
+msgid "Things to know when operating it:"
+msgstr "运维时需要知道的几件事："
+
+#: ../developer/operations.md:4474
+msgid ""
+"**A new key closes nothing.** No process holds the key, so the next "
+"request uses the new one. A new Base URL, disabling and deleting close "
+"every member process on the connection, as for an owner's connection."
+msgstr ""
+"**换密钥不会关闭任何进程。** 没有进程持有密钥，所以下一个请求就用新的。换 Base "
+"URL、停用和删除，会关闭这个连接上的每个成员进程，和所有者自己的连接一样。"
+
+#: ../developer/operations.md:4477
+msgid ""
+"**The relay is on the path.** Requests and answers of provided models "
+"pass through the control plane; nothing of them is stored or logged (one "
+"line per request: job, account id, model, status, duration). Restarting "
+"the `model-relay` service, which a control-plane release does, cuts "
+"answers in flight; agent CLIs retry. Turns on owners' own connections do "
+"not pass through it."
+msgstr ""
+"**中继在请求路径上。** 部署提供的模型的请求和应答会经过控制平面；它们的内容既不保存也不写日志（每个请求只有一行：job、账号 "
+"id、模型、状态码、耗时）。重启 `model-relay` 服务（控制平面每次发布都会重启）会中断进行中的应答，agent CLI "
+"会重试。所有者自己的连接上的轮次不经过它。"
+
+#: ../developer/operations.md:4483
+msgid ""
+"**A refused key.** If the provider answers `401` to the deployment's key,"
+" the relay answers `502` to the agent, logs "
+"`agent_model_relay_key_refused` and the admin page shows since when. It "
+"clears on the next request the provider accepts, or when the key is "
+"replaced."
+msgstr ""
+"**密钥被拒绝。** 如果服务商对部署的密钥返回 `401`，中继会向 agent 返回 `502`，记一条 "
+"`agent_model_relay_key_refused` "
+"日志，管理页面显示从什么时候开始。等服务商下一次接受请求，或者密钥被更换后，这个状态就会清除。"
+
+#: ../developer/operations.md:4488
+msgid ""
+"**Nothing falls back.** A turn on a provided model never moves to the "
+"owner's own connection, or the reverse. A disabled or deleted connection "
+"refuses its turns with that reason."
+msgstr "**不会回退。** 跑在部署提供的模型上的轮次，永远不会换到所有者自己的连接上，反过来也一样。连接被停用或删除后，它的轮次会以这个原因被拒绝。"
+
+#: ../developer/operations.md:4491
+msgid ""
+"**`AGENT_MODEL_CONNECTIONS_ENABLED`** switches provided models off "
+"together with owners' connections."
+msgstr "**`AGENT_MODEL_CONNECTIONS_ENABLED`** 会把部署提供的模型和所有者的连接一起关掉。"
+
+#: ../developer/operations.md:4493
+msgid ""
+"**Rolling back.** Downgrading `0116` refuses while a provided connection "
+"exists or any turn or waiting message names one. The previous release "
+"reads such a turn's source as a connection it cannot find and refuses its"
+" next message."
+msgstr ""
+"**回滚。** 只要还存在部署提供的连接，或者有轮次、排队消息指向它，降级 `0116` "
+"就会拒绝执行。上一个版本会把这种轮次的来源当成一个找不到的连接，并拒绝它的下一条消息。"
+
+#: ../developer/operations.md:4497
+msgid ""
+"**Claude Code and the first-party host.** Claude Code decides some "
+"features from the host name it is pointed at. Through the relay it sees "
+"the relay's name, so a provided connection to its vendor's own API "
+"behaves as any third-party endpoint does."
+msgstr ""
+"**Claude Code 和它自家的主机名。** Claude Code "
+"会根据它被指向的主机名决定一些功能。经过中继后，它看到的是中继的名字，所以即使部署提供的连接指向它厂商自己的 API，行为也和任何第三方端点一样。"
+
+#: ../developer/operations.md:4502
 msgid "Reusable cloud environments"
 msgstr "可复用的云环境"
 
-#: ../developer/operations.md:4404
+#: ../developer/operations.md:4504
 msgid ""
 "Migration `0065_environments` adds owner configuration, immutable "
 "encrypted versions, fixed workspace bindings, isolated test leases and "
@@ -8974,7 +9177,7 @@ msgstr ""
 "variable/v1` 域下加密。这把密钥要和现有的凭据存储一起备份；不经重新加密就换掉它，旧的绑定就读不出来了。Secrets "
 "无法通过所有者的读取或历史 API 拿到。"
 
-#: ../developer/operations.md:4411
+#: ../developer/operations.md:4511
 msgid ""
 "Repository environments are a standard product feature, available without"
 " an admin switch. Settings, task selection and the Environment tab are "
@@ -8990,7 +9193,7 @@ msgstr ""
 "`AGENT_REPOSITORY_ENVIRONMENTS_ENABLED`，都会被忽略，也不再出现在设置编辑器里。没有配置环境的任务，仍按基础环境运行，不做准备；配置了环境的工作区，仍然要求"
 " runner 和 sandbox manager 实际支持 `environment-v1`。"
 
-#: ../developer/operations.md:4419
+#: ../developer/operations.md:4519
 msgid ""
 "Upgrade every control-plane replica before creating any new environment-"
 "bound workspace; mixed old/new admission, Fork and terminal handlers may "
@@ -9002,7 +9205,7 @@ msgstr ""
 "在创建任何新的、绑定了环境的工作区之前，先把每一个控制平面副本都升级好；如果新旧版本混着处理准入、Fork "
 "和终端请求，绑定信息可能会悄悄丢失。一旦出现了第一个绑定，就不要再回滚到读不懂它的二进制版本。如果非要回滚：先关掉这些执行入口，把环境测试和环境准备都排空，并让已绑定的工作区留在兼容的主机上，或者隔离起来。"
 
-#: ../developer/operations.md:4425
+#: ../developer/operations.md:4525
 msgid ""
 "Roll out the environment-capable runner and sandbox manager together. A "
 "claiming replica must attest `environment-v1`, and the actual "
@@ -9019,7 +9222,7 @@ msgstr ""
 "attempt；它绝不能在缺少变量的情况下运行这些任务。环境测试同样遵守部署固定、计算资源准入、副本证明和主机槽位的限制，并且只拿到只读的源码凭据，拿不到推理、MCP"
 " 或仓库写入的授权。"
 
-#: ../developer/operations.md:4433
+#: ../developer/operations.md:4533
 msgid ""
 "Preparation receipts live in the host credential directory under "
 "`environment-preparation`, outside container mounts and source archives. "
@@ -9034,7 +9237,7 @@ msgstr ""
 "重启时，这份主机状态要保留。安装在每个固定的工作区上只会成功一次；startup 在每次实际启动时运行一次。失败的步骤会一直显示在 "
 "Environment 标签页里，可以针对原来的绑定重试。"
 
-#: ../developer/operations.md:4440
+#: ../developer/operations.md:4540
 msgid ""
 "Manual-action receipts live next to preparation state under `environment-"
 "actions`. They reserve the run before launching a command and retain its "
@@ -9052,7 +9255,7 @@ msgstr ""
 " "
 "`unknown`，绝不会自动重放。换一个幂等键开始新的运行之前，先检查一下它在外部已经造成了哪些影响。这些回执并不能保证外部服务里的副作用恰好只发生一次。"
 
-#: ../developer/operations.md:4449
+#: ../developer/operations.md:4549
 msgid ""
 "The output of a test, a preparation or an action is stored masked and "
 "bounded, with each NUL and unpaired surrogate replaced by U+FFFD: "
@@ -9062,7 +9265,7 @@ msgstr ""
 "测试、准备步骤或操作的输出，会经过遮蔽、限制长度后存储，其中每个 NUL 和落单的代理项都会替换为 U+FFFD：这两种字符 Postgres "
 "都存不了，而拒绝这段输出，会让测试或命令一直完不成。"
 
-#: ../developer/operations.md:4453
+#: ../developer/operations.md:4553
 msgid ""
 "Empty bindings still pin the original task's selection, but require "
 "neither `environment-v1` nor preparation. Each environment test reserves "
@@ -9074,7 +9277,7 @@ msgstr ""
 "上占用一个本地槽位，这样其他空闲槽位还能继续认领编码任务。主机上的孤儿查询是只读的，并且限流；租约过期和历史记录的维护，由控制平面的 reaper"
 " 负责。"
 
-#: ../developer/operations.md:4459
+#: ../developer/operations.md:4559
 msgid ""
 "Cancellation fences the result immediately but keeps the leased slot "
 "until cleanup is confirmed or the lease expires. An expired orphan no "
@@ -9092,7 +9295,7 @@ msgstr ""
 "ID，并在确认清理之前，删掉那些确切的、带标签的容器。不要为了腾容量去删无关的沙箱组，也不要绕过租约和容器身份的检查。已经归档、并且没人再引用的版本，30"
 " 天后回收；已有的工作区和测试绑定，会保留它们当时的加密值，用于遮蔽。"
 
-#: ../developer/operations.md:4468
+#: ../developer/operations.md:4568
 msgid ""
 "Owner-provided credentials can be read and sent outside by user code "
 "through the existing network. Known-value masking does not cover encoded "
@@ -9103,7 +9306,7 @@ msgstr ""
 "所有者提供的凭据，可以被用户代码读取，并通过现有的网络发送出去。按已知值做的遮蔽覆盖不到编码过的 secret、所有者原始的终端和文件，也覆盖不到"
 " Git 推送；平台也不会扫描推送的内容。平台持有的长期凭据、保留的变量名，以及固定的出口规则，仍然受保护。"
 
-#: ../developer/operations.md:4473
+#: ../developer/operations.md:4573
 msgid ""
 "Environment setup, startup and actions share executable package data in "
 "`/workspace/.cloud-agent-tools`, excluded through Git's local exclude "
@@ -9118,11 +9321,11 @@ msgstr ""
 "目录仍然是私有的。显式刷新运行时会保留安装时的输入，并从下一轮开始生效；已经在运行的服务继续用旧值。startup "
 "恢复只是明确放行接下来的一次人工轮次，绝不是一张永久的成功回执。"
 
-#: ../developer/operations.md:4480
+#: ../developer/operations.md:4580
 msgid "Team environments"
 msgstr "团队环境"
 
-#: ../developer/operations.md:4482
+#: ../developer/operations.md:4582
 msgid ""
 "A team's owner and admins can create environments for the team: in "
 "Settings → Environments, **New environment** or **Copy** offers the teams"
@@ -9140,7 +9343,7 @@ msgstr ""
 " 403。创建、编辑和移除团队环境，都会记在团队的审计日志里。设计见[团队](../agents/specs/2026-10-15-team-"
 "shared-workspace-design.zh-CN.md) §6。"
 
-#: ../developer/operations.md:4491
+#: ../developer/operations.md:4591
 msgid ""
 "**Each member's own container.** A team environment is shared "
 "configuration, not a shared workspace. A member's task runs in that "
@@ -9154,7 +9357,7 @@ msgstr ""
 "团队环境共享的是配置，而不是工作区。成员的任务在这个成员自己的容器里运行，用的是团队的变量和脚本、这个成员自己的模型连接和 MCP "
 "连接；这个成员个人的全局变量只在运行时使用（只用于安装的那些会被排除；如果名字相同，以团队的定义为准）。所以安装结果对每位成员都一样，团队才能共享快照。"
 
-#: ../developer/operations.md:4498
+#: ../developer/operations.md:4598
 msgid ""
 "**Secrets are shared.** Every member who can run a task with a team "
 "environment can read its Secrets from inside that task; the dialog says "
@@ -9164,7 +9367,7 @@ msgstr ""
 "**Secrets 是共享的。** 只要能用团队环境运行任务，成员就能在任务里读到它的 "
 "Secrets，对话框里也会说明这一点。请把它们当作整个团队都知道的内容；如果某位成员离开后不应该再持有某个 Secret，就把它轮换掉。"
 
-#: ../developer/operations.md:4502
+#: ../developer/operations.md:4602
 msgid ""
 "**Leaving.** A binding records the team and the member's access "
 "generation. When a member leaves, is removed, or the team is deleted, "
@@ -9183,14 +9386,14 @@ msgstr ""
 " "
 "409；遮蔽仍然会读取它的值。重新加入团队也不会让旧对话恢复，因为代次已经往前走了。如果成员的仓库默认设置指向一个他已经不能再用的团队环境，下次他开始任务时，这个默认设置会被清掉。"
 
-#: ../developer/operations.md:4512
+#: ../developer/operations.md:4612
 msgid ""
 "**Removal.** Removing a team environment clears every member's default "
 "that names it. Conversations already bound keep their fixed "
 "configuration, as with a personal environment."
 msgstr "**移除环境。** 移除一个团队环境，会清掉所有指向它的成员默认设置。已经绑定的对话，和个人环境一样，保持它们固定下来的配置。"
 
-#: ../developer/operations.md:4515
+#: ../developer/operations.md:4615
 msgid ""
 "**Rollback.** Downgrading below `0082_team_environments` is refused while"
 " any team environment exists, archived ones included."

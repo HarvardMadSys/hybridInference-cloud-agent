@@ -35,7 +35,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 from cloud_agent.application.model_connections import (
     access_for_job,
     connection_residency_credential,
-    model_connection_cipher,
     unusable_error,
 )
 from cloud_agent.application.residency import residency_ttl_s
@@ -132,7 +131,7 @@ async def _fork_source_job(
     try:
         if not source_job.get("model_connection_id"):
             raise ModelConnectionUnusable("no_connection")
-        await access_for_job(job_store.model_connections, source_job, model_connection_cipher())
+        await access_for_job(job_store.model_connections, source_job)
     except (ModelConnectionUnusable, CredentialCipherError) as exc:
         raise _credential_refused(exc) from None
     return source_job

@@ -3678,6 +3678,8 @@ Allowed:
   checked before the protected ranges, so a resolver on a private address or
   on this host works — on port 53 only;
 - the group's own MCP relay, by exact bridge, address and port;
+- the model relay, the same way, on a host configured with one
+  ([Provided models](#provided-models));
 - the exact public IPv4 address and port of each SSH server the group's owner
   registered, checked and enabled for one of its chats, by exact bridge, in the
   `ssh_targets` set. It is consulted after the protected ranges, so a protected
@@ -4398,6 +4400,104 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
   admin run detail and the Usage pages show the tokens the agent reported and
   say the provider bills it; there is no cost. What is and is not counted is
   in [Usage](#usage).
+
+## Provided models
+
+A deployment can offer models of its own beside owners' connections. An
+administrator saves a provider's Base URL, the deployment's key and the model
+ids under **Admin → Settings → Models**; every admitted owner then finds those
+models in the composer with nothing to set up. Design and the boundaries it
+changes: [provided models](../agents/specs/2026-11-12-platform-model-relay.zh-CN.md),
+and the provided models entry in [AGENTS.md](../../AGENTS.md) §7.
+
+**Where the key is.** Only in the control plane, encrypted under the settings
+root key. A member's CLI on a provided model is told its provider is the
+host's `model-tunnel` (at the connection's own path) and holds a residency
+placeholder (`amd.`) as its API key. The tunnel ends at the control plane's
+model relay, a listener of its own (`create_model_relay_app`, port 8002). On
+every request the relay resolves the placeholder to the running turn it
+speaks for, checks the turn runs on that connection and its owner may send
+the model another request today, and forwards the request to the connection's
+Base URL with the deployment's key. It forwards only the inference and
+model-listing paths an agent CLI calls, for the models the connection lists.
+Stop, a finished turn, a rotated residency and a removed host take effect on
+the next request; nothing has to be revoked at the provider.
+
+**Allowances.** Each model has a default: how many requests each owner may
+send it per UTC day. Empty is unlimited; `0` offers the model only to accounts
+given a number of their own, which an administrator sets per account and
+model on the same page. A model with no default is offered to nobody, and a
+connection cannot be enabled until every model has one. A request is one
+inference call the relay let through, so one turn spends many. A request the
+provider did not serve (unreachable, `429`, `5xx`) is not counted. When an
+allowance is used up the relay answers `403`, the turn ends with the agent's
+own error, and new turns on that model are refused until 00:00 UTC. Two more
+caps limit requests in flight: per owner (4 by default) and, optionally, per
+model across everyone. Both are kept in the relay process, so they apply per
+replica of it.
+
+**What it is not.** There is no token or dollar accounting here: a request
+may be small or large. Give the deployment's key a budget and a model list at
+the provider; an owner who sends many large requests can exhaust that budget
+for everyone before running out of requests. A connection may name an
+**end-user header**: the relay then sends, with every request, an opaque tag
+for the owner's account (a keyed digest, not the account id or email), which
+a provider that supports it can attribute or limit by.
+
+To turn it on:
+
+1. On the control plane, add `model-relay` to `COMPOSE_PROFILES`. The
+   `model-relay` service binds `127.0.0.1:8002`
+   (`AGENT_MODEL_RELAY_BIND` / `AGENT_MODEL_RELAY_PORT`); keep it off the
+   public edge.
+2. On each host that should run these turns, add `model-relay` to
+   `COMPOSE_PROFILES`, set `AGENT_SANDBOX_MODEL_RELAY_URL=http://agent-models:8000`
+   and give the `model-tunnel` an SSH key of its own (`AGENT_MODEL_TUNNEL_*`),
+   on an account of its own on the control-plane machine, allowed that one
+   forward and nothing else:
+
+   ```text
+   command="",restrict,port-forwarding,permitopen="127.0.0.1:8002" ssh-ed25519 AAAA... models
+   ```
+
+   The host then advertises `model-relay-v1`; a host without it is never
+   handed a turn on a provided model, and the admin page warns while no host
+   advertises it.
+3. Roll hosts before the control plane, as always
+   ([rolling deployment order](#rolling-deployment-order)).
+4. In **Admin → Settings → Models**, add the connection. The save verifies
+   every model with the key, as an owner's save does, and stores nothing if
+   one fails. Set each model's default allowance, then enable it.
+
+Things to know when operating it:
+
+- **A new key closes nothing.** No process holds the key, so the next request
+  uses the new one. A new Base URL, disabling and deleting close every member
+  process on the connection, as for an owner's connection.
+- **The relay is on the path.** Requests and answers of provided models pass
+  through the control plane; nothing of them is stored or logged (one line
+  per request: job, account id, model, status, duration). Restarting the
+  `model-relay` service, which a control-plane release does, cuts answers in
+  flight; agent CLIs retry. Turns on owners' own connections do not pass
+  through it.
+- **A refused key.** If the provider answers `401` to the deployment's key,
+  the relay answers `502` to the agent, logs
+  `agent_model_relay_key_refused` and the admin page shows since when. It
+  clears on the next request the provider accepts, or when the key is
+  replaced.
+- **Nothing falls back.** A turn on a provided model never moves to the
+  owner's own connection, or the reverse. A disabled or deleted connection
+  refuses its turns with that reason.
+- **`AGENT_MODEL_CONNECTIONS_ENABLED`** switches provided models off together
+  with owners' connections.
+- **Rolling back.** Downgrading `0116` refuses while a provided connection
+  exists or any turn or waiting message names one. The previous release reads
+  such a turn's source as a connection it cannot find and refuses its next
+  message.
+- **Claude Code and the first-party host.** Claude Code decides some features
+  from the host name it is pointed at. Through the relay it sees the relay's
+  name, so a provided connection to its vendor's own API behaves as any
+  third-party endpoint does.
 
 ## Reusable cloud environments
 

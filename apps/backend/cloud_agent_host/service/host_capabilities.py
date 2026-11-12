@@ -20,7 +20,11 @@ from cloud_agent_host.service.local_settings import _sandbox_resource_setting
 from cloud_agent_shared import sandbox_archive_settings
 from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY, ENVIRONMENT_INFERENCE_CAPABILITY
 from cloud_agent_shared.environment_snapshots import ENVIRONMENT_SNAPSHOT_CAPABILITY
-from cloud_agent_shared.model_connections import HOST_MODEL_CONNECTION_CAPABILITIES
+from cloud_agent_shared.model_connections import (
+    HOST_MODEL_CONNECTION_CAPABILITIES,
+    MODEL_RELAY_CAPABILITY,
+    MODEL_RELAY_URL_ENV,
+)
 from cloud_agent_shared.sandbox_manager_compat import manager_env
 from cloud_agent_shared.sandbox_restore import SANDBOX_RESTORE_CAPABILITY
 from cloud_agent_shared.shared_protocol import (
@@ -173,6 +177,9 @@ def _environment_host_capabilities(backend: SandboxBackend, stamp: dict[str, Any
         ENVIRONMENT_SNAPSHOT_CAPABILITY,
         SSH_ACCESS_CAPABILITY,
         *HOST_MODEL_CONNECTION_CAPABILITIES,
+        # Only a host whose sandboxes reach the model relay runs a turn on a
+        # connection the deployment provides.
+        *([MODEL_RELAY_CAPABILITY] if (os.environ.get(MODEL_RELAY_URL_ENV) or "").strip() else []),
     ]
 
 
