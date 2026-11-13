@@ -6,7 +6,7 @@ import json
 import threading
 from types import SimpleNamespace
 
-from cloud_agent_host.manager_api.turns import _TurnBoundary, _turn_frames
+from cloud_agent_host.manager_api.turns import _turn_frames, _TurnBoundary
 
 
 def test_shared_turn_emits_a_question_change_frame_while_native_output_is_silent():
