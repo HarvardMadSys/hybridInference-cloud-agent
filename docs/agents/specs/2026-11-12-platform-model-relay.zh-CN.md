@@ -1,6 +1,6 @@
 # 平台提供的模型：模型中继与每人每模型的用量上限
 
-日期：2026-11-12。状态：已实现，和本文在同一个 PR 里；第 11 节的三处决定仍需评审确认。哪些做了、哪些没做见第 14 节。
+日期：2026-11-12。状态：已实现，和本文在同一个 PR 里；第 11 节的三处决定已于 2026-11-13 和维护者确认。哪些做了、哪些没做见第 14 节。
 
 设计核对基线：远端 `dev`，提交 `ccf7e07f1`。
 
@@ -379,6 +379,8 @@ limits:
 
 ## 11. 需要定的事
 
+**2026-11-13 的决定。** 和维护者讨论后，确定按本设计做，下面三处改动成立。同一天合进 `dev` 的另一条路线，是给每个获准用户在推理服务上开一个账号、发一把只能用 agent 模型的 key，由用户自己填进个人连接（#1155 和推理服务那边的配套改动）。它和本设计解决的是同一个需求，走的是第 2 节说的每人一把 key 的路线，还要求推理服务认识本服务的用户。按这个决定，它在本设计合并以后由后续的 PR 撤回。
+
 接受本设计，就要改这三处：
 
 1. **组桥上再加一个 relay。** [只保留独立账号](2026-10-30-independent-accounts-only.md)删掉了组桥上的推理中继，那份设计也把中继列为不计划做。本设计加回一个，但它不依赖任何一个供应商，也不带回登录、准入和 grant。
@@ -437,7 +439,7 @@ limits:
 
 和本文在同一个 PR 里的：
 
-- 控制面：迁移 `0116`；平台连接的解析、claim 和 residency（`application/model_connections.py`）；模型中继和它的 listener（`api/model_relay.py`、`create_model_relay_app`）；管理接口和审计（`api/admin_operator_models.py`）；`/v1/agent/config` 的 `provided_sources`；用量应答的 `source`。
+- 控制面：迁移 `0118`；平台连接的解析、claim 和 residency（`application/model_connections.py`）；模型中继和它的 listener（`api/model_relay.py`、`create_model_relay_app`）；管理接口和审计（`api/admin_operator_models.py`）；`/v1/agent/config` 的 `provided_sources`；用量应答的 `source`。
 - 宿主机：`model-relay-v1` 能力；`relayed` 的启动把地址换成本机的模型中继；成员的 loopback 服务只在启动标明上游是模型中继时接受明文 HTTP。
 - 部署：控制面的 `model-relay` 服务和宿主机的 `model-tunnel`，都在 `model-relay` profile 后面。
 - 界面：模型选择器分组和剩余次数，Settings 的只读卡片，Admin → Settings → Models。
