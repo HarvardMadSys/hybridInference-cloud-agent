@@ -8,9 +8,9 @@ queue has one set of rules however it was woken.
 
 The settlement itself is one transaction in the store. What happens here is the
 part that cannot be inside it: checking the first message against the turn it
-would follow — the owner's Agent access, model, effort, repository access,
-skills, uploads — can reach the gateway and the source-control provider, and a
-thread's lock must not be held across either. The check is made outside, handed
+would follow — the owner's Agent access, model connection, effort, repository
+access, skills, uploads — can reach the source-control provider, and a
+thread's lock must not be held across that. The check is made outside, handed
 back in, and applied only if it was made for exactly the message and the turn
 the transaction then finds.
 """
@@ -20,17 +20,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from fastapi import HTTPException
-
 from cloud_agent.application.follow_ups import PreparedFollowUp, prepare_follow_up
-from cloud_agent.domain.pending_messages import PreparedHead, SettleOutcome
-from cloud_agent.logging_utils import get_logger
-from cloud_agent.owner_access import (
+from cloud_agent.application.owner_access import (
     AGENT_ACCESS_WITHDRAWN,
     AgentAccessUnavailable,
     owner_may_use_agent,
 )
-from cloud_agent.source_control_runtime import SourceControlUnavailable
+from cloud_agent.domain.errors import Refused, Unavailable
+from cloud_agent.domain.pending_messages import PreparedHead, SettleOutcome
+from cloud_agent.logging_utils import get_logger
+from cloud_agent.source_control.source_control_runtime import SourceControlUnavailable
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -41,7 +40,7 @@ if TYPE_CHECKING:
         SkillRepository,
         SourceControlRepository as SourceControlPort,
     )
-    from cloud_agent.source_control_runtime import GitHubAppSource
+    from cloud_agent.source_control.source_control_runtime import GitHubAppSource
 
 logger = get_logger(__name__)
 
@@ -87,22 +86,12 @@ def prepared_head(
     )
 
 
-def _refusal(exc: HTTPException) -> str:
-    """The sentence a refused check gave its owner, for the held message."""
-    detail = exc.detail
-    if isinstance(detail, dict):
-        error = detail.get("error")
-        if isinstance(error, dict) and error.get("message"):
-            return str(error["message"])
-    return str(detail)
-
-
 async def prepare_message(
     store: QueueStorage,
     *,
     message: dict[str, Any],
     parent_job_id: str,
-    gateway: Any,
+    owners: Any,
     app_credentials: Any | None,
 ) -> PreparedHead | None:
     """Check one waiting message against the turn it would follow.
@@ -111,21 +100,21 @@ async def prepare_message(
     parent *now* — which is not the turn that was running when the message was
     written, and may run a different model. A refusal comes back as a
     ``PreparedHead`` carrying the reason, and the settlement holds the message
-    with it. ``None`` means the check could not be made — the gateway did not
-    answer, say — and nothing about the message should change: the next
-    settlement asks again.
+    with it. ``None`` means the check could not be made — the account store
+    did not answer, say — and nothing about the message should change: the
+    next settlement asks again.
 
     **The owner's Agent access is asked first.** A message waiting in the queue
     is sent with no request of its owner's behind it, so nothing else here
     would notice that their access was withdrawn after they wrote it. A denial
-    holds the message with the reason; a Gateway that cannot answer leaves it
-    waiting, exactly as for any other check that could not be made.
+    holds the message with the reason; a directory that cannot answer leaves
+    it waiting, exactly as for any other check that could not be made.
     """
     parent = await store.conversation_queries.get_job(parent_job_id)
     if parent is None:
         return None
     try:
-        permitted = await owner_may_use_agent(gateway, user_id=str(message["user_id"]))
+        permitted = await owner_may_use_agent(owners, user_id=str(message["user_id"]))
     except AgentAccessUnavailable:
         logger.warning(
             "agent_pending_message_check_unavailable",
@@ -157,25 +146,25 @@ async def prepare_message(
             reasoning_effort=message.get("reasoning_effort"),
             store=store,
             app_credentials=app_credentials,
-            gateway=gateway,
         )
-    except HTTPException as exc:
-        if exc.status_code >= 500:
-            logger.warning(
-                "agent_pending_message_check_unavailable",
-                extra={
-                    "event": "agent_pending_message_check_unavailable",
-                    "thread_id": message.get("thread_id"),
-                    "message_id": message.get("id"),
-                    "status_code": exc.status_code,
-                },
-            )
-            return None
+    except Unavailable as exc:
+        logger.warning(
+            "agent_pending_message_check_unavailable",
+            extra={
+                "event": "agent_pending_message_check_unavailable",
+                "thread_id": message.get("thread_id"),
+                "message_id": message.get("id"),
+                "error_type": exc.type,
+            },
+        )
+        return None
+    except Refused as exc:
+        # The sentence the refused check gave its owner, for the held message.
         return PreparedHead(
             message_id=str(message["id"]),
             revision=int(message["revision"]),
             parent_job_id=parent_job_id,
-            error=_refusal(exc),
+            error=exc.message,
         )
     except Exception:
         # An outage is not a verdict on the message. Holding it would make the
@@ -197,7 +186,7 @@ async def settle_queue(
     store: QueueStorage,
     *,
     thread_id: str,
-    gateway: Any,
+    owners: Any,
     app_credentials: Any | None,
     prepared: PreparedHead | None = None,
 ) -> SettleOutcome:
@@ -206,7 +195,7 @@ async def settle_queue(
     Safe to call from anywhere, at any time, any number of times: under the
     thread's lock a second call finds the turn the first one created and does
     nothing. ``prepared`` is a check the caller already made — the submit route
-    checks the message it is adding — so the common case asks the gateway once.
+    checks the message it is adding — so the common case checks it once.
     """
     for _ in range(_SETTLE_ROUNDS):
         outcome = await store.pending_messages.settle_queue(thread_id=thread_id, prepared=prepared)
@@ -226,7 +215,7 @@ async def settle_queue(
             store,
             message=outcome.head,
             parent_job_id=outcome.parent_job_id,
-            gateway=gateway,
+            owners=owners,
             app_credentials=app_credentials,
         )
         if prepared is None:
@@ -243,7 +232,7 @@ def _app_credentials(github_app: GitHubAppSource | None) -> Any:
 
 
 async def _settle_with(
-    store: QueueStorage, *, thread_id: str, gateway: Any, app_credentials: Any
+    store: QueueStorage, *, thread_id: str, owners: Any, app_credentials: Any
 ) -> SettleOutcome:
     if app_credentials is _APP_UNAVAILABLE:
         # The ending is still recorded and a failed or cancelled turn still
@@ -252,7 +241,7 @@ async def _settle_with(
         # message its owner may send. Unprepared, the store sends nothing.
         return await store.pending_messages.settle_queue(thread_id=thread_id, prepared=None)
     return await settle_queue(
-        store, thread_id=thread_id, gateway=gateway, app_credentials=app_credentials
+        store, thread_id=thread_id, owners=owners, app_credentials=app_credentials
     )
 
 
@@ -260,7 +249,7 @@ async def settle_queue_when_possible(
     store: QueueStorage,
     *,
     thread_id: str,
-    gateway: Any,
+    owners: Any,
     github_app: GitHubAppSource | None,
 ) -> SettleOutcome:
     """Settle one queue for a caller that holds no App credentials of its own.
@@ -273,7 +262,7 @@ async def settle_queue_when_possible(
     return await _settle_with(
         store,
         thread_id=thread_id,
-        gateway=gateway,
+        owners=owners,
         app_credentials=_app_credentials(github_app),
     )
 
@@ -294,7 +283,7 @@ class QueueSweep:
 async def settle_waiting_queues(
     store: QueueStorage,
     *,
-    gateway: Any,
+    owners: Any,
     github_app: GitHubAppSource | None,
     limit: int = 50,
     sweep: QueueSweep | None = None,
@@ -321,7 +310,7 @@ async def settle_waiting_queues(
     for thread_id in page:
         try:
             await _settle_with(
-                store, thread_id=thread_id, gateway=gateway, app_credentials=app_credentials
+                store, thread_id=thread_id, owners=owners, app_credentials=app_credentials
             )
         except Exception:
             logger.warning(

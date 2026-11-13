@@ -407,15 +407,18 @@ async def test_a_version_no_image_holds_is_refused_rather_than_stored(admin_clie
     # agent Settings can update is downloaded by updating to the version…
     detail = response.json()["detail"]
     assert "Update to it from Settings" in detail
-    assert "EXTRA_VERSIONS" not in detail
-    # …and only one it cannot, Kilo, has to be built into the image.
+    assert "SHARED_SANDBOX_RUNTIME_PINS" not in detail
+    # …and only one it cannot, Kilo, changes with the image's reviewed pin.
     kilo = await client.put(
         "/admin/agent/runtime-versions",
         json={"runtime": "kilo", "version": "9.9.9"},
         headers=ADMIN,
     )
     assert kilo.status_code == 404
-    assert "EXTRA_VERSIONS" in kilo.json()["detail"]
+    kilo_detail = kilo.json()["detail"]
+    assert "pinned in the sandbox image" in kilo_detail
+    assert "SHARED_SANDBOX_RUNTIME_PINS" in kilo_detail
+    assert "Update to it from Settings" not in kilo_detail
     assert store.runtime_versions == {}
 
 
@@ -598,7 +601,12 @@ async def test_the_pool_lists_every_setting_an_admin_may_set_with_its_bounds(adm
         "terminal_output_max_mib",
         "terminal_input_max_kib",
         "terminal_max_streams_per_session",
+        "lease_ttl_s",
     }
+    # A lease shorter than one renewal round trip would expire before it renews.
+    assert definitions["lease_ttl_s"]["minimum"] == 41
+    assert definitions["lease_ttl_s"]["maximum"] == 900
+    assert definitions["lease_ttl_s"]["scope"] == "runner"
     assert definitions["source_import_max_mib"] | {"label": None, "description": None} == {
         "key": "source_import_max_mib",
         "env": "AGENT_SOURCE_IMPORT_MAX_MIB",

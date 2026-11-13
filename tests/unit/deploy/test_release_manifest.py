@@ -29,7 +29,7 @@ import jsonschema
 import pytest
 from deploy.release import release_manifest as rm
 
-from cloud_agent_host import sandbox as host_sandbox
+from cloud_agent_host.container import sandbox as host_sandbox
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCHEMA = json.loads((REPO_ROOT / "deploy/release/manifest.schema.json").read_text())
@@ -41,7 +41,11 @@ _SCHEMA_VALIDATOR_CLASS.check_schema(SCHEMA)
 SCHEMA_VALIDATOR = _SCHEMA_VALIDATOR_CLASS(SCHEMA)
 
 COMMIT = "4af1b771ac8f736a1be24f20cb307012af114a18"
-RUN_URL = "https://github.com/HarvardMadSys/hybridInference-cloud-agent/actions/runs/34559400992"
+RUN_URL = "https://github.com/HarvardMadSys/cloud-agent/actions/runs/34559400992"
+RECIPE_URL = "https://github.com/HarvardMadSys/cloud-agent/releases/download/x/r.tgz"
+#: The repository's name until 2026-11-10. Every release published before then,
+#: the v1 fixture included, carries it, and pinned bytes are never rewritten.
+FORMER_REPOSITORY = "HarvardMadSys/hybridInference-cloud-agent"
 
 ROLES = ("control", "runner", "sandbox", "tunnel")
 RUNTIMES = ("claude-code", "codex", "pi", "opencode", "kilo")
@@ -74,7 +78,6 @@ def built_artifacts() -> list[dict[str, Any]]:
     return [
         artifact("control"),
         artifact("web", base_path=""),
-        artifact("web", base_path="/agents"),
         *(artifact(role) for role in ROLES[1:]),
     ]
 
@@ -110,7 +113,7 @@ def build(**overrides: Any) -> dict[str, Any]:
         "source_commit": COMMIT,
         "artifacts": built_artifacts(),
         "runtime_labels": labels(),
-        "recipe_url": "https://github.com/HarvardMadSys/hybridInference-cloud-agent/releases/download/agent-4af1b77/recipe.tar.gz",
+        "recipe_url": "https://github.com/HarvardMadSys/cloud-agent/releases/download/agent-4af1b77/recipe.tar.gz",
         "recipe_sha256": hexdigest("recipe"),
         "publisher_run_url": RUN_URL,
         "protocol": rm.deploy_protocol(),
@@ -131,11 +134,10 @@ def test_a_complete_build_produces_a_manifest_the_schema_accepts() -> None:
     manifest = build()
     SCHEMA_VALIDATOR.validate(manifest)
     assert [entry["role"] for entry in manifest["artifacts"]] == sorted(
-        ["control", "web", "web", "runner", "sandbox", "tunnel"]
+        ["control", "web", "runner", "sandbox", "tunnel"]
     )
     assert {entry["variant"] for entry in manifest["artifacts"] if entry["role"] == "web"} == {
         "root",
-        "agents",
     }
 
 
@@ -165,10 +167,10 @@ def test_a_duplicated_role_is_refused(duplicated: str) -> None:
 
 
 def test_web_is_built_once_per_mount_shape() -> None:
-    only_root = [entry for entry in built_artifacts() if entry.get("base_path") != "/agents"]
+    retired = [*built_artifacts(), artifact("web", base_path="/agents", seed="web-agents")]
     with pytest.raises(rm.ManifestError) as raised:
-        build(artifacts=only_root)
-    assert "mount shape" in str(raised.value)
+        build(artifacts=retired)
+    assert "base path" in str(raised.value)
 
     two_roots = [*built_artifacts(), artifact("web", base_path="", seed="web-root-again")]
     with pytest.raises(rm.ManifestError) as raised:
@@ -176,7 +178,7 @@ def test_web_is_built_once_per_mount_shape() -> None:
     assert "mount shape" in str(raised.value)
 
     unknown_path = [
-        entry if entry.get("base_path") != "/agents" else artifact("web", base_path="/agent")
+        entry if entry.get("base_path") != "" else artifact("web", base_path="/agent")
         for entry in built_artifacts()
     ]
     with pytest.raises(rm.ManifestError) as raised:
@@ -204,16 +206,6 @@ def test_one_image_cannot_stand_in_for_two_artifacts() -> None:
     with pytest.raises(rm.ManifestError) as raised:
         build(artifacts=artifacts)
     assert "same image" in str(raised.value)
-
-
-def test_the_two_web_variants_cannot_share_a_digest() -> None:
-    artifacts = built_artifacts()
-    first = next(entry for entry in artifacts if entry.get("base_path") == "")
-    second = next(entry for entry in artifacts if entry.get("base_path") == "/agents")
-    second["image"] = first["image"]
-    with pytest.raises(rm.ManifestError) as raised:
-        build(artifacts=artifacts)
-    assert "never built" in str(raised.value)
 
 
 @pytest.mark.parametrize(
@@ -273,6 +265,45 @@ def test_the_publisher_run_is_recorded() -> None:
     assert "publisher_run_url" in str(raised.value)
 
 
+def test_a_release_names_the_repository_it_is_published_from() -> None:
+    """The run URL the publication workflow passes, under the repository's current name.
+
+    `Write the manifest` builds it from `GITHUB_REPOSITORY`, which GitHub spells
+    `HarvardMadSys/cloud-agent` since the rename on 2026-11-10. A generator that
+    still expected the former name refused its own run's URL, so every Publish
+    run on dev failed at that step; this is the URL of one of them.
+    """
+    run_url = "https://github.com/HarvardMadSys/cloud-agent/actions/runs/42978256348"
+    manifest = build(publisher_run_url=run_url)
+    SCHEMA_VALIDATOR.validate(manifest)
+    assert manifest["source_repository"] == rm.SOURCE_REPOSITORY == "HarvardMadSys/cloud-agent"
+    assert manifest["publisher_run_url"] == run_url
+
+
+def test_the_generator_does_not_write_the_former_name() -> None:
+    """Readers accept both names; a new release is written under the current one."""
+    with pytest.raises(rm.ManifestError) as raised:
+        build(publisher_run_url=f"https://github.com/{FORMER_REPOSITORY}/actions/runs/42701785447")
+    assert "publisher_run_url" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "run_url",
+    [
+        pytest.param("https://github.com/HarvardMadSys/other/actions/runs/1", id="another"),
+        pytest.param("https://github.com/harvardmadsys/cloud-agent/actions/runs/1", id="respelled"),
+        pytest.param(
+            "https://github.com/HarvardMadSys/cloud-agent-mirror/actions/runs/1", id="lookalike"
+        ),
+        pytest.param("https://github.com/HarvardMadSys/cloud-agent/actions/runs/", id="no run"),
+    ],
+)
+def test_the_publisher_run_belongs_to_this_repository(run_url: str) -> None:
+    with pytest.raises(rm.ManifestError) as raised:
+        build(publisher_run_url=run_url)
+    assert "publisher_run_url" in str(raised.value)
+
+
 # ---------------------------------------------------------- the runtime catalog
 
 
@@ -315,7 +346,7 @@ def test_an_unlabelled_sandbox_cannot_be_released() -> None:
 def test_the_label_names_are_the_ones_the_host_reads() -> None:
     """Two modules read these labels; a rename in one must not pass silently.
 
-    `cloud_agent_host.sandbox` reads them at claim time to stamp an attempt, and
+    `cloud_agent_host.container.sandbox` reads them at claim time to stamp an attempt, and
     this generator reads them to describe a release. The names are duplicated
     rather than imported — a publication job has no business loading the host
     package — so the agreement is asserted here.
@@ -337,7 +368,7 @@ def test_the_database_revision_is_alembics_head() -> None:
     """A property, not the current value: a head is whatever the chain ends at."""
     revisions: set[str] = set()
     parents: set[str] = set()
-    for path in (REPO_ROOT / "migrations/versions").glob("*.py"):
+    for path in (REPO_ROOT / "apps/backend/migrations/versions").glob("*.py"):
         text = path.read_text()
         revision = next(
             (line for line in text.splitlines() if line.startswith("revision = ")), None
@@ -411,6 +442,31 @@ def test_the_upgrade_instructions_name_the_revision_this_release_migrates_to(
             lambda m: m.update(publisher_run_url="https://example.test/run"),
             id="publisher outside the repository",
         ),
+        pytest.param(
+            lambda m: m.update(
+                publisher_run_url="https://github.com/HarvardMadSys/other/actions/runs/1"
+            ),
+            id="publisher in another repository",
+        ),
+        pytest.param(
+            lambda m: m.update(
+                publisher_run_url="https://github.com/HarvardMadSys/cloud-agent-mirror/actions/runs/1"
+            ),
+            id="publisher in a lookalike repository",
+        ),
+        pytest.param(
+            lambda m: m.update(
+                publisher_run_url="https://github.com/harvardmadsys/cloud-agent/actions/runs/1"
+            ),
+            id="publisher repository respelled",
+        ),
+        pytest.param(
+            lambda m: m.update(source_repository="HarvardMadSys/other"), id="another repository"
+        ),
+        pytest.param(
+            lambda m: m.update(source_repository="harvardmadsys/cloud-agent"),
+            id="repository respelled",
+        ),
         pytest.param(lambda m: m.update(extra="field"), id="unknown field"),
     ],
 )
@@ -419,6 +475,28 @@ def test_the_schema_rejects_a_tampered_manifest(tamper) -> None:
     tamper(manifest)
     with pytest.raises(jsonschema.ValidationError):
         SCHEMA_VALIDATOR.validate(manifest)
+
+
+@pytest.mark.parametrize("repository", [rm.SOURCE_REPOSITORY, FORMER_REPOSITORY])
+def test_the_schema_accepts_either_name_of_the_repository(repository: str) -> None:
+    """One repository, renamed on 2026-11-10, so two names and no others.
+
+    The releases published before the rename name the former one in all three
+    places, and their bytes are pinned, so the v1 schema keeps accepting them,
+    as it keeps accepting a retired web variant; the releases after it name the
+    current one. Exact strings: the tampered cases above refuse a respelling
+    and any other repository.
+    """
+    manifest = contract_fixture()
+    assert manifest["source_repository"] == FORMER_REPOSITORY, "the fixture predates the rename"
+    manifest["source_repository"] = repository
+    manifest["recipe"]["url"] = manifest["recipe"]["url"].replace(FORMER_REPOSITORY, repository)
+    manifest["publisher_run_url"] = manifest["publisher_run_url"].replace(
+        FORMER_REPOSITORY, repository
+    )
+    assert repository in manifest["recipe"]["url"]
+    assert manifest["publisher_run_url"].startswith(f"https://github.com/{repository}/")
+    SCHEMA_VALIDATOR.validate(manifest)
 
 
 def test_membership_is_the_invariant_the_schema_cannot_express() -> None:
@@ -541,7 +619,7 @@ def test_the_cli_writes_a_manifest(tmp_path: Path) -> None:
             "--inputs",
             str(inputs),
             "--recipe-url",
-            "https://github.com/HarvardMadSys/hybridInference-cloud-agent/releases/download/x/r.tgz",
+            RECIPE_URL,
             "--recipe-sha256",
             hexdigest("recipe"),
             "--publisher-run-url",
@@ -553,6 +631,9 @@ def test_the_cli_writes_a_manifest(tmp_path: Path) -> None:
     assert code == 0
     written = json.loads(output.read_text())
     SCHEMA_VALIDATOR.validate(written)
+    assert written["source_repository"] == rm.SOURCE_REPOSITORY
+    assert written["publisher_run_url"] == RUN_URL
+    assert written["recipe"]["url"] == RECIPE_URL
     # Defaults come from the repository, not from the caller.
     assert written["deploy_protocol"] == rm.deploy_protocol()
     assert written["database_revision"] == rm.database_revision()
@@ -574,7 +655,7 @@ def test_a_refused_run_writes_nothing(tmp_path: Path) -> None:
                 "--inputs",
                 str(inputs),
                 "--recipe-url",
-                "https://github.com/HarvardMadSys/hybridInference-cloud-agent/releases/download/x/r.tgz",
+                RECIPE_URL,
                 "--recipe-sha256",
                 hexdigest("recipe"),
                 "--publisher-run-url",
@@ -593,7 +674,7 @@ def cli_arguments(inputs: Path, output: Path) -> list[str]:
         "--inputs",
         str(inputs),
         "--recipe-url",
-        "https://github.com/HarvardMadSys/hybridInference-cloud-agent/releases/download/x/r.tgz",
+        RECIPE_URL,
         "--recipe-sha256",
         hexdigest("recipe"),
         "--publisher-run-url",

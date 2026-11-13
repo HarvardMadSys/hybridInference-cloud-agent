@@ -11,7 +11,7 @@ from tests.unit.test_mcp_connections_api import (
     _seed,
 )
 
-from cloud_agent.api import mcp_connections
+from cloud_agent.api import mcp_authorization
 from cloud_agent.mcp import github_oauth, oauth, refresh
 from cloud_agent.mcp.registry import mcp_cipher, oauth_cipher
 
@@ -60,7 +60,7 @@ def test_browser_signin_completes_without_user_client_credentials(managed_app, m
     """A stable callback uses single-use state and stores only the user's token."""
     store, connection_id = _flow_store()
     exchange = AsyncMock(return_value={"access_token": "user-token", "refresh_token": "refresh"})
-    monkeypatch.setattr(mcp_connections, "_post_form", exchange)
+    monkeypatch.setattr(mcp_authorization, "_post_form", exchange)
     with _client(store) as client:
         presets = client.get("/v1/agent/mcp/connections").json()["templates"]
         assert presets[0]["auth_kind"] == "oauth"
@@ -180,7 +180,7 @@ def test_managed_callback_rejects_wrong_state_and_other_connections(managed_app,
     """The stable path cannot complete another user's connection without its state."""
     store, connection_id = _flow_store()
     exchange = AsyncMock()
-    monkeypatch.setattr(mcp_connections, "_post_form", exchange)
+    monkeypatch.setattr(mcp_authorization, "_post_form", exchange)
     with _client(store, user_id="user-other") as other_client:
         assert (
             other_client.post(f"/v1/agent/mcp/connections/{connection_id}/authorize").status_code
@@ -204,7 +204,7 @@ def test_managed_callback_refuses_flows_bound_elsewhere(managed_app, monkeypatch
     """The stable path refuses a flow not bound to GitHub before exchanging its code."""
     store, connection_id = _flow_store()
     exchange = AsyncMock(return_value={"access_token": "user-token", "refresh_token": "refresh"})
-    monkeypatch.setattr(mcp_connections, "_post_form", exchange)
+    monkeypatch.setattr(mcp_authorization, "_post_form", exchange)
     with _client(store) as client:
         response = client.post(f"/v1/agent/mcp/connections/{connection_id}/authorize")
         state = parse_qs(urlsplit(response.json()["authorization_url"]).query)["state"][0]
@@ -239,7 +239,7 @@ def test_explicit_registration_can_replace_an_existing_managed_connection(manage
         "managed_github_oauth": True,
     }
     exchange = AsyncMock(return_value={"access_token": "own-app-token", "refresh_token": "refresh"})
-    monkeypatch.setattr(mcp_connections, "_post_form", exchange)
+    monkeypatch.setattr(mcp_authorization, "_post_form", exchange)
     with _client(store) as client:
         response = client.post(
             f"/v1/agent/mcp/connections/{connection_id}/authorize",
@@ -270,7 +270,7 @@ def test_retry_preserves_stored_custom_github_app(managed_app, monkeypatch):
         "own-secret"
     )
     exchange = AsyncMock(return_value={"access_token": "own-app-token", "refresh_token": "refresh"})
-    monkeypatch.setattr(mcp_connections, "_post_form", exchange)
+    monkeypatch.setattr(mcp_authorization, "_post_form", exchange)
     with _client(store) as client:
         response = client.post(f"/v1/agent/mcp/connections/{connection_id}/authorize")
         assert response.status_code == 200, response.text

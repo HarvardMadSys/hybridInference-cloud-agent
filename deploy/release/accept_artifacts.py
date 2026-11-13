@@ -34,10 +34,10 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:  # pragma: no cover - annotations only, and they are strings
     from collections.abc import Mapping
 
-#: The images the acceptance builds and pushes. Not all six: the host stack's
+#: The images the acceptance builds and pushes. Not all five: the host stack's
 #: artifacts are started on their own architectures by the smoke check in CI
 #: already, and building them again here would measure the same thing twice.
-ACCEPTANCE_ARTIFACTS = ("control", "web-root", "web-agents")
+ACCEPTANCE_ARTIFACTS = ("control", "web-root")
 
 #: Which compose service runs which manifest role, per stack. The web service
 #: appears once per variant because a deployment serves one mount shape.

@@ -26,13 +26,14 @@ import pytest
 from tests.unit.test_agent_runner_worktree import remote as remote
 from tests.unit.test_runner_host_settings import _JOB, _stamp
 
-from cloud_agent_host import runner as runner_mod
-from cloud_agent_host.chat_sandbox import CHAT_WORKDIR
-from cloud_agent_host.runner import WorktreeError
+from cloud_agent_host import control_plane_client
+from cloud_agent_host.container.chat_sandbox import CHAT_WORKDIR
+from cloud_agent_host.container.sandbox import ContainerBackend, SandboxError
 from cloud_agent_host.runtimes import get_runtime
-from cloud_agent_host.sandbox import ContainerBackend, SandboxError
-from cloud_agent_host.session_supervisor_client import SessionSupervisorError
+from cloud_agent_host.sandbox_manager_client import SandboxManagerError
 from cloud_agent_host.setup import SetupResult
+from cloud_agent_host.turn import group_reservation, shared_live_attempt, source_preparation
+from cloud_agent_host.turn.source_preparation import WorktreeError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -86,9 +87,11 @@ def _run_turn(
     heart: Any = None,
 ) -> SimpleNamespace:
     """Drive one shared turn with the clone scripted and everything else mocked."""
-    monkeypatch.setattr(runner_mod, "prepare_worktree", source.prepare_worktree)
-    monkeypatch.setattr(runner_mod, "checkout_output_branch", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(runner_mod, "build_source_archive", source.build_source_archive)
+    monkeypatch.setattr(source_preparation, "prepare_worktree", source.prepare_worktree)
+    monkeypatch.setattr(
+        source_preparation, "checkout_output_branch", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(source_preparation, "build_source_archive", source.build_source_archive)
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(backend, "version_stamp", _stamp)
     imported: list[tuple[Any, str, bytes]] = []
@@ -100,11 +103,13 @@ def _run_turn(
     retained = Mock()
     retained.sandbox_metadata.return_value = {}
     retained.has_binary.return_value = True
-    monkeypatch.setattr(runner_mod, "ChatSandboxManager", lambda _backend: manager)
-    monkeypatch.setattr(runner_mod, "RetainedChatBackend", lambda *_args, **_kwargs: retained)
-    monkeypatch.setattr(runner_mod, "_resident_base_ready", lambda *_args: True)
-    monkeypatch.setattr(runner_mod, "runtime_version_unavailable", lambda *_args: None)
-    control = Mock(spec=runner_mod.ControlPlane)
+    monkeypatch.setattr(group_reservation, "ChatSandboxManager", lambda _backend: manager)
+    monkeypatch.setattr(
+        shared_live_attempt, "RetainedChatBackend", lambda *_args, **_kwargs: retained
+    )
+    monkeypatch.setattr(shared_live_attempt, "_resident_base_ready", lambda *_args: True)
+    monkeypatch.setattr(shared_live_attempt, "runtime_version_unavailable", lambda *_args: None)
+    control = Mock(spec=control_plane_client.ControlPlane)
     control.mark_chat_sandbox_running.return_value = {}
     control.reserve_chat_sandbox.side_effect = lambda seed: {
         **seed,
@@ -147,21 +152,20 @@ def _run_turn(
         "process_generation": 1,
     }
     supervisor.settle_shared.return_value = {"native_session_id": "native-1"}
-    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda: supervisor)
+    monkeypatch.setattr(shared_live_attempt, "sandbox_manager_from_env", lambda: supervisor)
     monkeypatch.setattr(
-        runner_mod, "_stream_shared_agent_turn", lambda **_kwargs: (0, "", [], None, None)
+        shared_live_attempt, "_stream_shared_agent_turn", lambda **_kwargs: (0, "", [], None, None)
     )
     monkeypatch.setenv("AGENT_SHARED_RESIDENT_CAPACITY", "8")
     monkeypatch.setenv("AGENT_CHAT_IDLE_TIMEOUT_S", "1800")
     finish = Mock()
-    result = runner_mod._run_shared_live_attempt(
+    result = shared_live_attempt._run_shared_live_attempt(
         runtime=get_runtime("claude-code"),
         job=replace(_JOB, setup_script=setup_script),
         control=control,
         heart=heart or SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
-        gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=finish,
         host_settings={"source_import_max_mib": 64},
@@ -218,7 +222,7 @@ def test_a_turn_that_stops_before_its_checkout_leaves_nothing_behind(
         if clone_finished_first:
             for thread in _prefetch_threads():
                 thread.join(5)
-        raise SessionSupervisorError(503, "shared Session Supervisor is unavailable")
+        raise SandboxManagerError(503, "shared Session Supervisor is unavailable")
 
     turn = _run_turn(monkeypatch, source, before_acquire=stop)
     source.release.set()
@@ -245,10 +249,14 @@ def test_a_follow_up_clones_nothing(monkeypatch):
 
 def test_a_discarded_source_cannot_be_imported(monkeypatch):
     source = Source()
-    monkeypatch.setattr(runner_mod, "prepare_worktree", source.prepare_worktree)
-    monkeypatch.setattr(runner_mod, "checkout_output_branch", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(runner_mod, "build_source_archive", source.build_source_archive)
-    prefetch = runner_mod._prefetch_retained_source(job=_JOB, uid=1000, gid=1000, max_bytes=1)
+    monkeypatch.setattr(source_preparation, "prepare_worktree", source.prepare_worktree)
+    monkeypatch.setattr(
+        source_preparation, "checkout_output_branch", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(source_preparation, "build_source_archive", source.build_source_archive)
+    prefetch = source_preparation._prefetch_retained_source(
+        job=_JOB, uid=1000, gid=1000, max_bytes=1
+    )
     for thread in _prefetch_threads():
         thread.join(5)
 
@@ -262,8 +270,8 @@ def test_a_discarded_source_cannot_be_imported(monkeypatch):
 def test_the_real_clone_and_archive_run_on_the_prefetch_thread(monkeypatch, remote):
     """No scripted clone: real git against a local origin, imported as a real tar."""
     base, repo, first, _head = remote
-    monkeypatch.setattr(runner_mod, "repo_clone_base_url", lambda **_kwargs: base)
-    prefetch = runner_mod._prefetch_retained_source(
+    monkeypatch.setattr(source_preparation, "repo_clone_base_url", lambda **_kwargs: base)
+    prefetch = source_preparation._prefetch_retained_source(
         job=replace(_JOB, repo=repo, base_sha=first), uid=1000, gid=1000
     )
     imported: list[bytes] = []
@@ -300,9 +308,11 @@ def test_a_tracked_name_that_is_not_utf8_still_starts_a_chat(monkeypatch, tmp_pa
         check=True,
     )
     monkeypatch.setattr(
-        runner_mod, "repo_clone_base_url", lambda **_kwargs: f"file://{tmp_path / 'remotes'}"
+        source_preparation,
+        "repo_clone_base_url",
+        lambda **_kwargs: f"file://{tmp_path / 'remotes'}",
     )
-    prefetch = runner_mod._prefetch_retained_source(
+    prefetch = source_preparation._prefetch_retained_source(
         job=replace(_JOB, repo="owner/name", base_sha=head), uid=1000, gid=1000
     )
     manager = Mock()
@@ -319,10 +329,10 @@ def test_the_prefetch_clone_is_stopped_at_the_turns_import_limit(monkeypatch, re
     had been fetched and checked out onto the host's shared Docker data root.
     """
     base, repo, first, _head = remote
-    monkeypatch.setattr(runner_mod, "repo_clone_base_url", lambda **_kwargs: base)
+    monkeypatch.setattr(source_preparation, "repo_clone_base_url", lambda **_kwargs: base)
     archived = Mock()
-    monkeypatch.setattr(runner_mod, "build_source_archive", archived)
-    prefetch = runner_mod._prefetch_retained_source(
+    monkeypatch.setattr(source_preparation, "build_source_archive", archived)
+    prefetch = source_preparation._prefetch_retained_source(
         job=replace(_JOB, repo=repo, base_sha=first), uid=1000, gid=1000, max_bytes=1
     )
     manager = Mock()
@@ -349,7 +359,7 @@ def test_a_stop_during_setup_stops_it_and_cancels_before_the_baseline(monkeypatc
         stopped.append(stop() if stop is not None else None)
         return SetupResult(ran=True, exit_code=130, detail="setup was stopped")
 
-    monkeypatch.setattr(runner_mod, "run_setup", setup)
+    monkeypatch.setattr(shared_live_attempt, "run_setup", setup)
 
     turn = _run_turn(monkeypatch, Source(), setup_script="npm ci", heart=heart)
 
@@ -371,8 +381,10 @@ def test_discarding_stops_a_clone_that_is_still_running(monkeypatch):
         stopped_in_time.append(stop is not None and stop.wait(5))
         raise WorktreeError("the clone was abandoned before it finished")
 
-    monkeypatch.setattr(runner_mod, "prepare_worktree", clone)
-    prefetch = runner_mod._prefetch_retained_source(job=_JOB, uid=1000, gid=1000, max_bytes=1)
+    monkeypatch.setattr(source_preparation, "prepare_worktree", clone)
+    prefetch = source_preparation._prefetch_retained_source(
+        job=_JOB, uid=1000, gid=1000, max_bytes=1
+    )
     assert started.wait(5)
 
     prefetch.discard()

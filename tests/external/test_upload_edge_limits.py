@@ -1,8 +1,9 @@
 """Exercise shipped nginx routes against local mocks on an isolated Docker network.
 
-Pull nginx:1.27.5-alpine before selecting this external tier, or set
-AGENT_UPLOAD_TEST_NGINX_IMAGE to an already available nginx image. No live
-deployment, gateway credential, or external HTTP endpoint is used.
+The default image is the one the control plane's edge runs, as
+deploy/control-plane/docker-compose.yml pins it. Pull it before selecting this
+external tier, or set AGENT_UPLOAD_TEST_NGINX_IMAGE to an already available
+nginx image. No live deployment, credential, or external HTTP endpoint is used.
 """
 
 from __future__ import annotations
@@ -18,16 +19,24 @@ from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 
 from cloud_agent.attachments.models import MAX_ATTACHMENT_FILE_BYTES
 
 pytestmark = pytest.mark.external
 REPO_ROOT = Path(__file__).resolve().parents[2]
-IMAGE = os.environ.get("AGENT_UPLOAD_TEST_NGINX_IMAGE", "nginx:1.27.5-alpine")
+
+
+def _edge_image() -> str:
+    """The nginx the control plane's edge runs, pinned in its Compose file."""
+    stack = yaml.safe_load((REPO_ROOT / "deploy/control-plane/docker-compose.yml").read_text())
+    return str(stack["services"]["edge"]["image"])
+
+
+IMAGE = os.environ.get("AGENT_UPLOAD_TEST_NGINX_IMAGE") or _edge_image()
 CASES = [
     ("deploy/control-plane/edge.nginx.conf", "/api", 80),
     ("deploy/local/nginx.conf", "/api", 8088),
-    ("deploy/reverse-proxy/agents-under-gateway.conf", "/agents/api", 80),
 ]
 MOCKS = r"""
 server {
@@ -41,7 +50,6 @@ server {
 }
 server { listen 3000; return 200 'web'; }
 server { listen 3002; return 200 'web'; }
-server { listen 8080; return 200 'gateway'; }
 """
 
 
@@ -80,12 +88,10 @@ def nginx_network():
         docker("network", "rm", network, check=False)
 
 
-@pytest.fixture(params=CASES, ids=["standalone", "local", "gateway-reference"])
+@pytest.fixture(params=CASES, ids=["standalone", "local"])
 def edge(request, tmp_path: Path, nginx_network):
     source, prefix, port = request.param
     configuration = (REPO_ROOT / source).read_text()
-    if source.startswith("deploy/reverse-proxy/"):
-        configuration = "server { listen 80;\n" + configuration + "\n}"
     config = tmp_path / "nginx.conf"
     config.write_text("events {}\nhttp { access_log off;\n" + configuration + MOCKS + "\n}")
     name = "review-test-upload-" + uuid.uuid4().hex[:12]
@@ -103,8 +109,6 @@ def edge(request, tmp_path: Path, nginx_network):
             "control-plane",
             "--network-alias",
             "web",
-            "--network-alias",
-            "local-gateway",
             "--mount",
             f"type=bind,src={config},dst=/etc/nginx/nginx.conf,readonly",
             "-p",

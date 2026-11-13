@@ -42,12 +42,10 @@ SCHEMA_PATH = Path(__file__).resolve().parent / "manifest.schema.json"
 
 _IMAGE_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$")
 
-#: The mount shape each variant is built for. A variant and a base path are one
-#: decision: `agents` with an empty base path is a deployment whose health check
-#: probes `/` while its image serves `/agents`, and both halves look valid on
-#: their own. The manifest schema states this pairing too; it is repeated here
+#: The mount shape each variant is built for: only `root`, at the root of its
+#: hostname. The manifest schema states this pairing too; it is repeated here
 #: because this is the code that would act on it.
-WEB_BASE_PATHS = {"root": "", "agents": "/agents"}
+WEB_BASE_PATHS = {"root": ""}
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
 #: Which manifest roles become which variable, per stack. The names match the
@@ -169,7 +167,7 @@ def environment_for(
 
     if stack == "control-plane":
         if variant is None:
-            raise ReleaseEnvError("the control-plane stack needs --variant: root or agents")
+            raise ReleaseEnvError("the control-plane stack needs --variant root")
         base_path = by_role["web"].get("base_path")
         expected = WEB_BASE_PATHS[variant]
         if base_path != expected:
@@ -179,9 +177,6 @@ def environment_for(
                 "decision: a mismatch probes a mount point the image does not serve."
             )
         environment["AGENT_WEB_VARIANT"] = variant
-        # Quoted so an empty base path survives `source` as an empty string
-        # rather than disappearing — the health check probes `/${WEB_BASE_PATH}`.
-        environment["AGENT_WEB_BASE_PATH"] = f'"{base_path}"'
 
     for key, value in environment.items():
         found = (ambient or {}).get(key)
@@ -210,7 +205,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--stack", required=True, choices=sorted(STACK_ROLES))
-    parser.add_argument("--variant", choices=("root", "agents"), default=None)
+    parser.add_argument("--variant", choices=tuple(WEB_BASE_PATHS), default=None)
     parser.add_argument(
         "--ambient",
         action="append",

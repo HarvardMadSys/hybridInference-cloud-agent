@@ -27,13 +27,12 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from tests.support.owners import connection_claim
 from tests.support.storage import AllCapabilities
 
-from cloud_agent import sandbox_manager_routing
 from cloud_agent.api import admin_hosts, hosts
-from cloud_agent.api.deps import get_grant_client, get_storage, verify_admin_access
-from cloud_agent.application import residency
-from cloud_agent.host_pool import (
+from cloud_agent.api.deps import get_storage, verify_admin_access
+from cloud_agent.domain.host_pool import (
     HOST_DISABLED,
     HOST_DRAINING,
     HOST_ENROLLING,
@@ -43,7 +42,9 @@ from cloud_agent.host_pool import (
     normalize_capabilities,
     transition_allowed,
 )
-from cloud_agent.sandbox_manager_routing import (
+from cloud_agent.ports.errors import ConflictCode, StorageConflict
+from cloud_agent.sandbox_manager import sandbox_manager_routing
+from cloud_agent.sandbox_manager.sandbox_manager_routing import (
     ENV_SANDBOX_MANAGER_HOSTS,
     PROBE_FAILED_FOR_HOST,
     SandboxManagerUrlRefused,
@@ -183,7 +184,7 @@ class FakeHostPoolStore(AllCapabilities):
     ) -> dict[str, Any]:
         existing = self.rows.get(host)
         if existing is not None and existing["drain_fence_active"]:
-            raise ValueError("host_drain_fenced")
+            raise StorageConflict(ConflictCode.HOST_DRAIN_FENCED)
         return self.seed(
             host,
             status=HOST_ENROLLING,
@@ -229,10 +230,13 @@ class FakeHostPoolStore(AllCapabilities):
         sandbox_archive_settings_applied_revision: int | None = None,
         sandbox_archive_settings_revision_reported: bool = False,
         runtime_downloads: list[dict[str, Any]] | None = None,
+        config_reports: dict[str, str] | None = None,
     ) -> dict[str, Any] | None:
         row = self.rows.get(host)
         if row is None:
             return None
+        if config_reports is not None:
+            row["config_reports"] = dict(config_reports)
         if runtime_downloads is not None:
             row["runtime_downloads"] = [dict(report) for report in runtime_downloads]
         if row["status"] in (HOST_ENROLLING, HOST_OFFLINE):
@@ -625,31 +629,6 @@ class FakeHostPoolStore(AllCapabilities):
         return self.sandbox_stop_due
 
 
-class RecordingGrants:
-    """The grant client's shape, recording every call; mint can be scripted."""
-
-    def __init__(self) -> None:
-        self.minted: list[dict[str, Any]] = []
-        self.renewed: list[str] = []
-        self.revoked: list[str] = []
-        self.fail_mint = False
-
-    async def mint(self, **kwargs: Any) -> dict[str, Any]:
-        if self.fail_mint:
-            raise RuntimeError("gateway is down")
-        self.minted.append(kwargs)
-        n = len(self.minted)
-        return {"grant_id": f"agr-{n}", "token": f"tok-{n}"}
-
-    async def renew(self, grant_id: str) -> dict[str, Any]:
-        self.renewed.append(grant_id)
-        return {}
-
-    async def revoke(self, grant_id: str) -> bool:
-        self.revoked.append(grant_id)
-        return True
-
-
 def _build_app(store: FakeHostPoolStore) -> FastAPI:
     app = FastAPI()
     app.include_router(hosts.router)
@@ -691,12 +670,10 @@ async def residency_client(monkeypatch):
     monkeypatch.setattr(admin_hosts, "get_client_ip", lambda _request: "127.0.0.1")
 
     store = FakeHostPoolStore()
-    grants = RecordingGrants()
     app = _build_app(store)
-    app.dependency_overrides[get_grant_client] = lambda: grants
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as async_client:
-        yield async_client, store, grants
+        yield async_client, store
 
 
 def _registration_body(token: str, name: str, **overrides) -> dict[str, Any]:
@@ -834,7 +811,7 @@ async def test_removal_between_token_consumption_and_registration_refuses_enroll
         "/admin/agent/runner-hosts/enroll-token", json={"host": "runner-a"}, headers=ADMIN
     )
     token = issued.json()["enroll_token"]
-    register = AsyncMock(side_effect=ValueError("enrollment_token_removed"))
+    register = AsyncMock(side_effect=StorageConflict(ConflictCode.ENROLLMENT_TOKEN_REMOVED))
     monkeypatch.setattr(store, "register_host", register)
 
     response = await async_client.post(
@@ -981,9 +958,7 @@ async def test_reenrollment_cannot_clear_an_active_deployment_fence(client):
     assert acquired[:2] == ("ok", HOST_ONLINE)
     assert acquired[2] != expected_epoch
     issued = await async_client.post(
-        "/admin/agent/runner-hosts/enroll-token",
-        json={"host": "runner-a"},
-        headers=ADMIN,
+        "/admin/agent/runner-hosts/enroll-token", json={"host": "runner-a"}, headers=ADMIN
     )
     enroll_token = issued.json()["enroll_token"]
 
@@ -1124,19 +1099,6 @@ async def test_a_heartbeat_does_not_undo_a_drain(client):
     assert response.json()["status"] == HOST_DRAINING
 
 
-async def test_a_heartbeat_only_overwrites_what_it_carries(client):
-    """A liveness-only beat must not blank what enrollment declared."""
-    async_client, store = client
-    credential = await _enroll(async_client, store, slots_total=4, capabilities=["kata"])
-
-    await async_client.post(
-        "/v1/agent/host/heartbeat", json={}, headers={"Authorization": f"Bearer {credential}"}
-    )
-
-    assert store.rows["runner-a"]["slots_total"] == 4
-    assert store.rows["runner-a"]["capabilities"] == ["kata"]
-
-
 async def test_a_heartbeat_can_update_capacity_and_version(client):
     async_client, store = client
     credential = await _enroll(async_client, store, slots_total=1)
@@ -1195,7 +1157,7 @@ async def test_a_host_holding_more_versions_than_a_menu_may_list_is_still_heard(
     (``test_host_report_bounds.py``).
     """
     from cloud_agent.schemas import HOST_VERSION_MENU_MAX_ITEMS, WorkerClaimAttestation
-    from cloud_agent_host.sandbox import ContainerBackend
+    from cloud_agent_host.container.sandbox import ContainerBackend
 
     async_client, store = client
     credential = await _enroll(async_client, store)
@@ -1217,7 +1179,7 @@ async def test_a_host_holding_more_versions_than_a_menu_may_list_is_still_heard(
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     with monkeypatch.context() as patched:
-        patched.setattr("cloud_agent_host.sandbox.subprocess.run", docker)
+        patched.setattr("cloud_agent_host.container.sandbox.subprocess.run", docker)
         stamp = ContainerBackend(image="img:1").version_stamp()
 
     response = await async_client.post(
@@ -1734,14 +1696,14 @@ def test_a_claim_warns_about_a_new_untrusted_group_without_a_disk_quota(
     caplog, disk_limit_mib, profile, thread_sandbox, warned
 ):
     """A warning only: the claim itself is never changed by the quota."""
-    from cloud_agent.api.worker import _warn_on_unbounded_untrusted_group
+    from cloud_agent.application.turn_claim import warn_on_unbounded_untrusted_group
     from cloud_agent.schemas import WorkerClaimAttestation
 
     claim = {"id": "ajob_1", "execution_profile": profile, "thread_sandbox": thread_sandbox}
     attestation = WorkerClaimAttestation(sandbox_disk_limit_mib=disk_limit_mib)
 
     with caplog.at_level(logging.WARNING):
-        _warn_on_unbounded_untrusted_group(claim, attestation, host="runner-a")
+        warn_on_unbounded_untrusted_group(claim, attestation, host="runner-a")
 
     events = [
         record
@@ -1764,10 +1726,12 @@ async def test_request_body_host_identity_is_rejected(claim_client):
 
     response = await async_client.post(
         "/v1/agent/worker/claim",
-        json={
-            "worker_id": "w1",
-            "host": "runner-b",
-        },
+        json=connection_claim(
+            {
+                "worker_id": "w1",
+                "host": "runner-b",
+            }
+        ),
         headers={"Authorization": f"Bearer {credential}"},
     )
 
@@ -1781,7 +1745,7 @@ async def test_pool_wide_token_is_not_a_claim_credential(claim_client):
 
     response = await async_client.post(
         "/v1/agent/worker/claim",
-        json={"worker_id": "w1"},
+        json=connection_claim({"worker_id": "w1"}),
         headers={"Authorization": "Bearer pool-wide-token"},
     )
 
@@ -1799,7 +1763,7 @@ async def test_a_revoked_host_credential_cannot_claim(claim_client):
 
     response = await async_client.post(
         "/v1/agent/worker/claim",
-        json={"worker_id": "w1"},
+        json=connection_claim({"worker_id": "w1"}),
         headers={"Authorization": f"Bearer {credential}"},
     )
 
@@ -1814,7 +1778,7 @@ async def test_a_host_credential_for_an_unknown_host_cannot_claim(claim_client):
 
     response = await async_client.post(
         "/v1/agent/worker/claim",
-        json={"worker_id": "w1"},
+        json=connection_claim({"worker_id": "w1"}),
         headers={"Authorization": f"Bearer {mint_host_token(host='ghost')}"},
     )
 
@@ -2739,8 +2703,8 @@ def test_an_origin_allowlist_entry_pins_the_scheme_and_port(monkeypatch) -> None
 
 
 async def test_legacy_host_residency_mutations_are_not_executable(residency_client):
-    """Only attempt-fenced worker routes may create or release member grants."""
-    client, store, grants = residency_client
+    """Only attempt-fenced worker routes may create or release a member residency."""
+    client, store = residency_client
     credential = await _enroll(client, store)
     headers = {"Authorization": f"Bearer {credential}"}
 
@@ -2757,8 +2721,6 @@ async def test_legacy_host_residency_mutations_are_not_executable(residency_clie
 
     assert establish.status_code == 404
     assert release.status_code == 404
-    assert grants.minted == []
-    assert grants.revoked == []
 
 
 def _live_group(*members: tuple[str, int]) -> dict[str, Any]:
@@ -2788,7 +2750,7 @@ def _live_group(*members: tuple[str, int]) -> dict[str, Any]:
 
 
 async def test_host_heartbeat_reconciles_exact_retained_docker_observations(residency_client):
-    client, store, _grants = residency_client
+    client, store = residency_client
     credential = await _enroll(client, store)
 
     response = await client.post(
@@ -2831,7 +2793,7 @@ async def test_host_heartbeat_reconciles_exact_retained_docker_observations(resi
 async def test_host_heartbeat_forwards_optional_container_telemetry(residency_client):
     from tests.unit.test_sandbox_resource_protocol import beat, sample
 
-    client, store, _grants = residency_client
+    client, store = residency_client
     credential = await _enroll(client, store)
     measured = sample()
     response = await client.post(
@@ -2848,7 +2810,7 @@ async def test_host_heartbeat_forwards_optional_container_telemetry(residency_cl
 async def test_host_heartbeat_drops_bad_telemetry_and_still_reports_lifecycle(residency_client):
     from tests.unit.test_sandbox_resource_protocol import beat, sample
 
-    client, store, _grants = residency_client
+    client, store = residency_client
     credential = await _enroll(client, store)
     response = await client.post(
         "/v1/agent/host/heartbeat",
@@ -2863,7 +2825,7 @@ async def test_host_heartbeat_drops_bad_telemetry_and_still_reports_lifecycle(re
 
 
 async def test_host_heartbeat_rejects_a_non_shared_sandbox_observation(residency_client):
-    client, store, _grants = residency_client
+    client, store = residency_client
     credential = await _enroll(client, store)
 
     response = await client.post(
@@ -2892,7 +2854,7 @@ async def test_host_heartbeat_rejects_a_non_shared_sandbox_observation(residency
 async def test_host_heartbeat_returns_only_durable_due_idle_stop_fences(
     residency_client, member_generations
 ):
-    client, store, _grants = residency_client
+    client, store = residency_client
     credential = await _enroll(client, store)
     store.sandbox_stop_due = {
         "thread_id": "athr_1",
@@ -2927,7 +2889,7 @@ async def test_host_heartbeat_returns_only_durable_due_idle_stop_fences(
 
 async def test_host_heartbeat_accepts_a_fenced_generation_zero_group_stop(residency_client):
     """A generation-zero target stops only through its explicit group fence."""
-    client, store, _grants = residency_client
+    client, store = residency_client
     credential = await _enroll(client, store)
     store.sandbox_stop_due = {
         "thread_id": "athr_fork",
@@ -2959,69 +2921,6 @@ async def test_host_heartbeat_accepts_a_fenced_generation_zero_group_stop(reside
     ]
 
 
-async def test_stopped_member_revocation_cannot_hold_the_heartbeat_reply(monkeypatch):
-    from fastapi import BackgroundTasks
-
-    from cloud_agent.application import grant_revocation
-    from cloud_agent.schemas import HostHeartbeatRequest
-
-    monkeypatch.setattr(grant_revocation, "REVOCATION_DEADLINE_S", 0.02)
-    store = FakeHostPoolStore()
-    store.seed("runner-a", credential_hash="credential-hash", enrolled=True)
-    store.release_answer = "agr-stopped"
-    started = asyncio.Event()
-    cancelled = asyncio.Event()
-
-    async def revoke(_grant_id):
-        started.set()
-        try:
-            await asyncio.Event().wait()
-        finally:
-            cancelled.set()
-
-    body = HostHeartbeatRequest.model_validate(
-        {
-            "retained_sandboxes": [
-                {
-                    "thread_id": "athr_source",
-                    "sandbox_id": "asbx_shared",
-                    "container_id": "0123456789abcdef",
-                    "generation": 1,
-                    "activation_generation": 2,
-                    "running": False,
-                    "shared_live": True,
-                    "members": [
-                        {
-                            "thread_id": "athr_source",
-                            "native_session_id": "native",
-                            "process_generation": 11,
-                            "residency_generation": 7,
-                            "resident_state": "stopped",
-                            "resident_slot_id": 0,
-                        }
-                    ],
-                }
-            ]
-        }
-    )
-    background = BackgroundTasks()
-    reply = await asyncio.wait_for(
-        hosts.heartbeat_host(
-            body,
-            background_tasks=background,
-            host={"host": "runner-a", "credential_hash": "credential-hash"},
-            store=store,
-            grants=SimpleNamespace(revoke=revoke),
-        ),
-        timeout=1,
-    )
-    assert reply.host == "runner-a"
-    assert store.release_calls == [("athr_source", 7, "runner-a", 11)]
-    assert not started.is_set()
-    await asyncio.wait_for(background(), timeout=1)
-    assert started.is_set() and cancelled.is_set()
-
-
 # ── residency grant minting ────────────────────────────────────────────
 #
 # ``_mint_residency_grant`` is the only caller of ``link_residency_grant`` and
@@ -3039,55 +2938,6 @@ def _residency_row() -> dict[str, Any]:
         "user_id": "user-1",
         "model": "claude-sonnet-4",
     }
-
-
-async def test_a_grant_with_no_token_is_revoked_rather_than_abandoned() -> None:
-    """A named grant with no credential is dead weight until its TTL expires.
-
-    The gateway answering with a ``grant_id`` but no ``token`` is not a shape
-    anything can use, so the mint hands the grant back rather than leaving it
-    live with no owner. The caller reads ``None`` as "no credential" and
-    releases the residency it just established.
-    """
-    store = FakeHostPoolStore()
-    grants = RecordingGrants()
-    grants.mint = AsyncMock(return_value={"grant_id": "agr-orphan", "token": ""})
-
-    credential = await residency._mint_residency_grant(store, grants, row=_residency_row())
-
-    assert credential is None
-    assert grants.revoked == ["agr-orphan"]
-    assert store.linked == []
-
-
-async def test_a_refused_revoke_still_reports_no_credential() -> None:
-    """The cleanup is best-effort, not a new way for the mint to fail.
-
-    Before the revoke existed this path made no network call at all, so a
-    gateway that refuses the revoke must not turn "there is no credential"
-    into a 500.
-    """
-    store = FakeHostPoolStore()
-    grants = RecordingGrants()
-    grants.mint = AsyncMock(return_value={"grant_id": "agr-orphan", "token": ""})
-    grants.revoke = AsyncMock(side_effect=RuntimeError("gateway is down"))
-
-    credential = await residency._mint_residency_grant(store, grants, row=_residency_row())
-
-    assert credential is None
-
-
-async def test_an_answer_without_a_grant_id_has_nothing_to_revoke() -> None:
-    """An empty ``grant_id`` names nothing, so nothing is handed to revoke."""
-    store = FakeHostPoolStore()
-    grants = RecordingGrants()
-    grants.mint = AsyncMock(return_value={"grant_id": "", "token": "tok-1"})
-
-    credential = await residency._mint_residency_grant(store, grants, row=_residency_row())
-
-    assert credential is None
-    assert grants.revoked == []
-    assert store.linked == []
 
 
 # ── Host capacity: the optional block and the history endpoint ─────────
@@ -3494,7 +3344,7 @@ async def test_a_due_stop_is_fenced_to_the_activation_the_beat_reported(residenc
     member's, so a placeholder made every control-plane stop of a used chat
     stale (staging: activation 0 sent, 3 current).
     """
-    client, store, _grants = residency_client
+    client, store = residency_client
     credential = await _enroll(client, store)
     store.sandbox_stop_due = {
         "thread_id": "athr_1",

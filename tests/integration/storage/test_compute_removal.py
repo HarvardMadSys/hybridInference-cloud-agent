@@ -101,7 +101,7 @@ async def test_removal_cleans_owned_metadata_and_preserves_user_history(
     job = await seed(db, store, "removed-history", state="stopped", host="removed")
     await member(db, "removed-history", job, None)
     _, attempt_id, ledger_id = await _seed_attempt(
-        db, store, job=job, finished_at=datetime.now(UTC)
+        db, store, job=job, grant_id="grant-one", finished_at=datetime.now(UTC)
     )
     rotation = await store.compute_resources.create_operation(
         request_id="completed-move",

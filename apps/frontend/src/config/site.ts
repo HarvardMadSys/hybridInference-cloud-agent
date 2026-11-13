@@ -1,9 +1,9 @@
 // Deployment site identity, resolved from the environment at request time.
 //
-// The build-time half of the configuration stays in `env.ts`: `basePath` and
-// the browser's API prefix are properties of the *image variant*, and Next
-// resolves them while the bundle is compiled. Everything here is the opposite
-// — a name, an organisation, a status page, the gateway's origin — and those
+// The build-time half of the configuration stays in `env.ts`: the browser's
+// API prefix is a property of the *image*, and Next resolves it while the
+// bundle is compiled. Everything here is the opposite
+// — a name, an organisation, a status page — and those
 // are properties of a *deployment*, not of a build. A deployment that changes
 // its product name must not have to rebuild the same image.
 //
@@ -27,23 +27,38 @@ export interface SiteBranding {
   docsUrl: string;
   /** A support page, or `mailto:` and one address. Empty hides the link. */
   contactUrl: string;
-  /**
-   * The gateway's *origin*, for the links this app does not host itself.
-   * Never the browser's API address — that is `basePath` plus `/api`, and it
-   * belongs to the build variant.
-   */
-  gatewayUrl: string;
+}
+
+/** A label by UI locale (`en`, `zh-CN`), as the deployment wrote it. */
+export type LocalizedText = Readonly<Record<string, string>>;
+
+export interface TeamMember {
+  name: string;
+  /** An optional HTTPS or inline raster portrait, loaded directly by the browser. */
+  photoUrl?: string;
+  /** An absolute http(s) URL, or empty. */
+  website: string;
+  badge: LocalizedText;
+  roles: LocalizedText[];
+}
+
+/**
+ * The deployment's own public content, from the site files it mounts on the
+ * control plane rather than from Admin. Absent when it declared none.
+ */
+export interface SiteContent {
+  /** The footer's GitHub link; empty hides it. */
+  sourceUrl: string;
+  /** The Team page; empty hides its footer link. */
+  team: TeamMember[];
 }
 
 export interface RuntimeSiteConfig {
   branding: SiteBranding;
+  content?: SiteContent;
   deployment?: {
     version: string;
     deployedAt: string;
-  };
-  features: {
-    /** The gateway's docs assistant. Off unless a deployment says otherwise. */
-    rag: boolean;
   };
 }
 
@@ -63,10 +78,6 @@ export const NEUTRAL_SITE_CONFIG: RuntimeSiteConfig = {
     statusUrl: '',
     docsUrl: '',
     contactUrl: '',
-    gatewayUrl: '',
-  },
-  features: {
-    rag: false,
   },
 };
 
@@ -85,8 +96,6 @@ export const SITE_CONFIG_ENV = {
   statusUrl: 'AGENT_WEB_STATUS_URL',
   docsUrl: 'AGENT_WEB_DOCS_URL',
   contactUrl: 'AGENT_WEB_CONTACT_URL',
-  gatewayUrl: 'AGENT_WEB_GATEWAY_URL',
-  featureRag: 'AGENT_WEB_FEATURE_RAG',
   version: 'AGENT_DEPLOYMENT_SHA',
   deployedAt: 'AGENT_WEB_DEPLOYED_AT',
 } as const;
@@ -98,9 +107,8 @@ type EnvSource = Record<string, string | undefined>;
  *
  * Thrown rather than swallowed. The previous code turned an unparseable URL
  * into the empty string, which reads as "not configured" — so a typo in a
- * status URL silently removed the Status link, and a typo in the gateway URL
- * silently removed every gateway link, with nothing anywhere saying why. A
- * deployment that meant to configure something and got it wrong should say so.
+ * status URL silently removed the Status link, with nothing anywhere saying
+ * why. A deployment that meant to configure something and got it wrong should say so.
  */
 export class SiteConfigError extends Error {
   constructor(message: string) {
@@ -144,12 +152,6 @@ function optionalContact(env: EnvSource, name: string): string {
 }
 
 /** An optional absolute http(s) URL, reduced to its origin. */
-function optionalOrigin(env: EnvSource, name: string): string {
-  const raw = trimmed(env[name]);
-  if (!raw) return '';
-  return parseUrl(name, raw).origin;
-}
-
 function parseUrl(name: string, raw: string): URL {
   let parsed: URL;
   try {
@@ -170,15 +172,6 @@ function parseUrl(name: string, raw: string): URL {
  * old reader was `=== 'true'`, which silently read `1`, `yes` and `TRUE` as
  * off — a switch an operator sets and cannot see that it did nothing.
  */
-function optionalBoolean(env: EnvSource, name: string, fallback: boolean): boolean {
-  const raw = trimmed(env[name]);
-  if (!raw) return fallback;
-  const lowered = raw.toLowerCase();
-  if (lowered === 'true') return true;
-  if (lowered === 'false') return false;
-  throw new SiteConfigError(`${name} must be "true" or "false", got: ${raw}`);
-}
-
 /**
  * Resolve the site identity from an explicit environment.
  *
@@ -195,10 +188,6 @@ export function parseRuntimeSiteConfig(env: EnvSource): RuntimeSiteConfig {
       statusUrl: optionalUrl(env, SITE_CONFIG_ENV.statusUrl),
       docsUrl: optionalUrl(env, SITE_CONFIG_ENV.docsUrl),
       contactUrl: optionalContact(env, SITE_CONFIG_ENV.contactUrl),
-      gatewayUrl: optionalOrigin(env, SITE_CONFIG_ENV.gatewayUrl),
-    },
-    features: {
-      rag: optionalBoolean(env, SITE_CONFIG_ENV.featureRag, NEUTRAL_SITE_CONFIG.features.rag),
     },
   };
   const version = optionalName(env, SITE_CONFIG_ENV.version);
@@ -220,21 +209,85 @@ export function parseRuntimeSiteConfig(env: EnvSource): RuntimeSiteConfig {
   return site;
 }
 
+/** A label in the reader's locale, else English, else whichever was written. */
+export function localizedText(label: LocalizedText, locale: string): string {
+  return label[locale] || label['en'] || Object.values(label).find(Boolean) || '';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function parseLabel(value: unknown): LocalizedText | null {
+  if (!isRecord(value)) return null;
+  const entries = Object.entries(value).filter(
+    (entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].trim() !== '',
+  );
+  return entries.length ? Object.fromEntries(entries) : null;
+}
+
+function optionalHttpUrl(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim()) return '';
+  try {
+    return parseUrl('url', value.trim()).toString();
+  } catch {
+    return '';
+  }
+}
+
+function parseMember(value: unknown): TeamMember[] {
+  if (!isRecord(value) || typeof value.name !== 'string' || !value.name.trim()) return [];
+  const roles = Array.isArray(value.roles) ? value.roles.map(parseLabel) : [];
+  const photoUrl = optionalPhotoUrl(value.photoUrl);
+  return [
+    {
+      name: value.name.trim(),
+      ...(photoUrl ? { photoUrl } : {}),
+      website: optionalHttpUrl(value.website),
+      badge: parseLabel(value.badge) ?? {},
+      roles: roles.filter((role): role is LocalizedText => role !== null),
+    },
+  ];
+}
+
+function optionalPhotoUrl(value: unknown): string {
+  if (
+    typeof value === 'string' &&
+    /^data:image\/(?:jpeg|png|webp);base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+      value,
+    ) &&
+    !value.endsWith(',')
+  ) {
+    return value;
+  }
+  const url = optionalHttpUrl(value);
+  if (!url) return '';
+  const parsed = new URL(url);
+  return parsed.protocol === 'https:' && !parsed.username && !parsed.password ? url : '';
+}
+
+/**
+ * The control plane validated these files already; anything malformed here is
+ * dropped rather than thrown, so it can never discard the saved appearance.
+ */
+function parseSiteContent(value: unknown): SiteContent | undefined {
+  if (!isRecord(value)) return undefined;
+  const sourceUrl = optionalHttpUrl(value.sourceUrl);
+  const team = Array.isArray(value.team) ? value.team.flatMap(parseMember) : [];
+  return sourceUrl || team.length ? { sourceUrl, team } : undefined;
+}
+
 function checkedSavedSiteConfig(value: unknown, metadata: EnvSource): RuntimeSiteConfig {
   if (!value || typeof value !== 'object')
     throw new SiteConfigError('Invalid application settings.');
   const saved = value as Record<string, unknown>;
   const branding = saved.branding as Record<string, unknown> | undefined;
-  const features = saved.features as Record<string, unknown> | undefined;
-  if (!branding || !features || typeof features.rag !== 'boolean') {
-    throw new SiteConfigError('Invalid application settings.');
-  }
+  if (!branding) throw new SiteConfigError('Invalid application settings.');
   const env: EnvSource = {
     [SITE_CONFIG_ENV.version]: metadata[SITE_CONFIG_ENV.version],
     [SITE_CONFIG_ENV.deployedAt]: metadata[SITE_CONFIG_ENV.deployedAt],
-    [SITE_CONFIG_ENV.featureRag]: String(features.rag),
   };
-  for (const key of ['appName', 'orgName', 'orgUrl', 'statusUrl', 'gatewayUrl'] as const) {
+  for (const key of ['appName', 'orgName', 'orgUrl', 'statusUrl'] as const) {
     if (typeof branding[key] !== 'string')
       throw new SiteConfigError('Invalid application settings.');
     env[SITE_CONFIG_ENV[key]] = branding[key];
@@ -248,16 +301,20 @@ function checkedSavedSiteConfig(value: unknown, metadata: EnvSource): RuntimeSit
       throw new SiteConfigError('Invalid application settings.');
     env[SITE_CONFIG_ENV[key]] = (branding[key] as string | undefined) ?? '';
   }
-  return parseRuntimeSiteConfig(env);
+  const site = parseRuntimeSiteConfig(env);
+  // Added later still; a control plane that predates it sends none.
+  const content = parseSiteContent(saved.content);
+  if (content) site.content = content;
+  return site;
 }
 
 /** Only validated public appearance can become the server's outage fallback. */
 export function parseSavedPublicAppearance(
   value: unknown,
-): Pick<RuntimeSiteConfig, 'branding' | 'features'> | null {
+): Pick<RuntimeSiteConfig, 'branding' | 'content'> | null {
   try {
-    const { branding, features } = checkedSavedSiteConfig(value, {});
-    return { branding, features };
+    const { branding, content } = checkedSavedSiteConfig(value, {});
+    return content ? { branding, content } : { branding };
   } catch {
     return null;
   }

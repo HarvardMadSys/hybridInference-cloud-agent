@@ -111,7 +111,35 @@ def _deny(
     )
 
 
-def decide(  # noqa: PLR0912 complexity baseline, #771
+def _connection_refusal(
+    connection: McpConnection,
+    binding: ThreadBinding,
+    *,
+    kind: CapabilityKind,
+    name: str,
+    user_id: str,
+) -> AuthorizationDecision | None:
+    """Refuse a call through a connection that is not this owner's, or not usable."""
+    if connection.user_id != user_id:
+        # Unreachable through the API, which scopes every read by owner. Kept
+        # because this function is also called from the relay, where the user
+        # comes from a fence row rather than from a session.
+        return _deny("wrong_owner", name, "that MCP connection belongs to somebody else", kind)
+    if not connection.enabled or connection.status is ConnectionStatus.DISABLED:
+        return _deny("connection_disabled", name, "that MCP connection is turned off", kind)
+    if connection.status is ConnectionStatus.ERROR:
+        return _deny(
+            "connection_failed",
+            name,
+            connection.error_detail or "that MCP connection is not working",
+            kind,
+        )
+    if not binding.enabled:
+        return _deny("not_bound", name, "that MCP connection is not enabled for this session", kind)
+    return None
+
+
+def decide(
     *,
     connection: McpConnection | None,
     binding: ThreadBinding | None,
@@ -142,22 +170,9 @@ def decide(  # noqa: PLR0912 complexity baseline, #771
             "that MCP connection no longer exists",
             kind,
         )
-    if connection.user_id != user_id:
-        # Unreachable through the API, which scopes every read by owner. Kept
-        # because this function is also called from the relay, where the user
-        # comes from a fence row rather than from a session.
-        return _deny("wrong_owner", name, "that MCP connection belongs to somebody else", kind)
-    if not connection.enabled or connection.status is ConnectionStatus.DISABLED:
-        return _deny("connection_disabled", name, "that MCP connection is turned off", kind)
-    if connection.status is ConnectionStatus.ERROR:
-        return _deny(
-            "connection_failed",
-            name,
-            connection.error_detail or "that MCP connection is not working",
-            kind,
-        )
-    if not binding.enabled:
-        return _deny("not_bound", name, "that MCP connection is not enabled for this session", kind)
+    refusal = _connection_refusal(connection, binding, kind=kind, name=name, user_id=user_id)
+    if refusal is not None:
+        return refusal
 
     if capability is None:
         return _deny(

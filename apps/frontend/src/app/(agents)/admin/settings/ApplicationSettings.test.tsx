@@ -10,7 +10,6 @@ import {
   type AdminSettingDefinition,
   type AgentAdminSettings,
 } from '@/lib/api/adminSettings';
-import { getModelPreference } from '@/lib/api/modelPreference';
 import { APIError } from '@/lib/utils/errors';
 
 import ApplicationSettings from './ApplicationSettings';
@@ -20,8 +19,6 @@ vi.mock('@/lib/api/adminSettings', () => ({
   getAgentAdminSettings: vi.fn(),
   setAgentAdminSettings: vi.fn(),
 }));
-
-vi.mock('@/lib/api/modelPreference', () => ({ getModelPreference: vi.fn() }));
 
 const read = vi.mocked(getAgentAdminSettings);
 const write = vi.mocked(setAgentAdminSettings);
@@ -144,25 +141,6 @@ function archiveSnapshot(over: Partial<AgentAdminSettings> = {}): AgentAdminSett
   };
 }
 
-function modelSnapshot(value: string): AgentAdminSettings {
-  return snapshot({
-    definitions: [
-      {
-        key: 'default_model',
-        label: 'Default model for new tasks',
-        description: 'The model a new task starts on.',
-        category: 'Execution',
-        kind: 'string',
-        default: 'deepseek-v4-flash',
-        secret: false,
-      },
-    ],
-    values: { default_model: value },
-    secret_configured: {},
-    bootstrap: [],
-  });
-}
-
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
@@ -234,8 +212,8 @@ function organizedSnapshot(): AgentAdminSettings {
     ],
     ['trust_proxy_headers', 'Security', 'Trust forwarded client addresses', 'boolean', false],
     ['github_app_id', 'Source control', 'GitHub App ID', 'string', '123'],
-    ['publish_base_branch', 'Publication', 'Default pull request base branch', 'string', 'dev'],
-    ['publish_git_timeout_s', 'Publication', 'Publication Git timeout', 'integer', 120],
+    ['github_coauthor', 'Source control', 'Agent commit co-author', 'string', 'Agent'],
+    ['github_request_timeout_s', 'Source control', 'GitHub request timeout', 'integer', 30],
   ];
   const definitions: AdminSettingDefinition[] = fields.map(
     ([key, category, label, kind, value]) => ({
@@ -260,15 +238,6 @@ beforeEach(() => {
   window.history.replaceState(null, '', window.location.pathname);
   read.mockReset().mockResolvedValue(snapshot());
   write.mockReset();
-  vi.mocked(getModelPreference)
-    .mockReset()
-    .mockResolvedValue({
-      default_model: null,
-      last_model: null,
-      effective_model: 'deepseek-v4-flash',
-      deployment_default: 'deepseek-v4-flash',
-      models: ['deepseek-v4-flash', 'glm-5.1'],
-    });
 });
 
 afterEach(() => {
@@ -461,7 +430,7 @@ describe('application settings', () => {
       ['gateway_authorize_url', 'Sign-in', 'Sign-in authorization URL'],
       ['session_cookie_secure', 'Security', 'Require HTTPS session cookies'],
       ['github_app_id', 'Source control', 'GitHub App ID'],
-      ['publish_base_branch', 'Publication', 'Default pull request base branch'],
+      ['github_coauthor', 'Source control', 'Agent commit co-author'],
       ['attachments.max_files', 'Attachments', 'Maximum upload file count'],
       ['skills.max_selected', 'Skills', 'Maximum selected skills'],
       ['task_titles.max_chars', 'Task titles', 'Maximum task title length'],
@@ -500,7 +469,7 @@ describe('application settings', () => {
     expect(screen.getByRole('heading', { name: 'Session security', level: 4 })).toBeVisible();
     for (const [category, labels] of [
       ['Identity & access', ['Sign-in authorization URL', 'Require HTTPS session cookies']],
-      ['Source control', ['GitHub App ID', 'Default pull request base branch']],
+      ['Source control', ['GitHub App ID', 'Agent commit co-author']],
       [
         'Content',
         ['Maximum upload file count', 'Maximum selected skills', 'Maximum task title length'],
@@ -520,15 +489,15 @@ describe('application settings', () => {
     await loadedField('Application name');
     selectCategory('Source control');
     const appId = editField('GitHub App ID');
-    const timeout = editField('Publication Git timeout');
+    const timeout = editField('GitHub request timeout');
     expect(appId).toBeVisible();
-    expect(editField('Default pull request base branch')).toBeVisible();
+    expect(editField('Agent commit co-author')).toBeVisible();
     expect(timeout).toBeVisible();
     fireEvent.change(appId, { target: { value: '456' } });
     fireEvent.change(timeout, { target: { value: '180' } });
     selectCategory('Appearance');
     selectCategory('Source control');
-    expect(editField('Publication Git timeout')).toBe(timeout);
+    expect(editField('GitHub request timeout')).toBe(timeout);
     expect(timeout).toHaveValue(180);
     expect(appId).toHaveValue('456');
     expect(write).not.toHaveBeenCalled();
@@ -536,14 +505,14 @@ describe('application settings', () => {
 
   it('focuses an initially linked field from a merged original category without a disclosure', async () => {
     read.mockResolvedValue(organizedSnapshot());
-    window.history.replaceState(null, '', '#application-setting-publish_git_timeout_s');
+    window.history.replaceState(null, '', '#application-setting-trust_proxy_headers');
     render(<ApplicationSettings />);
-    const input = await screen.findByLabelText('Publication Git timeout');
+    const input = await screen.findByLabelText('Trust forwarded client addresses');
     await waitFor(() => expect(input).toHaveFocus());
     expect(input).toBeVisible();
     expect(input.closest('details')).toBeNull();
-    expect(screen.getByRole('region', { name: 'Source control' })).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Source control' })).toHaveAttribute(
+    expect(screen.getByRole('region', { name: 'Identity & access' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Identity & access' })).toHaveAttribute(
       'aria-pressed',
       'true',
     );
@@ -577,62 +546,6 @@ describe('application settings', () => {
     expect(input.closest('details')).toBeNull();
     expect(screen.getByRole('region', { name: 'Identity & access' })).toBeVisible();
     expect(screen.getByLabelText('Sign-in authorization URL')).toBeVisible();
-  });
-
-  it('suggests the models this account is offered for the default model', async () => {
-    read.mockResolvedValue(modelSnapshot('deepseek-v4-flash'));
-    render(<ApplicationSettings />);
-    const field = await loadedField('Default model for new tasks');
-    fireEvent.keyDown(field, { key: 'ArrowDown' });
-    const names = screen.getAllByRole('option').map((option) => option.textContent);
-    expect(names).toEqual(['deepseek-v4-flash', 'glm-5.1']);
-    fireEvent.click(screen.getByRole('option', { name: 'glm-5.1' }));
-    expect(field).toHaveValue('glm-5.1');
-    // A model id is one line; the generic multi-line toggle does not apply.
-    expect(screen.queryByLabelText(/Use multiple lines/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/not offered this model/)).not.toBeInTheDocument();
-  });
-
-  it('flags a default model this account is not offered, without refusing it', async () => {
-    read.mockResolvedValue(modelSnapshot('deepseek-v4-flash'));
-    write.mockResolvedValue(modelSnapshot('deepseek-v4-flsh'));
-    render(<ApplicationSettings />);
-    const field = await loadedField('Default model for new tasks');
-    fireEvent.change(field, { target: { value: ' deepseek-v4-flsh\n' } });
-    expect(screen.getByText(/Your account is not offered this model/)).toBeInTheDocument();
-    expect(field.getAttribute('aria-describedby')).toContain('-note');
-    // Another user's catalog may differ, so this is a warning, not a block;
-    // the stray whitespace is trimmed so the value can match someone's model.
-    saveField('Default model for new tasks');
-    await waitFor(() =>
-      expect(write).toHaveBeenCalledExactlyOnceWith(
-        { default_model: 'deepseek-v4-flsh' },
-        1,
-        expect.any(AbortSignal),
-      ),
-    );
-  });
-
-  it('explains an empty default model and refuses one with spaces inside', async () => {
-    read.mockResolvedValue(modelSnapshot('deepseek-v4-flash'));
-    render(<ApplicationSettings />);
-    const field = await loadedField('Default model for new tasks');
-    fireEvent.change(field, { target: { value: '' } });
-    expect(screen.getByText(/Empty: every user without a model of their own/)).toBeVisible();
-    fireEvent.change(field, { target: { value: 'two models' } });
-    fireEvent.click(reviewButton('Default model for new tasks'));
-    expect(await screen.findByText('Enter one model id, without spaces.')).toBeVisible();
-    expect(write).not.toHaveBeenCalled();
-  });
-
-  it('suggests and flags nothing when this account has no readable catalog', async () => {
-    vi.mocked(getModelPreference).mockRejectedValue(new Error('forbidden'));
-    read.mockResolvedValue(modelSnapshot('anything'));
-    render(<ApplicationSettings />);
-    const field = await loadedField('Default model for new tasks');
-    await waitFor(() => expect(getModelPreference).toHaveBeenCalled());
-    expect(field).not.toHaveAttribute('role');
-    expect(screen.queryByText(/not offered this model/)).not.toBeInTheDocument();
   });
 
   it('saves an archive URI as an atomic bucket and prefix patch and resets both drafts', async () => {

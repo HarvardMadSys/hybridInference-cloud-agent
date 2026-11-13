@@ -18,20 +18,20 @@ from tests.unit.test_shared_session_supervisor import (
     _spec as _shared_spec,
 )
 
-from cloud_agent_host.chat_sandbox import ChatSandboxManager
-from cloud_agent_host.chat_sandbox_models import (
+from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
+from cloud_agent_host.container.chat_sandbox_models import (
     MEMBER_UID_BASE,
     ChatSandboxInspection,
     ChatSandboxSpec,
     ChatSandboxStatus,
 )
-from cloud_agent_host.guest_observer import (
+from cloud_agent_host.container.sandbox import KATA_RUNTIME, ContainerBackend
+from cloud_agent_host.observe.guest_observer import (
     GUEST_OBSERVER_BINARY,
     GuestObserverCursor,
     GuestObserverRuntimeError,
 )
-from cloud_agent_host.guest_observer_warmup import warm_guest_observer
-from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend
+from cloud_agent_host.observe.guest_observer_warmup import warm_guest_observer
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -53,7 +53,7 @@ def _proven_manager(*, runtime: str = KATA_RUNTIME) -> ChatSandboxManager:
     """A manager whose last start proved ``_CONTAINER`` for ``_spec()``."""
     manager = ChatSandboxManager(ContainerBackend(image="registry/agent:1", runtime=runtime))
     spec = _spec()
-    manager._proven.record(
+    manager.exact._proven.record(
         spec,
         ChatSandboxInspection(
             container_id=_CONTAINER,
@@ -146,10 +146,10 @@ def test_only_the_exact_proven_container_is_warmed(controller, proven):
     """A container replaced under the same name since the proof is left alone."""
     manager = _proven_manager()
     if proven == "none":
-        manager._proven.forget(_spec())
+        manager.exact._proven.forget(_spec())
     else:
-        current = manager._proven.get(_spec())
-        manager._proven.record(_spec(), replace(current, container_id="sha256:container-two"))
+        current = manager.exact._proven.get(_spec())
+        manager.exact._proven.record(_spec(), replace(current, container_id="sha256:container-two"))
 
     thread = warm_guest_observer(manager, _spec(), _CONTAINER)
     thread.join(5)
@@ -238,8 +238,8 @@ def stopped_helper(tmp_path: Path) -> Iterator[_LocalObserver]:
 def test_a_warmed_guest_is_fenced_with_nothing_left_to_start(stopped_helper, monkeypatch):
     """The start runs the real controller's own path; the prompt finds it running.
 
-    The prompt's fence is then only its two reads, the opening one and the
-    fence after it, with no start between them.
+    The prompt's fence is then only its one exec, the opening read and the
+    fence after it, with no start before it.
     """
     manager = _proven_manager()
     monkeypatch.setattr(
@@ -264,7 +264,7 @@ def test_a_warmed_guest_is_fenced_with_nothing_left_to_start(stopped_helper, mon
 
     assert privileged[-1] == [GUEST_OBSERVER_BINARY]
     assert cursor.available, cursor.detail
-    assert len(stopped_helper.execs) == 2
+    assert len(stopped_helper.execs) == 1
     assert len(privileged) == started
 
 

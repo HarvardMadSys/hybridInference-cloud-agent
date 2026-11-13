@@ -12,14 +12,34 @@ from pathlib import Path
 import pytest
 from tests.unit.test_live_sessions import _live, _LiveProcess, _turn_lines
 
-from cloud_agent_host.drivers import (
-    TurnInput,
-    driver_for,
+from cloud_agent_host.drivers import TurnInput
+from cloud_agent_host.question_change_signals import (
+    ChangeTrackedDict,
+    QuestionChangeTrackable,
+    question_change_frames,
 )
 from cloud_agent_host.runtimes import ClaudeCodeRuntime, CodexRuntime, KiloRuntime, OpencodeRuntime
+from cloud_agent_host.runtimes.live import driver_for
 from cloud_agent_shared.shared_protocol import INPUT_REFUSED, INPUT_TURN_ENDED
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures/agent_runtime_streams"
+
+
+def test_pending_question_mutations_coalesce_to_one_stream_frame():
+    class _Turn(QuestionChangeTrackable):
+        def __init__(self):
+            self._questions_lock = threading.Lock()
+            self._questions = ChangeTrackedDict()
+
+    turn = _Turn()
+    turn._questions["first"] = object()
+    turn._questions["second"] = object()
+
+    assert list(question_change_frames(turn)) == ['{"kind":"question_changed"}\n']
+    assert list(question_change_frames(turn)) == []
+
+    turn._questions.pop("first")
+    assert list(question_change_frames(turn)) == ['{"kind":"question_changed"}\n']
 
 
 def _fixture(runtime, kind="question"):
@@ -51,8 +71,6 @@ def _turn(tmp_path, runtime, kind="question"):
 @pytest.mark.parametrize("runtime", ["claude", "codex"])
 def test_native_request_retains_wire_identity_and_answers_once(tmp_path, runtime):
     process, _session, turn, request, response, spawned = _turn(tmp_path, runtime)
-    assert turn.take_question_change() is True
-    assert turn.take_question_change() is False
     (pending,) = turn.pending_questions()
     (question,) = pending["questions"]
     assert question["question"] == "Which approach?"
@@ -64,8 +82,6 @@ def test_native_request_retains_wire_identity_and_answers_once(tmp_path, runtime
     assert turn.answer_question(pending["request_id"], {question_id: ["B"]}).accepted
     assert json.loads(process.sent[-1]) == response
     assert turn.pending_questions() == []
-    assert turn.take_question_change() is True
-    assert turn.take_question_change() is False
     assert turn.answer_question(pending["request_id"], {question_id: ["A"]}).reason == INPUT_REFUSED
     if runtime == "claude":
         argv = spawned[0][0]

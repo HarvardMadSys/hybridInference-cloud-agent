@@ -17,8 +17,6 @@ import { getErrorMessage } from '@/lib/utils/errors';
 import { buttonClass, ErrorNotice, inputClass, primaryClass } from './compute-ui';
 
 const CREDENTIALS = [
-  ['gateway.key', 'Inference tunnel private key'],
-  ['gateway.known_hosts', 'Inference tunnel verified hosts'],
   ['mcp.key', 'MCP tunnel private key'],
   ['mcp.known_hosts', 'MCP tunnel verified hosts'],
   ['control.key', 'Control tunnel private key'],
@@ -32,21 +30,43 @@ type SavedAutomaticSetup = {
   parameters: AutomaticSetupParameters;
 };
 
+function AutomaticSetupIntro({ hasConnections }: { hasConnections: boolean }) {
+  const machines = 'control-plane machine';
+  return (
+    <>
+      <p className="text-sm text-gray-600 dark:text-gray-300">
+        Select your {machines} and confirm the sandbox network. Cloud Agent uses its deployed
+        release, creates the Host environment and dedicated tunnel credentials, and configures the
+        connections automatically.
+      </p>
+      {!hasConnections && (
+        <p className="text-sm text-gray-600 dark:text-gray-300">
+          Add SSH connections for the {machines} under Connections first.
+        </p>
+      )}
+      <p className="text-sm text-gray-600 dark:text-gray-300">
+        Use SSH accounts with passwordless sudo on the stable machines.{' '}
+        {
+          'The control plane runs the main API and MCP listener. Owners provide their own inference connections.'
+        }
+      </p>
+    </>
+  );
+}
+
 function automaticSetupStorageKey() {
   return `cloud-agent:automatic-server-setup:${config.apiBase}:${window.location.pathname}`;
 }
 
 function setupSignature(parameters: AutomaticSetupParameters) {
-  const target = (machine: AutomaticSetupParameters['gateway']) => [
+  const target = (machine: AutomaticSetupParameters['control']) => [
     machine.connection_id,
     machine.address,
     machine.port,
     machine.username,
   ];
   return JSON.stringify([
-    target(parameters.gateway),
     target(parameters.control),
-    parameters.gateway_port,
     parameters.chat_network_pool,
     parameters.dns_server,
     parameters.protected_cidrs,
@@ -67,9 +87,7 @@ function isSetupParameters(value: unknown): value is AutomaticSetupParameters {
     );
   };
   return (
-    isMachine(parameters.gateway) &&
     isMachine(parameters.control) &&
-    Number.isInteger(parameters.gateway_port) &&
     typeof parameters.chat_network_pool === 'string' &&
     typeof parameters.dns_server === 'string' &&
     Array.isArray(parameters.protected_cidrs) &&
@@ -172,19 +190,12 @@ function AutomaticComputeSetup({
     (connection) => connection.provider_id === 'existing_ssh',
   );
   const [status, setStatus] = useState<AutomaticComputeSetupStatus | null>(null);
-  const [gateway, setGateway] = useState({
-    connection_id: '',
-    address: '',
-    port: '22',
-    username: '',
-  });
   const [control, setControl] = useState({
     connection_id: '',
     address: '',
     port: '22',
     username: '',
   });
-  const [gatewayPort, setGatewayPort] = useState('8080');
   const [networkPool, setNetworkPool] = useState('');
   const [dnsServer, setDnsServer] = useState('');
   const [protectedCidrs, setProtectedCidrs] = useState('');
@@ -209,9 +220,7 @@ function AutomaticComputeSetup({
             ? result.pending_request_id
             : saved?.request_id;
         if (parameters) {
-          setGateway({ ...parameters.gateway, port: String(parameters.gateway.port) });
           setControl({ ...parameters.control, port: String(parameters.control.port) });
-          setGatewayPort(String(parameters.gateway_port));
           setNetworkPool(parameters.chat_network_pool);
           setDnsServer(parameters.dns_server);
           setProtectedCidrs(parameters.protected_cidrs.join('\n'));
@@ -222,7 +231,6 @@ function AutomaticComputeSetup({
           }
         } else if (result.machine_defaults) {
           const machines = result.machine_defaults;
-          setGateway((current) => ({ ...current, address: machines.gateway.address }));
           setControl((current) => ({ ...current, address: machines.control.address }));
         }
         setStatus(result);
@@ -240,19 +248,12 @@ function AutomaticComputeSetup({
     setError(null);
     try {
       const parameters = {
-        gateway: {
-          connection_id: gateway.connection_id,
-          address: gateway.address.trim(),
-          port: Number(gateway.port),
-          username: gateway.username.trim(),
-        },
         control: {
           connection_id: control.connection_id,
           address: control.address.trim(),
           port: Number(control.port),
           username: control.username.trim(),
         },
-        gateway_port: Number(gatewayPort),
         chat_network_pool: networkPool.trim(),
         dns_server: dnsServer.trim(),
         protected_cidrs: protectedCidrs.split(/[\s,]+/).filter(Boolean),
@@ -291,11 +292,7 @@ function AutomaticComputeSetup({
         void submit();
       }}
     >
-      <p className="text-sm text-gray-600 dark:text-gray-300">
-        Select your gateway and control-plane machines and confirm the sandbox network. Cloud Agent
-        uses its deployed release, creates the Host environment and dedicated tunnel credentials,
-        and configures the connections automatically.
-      </p>
+      <AutomaticSetupIntro hasConnections={sshConnections.length > 0} />
       {!status && !error && <p role="status">Checking automatic setup availability…</p>}
       {status && !status.available && (
         <div role="alert" className="space-y-2 text-sm text-amber-700 dark:text-amber-300">
@@ -305,23 +302,9 @@ function AutomaticComputeSetup({
           ))}
         </div>
       )}
-      {sshConnections.length === 0 && (
-        <p className="text-sm text-gray-600 dark:text-gray-300">
-          Add SSH connections for the gateway and control-plane machines under Connections first.
-        </p>
-      )}
-      <p className="text-sm text-gray-600 dark:text-gray-300">
-        Use SSH accounts with passwordless sudo on the stable machines. The gateway serves
-        inference; the control plane runs the main API and MCP listener.
-      </p>
       <fieldset className="space-y-4" disabled={busy || !status?.available}>
         <div className="grid gap-4 sm:grid-cols-2">
-          {(
-            [
-              ['Gateway', gateway, setGateway],
-              ['Control-plane', control, setControl],
-            ] as const
-          ).map(([name, value, update]) => (
+          {([['Control-plane', control, setControl]] as const).map(([name, value, update]) => (
             <fieldset className="space-y-3" key={name}>
               <legend className="mb-2 text-sm font-semibold">{name} machine</legend>
               <label className="block text-sm">
@@ -376,21 +359,6 @@ function AutomaticComputeSetup({
             </fieldset>
           ))}
         </div>
-        <details>
-          <summary className="cursor-pointer text-sm">Custom inference port</summary>
-          <label className="mt-3 block text-sm">
-            <span className="mb-1 block font-medium">Gateway inference port</span>
-            <input
-              className={inputClass}
-              type="number"
-              min={1}
-              max={65535}
-              required
-              value={gatewayPort}
-              onChange={(event) => setGatewayPort(event.target.value)}
-            />
-          </label>
-        </details>
         <div className="grid gap-4 sm:grid-cols-2">
           <label className="text-sm">
             <span className="mb-1 block font-medium">Server setup capacity</span>

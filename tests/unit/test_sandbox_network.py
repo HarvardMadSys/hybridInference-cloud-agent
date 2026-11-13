@@ -27,7 +27,6 @@ _ENV = {
     "AGENT_EGRESS_CHAT_NETWORK_POOL": "10.240.0.0/16",
     "AGENT_EGRESS_DNS_SERVER": "1.1.1.1",
     "AGENT_RELAY_NETWORK": "agent-relays",
-    "AGENT_GATEWAY_URL": "http://agent-gateway:8080",
     "AGENT_SANDBOX_MCP_URL": "http://agent-mcp:8000",
 }
 
@@ -46,11 +45,8 @@ def test_a_complete_environment_is_one_network() -> None:
     assert network.pool == ipaddress.IPv4Network("10.240.0.0/16")
     assert network.dns_server == ipaddress.IPv4Address("1.1.1.1")
     assert network.relay_network == "agent-relays"
-    assert network.relays == (
-        RelayEndpoint("agent-gateway", 8080),
-        RelayEndpoint("agent-mcp", 8000),
-    )
-    assert network.relay_hosts == ("agent-gateway", "agent-mcp")
+    assert network.relays == (RelayEndpoint("agent-mcp", 8000),)
+    assert network.relay_hosts == ("agent-mcp",)
 
 
 def test_a_configuration_error_is_a_sandbox_error() -> None:
@@ -90,8 +86,8 @@ def test_two_deployments_on_one_host_do_not_share_a_prefix_or_table() -> None:
         ("AGENT_RELAY_NETWORK", ""),
         ("AGENT_EGRESS_PROTECTED_CIDRS", "140.247.0.0/33"),
         ("AGENT_EGRESS_PROTECTED_CIDRS", "2001:db8::/32"),
-        ("AGENT_GATEWAY_URL", "agent-gateway:8080"),
-        ("AGENT_GATEWAY_URL", "http://10.0.0.5:8080"),
+        ("AGENT_SANDBOX_MCP_URL", "agent-mcp:8000"),
+        ("AGENT_SANDBOX_MCP_URL", "http://10.0.0.5:8000"),
         ("AGENT_SANDBOX_MCP_URL", "ftp://agent-mcp:8000"),
     ],
 )

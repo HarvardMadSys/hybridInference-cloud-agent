@@ -31,14 +31,15 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from tests.support.storage import AllCapabilities, OneFake
 
-from cloud_agent import memory_tool
-from cloud_agent.api import mcp_relay as agent_mcp_router
+from cloud_agent.api import _mcp_relay_callers, mcp_relay as agent_mcp_router
 from cloud_agent.api.deps import get_storage
 from cloud_agent.mcp import protocol, runtime as mcp_runtime
 from cloud_agent.mcp.host import ContentBlock, Session, ToolResult
+from cloud_agent.mcp.invocations import MAX_HELD_ARGUMENTS_BYTES
 from cloud_agent.mcp.net_policy import EgressPolicy
 from cloud_agent.mcp.protocol import Handshake
 from cloud_agent.mcp.registry import mcp_cipher
+from cloud_agent.memory import memory_tool
 from cloud_agent.ports.web_search import WebSearchAdmission
 from cloud_agent.tokens import SCOPE_MCP, mint_residency_mcp_token, mint_worker_token
 
@@ -78,7 +79,6 @@ def _connection(connection_id: int, label: str, **overrides: Any) -> dict[str, A
         "launch_spec": None,
         "auth_kind": "static",
         "auth_config": {"header_name": "Authorization", "scheme": "Bearer"},
-        "connector_id": None,
         "status": "active",
         "error_kind": "none",
         "error_detail": None,
@@ -574,7 +574,7 @@ class TestTheMergedCatalogue:
             refreshed.append(row["id"])
             return row
 
-        monkeypatch.setattr(agent_mcp_router, "ensure_fresh", refresh)
+        monkeypatch.setattr(_mcp_relay_callers, "ensure_fresh", refresh)
         listed = await client.post(_HOST_URL, json=_rpc("tools/list"), headers=_auth())
         called = await client.post(
             _HOST_URL,
@@ -686,8 +686,8 @@ class TestRoutingACall:
     ) -> None:
         """The refresh before a call uses the policy authorization and Test use.
 
-        This deployment admits private plain-HTTP targets, as one with a
-        connector bridge on its own network does. A refresh that fell back to
+        This deployment admits private plain-HTTP targets, as one whose MCP
+        servers live on its own network does. A refresh that fell back to
         the default policy would refuse that token endpoint only when a job
         asked, and the connection would read as needing reconnection mid-job
         while Test, which refreshes under the deployment's policy, kept
@@ -701,7 +701,7 @@ class TestRoutingACall:
             seen.append(policy)
             return row
 
-        monkeypatch.setattr(agent_mcp_router, "ensure_fresh", refresh)
+        monkeypatch.setattr(_mcp_relay_callers, "ensure_fresh", refresh)
         response = await client.post(
             _HOST_URL,
             json=_rpc("tools/call", name="docs__search", arguments={"q": "nsi"}),
@@ -759,7 +759,7 @@ class TestRoutingACall:
         store.bindings = [
             _binding(7, "github", rules={"get_issue": {"policy": "confirm", "fingerprint": ""}})
         ]
-        arguments = {"body": "x" * agent_mcp_router.MAX_HELD_ARGUMENTS_BYTES}
+        arguments = {"body": "x" * MAX_HELD_ARGUMENTS_BYTES}
 
         response = await client.post(
             _HOST_URL,
@@ -1073,7 +1073,7 @@ def real_host(monkeypatch: pytest.MonkeyPatch) -> FakeUpstream:
     Two things are arranged rather than mocked away. The connection's URL is an
     https loopback literal, so the egress check keeps its default scheme rule
     and needs no resolver; only the private-address rule is widened, the way a
-    deployment with a private connector bridge widens it. The transport is then
+    deployment with MCP servers on a private network widens it. The transport is then
     mocked, so everything above it -- version negotiation, ``tools/list``, the
     call itself, the result rendering -- is the code that runs in production.
     """
@@ -1341,7 +1341,7 @@ async def test_inactive_connection_never_refreshes_or_delays_healthy_tools(
         assert row["id"] == 8, "inactive connection must not enter refresh"
         return row
 
-    monkeypatch.setattr(agent_mcp_router, "ensure_fresh", refresh)
+    monkeypatch.setattr(_mcp_relay_callers, "ensure_fresh", refresh)
     listed = await client.post(_HOST_URL, json=_rpc("tools/list"), headers=_auth())
     assert _tool_names(listed) == _catalogue("docs__search")
     assert refreshed == []

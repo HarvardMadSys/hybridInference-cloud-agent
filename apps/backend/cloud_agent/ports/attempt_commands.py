@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from cloud_agent.goals.report import GoalReportEnvelope
+    from cloud_agent.domain.goals import GoalReportEnvelope
 
 #: Every outcome of :meth:`AttemptCommands.record_attempt_turn_summary`.
 #: ``stored`` and ``duplicate`` are success -- a retried post is the same
@@ -26,6 +26,11 @@ TurnSummaryWrite = Literal["stored", "duplicate", "conflict", "lease_lost"]
 
 class AttemptCommands(Protocol):
     """Port: the attempt lifecycle -- claim, heartbeat, transition, retire."""
+
+    async def notify_question_change(
+        self, *, job_id: str, attempt_id: int, lease_generation: int
+    ) -> bool:
+        """Wake a thread reader only while this attempt holds its live fence."""
 
     async def claim_job(
         self,
@@ -188,9 +193,8 @@ class AttemptCommands(Protocol):
         For each expired ``running`` attempt: mark it ``superseded``, append an
         ``attempt_superseded`` control event, then decide the job's fate —
         requeue while attempts remain, ``cancelled`` if cancellation was
-        pending, ``failed`` once ``max_attempts`` is exhausted. Publication is
-        a snapshot's lifecycle, not the job's, so no job is ever caught
-        mid-publish here. Returns a summary per reaped attempt.
+        pending, ``failed`` once ``max_attempts`` is exhausted. Returns a
+        summary per reaped attempt.
         """
         ...
 
@@ -224,12 +228,6 @@ class AttemptCommands(Protocol):
         included, under one fence check. Returns their ids in the order given,
         or ``None`` when the caller lost the lease, and then stores none.
         """
-        ...
-
-    async def notify_question_change(
-        self, *, job_id: str, attempt_id: int, lease_generation: int
-    ) -> bool:
-        """Publish an owner-scoped question hint for this live attempt only."""
         ...
 
     async def record_continuity_mode(

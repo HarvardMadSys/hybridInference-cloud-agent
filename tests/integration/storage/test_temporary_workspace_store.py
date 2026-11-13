@@ -21,7 +21,7 @@ from tests.integration.storage.test_schema_upgrade import _db_config
 from tests.support.db import reset_agent_tables
 from tests.support.migrations import apply_migrations, downgrade_to
 
-from cloud_agent.agent_memory import MemoryTask
+from cloud_agent.domain.agent_memory import MemoryTask
 from cloud_agent.storage.repositories.environments import EnvironmentNotFound
 from cloud_agent_shared.git.temporary_workspace import TEMPORARY_WORKSPACE_BASE_SHA
 
@@ -144,7 +144,6 @@ async def test_a_temporary_workspace_settles_without_opening_a_snapshot(store, p
     assert group["published_base_sha"] == TEMPORARY_WORKSPACE_BASE_SHA
     assert group["workspace_epoch"] == 1
     assert snapshots == 0
-    assert await store.snapshot.claim_due_sandbox_snapshot() is None
 
 
 async def test_the_lists_select_temporary_workspaces_and_count_them_as_a_project(store):

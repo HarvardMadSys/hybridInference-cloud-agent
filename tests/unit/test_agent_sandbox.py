@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
 
-from cloud_agent_host import sandbox as sandbox_mod
-from cloud_agent_host.sandbox import (
+from cloud_agent_host import runtime_images
+from cloud_agent_host.container import sandbox as sandbox_mod
+from cloud_agent_host.container.sandbox import (
     KATA_RUNTIME,
     ContainerBackend,
     ProcessBackend,
@@ -215,7 +218,8 @@ def test_container_preflight_proves_guest_kernel_with_the_exact_runtime_and_imag
         return "guest-kernel"
 
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.ChatSandboxManager.probe_guest_observer", observer_probe
+        "cloud_agent_host.container.chat_sandbox.ChatSandboxManager.probe_guest_observer",
+        observer_probe,
     )
     calls: list[list[str]] = []
     monkeypatch.setattr(sandbox_mod.os, "uname", lambda: SimpleNamespace(release="host-kernel"))
@@ -260,7 +264,7 @@ def test_combined_preflight_never_attests_missing_or_shared_kernel(monkeypatch, 
         lambda argv, **kwargs: SimpleNamespace(returncode=0, stdout="27.0\n", stderr=""),
     )
     monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox.ChatSandboxManager.probe_guest_observer",
+        "cloud_agent_host.container.chat_sandbox.ChatSandboxManager.probe_guest_observer",
         lambda self: guest_kernel,
     )
     backend = ContainerBackend(image="img:1", runtime=KATA_RUNTIME)
@@ -433,7 +437,7 @@ def test_a_turns_child_checks_the_network_on_its_hosts_verification_of_the_rules
     the child took it, leaves it nothing to rely on, so its check makes a
     fresh one, as every other caller's does.
     """
-    from cloud_agent_host.network_guard import VERIFICATION_KEY, NetworkGuardError
+    from cloud_agent_host.network.network_guard import VERIFICATION_KEY, NetworkGuardError
 
     calls, ensured = _network_preflight(monkeypatch)
     handed: list[object] = []
@@ -496,32 +500,6 @@ def test_the_candidate_preflight_touches_no_network(monkeypatch):
     assert ensured == []
 
 
-def test_every_probe_runs_under_the_runtime_jobs_will_use(monkeypatch):
-    """A probe under the daemon's default validates a deployment nobody runs.
-
-    The bind check learned this when it passed on a host with no Kata shim and
-    every job then died at spawn. The gateway probe is the same shape — DNS
-    and networking are exactly what differs between a shared-kernel container
-    and a VM-isolated one — so it carries the flag too, and gets the guest's
-    relay addresses the way a chat does.
-    """
-    backend = build_backend_from_env(
-        {"AGENT_SANDBOX_BACKEND": "kata", "AGENT_SANDBOX_IMAGE": "img:1", **_NET_ENV}
-    )
-    monkeypatch.setattr(
-        "cloud_agent_host.chat_sandbox_network.ChatSandboxNetwork.relay_addresses",
-        lambda self, network: {"agent-gateway": "10.2.0.2"},
-    )
-    calls = _probe_returns(monkeypatch, "ok")
-
-    backend.check_gateway_reachable("http://agent-gateway:8080")
-
-    runs = [argv for argv in calls if argv[1] == "run"]
-    assert len(runs) == 1
-    assert runs[0][runs[0].index("--runtime") + 1] == KATA_RUNTIME
-    assert "agent-gateway=10.2.0.2" in runs[0]
-
-
 def _probe_returns(monkeypatch, verdict: str) -> list[list[str]]:
     """Stub the probe container, capturing the argv it would have run."""
     calls: list[list[str]] = []
@@ -532,72 +510,6 @@ def _probe_returns(monkeypatch, verdict: str) -> list[list[str]]:
 
     monkeypatch.setattr(sandbox_mod.subprocess, "run", fake_run)
     return calls
-
-
-def test_a_reachable_gateway_passes(monkeypatch):
-    calls = _probe_returns(monkeypatch, "ok")
-    backend = ContainerBackend(image="img:1", sandbox_network=_NETWORK)
-
-    backend.check_gateway_reachable("http://agent-gateway:8080")
-
-    argv = calls[0]
-    assert argv[:2] == ["docker", "run"]
-    assert argv[argv.index("--network") + 1] == "agent-relays"
-    # The probe URL is passed as an argument, never interpolated into the
-    # script: it comes from configuration and ends up inside a shell.
-    assert "http://agent-gateway:8080/health" in argv
-
-
-def test_a_name_that_does_not_resolve_names_the_remote_gateway_case(monkeypatch):
-    _probe_returns(monkeypatch, "unresolved")
-    backend = ContainerBackend(image="img:1", sandbox_network=_NETWORK)
-
-    with pytest.raises(SandboxError) as excinfo:
-        backend.check_gateway_reachable("http://backend:8080")
-
-    message = str(excinfo.value)
-    assert "cannot resolve" in message
-    assert "relay" in message
-
-
-def test_a_relay_that_resolves_but_cannot_forward_is_caught(monkeypatch):
-    """The regression this check was rewritten for.
-
-    DNS alone passes for anything with a record — including a tunnel container
-    that answers to the gateway's name and cannot reach the gateway behind it.
-    That is exactly the shape of a cross-machine deployment, so the one
-    topology that needed the check hardest was the one it could not see.
-    """
-    _probe_returns(monkeypatch, "unreachable")
-    backend = ContainerBackend(image="img:1", sandbox_network=_NETWORK)
-
-    with pytest.raises(SandboxError) as excinfo:
-        backend.check_gateway_reachable("http://agent-gateway:8080")
-
-    message = str(excinfo.value)
-    assert "no HTTP response" in message
-    assert "cannot reach the gateway behind it" in message
-
-
-def test_an_image_without_curl_or_python_degrades_loudly(monkeypatch, caplog):
-    """A deployment-owned image may have neither. Resolving is all that can be
-    asked of it — but the log must not imply the stronger check ran."""
-    _probe_returns(monkeypatch, "dns-only")
-    backend = ContainerBackend(image="custom:1", sandbox_network=_NETWORK)
-
-    with caplog.at_level(logging.WARNING):
-        backend.check_gateway_reachable("http://agent-gateway:8080")
-
-    assert "agent_sandbox_gateway_probe_degraded" in caplog.text
-
-
-def test_a_base_url_with_no_host_is_not_probed(monkeypatch):
-    calls = _probe_returns(monkeypatch, "ok")
-    backend = ContainerBackend(image="img:1", sandbox_network=_NETWORK)
-
-    backend.check_gateway_reachable("not-a-url")
-
-    assert calls == []
 
 
 def _inspect_json(**overrides):
@@ -628,7 +540,7 @@ def test_version_stamp_reads_runtime_digest_and_baked_versions(monkeypatch):
         calls.append(argv)
         return SimpleNamespace(returncode=0, stdout=_inspect_json(), stderr="")
 
-    monkeypatch.setattr("cloud_agent_host.sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.container.sandbox.subprocess.run", fake_run)
     backend = ContainerBackend(image="img:1", runtime="io.containerd.kata.v2")
 
     stamp = backend.version_stamp()
@@ -661,7 +573,7 @@ def test_version_stamp_offers_downloaded_versions_after_the_images_own(monkeypat
             )
         return SimpleNamespace(returncode=0, stdout=_inspect_json(), stderr="")
 
-    monkeypatch.setattr("cloud_agent_host.sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.container.sandbox.subprocess.run", fake_run)
     backend = ContainerBackend(image="img:1")
 
     stamp = backend.version_stamp()
@@ -699,7 +611,7 @@ def _holding(monkeypatch, versions, *, in_use=(), menu_label=None):
             returncode=0, stdout=_inspect_json(Config={"Labels": labels}), stderr=""
         )
 
-    monkeypatch.setattr("cloud_agent_host.sandbox.subprocess.run", fake_run)
+    monkeypatch.setattr("cloud_agent_host.container.sandbox.subprocess.run", fake_run)
     return calls
 
 
@@ -777,10 +689,51 @@ def test_an_image_menu_too_long_to_report_keeps_its_default(monkeypatch):
     assert backend.image_menu()["claude-code"] == own
 
 
+def test_a_stamp_that_skips_downloads_lists_no_images(monkeypatch):
+    """A turn needing only the image's facts never waits for the slow image listing."""
+    calls = _holding(monkeypatch, ["2.1.300"])
+    backend = ContainerBackend(image="img:1")
+
+    stamp = backend.version_stamp(downloads="skip")
+
+    assert stamp["sandbox_image_digest"] == "registry.example/sandbox@sha256:pinned"
+    assert stamp["runtime_versions_available"]["claude-code"] == ["1.2.3"]
+    assert [argv for argv in calls if argv[1:3] == ["image", "ls"]] == []
+    # The same backend still offers the download where the menu is reported.
+    assert backend.version_stamp()["runtime_versions_available"]["claude-code"] == [
+        "1.2.3",
+        "2.1.300",
+    ]
+
+
+def test_a_fresh_stamp_lists_downloads_again_however_recent_the_menu(monkeypatch):
+    calls = _holding(monkeypatch, ["2.1.300"])
+    backend = ContainerBackend(image="img:1")
+    backend.version_stamp()
+
+    backend.version_stamp(downloads="fresh")
+
+    assert len([argv for argv in calls if argv[1:3] == ["image", "ls"]]) == 2
+
+
+def test_a_stamp_that_skips_downloads_does_not_repeat_the_left_off_warning(monkeypatch, caplog):
+    """The image's own menu is not the menu offered, so it neither warns nor resets the warning."""
+    _holding(monkeypatch, [f"2.1.{n}" for n in range(70)])
+    backend = ContainerBackend(image="img:1")
+
+    with caplog.at_level(logging.WARNING):
+        backend.version_stamp()
+        backend.version_stamp(downloads="skip")
+        backend.version_stamp()
+
+    warned = [r for r in caplog.records if r.getMessage() == "agent_runtime_versions_left_off"]
+    assert len(warned) == 1
+
+
 def test_version_stamp_attests_runc_with_an_empty_string(monkeypatch):
     """No VM runtime is a positive statement, not a missing one."""
     monkeypatch.setattr(
-        "cloud_agent_host.sandbox.subprocess.run",
+        "cloud_agent_host.container.sandbox.subprocess.run",
         lambda argv, **kwargs: SimpleNamespace(returncode=0, stdout=_inspect_json(), stderr=""),
     )
     backend = ContainerBackend(image="img:1")
@@ -791,7 +744,7 @@ def test_version_stamp_attests_runc_with_an_empty_string(monkeypatch):
 def test_version_stamp_falls_back_to_the_local_image_id(monkeypatch):
     """A built-but-never-pushed image still pins what ran."""
     monkeypatch.setattr(
-        "cloud_agent_host.sandbox.subprocess.run",
+        "cloud_agent_host.container.sandbox.subprocess.run",
         lambda argv, **kwargs: SimpleNamespace(
             returncode=0, stdout=_inspect_json(RepoDigests=[]), stderr=""
         ),
@@ -811,7 +764,7 @@ def test_version_stamp_degrades_without_failing_the_heartbeat(monkeypatch, failu
     def fail(argv, **kwargs):
         raise failure
 
-    monkeypatch.setattr("cloud_agent_host.sandbox.subprocess.run", fail)
+    monkeypatch.setattr("cloud_agent_host.container.sandbox.subprocess.run", fail)
     backend = ContainerBackend(image="img:1", runtime="io.containerd.kata.v2")
 
     stamp = backend.version_stamp()
@@ -823,3 +776,109 @@ def test_version_stamp_degrades_without_failing_the_heartbeat(monkeypatch, failu
 
 def test_the_process_backend_has_nothing_to_stamp():
     assert ProcessBackend(acknowledged_unsafe=True).version_stamp() == {}
+
+
+# ── Downloaded versions: answered at once, read again in the background ──
+
+
+class _Listing:
+    """A ``discover`` whose answer a test sets, and whose background read it can hold."""
+
+    def __init__(self, monkeypatch, versions):
+        self.versions = list(versions)
+        self.calls = 0
+        self.gate = threading.Event()
+        self.gate.set()
+        monkeypatch.setattr(runtime_images, "discover", self)
+
+    def __call__(self, docker, namespace, **kwargs):
+        self.calls += 1
+        answer = list(self.versions)
+        assert self.gate.wait(5)
+        return [
+            runtime_images.RuntimeImage("claude-code", version, "0123456789ab", "ref")
+            for version in answer
+        ]
+
+
+def _age(downloaded, seconds):
+    """Make the menu ``downloaded`` holds ``seconds`` old."""
+    downloaded._read_at = time.monotonic() - seconds
+
+
+def test_a_menu_past_its_cache_is_answered_while_docker_is_read_again(monkeypatch):
+    listing = _Listing(monkeypatch, ["2.1.300"])
+    downloaded = runtime_images.DownloadedVersions("docker", "ns")
+    assert downloaded.versions() == {"claude-code": ["2.1.300"]}
+    assert downloaded.versions() == {"claude-code": ["2.1.300"]}
+    assert listing.calls == 1
+
+    _age(downloaded, runtime_images._CACHE_S + 1)
+    listing.versions = ["2.1.300", "2.1.301"]
+    listing.gate.clear()
+    # Answered at once, from the menu held, while Docker is listed again.
+    assert downloaded.versions() == {"claude-code": ["2.1.300"]}
+    refresher = downloaded._refresher
+    assert refresher is not None
+    # One background read at a time.
+    assert downloaded.versions() == {"claude-code": ["2.1.300"]}
+    listing.gate.set()
+    refresher.join(5)
+
+    assert downloaded.versions() == {"claude-code": ["2.1.300", "2.1.301"]}
+    assert listing.calls == 2
+
+
+def test_an_invalidated_menu_waits_for_docker_and_drops_an_older_read(monkeypatch):
+    """A download just finished: the next beat must offer it, not a read begun before it."""
+    listing = _Listing(monkeypatch, [])
+    downloaded = runtime_images.DownloadedVersions("docker", "ns")
+    downloaded.versions()
+    _age(downloaded, runtime_images._CACHE_S + 1)
+    listing.gate.clear()
+    downloaded.versions()
+    refresher = downloaded._refresher
+    assert refresher is not None
+
+    downloaded.invalidate()
+    listing.versions = ["2.1.300"]
+    listing.gate.set()
+    assert downloaded.versions() == {"claude-code": ["2.1.300"]}
+    refresher.join(5)
+
+    assert downloaded.versions() == {"claude-code": ["2.1.300"]}
+    assert listing.calls == 3
+
+
+def test_a_removed_version_is_withdrawn_once_invalidated(monkeypatch):
+    listing = _Listing(monkeypatch, ["2.1.300"])
+    downloaded = runtime_images.DownloadedVersions("docker", "ns")
+    downloaded.versions()
+
+    listing.versions = []
+    downloaded.invalidate()
+
+    assert downloaded.versions() == {}
+
+
+def test_a_menu_too_old_is_never_answered(monkeypatch):
+    """A process that asks rarely waits for Docker rather than offering an old menu."""
+    listing = _Listing(monkeypatch, ["2.1.300"])
+    downloaded = runtime_images.DownloadedVersions("docker", "ns")
+    downloaded.versions()
+    _age(downloaded, runtime_images._STALE_S + 1)
+    listing.versions = []
+
+    assert downloaded.versions() == {}
+    assert downloaded._refresher is None
+    assert listing.calls == 2
+
+
+def test_a_fresh_menu_is_read_now(monkeypatch):
+    listing = _Listing(monkeypatch, ["2.1.300"])
+    downloaded = runtime_images.DownloadedVersions("docker", "ns")
+    downloaded.versions()
+    listing.versions = ["2.1.300", "2.1.301"]
+
+    assert downloaded.versions(fresh=True) == {"claude-code": ["2.1.300", "2.1.301"]}
+    assert listing.calls == 2

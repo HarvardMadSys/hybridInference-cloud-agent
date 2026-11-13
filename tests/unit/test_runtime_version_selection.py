@@ -19,21 +19,22 @@ from __future__ import annotations
 
 from typing import Any
 
+from tests.support.owners import connection_access
+
 from cloud_agent.domain.runtimes import resolve_runtime_version
 from cloud_agent.schemas import WorkerClaimAttestation, WorkerClaimResponse
-from cloud_agent_host.runner import (
-    ClaimedJob,
-    _claim_attestation,
-    runtime_version_unavailable,
-)
-from cloud_agent_host.sandbox import (
+from cloud_agent_host.claimed_job import ClaimedJob
+from cloud_agent_host.container.sandbox import (
     ContainerBackend,
     _labelled,
     _split_menu,
 )
+from cloud_agent_host.service.host_capabilities import claim_attestation as _claim_attestation
+from cloud_agent_host.turn.shared_live_attempt import runtime_version_unavailable
 from cloud_agent_shared.environment import BoundEnvironment
 from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef, snapshot_object_key
 from cloud_agent_shared.model_connections import ModelConnectionAccess
+from cloud_agent_shared.sandbox_mcp import SandboxMcpServer
 from cloud_agent_shared.ssh_access import SshAccess
 
 _MENU = {"claude-code": ["2.1.220", "2.1.235"]}
@@ -174,17 +175,33 @@ def test_the_menu_keeps_the_image_order() -> None:
 
 
 class _Backend:
-    """Only what version selection reads off a sandbox backend."""
+    """Only what version selection reads off a sandbox backend.
 
-    def __init__(self, available: dict[str, list[str]] | None) -> None:
+    ``available`` is the image's own menu; ``downloaded`` what a fresh Docker
+    listing finds since. ``asked`` records how each stamp read the latter.
+    """
+
+    def __init__(
+        self,
+        available: dict[str, list[str]],
+        downloaded: dict[str, list[str]] | None = None,
+    ) -> None:
         self._available = available
+        self._downloaded = downloaded or {}
+        self.asked: list[str] = []
 
-    def version_stamp(self) -> dict[str, Any]:
-        return {"runtime_versions_available": self._available}
+    def version_stamp(self, *, downloads: str = "recent") -> dict[str, Any]:
+        self.asked.append(downloads)
+        menus = {runtime: list(versions) for runtime, versions in self._available.items()}
+        if downloads != "skip":
+            for runtime, versions in self._downloaded.items():
+                menus.setdefault(runtime, []).extend(versions)
+        return {"runtime_versions_available": menus}
 
 
 def _job(version: str | None) -> ClaimedJob:
     return ClaimedJob(
+        model_connection=connection_access("claude-code"),
         job_id="ajob_1",
         thread_id="athr_1",
         attempt_id=1,
@@ -195,7 +212,6 @@ def _job(version: str | None) -> ClaimedJob:
         runtime="claude-code",
         model="m",
         worker_token="w",
-        sandbox_token="s",
         runtime_version=version,
     )
 
@@ -204,6 +220,38 @@ def test_the_reason_is_reportable_before_the_agent_starts() -> None:
     """``run_turn`` fails the attempt with this rather than letting it time out."""
     assert runtime_version_unavailable(_job("9.9.9"), _Backend(_MENU)) is not None
     assert runtime_version_unavailable(_job("2.1.235"), _Backend(_MENU)) is None
+
+
+def test_a_version_the_image_holds_is_confirmed_without_listing_downloads() -> None:
+    """Listing downloaded versions takes seconds on a busy host; a turn start skips it."""
+    backend = _Backend(_MENU, {"claude-code": ["2.1.300"]})
+
+    assert runtime_version_unavailable(_job("2.1.235"), backend) is None
+    assert backend.asked == ["skip"]
+
+
+def test_a_downloaded_version_is_confirmed_from_a_fresh_listing() -> None:
+    """Not in the image, so Docker is asked now: a menu read earlier may predate it."""
+    backend = _Backend(_MENU, {"claude-code": ["2.1.300"]})
+
+    assert runtime_version_unavailable(_job("2.1.300"), backend) is None
+    assert backend.asked == ["skip", "fresh"]
+
+
+def test_a_version_the_host_does_not_hold_fails_only_after_a_fresh_listing() -> None:
+    backend = _Backend(_MENU, {"claude-code": ["2.1.300"]})
+
+    reason = runtime_version_unavailable(_job("9.9.9"), backend)
+
+    assert reason is not None and "2.1.300" in reason
+    assert backend.asked == ["skip", "fresh"]
+
+
+def test_no_selection_reads_no_stamp_at_all() -> None:
+    backend = _Backend(_MENU)
+
+    assert runtime_version_unavailable(_job(None), backend) is None
+    assert backend.asked == []
 
 
 # ── The wire between them ────────────────────────────────────────────────
@@ -313,6 +361,7 @@ def _full_claim() -> WorkerClaimResponse:
     return _claim(
         thread_attachment_count=2,
         turn_attachment_count=1,
+        context_injections=[{"producer": "memory", "items": 1, "chars": 40}],
         environment=BoundEnvironment(binding_id="b").model_dump(mode="json"),
         environment_snapshot=snapshot.model_dump(mode="json"),
         ssh_access=SshAccess(revision=1),
@@ -344,11 +393,12 @@ def _full_claim() -> WorkerClaimResponse:
             "activation_generation": 1,
             "process_generation": 1,
         },
-        sandbox_token="s",
         mcp_token="t",
         clone_token="c",
-        github_token="g",
         mcp_bindings=["docs"],
+        sandbox_mcp_servers=[
+            SandboxMcpServer(alias="browser", command="npx", args=("-y", "@playwright/mcp@0.0.83"))
+        ],
         metadata={"source": "test"},
     )
 

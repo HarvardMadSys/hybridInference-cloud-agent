@@ -31,11 +31,11 @@ export interface McpChoice {
   busy: boolean;
   error?: string;
   /**
-   * The connection cannot serve a task at all, so it is offered no switch.
+   * The connection cannot be selected for a new task until it is repaired.
    *
    * Distinct from a failed attempt, which leaves the switch in place: signing
    * in elsewhere or testing the connection can make that one work, and a row
-   * that reports a problem while removing the only control is a dead end.
+   * that reports a problem must keep a route to managing the connection.
    */
   blocked: boolean;
 }
@@ -43,7 +43,11 @@ export interface McpChoice {
 /** A connection that cannot serve a task, and why, in the owner's terms. */
 function unusable(connection: McpConnectionApi, t: Translator): string | null {
   if (connection.enabled === false) return t('attach.mcpDisabled');
-  if (connection.status === 'draft') return t('attach.mcpDraft');
+  // A program cannot be tested from here: it starts with a chat. One saved
+  // before testing marked it ready is still one a chat can turn on.
+  if (connection.status === 'draft' && connection.location !== 'sandbox') {
+    return t('attach.mcpDraft');
+  }
   if (connection.status === 'error' || connection.error_kind !== 'none') {
     return connection.error_kind === 'needs_authorization'
       ? t('attach.mcpNeedsSignIn')
@@ -106,12 +110,17 @@ export function useComposerMcp(t: Translator) {
             .filter((capability) => capability.kind === 'tool')
             .map((capability) => [capability.name, 'confirm' as const]),
         );
+        let binding: McpBindingInputApi = { connection_id: id, tools, enabled: true };
         if (Object.keys(tools).length === 0) {
-          // Binding a server with nothing to call would arrive disabled, which
-          // reads as a toggle that did not take.
-          throw new Error(t('attach.mcpNoTools'));
+          // A program lists its tools only once a chat has started it, so it
+          // is turned on with every tool asking first. A service lists them
+          // when it is tested; binding one with nothing to call would arrive
+          // disabled, which reads as a toggle that did not take.
+          const program = connections.find((row) => row.id === id)?.location === 'sandbox';
+          if (!program) throw new Error(t('attach.mcpNoTools'));
+          binding = { connection_id: id, tools: {}, enabled: true, use_defaults: true };
         }
-        setChosen((old) => new Map(old).set(id, { connection_id: id, tools, enabled: true }));
+        setChosen((old) => new Map(old).set(id, binding));
       } catch (cause) {
         setFailures((old) => new Map(old).set(id, getErrorMessage(cause)));
       } finally {
@@ -122,7 +131,7 @@ export function useComposerMcp(t: Translator) {
         });
       }
     },
-    [t],
+    [connections, t],
   );
 
   const clear = useCallback(() => setChosen(new Map()), []);

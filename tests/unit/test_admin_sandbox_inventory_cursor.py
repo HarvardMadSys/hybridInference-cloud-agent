@@ -2,8 +2,11 @@
 
 import pytest
 
-from cloud_agent.admin_observability import encode_cursor
-from cloud_agent.admin_sandbox_inventory import SandboxInventoryCursor, decode_inventory_cursor
+from cloud_agent.domain.cursors import encode_cursor
+from cloud_agent.schemas.admin_sandbox_inventory import (
+    SandboxInventoryCursor,
+    decode_inventory_cursor,
+)
 
 
 @pytest.mark.parametrize(

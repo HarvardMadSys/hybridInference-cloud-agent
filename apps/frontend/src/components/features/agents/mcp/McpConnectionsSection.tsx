@@ -34,6 +34,20 @@ export function capabilitySummary(counts: CapabilityCounts): string {
   return parts.join(' · ') || 'No tools discovered';
 }
 
+/** What kind of server this is, in the owner's words: never where it is placed. */
+export function connectionKind(location: string): string {
+  return location === 'remote' ? 'Online service' : 'Program';
+}
+
+/** The one line under a server's name on its card. */
+function cardSummary(connection: McpConnectionApi, active: boolean): string {
+  if (active) return capabilitySummary(connection);
+  if (connection.location === 'sandbox') {
+    return `${connection.argv.join(' ')} · its tools appear once a chat has used it`;
+  }
+  return connection.url ?? connection.argv.join(' ');
+}
+
 export interface McpAuthorizationResult {
   ok: boolean;
   connectionId: string | null;
@@ -101,8 +115,11 @@ export function McpConnectionsSection({
               `${connections[index].label}: ${outcome.reason instanceof Error ? outcome.reason.message : 'Could not connect. Try again.'}`,
             );
           } else if (outcome.value.result.ok) {
+            // A program starts with a chat, so only a chat can list its tools.
             connected.push(
-              `${outcome.value.connection.label} connected. ${capabilitySummary(outcome.value.result)}.`,
+              outcome.value.connection.location === 'sandbox'
+                ? `${outcome.value.connection.label}: ${outcome.value.result.message}`
+                : `${outcome.value.connection.label} connected. ${capabilitySummary(outcome.value.result)}.`,
             );
           } else {
             if (
@@ -396,9 +413,7 @@ export function McpConnectionsSection({
                     </span>
                   </div>
                   <p className="mt-2 break-all text-xs leading-5 text-muted">
-                    {active
-                      ? capabilitySummary(connection)
-                      : (connection.url ?? connection.argv.join(' '))}
+                    {cardSummary(connection, active)}
                   </p>
                 </div>
                 <div className="flex shrink-0 flex-wrap items-center gap-2">
@@ -532,9 +547,7 @@ export function McpConnectionsSection({
                   </div>
                   <div>
                     <dt className="font-medium">Connection</dt>
-                    <dd className="mt-1 break-words">
-                      {connection.transport} · {connection.location}
-                    </dd>
+                    <dd className="mt-1 break-words">{connectionKind(connection.location)}</dd>
                   </div>
                   {connection.server_name ? (
                     <div>

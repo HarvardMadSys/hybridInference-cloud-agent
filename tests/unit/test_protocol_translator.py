@@ -11,7 +11,9 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import re
 import select
+import signal
 import socket
 import subprocess
 import sys
@@ -24,9 +26,10 @@ import pytest
 from tests.support.compat_cli import write_wrapper
 
 from cloud_agent_host import protocol_translator as compat_server
-from cloud_agent_host.compat_helper import helper_archive
+from cloud_agent_host.member_setup.compat_helper import helper_archive
 from cloud_agent_host.protocol_translator import Binding, LaunchError, _Server
 from cloud_agent_shared.protocol_compat import ORIGIN_PLACEHOLDER, TOKEN_PLACEHOLDER
+from cloud_agent_shared.request_prefix import read_record
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -103,7 +106,7 @@ def upstream(monkeypatch):
     fake.server.shutdown()
 
 
-def _binding(client: str) -> Binding:
+def _binding(client: str, effort: str = "") -> Binding:
     env = {
         "AGENT_COMPAT_CLIENT": client,
         "AGENT_COMPAT_UPSTREAM_URL": "https://provider.example/prefix/v1",
@@ -111,7 +114,18 @@ def _binding(client: str) -> Binding:
         "AGENT_COMPAT_MODEL": "m",
         "AGENT_COMPAT_TOKEN": _TOKEN,
     }
+    if effort:
+        env["AGENT_COMPAT_REASONING_EFFORT"] = effort
     return Binding.from_launch(env, ["cli"])
+
+
+def _serve(binding: Binding):
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(16)
+    server = _Server(sock, binding)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, sock.getsockname()[1]
 
 
 @pytest.fixture(params=["responses", "anthropic_messages"])
@@ -178,6 +192,23 @@ def test_a_request_goes_to_the_bound_upstream_with_the_key(service, upstream):
     assert sent["body"]["model"] == "m" and sent["body"]["stream"] is True
     assert ("response.completed" if binding.client == "responses" else "message_stop") in text
     assert _KEY not in text
+
+
+def test_a_translated_request_is_measured_as_the_cli_sent_it(service, upstream, monkeypatch):
+    binding, port = service
+    written: list[bytes] = []
+    monkeypatch.setattr(compat_server, "emit_record", written.append)
+    tools = [{"type": "function", "name": "shell", "parameters": {}}]
+    if binding.client == "anthropic_messages":
+        body = _body(binding, system="be brief", tools=[{"name": "shell", "input_schema": {}}])
+    else:
+        body = _body(binding, instructions="be brief", tools=tools)
+    assert _call(port, _path(binding), token=_TOKEN, body=body)[0] == 200
+    (line,) = written
+    record = read_record(line.decode().rstrip("\n"))
+    assert record["mode"] == "translated" and record["protocol"] == binding.client
+    assert record["system"]["chars"] == len("be brief")
+    assert record["entries"][0][0] == "shell"
 
 
 def test_the_model_cannot_be_chosen_by_the_caller(service, upstream):
@@ -373,6 +404,65 @@ def test_a_non_streamed_request_is_answered_whole(service, upstream):
     assert "stream" not in upstream.requests[0]["body"]
 
 
+#: What each CLI puts in its own effort field. Claude Code sends ``high`` at
+#: Auto too (tests/fixtures/agent_runtime_streams/effort_wire_shapes.md).
+_CLIENT_EFFORT = {
+    "responses": {"reasoning": {"effort": "high", "summary": "auto"}},
+    "anthropic_messages": {"output_config": {"effort": "high"}},
+}
+
+
+@pytest.mark.parametrize("client", ["responses", "anthropic_messages"])
+@pytest.mark.parametrize("effort", ["low", "max"])
+def test_a_chosen_level_reaches_the_chat_upstream_on_every_request(upstream, client, effort):
+    """The original bug: the helper popped the level, so a chosen effort never left it."""
+    binding = _binding(client, effort)
+    server, port = _serve(binding)
+    try:
+        for body in (_body(binding, **_CLIENT_EFFORT[client]), _body(binding)):
+            assert _call(port, _path(binding), token=_TOKEN, body=body)[0] == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+    sent = [request["body"] for request in upstream.requests]
+    assert [body.get("reasoning_effort") for body in sent] == [effort, effort]
+    for body in sent:
+        assert "output_config" not in body and "reasoning" not in body
+
+
+@pytest.mark.parametrize("client", ["responses", "anthropic_messages"])
+def test_at_auto_no_level_reaches_the_upstream_whatever_the_cli_sends(upstream, client):
+    binding = _binding(client)
+    assert binding.reasoning_effort == ""
+    server, port = _serve(binding)
+    try:
+        body = _body(binding, **_CLIENT_EFFORT[client])
+        assert _call(port, _path(binding), token=_TOKEN, body=body)[0] == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+    (sent,) = upstream.requests
+    assert "reasoning_effort" not in sent["body"]
+
+
+def test_a_level_is_one_plain_word_from_the_launch_only():
+    with pytest.raises(LaunchError, match="reasoning level"):
+        _binding("responses", "high; rm -rf /")
+    with pytest.raises(LaunchError, match="reasoning level"):
+        _binding("responses", "x" * 40)
+    env = {
+        "AGENT_COMPAT_CLIENT": "responses",
+        "AGENT_COMPAT_UPSTREAM_URL": "https://provider.example/v1",
+        "AGENT_COMPAT_UPSTREAM_KEY": _KEY,
+        "AGENT_COMPAT_MODEL": "m",
+        "AGENT_COMPAT_TOKEN": _TOKEN,
+        "AGENT_COMPAT_REASONING_EFFORT": "xhigh",
+    }
+    assert Binding.from_launch(env, ["cli"]).reasoning_effort == "xhigh"
+    # Consumed with the other launch variables: the CLI never sees it.
+    assert "AGENT_COMPAT_REASONING_EFFORT" not in env
+
+
 def test_a_launch_without_its_token_key_or_https_upstream_starts_nothing():
     base = {
         "AGENT_COMPAT_CLIENT": "responses",
@@ -399,12 +489,24 @@ def test_a_launch_without_its_token_key_or_https_upstream_starts_nothing():
     assert _KEY not in repr(binding) and binding.token not in repr(binding)
 
 
+#: A CLI stand-in that reports what it was started with. The report appears
+#: whole: the test polls for it, and a file opened for writing exists, empty,
+#: before its contents are written.
 _CLI = """\
 import json, os, sys, time
-with open(sys.argv[1], "w") as out:
+with open(sys.argv[1] + ".partial", "w") as out:
     json.dump({"argv": sys.argv, "env": dict(os.environ), "pid": os.getpid()}, out)
+os.replace(sys.argv[1] + ".partial", sys.argv[1])
 time.sleep(float(sys.argv[2]))
 """
+
+
+def _wait_for_report(report: Path, process: subprocess.Popen[bytes]) -> dict[str, Any]:
+    deadline = time.monotonic() + 10
+    while not report.exists() and time.monotonic() < deadline:
+        assert process.poll() is None, f"the launcher exited with {process.returncode}"
+        time.sleep(0.05)
+    return json.loads(report.read_text())
 
 
 def test_the_launcher_becomes_the_cli_and_its_service_leaves_with_it(tmp_path: Path):
@@ -436,10 +538,7 @@ def test_the_launcher_becomes_the_cli_and_its_service_leaves_with_it(tmp_path: P
         ],
         env=env,
     )
-    deadline = time.monotonic() + 10
-    while not report.exists() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    seen = json.loads(report.read_text())
+    seen = _wait_for_report(report, process)
     # The process the host spawned is the CLI itself.
     assert seen["pid"] == process.pid
     origin = seen["env"]["ANTHROPIC_BASE_URL"]
@@ -471,15 +570,65 @@ def test_the_service_leaves_when_the_cli_is_killed(tmp_path: Path):
             "OPENAI_BASE_URL": f"{ORIGIN_PLACEHOLDER}/v1",
         },
     )
-    deadline = time.monotonic() + 10
-    while not report.exists() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    port = int(
-        json.loads(report.read_text())["env"]["OPENAI_BASE_URL"].rsplit(":", 1)[1].split("/")[0]
-    )
+    seen = _wait_for_report(report, process)
+    port = int(seen["env"]["OPENAI_BASE_URL"].rsplit(":", 1)[1].split("/")[0])
     process.kill()
     process.wait(timeout=10)
     _assert_closed(port)
+
+
+#: The two signals CPython ignores from its start.
+_PYTHON_IGNORES = (1 << (signal.SIGPIPE - 1)) | (1 << (signal.SIGXFSZ - 1))
+_DISPOSITIONS = ["grep", "-E", "^Sig(Ign|Blk):", "/proc/self/status"]
+#: A CLI stand-in that reports what its one child, the service, ignores.
+_SERVICE_IGNORES = """\
+import os, re
+me = os.getpid()
+with open(f"/proc/{me}/task/{me}/children") as children:
+    (service,) = children.read().split()
+with open(f"/proc/{service}/status") as status:
+    print(re.search(r"^SigIgn:\\t([0-9a-f]+)$", status.read(), re.M).group(1))
+"""
+
+
+def _run_cli(argv: list[str]) -> str:
+    run = subprocess.run(
+        argv,
+        env={
+            "PATH": os.environ["PATH"],
+            "AGENT_COMPAT_CLIENT": "responses",
+            "AGENT_COMPAT_UPSTREAM_URL": "https://provider.example/v1",
+            "AGENT_COMPAT_UPSTREAM_KEY": _KEY,
+            "AGENT_COMPAT_MODEL": "m",
+            "AGENT_COMPAT_TOKEN": _TOKEN,
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert run.returncode == 0, run.stderr
+    return run.stdout
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="reads dispositions from /proc")
+def test_the_cli_gets_a_direct_launchs_signals_and_the_service_keeps_pythons(tmp_path: Path):
+    """CPython ignores SIGPIPE and SIGXFSZ, and an exec would hand that to the CLI.
+
+    ``grep`` stands in for a native CLI: nothing resets a disposition on its way.
+    """
+    zipapp = tmp_path / "model-protocol-translator.pyz"
+    zipapp.write_bytes(helper_archive())
+    helper = ["/usr/bin/python3", "-I", str(zipapp)]
+
+    direct = _run_cli(_DISPOSITIONS)
+    behind = _run_cli([*helper, *_DISPOSITIONS])
+    service = _run_cli([*helper, sys.executable, "-I", "-c", _SERVICE_IGNORES])
+
+    assert re.findall(r"^Sig(?:Ign|Blk):", behind, re.M) == ["SigBlk:", "SigIgn:"]
+    assert behind == direct
+    # The service is the launcher's Python, where a closed client stays an error.
+    assert int(service, 16) & _PYTHON_IGNORES == _PYTHON_IGNORES
 
 
 def test_the_wrapper_seam_exists_only_in_test_code(tmp_path: Path):

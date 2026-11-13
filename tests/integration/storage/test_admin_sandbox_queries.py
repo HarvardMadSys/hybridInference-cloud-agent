@@ -13,11 +13,11 @@ from tests.integration.storage.test_agent_job_store import (
 )
 from tests.integration.storage.test_attempt_ledger import _seed_attempt, db as db, store as store
 from tests.support.follow_ups import append_follow_up
-from tests.unit.test_ledger_snapshots import END, START
+from tests.support.usage import END, START
 from tests.unit.test_sandbox_resource_protocol import sample
 
-from cloud_agent.admin_observability import decode_cursor
-from cloud_agent.admin_sandboxes import (
+from cloud_agent.domain.cursors import decode_cursor
+from cloud_agent.schemas.admin_sandboxes import (
     SANDBOX_CURSOR_SCOPE,
     SANDBOX_TRAJECTORY_MEMBER_LIMIT,
     SandboxCursor,
@@ -25,7 +25,7 @@ from cloud_agent.admin_sandboxes import (
     sandbox_cursor_scope,
     sandbox_trajectory_cursor_scope,
 )
-from cloud_agent.storage.admin_sandbox_queries import AdminSandboxQueries
+from cloud_agent.storage.repositories.admin.sandboxes import PostgresAdminSandboxQueries
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -82,7 +82,7 @@ async def member(db, sandbox_id, job, slot, *, attempt=None, fork_from=None):
 
 
 async def listing(db, *, cursor=None, limit=100):
-    return await AdminSandboxQueries(db).list_running(cursor=cursor, limit=limit)
+    return await PostgresAdminSandboxQueries(db).list_running(cursor=cursor, limit=limit)
 
 
 async def stop_request(db, store, sandbox_id, **overrides):
@@ -301,13 +301,10 @@ async def test_stale_host_removal_refuses_a_host_that_heartbeats_after_review(db
     "change",
     [
         "active_operation_count=1",
-        "snapshot_state='pending'",
-        "snapshot_state='snapshotting'",
-        "snapshot_state='importing'",
         "deletion_state='pending'",
     ],
 )
-async def test_stale_host_removal_keeps_operation_snapshot_and_deletion_fences(db, store, change):
+async def test_stale_host_removal_keeps_operation_and_deletion_fences(db, store, change):
     await seed(db, store, "asbx_stale_busy")
     async with db.acquire() as conn:
         await conn.execute(f"UPDATE agent_sandboxes SET {change} WHERE id='asbx_stale_busy'")
@@ -379,9 +376,6 @@ async def test_removed_inventory_pagination_and_counts_use_same_visibility(db, s
         ("state = 'stopped_dirty'", "not_stopped"),
         ("state = 'lost'", "not_stopped"),
         ("active_operation_count = 1", "busy"),
-        ("snapshot_state = 'pending'", "busy"),
-        ("snapshot_state = 'snapshotting'", "busy"),
-        ("snapshot_state = 'importing'", "busy"),
     ],
 )
 async def test_inventory_removal_refuses_live_or_busy_groups(db, store, change, reason):
@@ -413,7 +407,10 @@ async def test_inventory_controls_reject_stale_review(db, store, archived, fence
 
 @pytest.mark.parametrize("archived", [False, True])
 @pytest.mark.parametrize("allow_stale_host", [False, True])
-async def test_inventory_audit_failure_rolls_back_visibility(db, store, archived, allow_stale_host):
+async def test_inventory_visibility_changes_even_when_its_audit_fails(
+    db, store, archived, allow_stale_host
+):
+    """Recording never fails the action: visibility changes and the miss is counted."""
     await seed(db, store, "asbx_audit", state="running" if allow_stale_host else "stopped")
     if not archived:
         assert (
@@ -427,12 +424,18 @@ async def test_inventory_audit_failure_rolls_back_visibility(db, store, archived
             f"CHECK (action <> '{action}')"
         )
     try:
-        with pytest.raises(asyncpg.CheckViolationError):
+        assert (
             await archive_request(
                 store, "asbx_audit", archived=archived, allow_stale_host=allow_stale_host
             )
+            == "accepted"
+        )
         detail = await store.admin_sandboxes.detail("asbx_audit")
-        assert detail is not None and (detail.sandbox.archived_at is None) == archived
+        assert detail is not None and (detail.sandbox.archived_at is not None) == archived
+        async with db.acquire() as conn:
+            assert (
+                await conn.fetchval("SELECT action FROM agent_admin_audit_write_failures") == action
+            )
     finally:
         async with db.acquire() as conn:
             await conn.execute(
@@ -652,13 +655,37 @@ async def test_admin_stop_survives_running_heartbeats_and_clears_on_confirmation
     assert logs[0]["target_user_id"] == origin["user_id"]
 
 
+@pytest.mark.parametrize("left", ["pending", "snapshotting", "importing"])
+async def test_stop_ignores_snapshot_state_left_by_the_removed_publisher(db, store, left):
+    # Nothing moves a group out of these states any more: the publisher and
+    # its snapshot worker are gone. A group upgraded while in one must still
+    # stop, or no stop would ever be accepted for it.
+    await seed(db, store, "asbx_left")
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET terminal_count=0, terminal_count_observed_at=NOW(), "
+            "snapshot_state=$1 WHERE id='asbx_left'",
+            left,
+        )
+    assert await stop_request(db, store, "asbx_left") == "accepted"
+
+
+@pytest.mark.parametrize("left", ["pending", "snapshotting", "importing"])
+async def test_inventory_removal_ignores_snapshot_state_left_by_the_removed_publisher(
+    db, store, left
+):
+    await seed(db, store, "asbx_left", state="stopped")
+    async with db.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_sandboxes SET snapshot_state=$1 WHERE id='asbx_left'", left
+        )
+    assert await archive_request(store, "asbx_left") == "accepted"
+
+
 @pytest.mark.parametrize(
     ("change", "reason"),
     [
         ("active_operation_count = 1", "busy"),
-        ("snapshot_state = 'pending'", "busy"),
-        ("snapshot_state = 'snapshotting'", "busy"),
-        ("snapshot_state = 'importing'", "busy"),
         ("terminal_count = 1", "terminals_open"),
         ("terminal_count_observed_at = NOW() - INTERVAL '2 minutes'", "activity_unknown"),
         ("state = 'stopped'", "not_running"),
@@ -684,7 +711,8 @@ async def test_stop_rejects_stale_review(db, store, fence):
     assert await stop_request(db, store, "asbx_stale", **fence) == "stale"
 
 
-async def test_stop_audit_failure_rolls_back_intent(db, store):
+async def test_a_stop_is_requested_even_when_its_audit_fails(db, store):
+    """Recording never fails the action: the stop is requested and the miss is counted."""
     await seed(db, store, "asbx_audit")
     async with db.acquire() as conn:
         await conn.execute(
@@ -692,11 +720,15 @@ async def test_stop_audit_failure_rolls_back_intent(db, store):
             "CHECK (action <> 'agent.sandbox.stop')"
         )
     try:
-        with pytest.raises(asyncpg.CheckViolationError):
-            await stop_request(db, store, "asbx_audit")
+        assert await stop_request(db, store, "asbx_audit") == "accepted"
         detail = await store.admin_sandboxes.detail("asbx_audit")
-        assert detail is not None and detail.sandbox.state == "running"
-        assert detail.sandbox.stop_requested_at is None
+        assert detail is not None and detail.sandbox.state == "stopping"
+        assert detail.sandbox.stop_requested_at is not None
+        async with db.acquire() as conn:
+            assert (
+                await conn.fetchval("SELECT action FROM agent_admin_audit_write_failures")
+                == "agent.sandbox.stop"
+            )
     finally:
         async with db.acquire() as conn:
             await conn.execute("ALTER TABLE agent_admin_audit_log DROP CONSTRAINT reject_stop_test")

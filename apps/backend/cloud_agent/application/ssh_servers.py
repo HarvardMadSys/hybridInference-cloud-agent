@@ -32,14 +32,14 @@ import httpx
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-from cloud_agent.credential_cipher import (
+from cloud_agent.crypto.credential_cipher import (
     USER_CREDENTIAL_ENCRYPTION_KEY,
     CredentialCipher,
     CredentialCipherError,
 )
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.sandbox_manager_client import SandboxManagerError
-from cloud_agent.sandbox_manager_routing import sandbox_manager_for_host
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_routing import sandbox_manager_for_host
 from cloud_agent.settings import setting_env
 from cloud_agent_shared.ssh_access import (
     HOST_KEY_ALGORITHMS,

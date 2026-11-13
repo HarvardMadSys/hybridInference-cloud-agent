@@ -23,6 +23,16 @@ if TYPE_CHECKING:
 
 SettingValue = str | int | float | bool
 SettingKind = Literal["string", "boolean", "integer", "number"]
+#: When a saved value reaches the code that uses it. ``unverified`` is the
+#: default and makes no promise; every other mode names a checked reader.
+ApplyMode = Literal["next_operation", "new_session", "restart", "host_reenroll", "unverified"]
+APPLY_MODES: tuple[ApplyMode, ...] = (
+    "next_operation",
+    "new_session",
+    "restart",
+    "host_reenroll",
+    "unverified",
+)
 
 
 class SettingTooShort(ValueError):
@@ -68,13 +78,6 @@ class Setting:
     empty_env_imports: bool = False
     #: A URL the code that uses it requires to be HTTPS, with no query.
     https_only: bool = False
-    #: Where the control plane sends its gateway dispatch token, fetches the
-    #: keys that identity tokens are checked against, or sends a browser to
-    #: sign in. A new value must use HTTPS unless it names this machine or a
-    #: private name (see :func:`_private_host`). A value saved or imported
-    #: before this rule still loads, so an internal plain-HTTP gateway keeps
-    #: working.
-    https_unless_private: bool = False
     #: Also takes ``mailto:`` and one address: a support address is as likely
     #: as a support page. One plain address only: header fields would let the
     #: link prefill a message the user did not write.
@@ -84,6 +87,15 @@ class Setting:
     check: Callable[[str], bool] | None = None
     #: What a valid value looks like, added to the message that refuses one.
     hint: str = ""
+    #: When a saved value takes effect, checked against its readers.
+    apply_mode: ApplyMode = "unverified"
+    #: Which component must restart (``apply_mode="restart"``), or what else
+    #: the administrator should know about when the value is used.
+    apply_description: str = ""
+    #: The reader this setting replaced used its default for a missing,
+    #: unparsable or out-of-range environment value. The import keeps doing
+    #: that rather than stopping the control plane on an old value.
+    invalid_env_uses_default: bool = False
 
     @property
     def storage_key(self) -> str:
@@ -144,15 +156,8 @@ class Setting:
         if self.mailto and value[:7].lower() == "mailto:":
             return bool(_CONTACT_MAILTO.fullmatch(value))
         parsed = _web_url(value)
-        return (
-            parsed is not None
-            and (not self.https_only or (parsed.scheme == "https" and not parsed.query))
-            and (
-                not self.https_unless_private
-                or saved
-                or parsed.scheme == "https"
-                or _private_host(parsed.hostname or "")
-            )
+        return parsed is not None and (
+            not self.https_only or (parsed.scheme == "https" and not parsed.query)
         )
 
     def definition(self) -> dict[str, Any]:
@@ -174,22 +179,10 @@ class Setting:
             result["choices"] = list(self.choices)
         if self.minimum_bytes:
             result["minimum_bytes"] = self.minimum_bytes
+        result["apply_mode"] = self.apply_mode
+        if self.apply_description:
+            result["apply_description"] = self.apply_description
         return result
-
-
-def _private_host(host: str) -> bool:
-    """Whether plain HTTP to ``host`` stays on this machine or a private network.
-
-    Loopback addresses and ``localhost`` names, and a single-label name such
-    as a Compose service (``local-gateway``), which public DNS cannot answer.
-    """
-    host = host.lower().rstrip(".")
-    if host == "localhost" or host.endswith(".localhost"):
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return bool(host) and "." not in host
 
 
 def _web_url(value: str) -> SplitResult | None:
@@ -216,25 +209,6 @@ def _web_url(value: str) -> SplitResult | None:
     return parsed
 
 
-def _issuer(value: str) -> bool:
-    """Exactly what the Gateway signs: no surrounding space or control characters."""
-    return value == value.strip() and not any(ord(char) < 32 for char in value)
-
-
-def _grant_base_path(value: str) -> bool:
-    """A path prefix the grant clients accept.
-
-    They check it during startup as well as on live requests, so an unusable
-    prefix is refused before it can be saved.
-    """
-    return (
-        value.rstrip("/").startswith("/")
-        and not value.startswith("//")
-        and not any(char in value for char in ("?", "#", "\\"))
-        and not any(char.isspace() or ord(char) < 32 for char in value)
-    )
-
-
 def _s3_bucket(value: str) -> bool:
     """Empty, or a name S3 accepts for a general purpose bucket."""
     return not value or is_s3_bucket_name(value)
@@ -254,16 +228,46 @@ def _s3_prefix(value: str) -> bool:
     )
 
 
+def _package_registry_url(value: str) -> bool:
+    """Empty, or an HTTPS registry; plain HTTP only to this machine or a private name.
+
+    Agent packages are verified against the registry's integrity hash, but the
+    hash comes from the same registry, so a registry reached over the public
+    internet must be reached over TLS.
+    """
+    if not value:
+        return True
+    parsed = _web_url(value)
+    if parsed is None or parsed.query:
+        return False
+    return parsed.scheme == "https" or _private_host(parsed.hostname or "")
+
+
+def _private_host(host: str) -> bool:
+    """Whether plain HTTP to ``host`` stays on this machine or a private network.
+
+    Loopback addresses and ``localhost`` names, and a single-label name such as
+    a Compose service (``verdaccio``), which public DNS cannot answer.
+    """
+    host = host.lower().rstrip(".")
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return bool(host) and "." not in host
+
+
 # The code that uses these two refuses anything else, so the editor asks it
 # rather than keeping a second copy of the rule.
 def _github_install_url(value: str) -> bool:
-    from cloud_agent.source_control import github_install_url_is_usable
+    from cloud_agent.source_control.source_control import github_install_url_is_usable
 
     return not value or github_install_url_is_usable(value)
 
 
 def _gitlab_redirect_uri(value: str) -> bool:
-    from cloud_agent.source_control import gitlab_redirect_uri_is_usable
+    from cloud_agent.source_control.source_control import gitlab_redirect_uri_is_usable
 
     return not value or gitlab_redirect_uri_is_usable(value)
 
@@ -278,6 +282,9 @@ def _numeric(
     *,
     env: str | None = None,
     description: str = "Applies to subsequent operations after settings synchronize.",
+    apply_mode: ApplyMode = "unverified",
+    apply_description: str = "",
+    invalid_env_uses_default: bool = False,
 ) -> Setting:
     return Setting(
         key,
@@ -289,6 +296,9 @@ def _numeric(
         minimum=minimum,
         maximum=maximum,
         description=description,
+        apply_mode=apply_mode,
+        apply_description=apply_description,
+        invalid_env_uses_default=invalid_env_uses_default,
     )
 
 

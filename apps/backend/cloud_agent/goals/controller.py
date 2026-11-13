@@ -23,9 +23,14 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
+from cloud_agent.application.owner_access import (
+    AGENT_ACCESS_WITHDRAWN,
+    AgentAccessUnavailable,
+    owner_may_use_agent,
+)
 from cloud_agent.application.pending_messages import settle_queue
-from cloud_agent.entitlement import RepoAccessUnavailable, RepoNotAllowed, require_entitled_repo
-from cloud_agent.goals.decision import GoalAction, GoalContext, decide
+from cloud_agent.domain.goals import GoalAction, GoalReport, GoalReportParse
+from cloud_agent.goals.decision import GoalContext, decide
 from cloud_agent.goals.models import (
     GOAL_REPORT_RUNTIMES,
     MAX_REASON_CHARS,
@@ -33,17 +38,16 @@ from cloud_agent.goals.models import (
     GoalState,
 )
 from cloud_agent.goals.prompts import render_repair_prompt, render_round_prompt
-from cloud_agent.goals.report import GoalReport, GoalReportParse
-from cloud_agent.goals.retry_policy import is_exhausted, wakeup_backoff
-from cloud_agent.owner_access import (
-    AGENT_ACCESS_WITHDRAWN,
-    AgentAccessUnavailable,
-    owner_may_use_agent,
+from cloud_agent.goals.retry_policy import capped_backoff, is_exhausted, wakeup_backoff
+from cloud_agent.source_control.entitlement import (
+    RepoAccessUnavailable,
+    RepoNotAllowed,
+    require_entitled_repo,
 )
-from cloud_agent.source_control_runtime import SourceControlUnavailable
+from cloud_agent.source_control.source_control_runtime import SourceControlUnavailable
 
 if TYPE_CHECKING:
-    from cloud_agent.source_control_runtime import GitHubAppSource
+    from cloud_agent.source_control.source_control_runtime import GitHubAppSource
 
 if TYPE_CHECKING:
     from cloud_agent.application.pending_messages import QueueStorage
@@ -120,7 +124,7 @@ async def run_goal_wakeups(
     *,
     store: _GoalStore,
     github_app: GitHubAppSource | None = None,
-    gateway: Any | None = None,
+    owners: Any | None = None,
     limit: int = 8,
     thread_id: str | None = None,
 ) -> int:
@@ -141,7 +145,7 @@ async def run_goal_wakeups(
     stall sweep leaves a goal with a pending wakeup alone — until a pass finds
     the App loaded.
 
-    A Gateway that cannot confirm the owner's Agent access is treated the same
+    An account store that cannot confirm the owner's Agent access is treated the same
     way as a repository lookup that could not be made: the wakeup goes back
     with its attempt restored, because an outage is not a reason to end
     anyone's goal, and nothing is scheduled until the answer is known.
@@ -154,13 +158,13 @@ async def run_goal_wakeups(
     for wakeup in await store.goal_wakeups.claim_wakeups(limit=limit, thread_id=thread_id):
         try:
             await consume_wakeup(
-                store=store, wakeup=wakeup, app_credentials=app_credentials, gateway=gateway
+                store=store, wakeup=wakeup, app_credentials=app_credentials, owners=owners
             )
         except RepoAccessUnavailable:
             await store.goal_wakeups.release_wakeup(
                 wakeup_id=str(wakeup["id"]),
                 lease_owner=str(wakeup.get("lease_owner") or ""),
-                retry_in_seconds=30.0,
+                retry_in_seconds=capped_backoff(30.0),
                 restore_attempt=True,
                 detail="repository access is temporarily unavailable; retrying",
             )
@@ -177,7 +181,7 @@ async def run_goal_wakeups(
             await store.goal_wakeups.release_wakeup(
                 wakeup_id=str(wakeup["id"]),
                 lease_owner=str(wakeup.get("lease_owner") or ""),
-                retry_in_seconds=30.0,
+                retry_in_seconds=capped_backoff(30.0),
                 restore_attempt=True,
                 detail="Agent access could not be confirmed; retrying",
             )
@@ -202,7 +206,7 @@ async def continue_after_finish(
     job_id: str,
     thread_id: str | None,
     github_app: GitHubAppSource | None = None,
-    gateway: Any | None = None,
+    owners: Any | None = None,
 ) -> int:
     """Drain what a finished turn made due, before the runner is acknowledged.
 
@@ -217,7 +221,7 @@ async def continue_after_finish(
     finish makes due belongs to the turn's own conversation, ``thread_id``: the
     wakeups parked behind the turn and the one a finished round arms. Other
     conversations' wait for the reaper's pass. Deciding them here held the
-    runner's request on their GitHub and Gateway calls, oldest first, and could
+    runner's request on their GitHub calls, oldest first, and could
     leave this turn's own wakeup behind them. A turn without a conversation has
     no goal, and drains nothing.
 
@@ -231,7 +235,7 @@ async def continue_after_finish(
         extra={"event": "agent_goal_finish_drain", "job_id": job_id, "thread_id": thread_id},
     )
     return await run_goal_wakeups(
-        store=store, github_app=github_app, gateway=gateway, limit=8, thread_id=thread_id
+        store=store, github_app=github_app, owners=owners, limit=8, thread_id=thread_id
     )
 
 
@@ -240,7 +244,7 @@ async def consume_wakeup(
     store: _GoalStore,
     wakeup: dict[str, Any],
     app_credentials: Any | None = None,
-    gateway: Any | None = None,
+    owners: Any | None = None,
 ) -> str:
     """Judge one goal and write what follows, atomically.
 
@@ -250,7 +254,7 @@ async def consume_wakeup(
 
     The owner's waiting messages are sent before anything is decided: a
     message the owner queued goes before a round the goal would add, and the
-    goal is judged again when that message's turn has ended. ``gateway`` is
+    goal is judged again when that message's turn has ended. ``owners`` is
     what checking such a message against the turn it follows asks.
     """
     thread_id = str(wakeup["thread_id"])
@@ -299,7 +303,7 @@ async def consume_wakeup(
     settled = await settle_queue(
         cast("QueueStorage", store),
         thread_id=thread_id,
-        gateway=gateway,
+        owners=owners,
         app_credentials=app_credentials,
     )
     if settled.job is not None:
@@ -335,7 +339,7 @@ async def consume_wakeup(
     # A read that may reach the network happens *before* the decision's
     # transaction opens. Holding the conversation's lock across a GitHub call
     # would serialize every finish in the deployment behind one outage.
-    blocked = await _check_access(store, turn, app_credentials=app_credentials, gateway=gateway)
+    blocked = await _check_access(store, turn, app_credentials=app_credentials, owners=owners)
     if blocked is not None:
         return await _stop(
             store,
@@ -527,7 +531,7 @@ async def _check_access(
     turn: dict[str, Any] | None,
     *,
     app_credentials: Any | None = None,
-    gateway: Any | None = None,
+    owners: Any | None = None,
 ) -> GoalAction | None:
     """The eligibility reads, including the two that reach outside the database.
 
@@ -542,7 +546,7 @@ async def _check_access(
     first point at which a goal can learn that its owner's access was
     withdrawn; without it an unbounded goal keeps queueing rounds for an owner
     who can no longer open the conversation, and only the claim's own check
-    would stop each one. A denial pauses the goal with the reason. A Gateway
+    would stop each one. A denial pauses the goal with the reason. A directory
     that cannot answer raises :class:`AgentAccessUnavailable`, which the
     consumer turns into a retry — neither an outage nor a missing client lets
     a round through.
@@ -565,7 +569,7 @@ async def _check_access(
             reason="context_lost",
             message=("the conversation's session is gone; it cannot be resumed from a transcript"),
         )
-    if not await owner_may_use_agent(gateway, user_id=str(turn["user_id"])):
+    if not await owner_may_use_agent(owners, user_id=str(turn["user_id"])):
         logger.warning(
             "agent_goal_owner_access_withdrawn",
             extra={

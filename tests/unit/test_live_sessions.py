@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -19,15 +20,9 @@ from cloud_agent_host.drivers import (
     TURN_COMPLETED,
     TURN_FAILED,
     TURN_STARTED,
-    ClaudeCodeLiveSession,
-    CodexAppServerSession,
     DriverError,
-    HttpAgentLiveSession,
     LaunchContext,
-    PiRpcSession,
     TurnInput,
-    driver_for,
-    get_driver,
 )
 from cloud_agent_host.runtimes import (
     EMPTY_RUNTIME_MCP_CONFIG,
@@ -38,6 +33,11 @@ from cloud_agent_host.runtimes import (
     PiRuntime,
     registered_runtimes,
 )
+from cloud_agent_host.runtimes.claude.session import ClaudeCodeLiveSession
+from cloud_agent_host.runtimes.codex.session import CodexAppServerSession
+from cloud_agent_host.runtimes.http_bridge.session import HttpAgentLiveSession
+from cloud_agent_host.runtimes.live import driver_for, get_driver
+from cloud_agent_host.runtimes.pi.session import PiRpcSession
 
 _ANSWER = {
     "type": "assistant",
@@ -90,7 +90,7 @@ def _live(
 
     context = LaunchContext(
         workdir="/w",
-        gateway_base_url="http://gw",
+        model_base_url="http://gw",
         credential="agr",
         provides_isolation=True,
         mcp_config=EMPTY_RUNTIME_MCP_CONFIG,
@@ -441,7 +441,9 @@ def test_close_ends_the_residency(tmp_path, monkeypatch):
     session.start_turn(TurnInput(prompt="p", model="m")).wait()
 
     clock = iter([0.0, 3.0])
-    monkeypatch.setattr("cloud_agent_host.drivers.time.monotonic", lambda: next(clock))
+    monkeypatch.setattr(
+        "cloud_agent_host.runtimes.claude.session.time.monotonic", lambda: next(clock)
+    )
     session.close()
 
     assert process.stdin_closed and process.killed
@@ -463,7 +465,7 @@ def test_settled_claude_close_allows_pending_native_history_to_flush(tmp_path, m
         flushed = True
 
     monkeypatch.setattr(process, "poll", lambda: 0 if flushed else None)
-    monkeypatch.setattr("cloud_agent_host.drivers.time.sleep", flush)
+    monkeypatch.setattr("cloud_agent_host.runtimes.claude.session.time.sleep", flush)
     session.close()
     session.close()
 
@@ -1520,3 +1522,36 @@ def test_codex_trajectory_keeps_native_identity_and_structured_streams(tmp_path)
     assert "usage_id" not in call.payload
     assert call.payload["id"] == "c"
     assert turn.wait().final_output == "Done"
+
+
+@pytest.mark.parametrize("effort", [None, "high"])
+def test_a_translated_claude_spawn_binds_its_helper_to_the_turns_level(tmp_path, effort):
+    """The template is built at Auto; the spawn tells the helper the turn's level, or nothing."""
+    from cloud_agent_host.runtimes import MessagesViaChatUrl
+
+    process = _LiveProcess()
+    context, spawned = _live(process, tmp_path)
+    context = replace(context, model_base_url=MessagesViaChatUrl("https://chat.example/v1"))
+    session = driver_for(ClaudeCodeRuntime()).launch_live(context)
+    process.feed = _turn_lines(_ANSWER, _RESULT)
+    session.start_turn(TurnInput(prompt="p", model="m", reasoning_effort=effort)).wait()
+
+    ((argv, env),) = spawned
+    assert env["AGENT_COMPAT_CLIENT"] == "anthropic_messages"
+    if effort is None:
+        assert "AGENT_COMPAT_REASONING_EFFORT" not in env
+        assert "--effort" not in argv
+    else:
+        assert env["AGENT_COMPAT_REASONING_EFFORT"] == "high"
+        assert argv[argv.index("--effort") + 1] == "high"
+
+
+def test_a_direct_claude_spawn_carries_no_helper_level(tmp_path):
+    process = _LiveProcess()
+    context, spawned = _live(process, tmp_path)
+    session = driver_for(ClaudeCodeRuntime()).launch_live(context)
+    process.feed = _turn_lines(_ANSWER, _RESULT)
+    session.start_turn(TurnInput(prompt="p", model="m", reasoning_effort="max")).wait()
+    ((argv, env),) = spawned
+    assert argv[argv.index("--effort") + 1] == "max"
+    assert not any(name.startswith("AGENT_COMPAT_") for name in env)

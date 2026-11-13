@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { offering, TEST_CONNECTION } from '@/test/connectionConfig';
 import '@testing-library/jest-dom/vitest';
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -20,8 +21,8 @@ const drawn = vi.hoisted(() => ({
   storedEvents: new Set<unknown>(),
 }));
 
-vi.mock('./ChatMessages', async (importOriginal) => {
-  const original = await importOriginal<typeof import('./ChatMessages')>();
+vi.mock('./conversation/ChatMessages', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./conversation/ChatMessages')>();
   return {
     ...original,
     // The page draws the current turn's list; stored turns draw their own.
@@ -32,8 +33,8 @@ vi.mock('./ChatMessages', async (importOriginal) => {
   };
 });
 
-vi.mock('./WorkspaceTabBar', async (importOriginal) => {
-  const original = await importOriginal<typeof import('./WorkspaceTabBar')>();
+vi.mock('./workspace/WorkspaceTabBar', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./workspace/WorkspaceTabBar')>();
   return {
     ...original,
     WorkspaceTabBar: (props: Parameters<typeof original.WorkspaceTabBar>[0]) => {
@@ -55,8 +56,8 @@ vi.mock('@/lib/workspaceLink', async (importOriginal) => {
   };
 });
 
-vi.mock('./activityOverview', async (importOriginal) => {
-  const original = await importOriginal<typeof import('./activityOverview')>();
+vi.mock('./conversation/activityOverview', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./conversation/activityOverview')>();
   return {
     ...original,
     subagentStartedBy: (...args: Parameters<typeof original.subagentStartedBy>) => {
@@ -192,9 +193,7 @@ function conversation(streamed: AgentEvent[] = []): AgentJob {
     branch: 'agent/task',
     runtime: 'claude-code',
     model: 'qwen-test',
-    spentUsd: 0,
-    hasLedger: false,
-    timeoutLabel: '',
+    modelConnectionId: TEST_CONNECTION,
     sandbox: 'container',
     attempts: [{ no: 1, status: 'live' }],
     currentAttemptNo: 1,
@@ -205,7 +204,6 @@ function conversation(streamed: AgentEvent[] = []): AgentJob {
     diffFileDetails: DIFF_DETAILS,
     diffStat: { add: 4002, del: 0 },
     gates: [],
-    usage: { tokensIn: '0', tokensOut: '0', cachePct: 0, turns: 1 },
   };
 }
 
@@ -233,7 +231,7 @@ beforeEach(() => {
   vi.mocked(getAgentConfig).mockResolvedValue({
     repos: ['owner/repository'],
     runtimes: ['claude-code'],
-    models: ['qwen-test'],
+    ...offering(['qwen-test']),
     github_connected: true,
     github_install_url: null,
   } as Awaited<ReturnType<typeof getAgentConfig>>);

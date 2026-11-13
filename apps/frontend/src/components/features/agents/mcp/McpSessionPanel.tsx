@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import { McpNoToolsYet, McpProgramTools } from './McpProgramTools';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   decideMcpInvocation,
@@ -749,7 +750,9 @@ function McpSessionPanelContent({
                     </Link>
                   </p>
                 ) : null}
-                {binding.capabilities.length ? (
+                {binding.capabilities.length && binding.location === 'sandbox' ? (
+                  <McpProgramTools capabilities={binding.capabilities} />
+                ) : binding.capabilities.length ? (
                   <details className="mt-3">
                     <summary className="w-fit cursor-pointer text-xs text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100">
                       Tools and permissions
@@ -779,12 +782,7 @@ function McpSessionPanelContent({
                     </div>
                   </details>
                 ) : binding.available ? (
-                  <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                    No tools discovered yet.{' '}
-                    <Link href="/settings/plugins" className="underline">
-                      Refresh the connection
-                    </Link>
-                  </p>
+                  <McpNoToolsYet program={binding.location === 'sandbox'} />
                 ) : null}
               </div>
             );

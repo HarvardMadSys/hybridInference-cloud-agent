@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from cloud_agent.sandbox_archive_credentials import (
+from cloud_agent.sandbox_archive.sandbox_archive_credentials import (
     archive_settings_payload,
     stored_archive_policy,
 )

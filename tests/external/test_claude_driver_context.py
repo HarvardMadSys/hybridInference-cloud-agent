@@ -18,8 +18,10 @@ from tests.external.test_credential_rotation import _pinned_cli_version
 from tests.support.claude_cli import FakeAnthropicGateway
 
 import cloud_agent_host.drivers as drivers
+import cloud_agent_host.runtimes.claude.session as claude_session
+from cloud_agent_host.container.sandbox import ProcessBackend, SandboxSpec
 from cloud_agent_host.runtimes import ERROR, ClaudeCodeRuntime
-from cloud_agent_host.sandbox import ProcessBackend, SandboxSpec
+from cloud_agent_host.runtimes.live import driver_for
 
 pytestmark = pytest.mark.external
 MODEL = "deepseek-v4-flash"
@@ -38,7 +40,7 @@ def native_driver(tmp_path, monkeypatch):
     config.mkdir()
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setattr(drivers, "CLAUDE_STATE_CONFIG_DIR", str(config))
+    monkeypatch.setattr(claude_session, "CLAUDE_STATE_CONFIG_DIR", str(config))
     gateway = FakeAnthropicGateway()
     backend = ProcessBackend(acknowledged_unsafe=True)
 
@@ -56,7 +58,7 @@ def native_driver(tmp_path, monkeypatch):
 
     context = drivers.LaunchContext(
         workdir=str(workdir),
-        gateway_base_url=f"http://127.0.0.1:{gateway.port}",
+        model_base_url=f"http://127.0.0.1:{gateway.port}",
         credential="local-context-test",
         provides_isolation=False,
         state_dir=str(tmp_path),
@@ -65,7 +67,7 @@ def native_driver(tmp_path, monkeypatch):
     sessions = []
 
     def open_session(session_id=None, *, extra_env=None):
-        driver = drivers.driver_for(ClaudeCodeRuntime())
+        driver = driver_for(ClaudeCodeRuntime())
         launch_context = replace(
             context,
             spawn_live=lambda argv, env: spawn(argv, {**env, **(extra_env or {})}),

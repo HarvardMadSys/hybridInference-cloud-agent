@@ -12,7 +12,7 @@ import pytest
 from tests.integration.storage.test_agent_job_store import pool, store  # noqa: F401
 from tests.support.follow_ups import append_follow_up
 
-from cloud_agent.environments import EnvironmentConflict, EnvironmentNotFound
+from cloud_agent.environments.environments import EnvironmentConflict, EnvironmentNotFound
 from cloud_agent.storage._sql.environment_runs import env_run_holds_slot
 from cloud_agent.storage.assembly import Storage
 from cloud_agent_shared.environment import EnvironmentScripts, EnvironmentVariable
@@ -541,7 +541,7 @@ async def test_runtime_rotation_keeps_setup_owner_cas_and_old_secret_scan(store,
     )
     assert view["runtime_revision"] == 2
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "wrong-key")
-    from cloud_agent.environments import EnvironmentEncryptionError
+    from cloud_agent.environments.environments import EnvironmentEncryptionError
 
     with pytest.raises(EnvironmentEncryptionError):
         await store.environments.redact_environment_steps("alice", binding, steps)
@@ -877,7 +877,10 @@ async def test_downgrade_allows_unused_empty_binding_but_guards_execution(store,
     import asyncpg
 
     migration = runpy.run_path(
-        str(Path(__file__).resolve().parents[3] / "migrations/versions/0065_environments.py")
+        str(
+            Path(__file__).resolve().parents[3]
+            / "apps/backend/migrations/versions/0065_environments.py"
+        )
     )
     statements = []
     migration["downgrade"].__globals__["op"] = SimpleNamespace(execute=statements.append)

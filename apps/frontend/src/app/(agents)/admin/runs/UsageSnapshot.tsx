@@ -1,45 +1,15 @@
 import type { AgentJobUsageApi } from '@/lib/api/agents';
 
-import { CARD, metric, money, number } from './shared';
+import { CARD, number } from './shared';
 
-/** Pure presentation: admin reads never invoke owner loaders or refresh accounting. */
+/** Pure presentation: what the turn's agent reported, and who bills it. */
 export function UsageSnapshot({ usage }: { usage: AgentJobUsageApi }) {
-  const { ledger } = usage;
-  const totals = ledger.totals;
-  const unknownRows = ledger.unknown_rows;
-  const cost = money(totals?.spent_usd);
-  const rows: { label: string; gateway: string; title?: string }[] = [
-    { label: 'Model calls', gateway: number(totals?.calls) },
-    {
-      label: 'Input tokens (including cache)',
-      gateway: metric(totals?.tokens_in, unknownRows?.tokens_in),
-    },
-    {
-      label: 'Output tokens',
-      gateway: metric(totals?.tokens_out, unknownRows?.tokens_out),
-    },
-    {
-      label: 'Cache read tokens',
-      gateway: metric(totals?.cache_read, unknownRows?.cache_read),
-    },
-    {
-      label: 'Cache write tokens',
-      gateway: metric(totals?.cache_write, unknownRows?.cache_write),
-    },
-    {
-      label: 'Reasoning tokens',
-      gateway: metric(totals?.reasoning, unknownRows?.reasoning),
-    },
-    {
-      label: 'Cost (USD)',
-      // The owner's own provider bills such a turn; the Gateway never saw it.
-      gateway: usage.external_provider
-        ? "Billed by the owner's provider"
-        : cost.exact && unknownRows?.spent_usd
-          ? `${cost.display} (${number(unknownRows.spent_usd)} unknown)`
-          : cost.display,
-      title: cost.exact ?? undefined,
-    },
+  const { runtime } = usage;
+  const rows = [
+    { label: 'Input tokens', value: number(runtime.input_tokens) },
+    { label: 'Output tokens', value: number(runtime.output_tokens) },
+    { label: 'Cache read tokens', value: number(runtime.cache_read_tokens) },
+    { label: 'Cost (USD)', value: "Billed by the owner's provider" },
   ];
 
   return (
@@ -51,24 +21,6 @@ export function UsageSnapshot({ usage }: { usage: AgentJobUsageApi }) {
         Token usage
       </h2>
       <div className={`${CARD} mt-4 overflow-hidden`}>
-        {usage.external_provider ? (
-          <p className="border-b border-gray-100 px-5 py-4 text-xs text-gray-500 dark:border-white/5 dark:text-gray-400">
-            This turn ran on its owner&rsquo;s own model connection. That provider bills it, and the
-            Gateway ledger records none of it.
-          </p>
-        ) : null}
-        {(ledger.missing_attempts > 0 || ledger.estimated_calls > 0) && (
-          <div className="flex flex-wrap gap-x-5 gap-y-2 border-b border-gray-100 px-5 py-4 text-xs text-gray-500 dark:border-white/5 dark:text-gray-400">
-            {ledger.missing_attempts > 0 && (
-              <span className="text-amber-700 dark:text-amber-400">
-                Gateway totals are missing for part of this turn.
-              </span>
-            )}
-            {ledger.estimated_calls > 0 && (
-              <span>{number(ledger.estimated_calls)} calls contain estimated usage.</span>
-            )}
-          </div>
-        )}
         <table aria-label="Token usage totals" className="w-full text-left text-sm">
           <tbody className="divide-y divide-gray-100 dark:divide-white/5">
             {rows.map((row) => (
@@ -79,9 +31,7 @@ export function UsageSnapshot({ usage }: { usage: AgentJobUsageApi }) {
                 >
                   {row.label}
                 </th>
-                <td className="px-5 py-2.5 text-right tabular-nums" title={row.title}>
-                  {row.gateway}
-                </td>
+                <td className="px-5 py-2.5 text-right tabular-nums">{row.value}</td>
               </tr>
             ))}
           </tbody>

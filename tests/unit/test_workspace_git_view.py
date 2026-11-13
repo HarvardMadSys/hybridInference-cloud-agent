@@ -1,12 +1,11 @@
 """Real-git tests: the broker's Git runs none of the commands a workspace names.
 
-The Git view, the shared-workspace snapshot and the base-bundle import run Git
-as the group UID against a repository whose ``.git/config`` any member can
-write. These tests plant each config-driven command Git would otherwise run
-and prove the broker still reads the workspace correctly without running any
-of them. The same file cannot change the patch's form either: the browser
-and the publisher both read its file names from the ``a/`` and ``b/``
-headers.
+The Git view and the base-bundle import run Git as the group UID against a
+repository whose ``.git/config`` any member can write. These tests plant each
+config-driven command Git would otherwise run and prove the broker still reads
+the workspace correctly without running any of them. The same file cannot
+change the patch's form either: the browser reads its file names from the
+``a/`` and ``b/`` headers.
 """
 
 from __future__ import annotations
@@ -18,10 +17,14 @@ from typing import TYPE_CHECKING
 import pytest
 from fastapi import HTTPException
 
-from cloud_agent_host import chat_sandbox
-from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
-from cloud_agent_host.sandbox import ContainerBackend, ProcessBackend, SandboxError
-from cloud_agent_host.sandbox_manager import _run_git, _run_git_metadata, _run_sandbox
+from cloud_agent_host.container import chat_sandbox_workspace
+from cloud_agent_host.container.chat_sandbox import ChatSandboxManager, ChatSandboxSpec
+from cloud_agent_host.container.sandbox import ContainerBackend, ProcessBackend, SandboxError
+from cloud_agent_host.manager_api.workspace_commands import (
+    _run_git,
+    _run_git_metadata,
+    _run_sandbox,
+)
 from cloud_agent_host.workspace_git import GIT_VIEW_ENV, NEUTRALIZE_GIT_FILTERS
 
 if TYPE_CHECKING:
@@ -327,8 +330,7 @@ def test_git_view_patch_still_carries_every_kind_of_change(backend, tmp_path):
 def test_git_patch_names_files_a_and_b_whatever_the_prefix_config(
     backend, tmp_path, scope, key, capture
 ):
-    # The browser's Git panel and Changes list read the a/ and b/ names, and
-    # the publisher applies a snapshot at -p1: both are read from this patch.
+    # The browser's Git panel and Changes list read the a/ and b/ names.
     repo = _repo(tmp_path / "ws")
     base = _git("rev-parse", "HEAD", cwd=repo).strip()
     if scope == "repository":
@@ -360,45 +362,6 @@ def test_git_patch_names_files_a_and_b_whatever_the_prefix_config(
     ]
 
 
-@pytest.mark.parametrize("edited", ["a.txt", "src/a.txt"])
-@pytest.mark.parametrize("key", ["noPrefix", "mnemonicPrefix"])
-def test_a_snapshot_captured_under_a_prefix_config_publishes_the_file_it_changed(
-    backend, tmp_path, key, edited
-):
-    from cloud_agent.publisher import publish_patch
-
-    workspace = _repo(tmp_path / "ws")
-    # The same name and contents one directory down: a patch read at the
-    # wrong depth applies cleanly to the other file.
-    (workspace / "src").mkdir()
-    (workspace / "src" / "a.txt").write_text("one\n")
-    _git("add", ".", cwd=workspace)
-    _git("commit", "-q", "-m", "second", cwd=workspace)
-    base = _git("rev-parse", "HEAD", cwd=workspace).strip()
-    origin = tmp_path / "origin.git"
-    _git("clone", "-q", "--bare", str(workspace), str(origin), cwd=tmp_path)
-    _git("config", "uploadpack.allowAnySHA1InWant", "true", cwd=origin)
-    _git("config", f"diff.{key}", "true", cwd=workspace)
-    (workspace / edited).write_text("two\n")
-
-    captured = _run_git(backend, workspace, base, exact_patch=True)
-    result = publish_patch(
-        job_id="ajob_prefix",
-        branch_id="athr_prefix",
-        patch=captured["patch"],
-        clone_url=f"file://{origin}",
-        base_sha=base,
-        commit_message="agent: edit",
-    )
-
-    assert result.changed_files == [edited]
-    published = {
-        path: _git("show", f"{result.commit_sha}:{path}", cwd=origin)
-        for path in ("a.txt", "src/a.txt")
-    }
-    assert published == {"a.txt": "one\n", "src/a.txt": "one\n", edited: "two\n"}
-
-
 @pytest.mark.parametrize("key", ["color.ui", "color.diff"])
 @pytest.mark.parametrize("capture", ["view", "snapshot"])
 def test_git_patch_carries_no_colour_whatever_the_colour_config(backend, tmp_path, key, capture):
@@ -417,36 +380,7 @@ def test_git_patch_carries_no_colour_whatever_the_colour_config(backend, tmp_pat
     assert view["patch"].endswith("\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-one\n+two\n")
 
 
-def test_a_snapshot_captured_under_a_colour_config_publishes(backend, tmp_path):
-    from cloud_agent.publisher import publish_patch
-
-    workspace = _repo(tmp_path / "ws")
-    base = _git("rev-parse", "HEAD", cwd=workspace).strip()
-    origin = tmp_path / "origin.git"
-    _git("clone", "-q", "--bare", str(workspace), str(origin), cwd=tmp_path)
-    _git("config", "uploadpack.allowAnySHA1InWant", "true", cwd=origin)
-    _git("config", "color.ui", "always", cwd=workspace)
-    (workspace / "a.txt").write_text("two\n")
-
-    captured = _run_git(backend, workspace, base, exact_patch=True)
-    result = publish_patch(
-        job_id="ajob_colour",
-        branch_id="athr_colour",
-        patch=captured["patch"],
-        clone_url=f"file://{origin}",
-        base_sha=base,
-        commit_message="agent: edit",
-    )
-
-    assert result.changed_files == ["a.txt"]
-    assert _git("show", f"{result.commit_sha}:a.txt", cwd=origin) == "two\n"
-
-
-def test_a_snapshot_captured_under_diff_context_zero_keeps_its_context_and_publishes(
-    backend, tmp_path
-):
-    from cloud_agent.publisher import publish_patch
-
+def test_the_git_view_keeps_its_context_under_diff_context_zero(backend, tmp_path):
     workspace = tmp_path / "ws"
     workspace.mkdir()
     _git("init", "-q", "-b", "main", cwd=workspace)
@@ -454,26 +388,12 @@ def test_a_snapshot_captured_under_diff_context_zero_keeps_its_context_and_publi
     _git("add", "a.txt", cwd=workspace)
     _git("commit", "-q", "-m", "first", cwd=workspace)
     base = _git("rev-parse", "HEAD", cwd=workspace).strip()
-    origin = tmp_path / "origin.git"
-    _git("clone", "-q", "--bare", str(workspace), str(origin), cwd=tmp_path)
-    _git("config", "uploadpack.allowAnySHA1InWant", "true", cwd=origin)
-    # git apply refuses a hunk with no context around it.
+    # A hunk with no context around it is one git apply refuses.
     _git("config", "diff.context", "0", cwd=workspace)
     (workspace / "a.txt").write_text("one\ntwo\nTHREE\nfour\nfive\n")
 
-    captured = _run_git(backend, workspace, base, exact_patch=True)
-    result = publish_patch(
-        job_id="ajob_context",
-        branch_id="athr_context",
-        patch=captured["patch"],
-        clone_url=f"file://{origin}",
-        base_sha=base,
-        commit_message="agent: edit",
-    )
-
-    assert _git("show", f"{result.commit_sha}:a.txt", cwd=origin) == "one\ntwo\nTHREE\nfour\nfive\n"
     hunk = "@@ -1,5 +1,5 @@\n one\n two\n-three\n+THREE\n four\n five\n"
-    assert captured["patch"].endswith(hunk)
+    assert _run_git(backend, workspace, base, exact_patch=True)["patch"].endswith(hunk)
     assert _run_git(backend, workspace)["patch"].endswith(hunk)
 
 
@@ -500,7 +420,7 @@ def test_base_bundle_import_never_lazily_fetches_a_missing_prerequisite(tmp_path
         _git("config", key, value, cwd=workspace)
     tmpfs = tmp_path / "tmpfs"
     tmpfs.mkdir()
-    monkeypatch.setattr(chat_sandbox, "ACTIVATION_TMPFS", str(tmpfs))
+    monkeypatch.setattr(chat_sandbox_workspace, "ACTIVATION_TMPFS", str(tmpfs))
     manager = ChatSandboxManager(ContainerBackend(image="img"))
 
     def exec_here(_spec, argv, *, env, workdir, timeout_s, input_bytes=None, stdin=None):

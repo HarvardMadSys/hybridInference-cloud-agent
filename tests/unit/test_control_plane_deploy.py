@@ -24,6 +24,7 @@ rule, so the list of forbidden names has exactly one definition.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -33,6 +34,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from cloud_agent.accounts.config import RETIRED_GATEWAY_VARIABLES
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = REPO_ROOT / "deploy" / "control-plane" / "docker-compose.yml"
 DOCKERFILE_PATH = REPO_ROOT / "deploy" / "control-plane" / "Dockerfile"
@@ -41,7 +44,6 @@ DEPLOY_SCRIPT_PATH = REPO_ROOT / "deploy" / "control-plane" / "deploy.sh"
 #: Signing and encryption keys. Each must be `:?` — required — rather than
 #: `:-` — defaulted.
 REQUIRED_SECRETS = (
-    "AGENT_SESSION_SECRET",
     "AGENT_CONTROL_TOKEN_SECRET",
     "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY",
 )
@@ -62,14 +64,13 @@ def test_missing_migrated_secrets_allow_setup_without_using_a_public_default(
     control_plane_env: dict, variable: str, monkeypatch
 ) -> None:
     """Setup can start with empty imports; credential use still fails closed."""
-    from cloud_agent import identity, settings, tokens
-    from cloud_agent.source_control import SourceControlCipher, SourceControlError
+    from cloud_agent import settings, tokens
+    from cloud_agent.source_control.source_control import SourceControlCipher, SourceControlError
 
     assert control_plane_env[variable] == "${" + variable + ":-}"
     monkeypatch.delenv(variable, raising=False)
     settings.reset_settings()
     operations = {
-        "AGENT_SESSION_SECRET": (identity._session_secret, identity.IdentityNotConfigured),
         "AGENT_CONTROL_TOKEN_SECRET": (tokens._signing_key, ValueError),
         "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY": (SourceControlCipher, SourceControlError),
     }
@@ -78,52 +79,55 @@ def test_missing_migrated_secrets_allow_setup_without_using_a_public_default(
         operation()
 
 
-async def test_saved_gateway_dispatch_credential_needs_no_environment_default(
-    control_plane_env: dict, monkeypatch
-) -> None:
-    """An empty import disables grants; a saved credential configures the live client."""
-    from cloud_agent import settings
-    from cloud_agent.gateway import GatewayError
-    from cloud_agent.grants import GrantClient
-
-    assert control_plane_env["GATEWAY_GRANT_DISPATCH_TOKEN"] == (
-        "${GATEWAY_GRANT_DISPATCH_TOKEN:-}"
-    )
-    monkeypatch.delenv("GATEWAY_GRANT_DISPATCH_TOKEN", raising=False)
-    monkeypatch.setenv("AGENT_SETTINGS_ENCRYPTION_KEY", "k" * 32)
-    settings.reset_settings()
-    try:
-        settings.apply_settings(1, {"gateway_base_url": "https://gateway.example"})
-        client = GrantClient()
-        assert not client.configured
-        with pytest.raises(GatewayError):
-            await client._post("/internal/agent-grants", {})
-        encoded = settings.encode_changes(
-            {"gateway_dispatch_token": "saved-gateway-dispatch-credential-32b"}
-        )
-        settings.apply_settings(2, {"gateway_base_url": "https://gateway.example", **encoded})
-        assert client.configured
-        assert "GATEWAY_GRANT_DISPATCH_TOKEN" not in os.environ
-        assert "saved-gateway-dispatch-credential-32b" not in str(
-            settings.settings_response(2, encoded)
-        )
-    finally:
-        settings.reset_settings()
+#: The services that read the deployment keys, and so wait for the `keys` service.
+KEY_READERS = ("migrate", "control-plane", "mcp-relay", "github-relay")
 
 
-def test_the_database_is_required_and_the_service_owns_it(control_plane_env: dict) -> None:
+def _waits_for_keys(compose: dict, service: str) -> bool:
+    """Whether ``service`` starts only after ``keys``, directly or through Postgres."""
+    depends = compose["services"][service].get("depends_on", {})
+    if depends.get("keys", {}).get("condition") == "service_completed_successfully":
+        return True
+    return any(_waits_for_keys(compose, name) for name in depends)
+
+
+def test_the_database_comes_from_the_keys_volume_never_a_default(compose: dict) -> None:
     """Defaulting the DSN points a fresh deployment at whatever is on
-    localhost, which in a co-located cutover is the gateway's own database."""
-    assert ":?" in control_plane_env["AGENT_DATABASE_URL"]
+    localhost, which in a co-located cutover is the gateway's own database.
+    Only the deployment's environment or its own keys volume supplies it."""
+    for service in KEY_READERS:
+        definition = compose["services"][service]
+        assert definition["environment"]["AGENT_DATABASE_URL"] == "${AGENT_DATABASE_URL:-}"
+        assert "agent-keys:/run/cloud-agent/keys:ro" in definition["volumes"]
+        assert _waits_for_keys(compose, service), service
 
 
-def test_both_listeners_allow_a_one_time_identity_import_from_the_environment(
+def test_both_listeners_read_the_account_key_and_no_gateway_setting(compose: dict) -> None:
+    """Both listeners read sessions; neither is handed anything of the removed Gateway.
+    The key has no default: the keys volume supplies it where the environment does not."""
+    for service in ("control-plane", "mcp-relay"):
+        environment = compose["services"][service]["environment"]
+        assert environment["AGENT_LOCAL_SESSION_SECRET"] == "${AGENT_LOCAL_SESSION_SECRET:-}"
+        assert not set(environment) & set(RETIRED_GATEWAY_VARIABLES)
+
+
+def test_the_keys_service_is_isolated_and_the_postgres_password_is_its_file(
     compose: dict,
 ) -> None:
-    """The shared lifespan verifies the saved issuer against the database binding."""
-    expected = "${GATEWAY_ISSUER:-}"
-    for service in ("control-plane", "mcp-relay"):
-        assert compose["services"][service]["environment"]["GATEWAY_ISSUER"] == expected
+    """Root to give each key file to its reader, and nothing else."""
+    keys = compose["services"]["keys"]
+    assert keys["network_mode"] == "none"
+    assert keys["read_only"] is True
+    assert keys["cap_drop"] == ["ALL"]
+    assert sorted(keys["cap_add"]) == ["CHOWN", "DAC_READ_SEARCH"]
+    assert "agent-postgres:/run/cloud-agent/database:ro" in keys["volumes"]
+    assert "ports" not in keys
+    postgres = compose["services"]["postgres"]
+    assert "POSTGRES_PASSWORD" not in postgres["environment"]
+    assert postgres["environment"]["POSTGRES_PASSWORD_FILE"] == (
+        "/run/cloud-agent/keys/AGENT_POSTGRES_PASSWORD"
+    )
+    assert _waits_for_keys(compose, "postgres")
 
 
 def test_postgres_publishes_no_port(compose: dict) -> None:
@@ -185,13 +189,180 @@ def test_the_image_ships_the_host_package() -> None:
 def test_the_image_ships_the_migrations_it_is_told_to_run() -> None:
     """The `migrate` service runs `alembic upgrade head` in *this* image."""
     dockerfile = DOCKERFILE_PATH.read_text()
-    assert "COPY alembic.ini" in dockerfile
-    assert re.search(r"^COPY migrations/ migrations/", dockerfile, re.MULTILINE)
+    assert re.search(
+        r"^COPY apps/backend/migrations/ apps/backend/migrations/", dockerfile, re.MULTILINE
+    )
+    # `alembic` finds its configuration in the pyproject.toml beside the venv.
+    assert re.search(r"^COPY pyproject\.toml ", dockerfile, re.MULTILINE)
 
 
 def test_the_container_does_not_run_as_root() -> None:
     """It holds a git credential and a database connection."""
     assert re.search(r"^USER (?!root)", DOCKERFILE_PATH.read_text(), re.MULTILINE)
+
+
+#: The services that run the control-plane image `keys` builds.
+CONTROL_IMAGE_FOLLOWERS = ("migrate", "control-plane", "mcp-relay", "github-relay")
+
+
+def test_one_service_builds_the_control_plane_image_and_the_rest_run_it(compose: dict) -> None:
+    """Five builds of one Dockerfile are five images: Compose labels each with its
+    service. Automatic Server setup refuses an API and MCP relay that run
+    different images, so a source deployment could not add a server. `keys`
+    builds it because every follower waits for `keys`, so any `up` of one of them
+    builds it first; `pull_policy: never` keeps Compose from looking for a name
+    only this machine makes in a registry."""
+    services = compose["services"]
+    builders = [
+        name
+        for name, service in services.items()
+        if (service.get("build") or {}).get("dockerfile") == "deploy/control-plane/Dockerfile"
+    ]
+    assert builders == ["keys"]
+    image = services["keys"]["image"]
+    assert image == "${COMPOSE_PROJECT_NAME}-control-plane:${AGENT_DEPLOYMENT_SHA:-unknown}"
+    assert services["keys"]["build"]["args"]["SOURCE_COMMIT"] == "${AGENT_DEPLOYMENT_SHA:-unknown}"
+    for name in CONTROL_IMAGE_FOLLOWERS:
+        service = services[name]
+        assert "build" not in service, name
+        assert service["image"] == image, name
+        assert service["pull_policy"] == "never", name
+        assert _waits_for_keys(compose, name), name
+
+
+def _resolved_images(project: str) -> dict[str, str]:
+    docker = shutil.which("docker")
+    if not docker or subprocess.run([docker, "compose", "version"], capture_output=True).returncode:
+        pytest.skip("Docker Compose CLI is needed for its actual interpolation")
+    rendered = subprocess.run(
+        [
+            *(docker, "compose", "-p", project, "-f", str(COMPOSE_PATH)),
+            *("--profile", "github-relay", "config", "--format", "json"),
+        ],
+        env={"PATH": os.environ["PATH"], "AGENT_DEPLOYMENT_SHA": "0" * 40},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    services = json.loads(rendered.stdout)["services"]
+    return {name: services[name]["image"] for name in ("keys", *CONTROL_IMAGE_FOLLOWERS)}
+
+
+def test_compose_resolves_every_control_plane_service_to_one_image_per_project() -> None:
+    """What setup compares is the running containers' image, so check what
+    Compose itself resolves: one name for all five, and another project's own."""
+    images = _resolved_images("one-image-a")
+    assert set(images.values()) == {"one-image-a-control-plane:" + "0" * 40}
+    assert set(_resolved_images("one-image-b").values()) == {
+        "one-image-b-control-plane:" + "0" * 40
+    }
+
+
+def _rendered_services(environment: dict[str, str]) -> dict:
+    docker = shutil.which("docker")
+    if not docker or subprocess.run([docker, "compose", "version"], capture_output=True).returncode:
+        pytest.skip("Docker Compose CLI is needed for its actual interpolation")
+    rendered = subprocess.run(
+        [
+            *(docker, "compose", "-p", "bundled-database", "-f", str(COMPOSE_PATH)),
+            *("--profile", "pgadmin", "config", "--format", "json"),
+        ],
+        env={"PATH": os.environ["PATH"], "AGENT_DEPLOYMENT_SHA": "0" * 40, **environment},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return json.loads(rendered.stdout)["services"]
+
+
+@pytest.mark.parametrize("named", ["", "cloudagent_accounts"])
+def test_everything_that_opens_the_bundled_database_opens_the_one_named(named: str) -> None:
+    """One setting, `AGENT_POSTGRES_DB`, rather than a literal in each place.
+
+    A deployment that moved `AGENT_DATABASE_URL` to another database on the
+    bundled server (the independent-accounts cutover's new one) sets it to that
+    database; a new installation leaves it unset and gets `cloudagent` for both.
+    """
+    services = _rendered_services({"AGENT_POSTGRES_DB": named} if named else {})
+
+    database = named or "cloudagent"
+    assert services["postgres"]["environment"]["POSTGRES_DB"] == database
+    assert services["postgres"]["healthcheck"]["test"] == [
+        "CMD-SHELL",
+        f"pg_isready -U cloudagent -d {database}",
+    ]
+    # The new installation's generated connection, and pgAdmin's bundled server.
+    assert services["keys"]["environment"]["AGENT_POSTGRES_DB"] == database
+    assert services["pgadmin"]["environment"]["AGENT_POSTGRES_DB"] == database
+
+
+#: Pages an operator copies database commands from. Records under docs/agents
+#: keep the commands they were written with.
+OPERATOR_DOCS = (
+    REPO_ROOT / "ENVIRONMENT.md",
+    REPO_ROOT / "README.md",
+    *sorted((REPO_ROOT / "docs" / "developer").rglob("*.md")),
+    *sorted((REPO_ROOT / "deploy").rglob("*.md")),
+)
+_DATABASE_TOOL = re.compile(r"\b(?:psql|pg_dump|pg_restore|pg_isready)\b")
+#: The name on its own: not `cloudagent-postgres-1` or `cloudagent-undrain-*.sql`.
+_LITERAL_DATABASE = re.compile(r"(?<![\w-])cloudagent(?![\w-])")
+
+
+def _documented_commands(text: str) -> list[str]:
+    """Each command in the fenced code blocks, its continuation lines joined."""
+    commands, current, fenced = [], "", False
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            fenced, current = not fenced, ""
+            continue
+        if not fenced:
+            continue
+        current += line.strip()
+        if current.endswith("\\"):
+            current = current[:-1].rstrip() + " "
+            continue
+        commands.append(current)
+        current = ""
+    return commands
+
+
+def test_documented_database_commands_open_the_one_agent_postgres_db_names() -> None:
+    """`-d cloudagent` is the deployment's database only until it moves.
+
+    After the independent-accounts cutover the old `cloudagent` database stays
+    on the bundled server as the archive, so a command naming it counts, drains
+    and dumps the archive while reporting success. The Postgres container's own
+    `POSTGRES_DB` and `POSTGRES_USER` are what `AGENT_POSTGRES_DB` and
+    `AGENT_POSTGRES_USER` set.
+    """
+    offenders = [
+        f"{path.relative_to(REPO_ROOT)}: {command}"
+        for path in OPERATOR_DOCS
+        for command in _documented_commands(path.read_text())
+        if _DATABASE_TOOL.search(command) and _LITERAL_DATABASE.search(command)
+    ]
+    assert not offenders, offenders
+
+
+def test_a_command_naming_the_database_is_found_across_its_continuation_lines() -> None:
+    text = (
+        "```bash\n"
+        'docker exec cloudagent-postgres-1 psql -U "$POSTGRES_USER" \\\n'
+        "  -d cloudagent -Atc 'SELECT 1'\n"
+        "docker exec -i cloudagent-postgres-1 psql < cloudagent-undrain-x.sql\n"
+        "```\n"
+    )
+
+    found = [
+        command
+        for command in _documented_commands(text)
+        if _DATABASE_TOOL.search(command) and _LITERAL_DATABASE.search(command)
+    ]
+
+    assert found == [
+        "docker exec cloudagent-postgres-1 psql -U \"$POSTGRES_USER\" -d cloudagent -Atc 'SELECT 1'"
+    ]
 
 
 def test_the_compose_only_sets_variables_the_code_reads(control_plane_env: dict) -> None:
@@ -220,17 +391,17 @@ def test_a_default_the_code_relies_on_is_not_blanked_out(control_plane_env: dict
     """**`:-` is not "leave it unset".**
 
     Compose passes an empty string as a *set* variable, and
-    `os.getenv(name, "dev")` returns that empty string rather than the default.
-    So `${AGENT_PUBLISH_BASE_BRANCH:-}` silently means "open the PR against a
-    branch called `''`", and `${AGENT_GITHUB_API:-}` means "talk to an empty
-    API base" — both from a compose file that looks like it configured nothing.
+    `os.getenv(name, "INFO")` returns that empty string rather than the default.
+    So `${AGENT_LOG_LEVEL:-}` silently means "log at level `''`", and
+    `${AGENT_GITHUB_API:-}` means "talk to an empty API base" — both from a
+    compose file that looks like it configured nothing.
 
     Variables whose *code* carries a default must repeat it here or be omitted
     entirely. Listed by name because the rule only applies to the ones with a
     default behind them; a genuinely optional variable is right to be blank.
     """
     for name, default in (
-        ("AGENT_PUBLISH_BASE_BRANCH", "dev"),
+        ("AGENT_LOG_LEVEL", "INFO"),
         ("AGENT_GITHUB_API", "https://api.github.com"),
     ):
         assert control_plane_env[name].endswith(f":-{default}}}"), (
@@ -298,9 +469,9 @@ def _run_control_deploy(
         '    [ "${CONTROL_RUNNING}" = "1" ] && printf "%s\\n" existing-control ; exit 0 ;;\n'
         "  *' ps --status running -q mcp-relay')\n"
         '    [ "${MCP_RUNNING}" = "1" ] && printf "%s\\n" existing-mcp ; exit 0 ;;\n'
-        "  *' run --rm --no-deps control-plane python -m cloud_agent.identity_namespace --check')\n"
+        "  *' run --rm --no-deps control-plane python -m cloud_agent.deployment.identity_namespace --check')\n"
         '    exit "${IDENTITY_EXIT}" ;;\n'
-        "  *' run --rm --no-deps control-plane python -m cloud_agent.deploy_readiness '*)\n"
+        "  *' run --rm --no-deps control-plane python -m cloud_agent.deployment.deploy_readiness '*)\n"
         '    exit "${READINESS_EXIT}" ;;\n'
         "esac\n"
         "exit 0\n"
@@ -362,13 +533,27 @@ def test_a_failed_identity_check_does_not_start_or_replace_listeners(tmp_path: P
         mcp_running=running,
     )
     assert result.returncode == 18
-    assert docker_calls.index(" run --rm --no-deps migrate") < docker_calls.index(
-        "cloud_agent.identity_namespace --check"
-    )
-    assert "cloud_agent.deploy_readiness" not in docker_calls
+    # Refused read-only, before anything could change the database it refused.
+    assert "cloud_agent.deployment.identity_namespace --check" in docker_calls
+    assert " run --rm --no-deps migrate" not in docker_calls
+    assert "cloud_agent.deployment.deploy_readiness" not in docker_calls
     assert " up -d --no-deps " not in docker_calls
     assert " up -d --remove-orphans" not in docker_calls
     assert " stop " not in docker_calls
+
+
+@pytest.mark.parametrize("variable", RETIRED_GATEWAY_VARIABLES)
+def test_a_retired_variable_in_the_env_file_stops_the_deploy_before_docker(
+    tmp_path: Path, variable: str
+) -> None:
+    """Compose would drop it without a word; the deployment must say so instead."""
+    result, docker_calls = _run_control_deploy(
+        tmp_path, readiness_exit=0, dotenv=f"{variable}=stale\n"
+    )
+    assert result.returncode != 0
+    assert variable in result.stderr
+    assert " run --rm --no-deps migrate" not in docker_calls
+    assert " up -d" not in docker_calls
 
 
 def test_a_failed_readiness_probe_never_replaces_the_running_stack(
@@ -380,9 +565,9 @@ def test_a_failed_readiness_probe_never_replaces_the_running_stack(
     assert (
         docker_calls.index(" build")
         < docker_calls.index(" up -d --wait --wait-timeout 1 postgres")
+        < docker_calls.index("cloud_agent.deployment.identity_namespace --check")
         < docker_calls.index(" run --rm --no-deps migrate")
-        < docker_calls.index("cloud_agent.identity_namespace --check")
-        < docker_calls.index("cloud_agent.deploy_readiness")
+        < docker_calls.index("cloud_agent.deployment.deploy_readiness")
     )
     assert " up -d --remove-orphans" not in docker_calls
 
@@ -415,7 +600,7 @@ def test_a_successful_readiness_probe_allows_the_shared_only_service(tmp_path: P
     result, docker_calls = _run_control_deploy(tmp_path, readiness_exit=0)
 
     assert result.returncode == 0, result.stderr
-    assert "cloud_agent.deploy_readiness" in docker_calls
+    assert "cloud_agent.deployment.deploy_readiness" in docker_calls
     assert re.search(r"--expected-deployment-sha [0-9a-f]{40}(?:\s|$)", docker_calls)
     assert " up -d --remove-orphans" in docker_calls
 
@@ -487,7 +672,7 @@ def test_a_cold_start_bootstraps_both_services_needed_for_host_readiness(
 
     assert result.returncode == 0, result.stderr
     bootstrap = docker_calls.index(" up -d --no-deps control-plane mcp-relay")
-    readiness = docker_calls.index("cloud_agent.deploy_readiness")
+    readiness = docker_calls.index("cloud_agent.deployment.deploy_readiness")
     full_up = docker_calls.index(" up -d --remove-orphans")
     assert bootstrap < readiness < full_up
     assert "parallel host readiness" in result.stdout
@@ -518,7 +703,7 @@ def test_post_gate_health_failure_does_not_stop_bootstrap_services(tmp_path: Pat
     )
 
     assert result.returncode != 0
-    assert "cloud_agent.deploy_readiness" in docker_calls
+    assert "cloud_agent.deployment.deploy_readiness" in docker_calls
     assert " up -d --remove-orphans" in docker_calls
     assert " stop control-plane" not in docker_calls
     assert " stop mcp-relay" not in docker_calls
@@ -554,7 +739,7 @@ def test_a_missing_mcp_relay_is_bootstrapped_without_replacing_the_live_api(
     assert " up -d --no-deps mcp-relay" in docker_calls
     assert " up -d --no-deps control-plane" not in docker_calls
     assert docker_calls.index(" up -d --no-deps mcp-relay") < docker_calls.index(
-        "cloud_agent.deploy_readiness"
+        "cloud_agent.deployment.deploy_readiness"
     )
 
 
@@ -599,7 +784,7 @@ def test_removed_default_off_switch_is_inert(
     )
 
     assert result.returncode == 0, result.stderr
-    assert "cloud_agent.deploy_readiness" in docker_calls
+    assert "cloud_agent.deployment.deploy_readiness" in docker_calls
     assert " up -d --remove-orphans" in docker_calls
 
 
@@ -614,7 +799,7 @@ def test_manual_staging_deploy_reads_its_persistent_environment(tmp_path: Path) 
 
     assert result.returncode == 0, result.stderr
     assert "shared-live scheduling gate" not in result.stdout
-    assert "cloud_agent.deploy_readiness" in docker_calls
+    assert "cloud_agent.deployment.deploy_readiness" in docker_calls
     assert " up -d --remove-orphans" in docker_calls
 
 

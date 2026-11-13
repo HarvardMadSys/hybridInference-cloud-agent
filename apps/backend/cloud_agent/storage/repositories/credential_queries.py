@@ -1,15 +1,21 @@
 """Postgres implementation of the Model-credential resolution port.
 
-Lifted verbatim from the single storage class this package replaced. The
-statements, their bound parameters and their transaction ownership are what
-they were; only the class holding them changed.
+Lifted from the single storage class this package replaced. The statements,
+their bound parameters and their transaction ownership are what they were;
+their fence predicates are composed from :mod:`cloud_agent.storage._sql.fences`,
+which the GitHub relay's caller fence reads too.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cloud_agent.storage._sql.hosts import LIVE_ATTEMPT_HOST
+from cloud_agent.storage._sql.fences import (
+    CURRENT_RUNNING_ATTEMPT,
+    LIVE_ATTEMPT,
+    RESIDENCY_CALLER_FROM,
+    residency_caller_sql,
+)
 from cloud_agent.storage._sql.mcp import mcp_binding_row
 from cloud_agent.storage._sql.mcp_residency import residency_fence_sql
 
@@ -40,22 +46,11 @@ class PostgresCredentialQueries:
         """
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                """
+                f"""
                 SELECT j.id AS job_id, a.id AS attempt_id, a.lease_generation
-                FROM agent_thread_sandbox_memberships m
-                JOIN agent_threads t ON t.id = m.thread_id
-                JOIN agent_sandboxes g ON g.id = m.sandbox_id
-                JOIN agent_attempts a ON a.id = m.active_attempt_id
-                JOIN agent_jobs j ON j.id = a.job_id
-                WHERE m.thread_id = $1
-                  AND m.residency_generation = $2
-                  AND m.residency_status = 'hot'
-                  AND m.residency_lease_expires_at > clock_timestamp()
-                  AND t.deleted_at IS NULL
-                  AND a.host_id = g.host
-                  AND a.status = 'running'
-                  AND j.thread_id = m.thread_id
-                  AND j.current_attempt_id = a.id
+                FROM {RESIDENCY_CALLER_FROM}
+                WHERE {residency_caller_sql("$1", "$2")}
+                  AND {CURRENT_RUNNING_ATTEMPT}
                 """,
                 thread_id,
                 residency_generation,
@@ -108,13 +103,8 @@ class PostgresCredentialQueries:
                 JOIN agent_jobs j ON j.id = a.job_id
                 WHERE a.id = $1
                   AND a.lease_generation = $2
-                  AND a.status = 'running'
-                  AND a.lease_expires_at > clock_timestamp()
                   AND j.id = $3
-                  AND j.current_attempt_id = a.id
-                  AND j.state = 'running'
-                  AND NOT j.cancel_requested
-                  AND {LIVE_ATTEMPT_HOST}
+                  AND {LIVE_ATTEMPT}
                   AND {residency_fence_sql("$4")}
                 """,
                 attempt_id,
@@ -133,7 +123,9 @@ class PostgresCredentialQueries:
                        c.deleted_at, c.label, c.transport, c.location
                 FROM agent_mcp_thread_bindings b
                 JOIN agent_mcp_connections c ON c.id = b.connection_id
-                WHERE b.thread_id = $1 AND b.enabled
+                -- A sandbox server runs behind the sandbox's own MCP gateway;
+                -- the relay never dials it, so never lists it either.
+                WHERE b.thread_id = $1 AND b.enabled AND c.location <> 'sandbox'
                 ORDER BY b.alias, b.connection_id
                 """,
                 row["thread_id"],

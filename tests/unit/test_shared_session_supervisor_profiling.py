@@ -20,8 +20,8 @@ from tests.unit.test_shared_session_supervisor import (
     time,
 )
 
-from cloud_agent_host.sandbox import KATA_RUNTIME
-from cloud_agent_host.tool_windows import ToolMark
+from cloud_agent_host.container.sandbox import KATA_RUNTIME
+from cloud_agent_host.observe.tool_windows import ToolMark
 
 
 def test_shared_claude_turn_fences_and_returns_exact_tool_marks():
@@ -243,7 +243,7 @@ def test_the_final_report_sequence_stays_above_every_checkpoint():
         reasoning_effort=None,
     )
     # A later configuration must never relabel an already-open measurement.
-    group = supervisor._members["athr_source"]
+    group = supervisor.state.members["athr_source"]
     group.spec = replace(group.spec, cpu_limit="4")
     sequences: list[int] = []
     for _ in range(3):
@@ -661,7 +661,7 @@ def test_a_collection_cut_short_by_the_deadline_says_so(monkeypatch):
             recorder.deadline_mono = time.monotonic() - 1
         return recorder
 
-    monkeypatch.setattr("cloud_agent_host.shared_session_supervisor.start_stage_recording", lapsed)
+    monkeypatch.setattr("cloud_agent_host.supervisor.member_sessions.start_stage_recording", lapsed)
     manager = _Manager()
     supervisor = SharedChatSessionSupervisor(manager, transport_factory=_TransportFactory())
 

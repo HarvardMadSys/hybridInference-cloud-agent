@@ -37,83 +37,82 @@ choice is the person whose job this is, taken from the same fence lookup that
 decides whether the token is still live. Not the caller: the caller is a
 sandbox running untrusted repository content, and it does not get to say whose
 tools it is spending.
+
+**Where each part lives.** This module holds the routes and the merged
+endpoint's dispatch. Resolving the caller and its bindings is in
+:mod:`cloud_agent.api._mcp_relay_callers`, the decision and the approval hold
+in :mod:`cloud_agent.api._mcp_relay_approval`, and rendering what goes back in
+:mod:`cloud_agent.mcp.relay_surface`.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from cloud_agent import memory_tool, web_search
-from cloud_agent.agent_memory import MemoryTask
-from cloud_agent.api.deps import get_http_client, get_mcp_decision_signal, get_storage
-from cloud_agent.credential_cipher import CredentialCipherError
-from cloud_agent.logging_utils import get_logger
-from cloud_agent.mcp import protocol
-from cloud_agent.mcp.authorization import decide, visible_capabilities
-from cloud_agent.mcp.host import (
-    HostError,
-    SessionKey,
-    arguments_digest,
-    encode_arguments,
+from cloud_agent.api._mcp_relay_approval import decide_call, finish_dispatches
+from cloud_agent.api._mcp_relay_callers import (
+    authorize_fence,
+    host_catalogue,
+    recheck_authorized,
+    recheck_fence,
+    refresh_catalogue_entry,
+    refused,
+    residency_fence,
+    resolve_live_binding,
 )
-from cloud_agent.mcp.invocations import MAX_HELD_ARGUMENTS_BYTES, deadline_for
+from cloud_agent.api.deps import get_http_client, get_storage
+from cloud_agent.domain.agent_memory import MemoryTask
+from cloud_agent.logging_utils import get_logger
+from cloud_agent.mcp import protocol, sandbox_tools
+from cloud_agent.mcp.host import HostError, SessionKey
 from cloud_agent.mcp.jsonrpc import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
     INVALID_REQUEST,
     MAX_MESSAGE_BYTES,
-    METHOD_NOT_FOUND,
     PARSE_ERROR,
 )
 from cloud_agent.mcp.models import CapabilityKind
-from cloud_agent.mcp.net_policy import policy_from_environment
-from cloud_agent.mcp.refresh import RefreshRefused, ensure_fresh
-from cloud_agent.mcp.registry import (
-    binding_from_row,
-    invocation_cipher,
-    resolve_connection,
+from cloud_agent.mcp.relay_surface import (
+    error_reply,
+    initialize_result,
+    prompt_entry,
+    resource_entry,
+    result_reply,
+    tool_entry,
 )
 from cloud_agent.mcp.resources import (
     ResourceResolutionError,
     resource_capability,
-    resource_uri,
     scope_resource_result,
     split_resource_uri,
 )
 from cloud_agent.mcp.runtime import get_host as _host
-from cloud_agent.tokens import (
-    SCOPE_MCP,
-    InvalidAgentToken,
-    parse_residency_mcp_token,
-    parse_worker_token,
-)
-from cloud_agent_shared.shared_protocol import is_residency_mcp_credential
+from cloud_agent.memory import memory_tool
+from cloud_agent.providers import web_search
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from cloud_agent.api._mcp_relay_callers import Authorized
     from cloud_agent.ports import (
         AgentMemoryRepository,
         CredentialQueries,
         McpConnectionRepository,
         WebSearchRepository,
     )
-    from cloud_agent.workers.mcp_decision_signal import McpDecisionSignal
 
 
 logger = get_logger(__name__)
 
 
-class _McpRelayStorage(Protocol):
-    """The capabilities this module's handlers reach the store for.
+class McpRelayStorage(Protocol):
+    """The capabilities the relay's handlers reach the store for.
 
     Named here so that reaching for one more is a deliberate edit to
     this list rather than a call that happens to type-check.
@@ -128,14 +127,7 @@ class _McpRelayStorage(Protocol):
 router = APIRouter(prefix="/v1/agent/mcp")
 
 
-#: A held call waits for its owner's decision, which wakes it, and looks again
-#: at least this often anyway: its caller leaving, its attempt being superseded
-#: and its connection changing announce nothing.
-_APPROVAL_IDLE_S = 5.0
 _HOST_KEEPALIVE_S = 15.0
-#: How often it looks where nothing would wake it: no listener in this process,
-#: or the listening connection lost.
-_APPROVAL_POLL_S = 1.0
 
 
 _SSE_HEADERS = {
@@ -155,92 +147,6 @@ MAX_RELAY_BODY_BYTES = MAX_MESSAGE_BYTES
 MAX_RELAY_BATCH_MESSAGES = 32
 
 
-@dataclass
-class Authorized:
-    """The current fenced connection and any dispatch receipts for one request.
-
-    Bundled rather than returned as a tuple because the fields are not
-    interchangeable: a caller that swapped the binding for the connection would
-    compile and authorize the wrong thing.
-    """
-
-    job_id: str
-    user_id: str
-    thread_id: str
-    connection_id: int
-    alias: str
-    binding: Any
-    connection: Any
-    snapshot: Any
-    #: The decrypted upstream credential, or ``None`` for a connection that
-    #: authenticates by position or not at all. Carried because the relay dials
-    #: the upstream itself.
-    secret: str | None = None
-    #: The attempt the credential was resolved to, and its lease: what every
-    #: invocation record and fenced write of this request belongs to.
-    attempt_id: int | None = None
-    lease_generation: int = 0
-    residency_generation: int | None = None
-    dispatches: list[tuple[int, int]] = field(default_factory=list, compare=False)
-
-
-class _BindingDisabled(HTTPException):
-    """A session selection stops all connection work before credentials are read."""
-
-    def __init__(self) -> None:
-        """Refuse transport access for an explicitly disabled selection."""
-        super().__init__(403, "this MCP connection is not enabled for this session")
-
-
-def _error_reply(request_id: Any, message: str, code: int = METHOD_NOT_FOUND) -> dict[str, Any]:
-    """Build a JSON-RPC error reply for one request id.
-
-    Answered as a *protocol* error rather than an HTTP failure on purpose: the
-    transport hop succeeded and the call did not, which is a thing models
-    handle. A 403 here would look to the CLI like a broken connection and take
-    the whole server down for the rest of the job.
-    """
-    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
-
-
-def _result_reply(request_id: Any, result: Any, *, stateless: bool) -> dict[str, Any]:
-    """Build a JSON-RPC result reply, discriminated when the client is modern.
-
-    The stateless revision requires every result to carry ``resultType``. A
-    client that asked in that shape treats a result without one as complete
-    anyway, but sending it costs nothing and keeps the reply honest about which
-    contract it was built for.
-    """
-    if stateless and isinstance(result, dict):
-        result = {**result, "resultType": protocol.RESULT_TYPE_COMPLETE}
-    return {"jsonrpc": "2.0", "id": request_id, "result": result}
-
-
-def _bearer(authorization: str | None) -> str:
-    """Extract the sandbox's MCP token, or refuse."""
-    token = ""
-    if authorization and authorization.lower().startswith("bearer "):
-        token = authorization[7:].strip()
-    if not token:
-        raise HTTPException(
-            status_code=401,
-            detail={
-                "error": {
-                    "type": "invalid_request_error",
-                    "message": "This endpoint takes an MCP-scoped job token.",
-                }
-            },
-        )
-    return token
-
-
-def _refused(status_code: int, kind: str, message: str) -> HTTPException:
-    """Build the JSON error shape every refusal on this surface uses."""
-    return HTTPException(
-        status_code=status_code, detail={"error": {"type": kind, "message": message}}
-    )
-
-
 class _BodyRefused(Exception):
     """A request this relay will not read or run, carrying the reply that says so."""
 
@@ -248,7 +154,7 @@ class _BodyRefused(Exception):
         """Build the JSON-RPC refusal, with the null id an unread request gets."""
         super().__init__(message)
         self.response = JSONResponse(
-            _error_reply(None, message, INVALID_REQUEST), status_code=status_code
+            error_reply(None, message, INVALID_REQUEST), status_code=status_code
         )
 
 
@@ -286,618 +192,12 @@ def _bounded_batch(document: Any) -> Any:
     return document
 
 
-def _require_relay_store(store: _McpRelayStorage | None) -> _McpRelayStorage:
-    """The relay's store, or the refusal a deployment without a database gets."""
-    if store is None:
-        raise _refused(
-            503, "invalid_request_error", "MCP is unavailable without a configured database."
-        )
-    return store
-
-
-async def _authorize_fence(
-    authorization: str | None,
-    store: _McpRelayStorage | None,
-) -> dict[str, Any]:
-    """Resolve the token to the job it was minted for, or refuse.
-
-    Split from the per-alias resolution below because the host endpoint serves
-    every binding of one job from a single URL: it needs the fence once and the
-    bindings many times, and re-reading the fence per tool would make a
-    revocation take effect at a different moment for each tool in one listing.
-
-    """
-    token = _bearer(authorization)
-    residency_generation = None
-
-    if is_residency_mcp_credential(token):
-        # A resident process's credential: it names the chat's residency, not
-        # an attempt, because the process serves turn after turn. It parses
-        # only as that, so it is MCP-only by construction, like the scope
-        # check below.
-        try:
-            residency = parse_residency_mcp_token(token)
-            residency_generation = residency["residency_generation"]
-        except InvalidAgentToken as exc:
-            raise _refused(401, "invalid_request_error", str(exc)) from exc
-        store = _require_relay_store(store)
-        # Which turn it speaks for is decided now, on every call: the one the
-        # residency is serving. Between turns, or once the residency rotated,
-        # expired or was released, there is none and nothing is authorized.
-        claims = await store.credential_queries.resolve_residency_attempt(
-            thread_id=residency["thread_id"],
-            residency_generation=residency["residency_generation"],
-        )
-        if claims is None:
-            raise _refused(
-                401, "invalid_request_error", "This chat has no running turn for tool calls."
-            )
-    else:
-        # COMPAT(remove-after=2026-11-30): no host reads the claim's mcp_token;
-        # this branch goes with its mint in api/worker.py.
-        try:
-            claims = parse_worker_token(token)
-        except InvalidAgentToken as exc:
-            raise _refused(401, "invalid_request_error", str(exc)) from exc
-
-        # Positive, as the module docstring explains: a token minted before
-        # scopes reads as `full`, and a runner's full-scope token buys no tools.
-        if claims.get("scope") != SCOPE_MCP:
-            raise _refused(403, "insufficient_scope", "This endpoint requires an MCP-scoped token.")
-        store = _require_relay_store(store)
-
-    # The fence, read fresh on every call. The claims name an attempt; this
-    # asks whether that attempt is still the job's current one, still running,
-    # with an unexpired lease. So revocation is automatic -- the instant the
-    # reaper supersedes the attempt or the owner cancels, the same credential
-    # stops buying tools, with no key to remember to revoke.
-    return await _recheck_fence({**claims, "residency_generation": residency_generation}, store)
-
-
-def _residency_fence(identity: dict[str, Any]) -> dict[str, int]:
-    """Pass the additional fence only for a residency credential."""
-    generation = identity.get("residency_generation")
-    return {} if generation is None else {"residency_generation": int(generation)}
-
-
-async def _recheck_fence(captured: dict[str, Any], store: _McpRelayStorage) -> dict[str, Any]:
-    """Revalidate the original attempt and residency, never resolve another turn."""
-    identity = await store.credential_queries.resolve_model_credential(
-        job_id=captured["job_id"],
-        attempt_id=captured["attempt_id"],
-        lease_generation=captured["lease_generation"],
-        **_residency_fence(captured),
-    )
-    if identity is None:
-        raise _refused(
-            401, "invalid_request_error", "This job token is no longer valid for tool calls."
-        )
-    # The attempt travels with the identity, so every record and write below
-    # is fenced to the turn resolved here rather than re-read from the token.
-    return {
-        **identity,
-        "attempt_id": int(captured["attempt_id"]),
-        "lease_generation": int(captured["lease_generation"]),
-        **_residency_fence(captured),
-    }
-
-
-async def _recheck_authorized(authorized: Authorized, store: _McpRelayStorage) -> None:
-    """Check a selected connection's captured caller after an asynchronous wait."""
-    await _recheck_fence(
-        {
-            "job_id": authorized.job_id,
-            "attempt_id": authorized.attempt_id,
-            "lease_generation": authorized.lease_generation,
-            "residency_generation": authorized.residency_generation,
-        },
-        store,
-    )
-
-
-async def _resolve_binding(
-    identity: dict[str, Any],
-    alias: str,
-    store: _McpRelayStorage,
-    *,
-    refresh_credentials: bool = True,
-) -> Authorized:
-    """Resolve one binding alias into the server this job may reach."""
-    job_id = identity["job_id"]
-    matching = [item for item in identity.get("mcp_bindings") or [] if item.get("alias") == alias]
-    if len(matching) > 1:
-        raise _refused(
-            403,
-            "permission_error",
-            f"More than one MCP connection uses alias {alias!r}. Save a unique selection in Tools.",
-        )
-    binding_row = matching[0] if matching else None
-    if binding_row is None:
-        # The session's own bindings, not a catalogue. A token is scoped to the
-        # job it was minted for, and a job reaches exactly the connections its
-        # conversation enabled.
-        logger.warning(
-            "agent_mcp_binding_not_granted",
-            extra={
-                "event": "agent_mcp_binding_not_granted",
-                "job_id": job_id,
-                "alias": alias,
-            },
-        )
-        raise _refused(
-            403,
-            "permission_error",
-            f"This session is not bound to an MCP connection named {alias!r}.",
-        )
-
-    if (
-        binding_row.get("deleted_at") is not None
-        or binding_row.get("owner_id") != identity["user_id"]
-    ):
-        raise _refused(404, "not_found", f"No MCP connection named {alias!r} is bound here.")
-
-    if not binding_row.get("enabled", True):
-        raise _BindingDisabled()
-
-    connection_row = await store.mcp.get_mcp_connection(
-        connection_id=int(binding_row["connection_id"])
-    )
-    if connection_row is None:
-        raise _refused(503, "server_error", f"The {alias!r} MCP connection no longer exists.")
-    if (
-        not connection_row.get("enabled", True)
-        or connection_row.get("status") in {"disabled", "error"}
-        or connection_row.get("deleted_at") is not None
-    ):
-        raise _refused(503, "server_error", f"The {alias!r} MCP connection is not usable.")
-    if str(connection_row.get("transport")) == "stdio":
-        # A local process needs a worker or a connector to run it, and neither
-        # is this listener. Refused here rather than forwarded to an address
-        # that does not exist, so the agent is told what is missing instead of
-        # reporting a server that cannot be reached.
-        logger.warning(
-            "agent_mcp_stdio_not_runnable",
-            extra={"event": "agent_mcp_stdio_not_runnable", "job_id": job_id, "alias": alias},
-        )
-        # Named precisely, because the two cases need different actions from the
-        # owner: one is a deployment that has no connector runtime, the other is
-        # a connection they have not routed anywhere yet.
-        raise _refused(
-            503,
-            "server_error",
-            (
-                f"The {alias!r} MCP connection runs through a connector, and this "
-                "deployment does not serve connectors yet."
-                if connection_row.get("connector_id")
-                else f"The {alias!r} MCP connection runs a local process, and no connector "
-                "is configured for it."
-            ),
-        )
-
-    try:
-        # Before the credential is read, so a token that aged out during a long
-        # job is renewed instead of being sent and refused. Under the deployment
-        # policy, the same one authorization, Test and the dial use: a token
-        # endpoint those doors admit must not be refused only when a job asks.
-        if refresh_credentials:
-            connection_row = dict(
-                await ensure_fresh(store.mcp, row=connection_row, policy=policy_from_environment())
-            )
-    except RefreshRefused as exc:
-        logger.warning(
-            "agent_mcp_refresh_refused",
-            extra={
-                "event": "agent_mcp_refresh_refused",
-                "job_id": job_id,
-                "alias": alias,
-                "kind": exc.kind,
-            },
-        )
-        raise _refused(
-            503,
-            "server_error",
-            f"The {alias!r} MCP connection needs to be reconnected.",
-        ) from exc
-
-    resolved = await resolve_connection(store.mcp, row=connection_row)
-    if not resolved.usable:
-        # Every method, not just ``tools/call``. ``decide`` covers the call path,
-        # but ``initialize``, ``tools/list`` and the session verbs would
-        # otherwise still be forwarded -- to a server this owner has turned off,
-        # or with no credential at all when the deployment lost its encryption
-        # key. A relay that dials a disconnected connection is a disconnect that
-        # did not happen.
-        logger.warning(
-            "agent_mcp_connection_unusable",
-            extra={
-                "event": "agent_mcp_connection_unusable",
-                "job_id": job_id,
-                "alias": alias,
-                "kind": resolved.error_kind.value,
-            },
-        )
-        raise _refused(503, "server_error", f"The {alias!r} MCP connection is not usable.")
-    binding = binding_from_row(binding_row)
-    return Authorized(
-        job_id=job_id,
-        user_id=identity["user_id"],
-        thread_id=identity["thread_id"],
-        connection_id=int(binding_row["connection_id"]),
-        alias=alias,
-        binding=binding,
-        connection=resolved.connection,
-        snapshot=resolved.snapshot,
-        secret=resolved.credential.get("secret"),
-        attempt_id=identity.get("attempt_id"),
-        lease_generation=int(identity.get("lease_generation") or 0),
-        residency_generation=identity.get("residency_generation"),
-    )
-
-
-async def _resolve_live_binding(
-    identity: dict[str, Any],
-    alias: str,
-    store: _McpRelayStorage,
-    *,
-    attempt_id: int | None,
-    lease_generation: int,
-) -> Authorized:
-    """Refresh only the selected connection, then recheck its live authority.
-
-    OAuth can spend seconds on the network. The binding and attempt read before
-    that wait cannot authorize dispatch after the user changes or revokes them.
-    The second resolution reads current rows without another network refresh.
-    """
-    if attempt_id is None:
-        raise _refused(401, "permission_error", "This MCP session is no longer authorized.")
-    captured = {
-        **identity,
-        "attempt_id": attempt_id,
-        "lease_generation": lease_generation,
-    }
-    previous = await _resolve_binding(await _recheck_fence(captured, store), alias, store)
-    current_identity = await _recheck_fence(captured, store)
-    current = await _resolve_binding(current_identity, alias, store, refresh_credentials=False)
-    if (
-        current.connection_id != previous.connection_id
-        or current.binding != previous.binding
-        or current.connection.config_revision != previous.connection.config_revision
-        or current.connection.authorization_epoch != previous.connection.authorization_epoch
-        or current.connection.capability_revision != previous.connection.capability_revision
-    ):
-        raise _refused(
-            403, "permission_error", "MCP authorization changed while refreshing credentials."
-        )
-    return current
-
-
-async def _refresh_catalogue_entry(
-    entry: tuple[Authorized, Any], identity: dict[str, Any], store: _McpRelayStorage
-) -> tuple[Authorized, Any]:
-    """Refresh the chosen tool or prompt and use its current capability record."""
-    previous, capability = entry
-    current = await _resolve_live_binding(
-        identity,
-        previous.alias,
-        store,
-        attempt_id=identity["attempt_id"],
-        lease_generation=identity["lease_generation"],
-    )
-    if current.connection_id != previous.connection_id:
-        raise _refused(403, "permission_error", "The selected MCP connection changed.")
-    latest = (
-        next(
-            (
-                item
-                for item in current.snapshot.of_kind(capability.kind)
-                if item.name == capability.name
-            ),
-            None,
-        )
-        if current.snapshot is not None
-        else None
-    )
-    if latest is None:
-        raise _refused(403, "permission_error", "This MCP capability is no longer available.")
-    return current, latest
-
-
 def _binding_error(request_id: Any, exc: HTTPException) -> dict[str, Any]:
     """Return a selected-connection failure without taking down the merged endpoint."""
     detail = exc.detail
     if isinstance(detail, dict) and isinstance(detail.get("error"), dict):
         detail = detail["error"].get("message")
-    return _error_reply(request_id, str(detail or "This MCP connection is unavailable."))
-
-
-async def _decide_call(
-    authorized: Authorized,
-    store: _McpRelayStorage,
-    *,
-    name: str,
-    arguments: Any,
-    capability: Any,
-    attempt_id: int | None,
-    lease_generation: int,
-    request_id: Any,
-    kind: CapabilityKind = CapabilityKind.TOOL,
-    request: Request | None = None,
-) -> dict[str, Any] | None:
-    """Decide one call, or return ``None`` when it may be dispatched.
-
-    The single decision point on this surface: tools, resources and prompts all
-    call it, because two copies of an authorization rule is one copy that will
-    be forgotten, and the copy that gets forgotten is always the newer one.
-    ``kind`` selects the scope: a resource read is checked against the resource
-    rules, which is what stops it being a way to reach something the session
-    did not enable.
-    """
-    decision = decide(
-        connection=authorized.connection,
-        binding=authorized.binding,
-        capability=capability,
-        kind=kind,
-        name=name,
-        user_id=authorized.user_id,
-    )
-    if decision.allowed:
-        return None
-    if decision.refused:
-        logger.warning(
-            "agent_mcp_tool_refused",
-            extra={
-                "event": "agent_mcp_tool_refused",
-                "job_id": authorized.job_id,
-                "alias": authorized.alias,
-                "tool": name,
-                "code": decision.code,
-            },
-        )
-        return _error_reply(request_id, decision.message or "this tool is not enabled")
-
-    digest = arguments_digest(arguments if isinstance(arguments, dict) else None)
-    # What the approval would have to have been given for. Every one of these
-    # moves when something the owner agreed to changes: the target, the
-    # catalogue, the session's own rules, or whose job this is.
-    fence = {
-        "config_revision": authorized.connection.config_revision,
-        "authorization_epoch": authorized.connection.authorization_epoch,
-        "capability_revision": authorized.connection.capability_revision,
-        "policy_revision": authorized.binding.policy_revision,
-        "attempt_id": attempt_id,
-        "lease_generation": lease_generation or None,
-        **_residency_fence({"residency_generation": authorized.residency_generation}),
-    }
-    approved = await store.mcp.find_approved_mcp_invocation(
-        job_id=authorized.job_id,
-        connection_id=authorized.connection_id,
-        capability_name=name,
-        arguments_digest=digest,
-        capability_kind=kind.value,
-        **fence,
-    )
-    if approved is not None:
-        claimed = await store.mcp.claim_mcp_invocation(invocation_id=int(approved["id"]), **fence)
-        if claimed is not None:
-            # Exactly one dispatcher ever wins this UPDATE, which is why a
-            # retry storm cannot send a write twice.
-            authorized.dispatches.append((int(claimed["id"]), int(claimed["dispatch_generation"])))
-            return None
-    if not _held_arguments_fit(arguments):
-        logger.warning(
-            "agent_mcp_call_too_large_to_hold",
-            extra={
-                "event": "agent_mcp_call_too_large_to_hold",
-                "job_id": authorized.job_id,
-                "alias": authorized.alias,
-                "tool": name,
-            },
-        )
-        return _error_reply(
-            request_id,
-            f"This call needs its owner's approval, and its arguments are larger than the "
-            f"{MAX_HELD_ARGUMENTS_BYTES} bytes a held call can keep for review. "
-            "It was not held or sent.",
-            INVALID_PARAMS,
-        )
-    invocation = await store.mcp.create_mcp_invocation(
-        job_id=authorized.job_id,
-        attempt_id=attempt_id,
-        lease_generation=lease_generation,
-        thread_id=authorized.thread_id,
-        connection_id=authorized.connection_id,
-        capability_name=name,
-        capability_kind=kind.value,
-        arguments_digest=digest,
-        arguments_ciphertext=_protect_arguments(arguments),
-        config_revision=authorized.connection.config_revision,
-        authorization_epoch=authorized.connection.authorization_epoch,
-        capability_revision=authorized.connection.capability_revision,
-        policy_revision=authorized.binding.policy_revision,
-        expires_at=deadline_for(created_at=datetime.now(UTC)).expires_at,
-        **_residency_fence({"residency_generation": authorized.residency_generation}),
-    )
-    logger.info(
-        "agent_mcp_call_held",
-        extra={
-            "event": "agent_mcp_call_held",
-            "job_id": authorized.job_id,
-            "alias": authorized.alias,
-            "tool": name,
-            "invocation_id": invocation["id"],
-        },
-    )
-    return await _wait_for_approval(
-        authorized,
-        store,
-        invocation=invocation,
-        fence=fence,
-        request_id=request_id,
-        request=request,
-    )
-
-
-async def _wait_for_approval(  # noqa: PLR0912 complexity baseline, #771
-    authorized: Authorized,
-    store: _McpRelayStorage,
-    *,
-    invocation: dict[str, Any],
-    fence: dict[str, Any],
-    request_id: Any,
-    request: Request | None,
-) -> dict[str, Any] | None:
-    """Keep the original CLI call open and dispatch it once its owner approves.
-
-    Waiting owns no transaction. The normal attempt heartbeat continues, and
-    each look checks whether the attempt or selected connection changed. A
-    disconnected caller leaves no reusable approval behind. The owner's
-    decision wakes the wait; otherwise it looks again on a clock.
-    """
-    invocation_id = int(invocation["id"])
-    message = (
-        "MCP session authorization changed while waiting for approval; this call was not sent."
-    )
-    signal = get_mcp_decision_signal(request) if request is not None else None
-    subscription = (
-        signal.subscribe(str(invocation_id)) if signal is not None else contextlib.nullcontext()
-    )
-    with subscription as woken:
-        try:
-            while True:
-                if request is not None and await request.is_disconnected():
-                    raise asyncio.CancelledError
-                if datetime.now(UTC) >= invocation["expires_at"]:
-                    message = (
-                        "MCP approval expired while waiting for the owner's decision; "
-                        "this call was not sent to the server. Ask the owner to review "
-                        "Approvals or this conversation's Tools permissions before requesting it again."
-                    )
-                    break
-                attempt_id = fence["attempt_id"]
-                if attempt_id is None:
-                    break
-                identity = await store.credential_queries.resolve_model_credential(
-                    job_id=authorized.job_id,
-                    attempt_id=attempt_id,
-                    lease_generation=int(fence["lease_generation"] or 0),
-                    **_residency_fence(fence),
-                )
-                if identity is None:
-                    break
-                identity = {**identity, **_residency_fence(fence)}
-                try:
-                    current = await _resolve_live_binding(
-                        identity,
-                        authorized.alias,
-                        store,
-                        attempt_id=attempt_id,
-                        lease_generation=int(fence["lease_generation"] or 0),
-                    )
-                except HTTPException:
-                    break
-                if (
-                    not current.binding.enabled
-                    or current.connection_id != authorized.connection_id
-                    or current.connection.config_revision != fence["config_revision"]
-                    or current.connection.authorization_epoch != fence["authorization_epoch"]
-                    or current.connection.capability_revision != fence["capability_revision"]
-                    or current.binding.policy_revision != fence["policy_revision"]
-                ):
-                    break
-                row = await store.mcp.get_mcp_invocation(invocation_id=invocation_id)
-                if row is None:
-                    break
-                if row["status"] == "approved":
-                    claimed = await store.mcp.claim_mcp_invocation(
-                        invocation_id=invocation_id, **fence
-                    )
-                    if claimed is not None:
-                        # OAuth may have refreshed while the user was deciding.
-                        # Use the checked connection's current credential for dispatch.
-                        authorized.connection = current.connection
-                        authorized.secret = current.secret
-                        authorized.dispatches.append(
-                            (invocation_id, int(claimed["dispatch_generation"]))
-                        )
-                        return None
-                    message = (
-                        "MCP approval could not be claimed; another caller may already have sent it. "
-                        "Check the external state before retrying a write."
-                    )
-                    break
-                if row["status"] != "pending":
-                    if row["status"] == "expired":
-                        return _error_reply(
-                            request_id,
-                            "MCP approval expired before dispatch; this call was not sent to the server. "
-                            "Ask the owner to review Approvals or this conversation's Tools permissions "
-                            "before requesting it again.",
-                        )
-                    if row["status"] in {"dispatching", "completed", "failed", "outcome_unknown"}:
-                        return _error_reply(
-                            request_id,
-                            f"MCP call {row['status']}; its approval was already claimed for dispatch. "
-                            "This caller cannot confirm the result. Check the external state "
-                            "before retrying a write.",
-                        )
-                    return _error_reply(
-                        request_id, f"MCP call {row['status']}; it was not dispatched."
-                    )
-                await _until_decided(signal, woken, expires_at=invocation["expires_at"])
-        except asyncio.CancelledError:
-            await asyncio.shield(store.mcp.expire_mcp_invocation(invocation_id=invocation_id))
-            raise
-    await store.mcp.expire_mcp_invocation(invocation_id=invocation_id)
-    return _error_reply(request_id, message)
-
-
-async def _until_decided(
-    signal: McpDecisionSignal | None, woken: asyncio.Event | None, *, expires_at: datetime
-) -> None:
-    """Wait for the held call's decision, its expiry, or the next look anyway."""
-    look = _APPROVAL_IDLE_S if signal is not None and signal.listening else _APPROVAL_POLL_S
-    remaining = (expires_at - datetime.now(UTC)).total_seconds()
-    timeout_s = max(0.0, min(look, remaining))
-    if signal is None or woken is None:
-        await asyncio.sleep(timeout_s)
-    else:
-        await signal.wait(woken, timeout_s)
-
-
-async def _finish_dispatches(
-    authorized: Authorized, store: _McpRelayStorage, *, status: str
-) -> None:
-    """Record an observed outcome without retrying a possible external write."""
-    for invocation_id, generation in authorized.dispatches:
-        await store.mcp.finish_mcp_invocation(
-            invocation_id=invocation_id,
-            dispatch_generation=generation,
-            status=status,
-        )
-    authorized.dispatches.clear()
-
-
-def _held_arguments_fit(arguments: Any) -> bool:
-    """Whether a held call's arguments fit under :data:`MAX_HELD_ARGUMENTS_BYTES` as stored."""
-    if not isinstance(arguments, dict):
-        return True
-    return len(encode_arguments(arguments)) <= MAX_HELD_ARGUMENTS_BYTES
-
-
-def _protect_arguments(arguments: Any) -> str | None:
-    """Store a held call's arguments under the invocation cipher."""
-    if not isinstance(arguments, dict):
-        return None
-    from cloud_agent.mcp.host import encode_arguments
-
-    try:
-        return invocation_cipher().encrypt(encode_arguments(arguments))
-    except CredentialCipherError:
-        # Without a key the platform cannot hold the body. The call is still
-        # held -- the owner can approve it by name -- but the arguments will not
-        # be shown, which is worse than useless for a write, so this is logged.
-        logger.error("agent_mcp_invocation_arguments_unprotectable")
-        return None
+    return error_reply(request_id, str(detail or "This MCP connection is unavailable."))
 
 
 # --------------------------------------------------------------------------
@@ -918,98 +218,6 @@ def _protect_arguments(arguments: Any) -> str | None:
 # through the one decision function above.
 
 
-async def _host_catalogue(
-    identity: dict[str, Any],
-    store: _McpRelayStorage,
-    kind: CapabilityKind = CapabilityKind.TOOL,
-) -> dict[str, tuple[Authorized, Any]]:
-    """Every capability of one kind this job may use, keyed by what it is called.
-
-    One builder for all three surfaces, because they differ only in what the
-    client uses as the key: a tool and a prompt by name, a resource by URI.
-    Building them separately is how a surface ends up with its own idea of which
-    bindings are reachable, and the design is explicit that resources and
-    prompts get their own *scopes* -- not their own resolution rules.
-
-    A binding that cannot be resolved is skipped rather than fatal. One
-    disconnected server must not take the others out of the catalogue -- the
-    agent would lose every tool it does have, which is a far worse failure than
-    the one that caused it.
-
-    Routing is a lookup in this map, not a string split. An alias may itself
-    contain the separator, so splitting would send ``a__b__tool`` to the wrong
-    server; the map is built from the catalogue, so a name that is not in it is
-    genuinely not callable.
-    """
-    catalogue: dict[str, tuple[Authorized, Any]] = {}
-    for binding_row in identity.get("mcp_bindings") or []:
-        alias = str(binding_row.get("alias") or "")
-        if not alias:
-            continue
-        try:
-            # Discovery snapshots are local. Listing or routing one connection
-            # must never contact another connection's OAuth endpoint.
-            authorized = await _resolve_binding(identity, alias, store, refresh_credentials=False)
-        except HTTPException as exc:
-            logger.warning(
-                "agent_mcp_host_binding_unavailable",
-                extra={
-                    "event": "agent_mcp_host_binding_unavailable",
-                    "job_id": identity["job_id"],
-                    "alias": alias,
-                    "detail": str(exc.detail),
-                },
-            )
-            continue
-        available = authorized.snapshot.of_kind(kind) if authorized.snapshot else ()
-        for capability in visible_capabilities(authorized.binding, available, kind):
-            # Connection-qualified URIs keep resource identity stable when
-            # other connections advertise the same upstream URI or template.
-            key = (
-                resource_uri(authorized.connection_id, capability.name)
-                if kind in (CapabilityKind.RESOURCE, CapabilityKind.RESOURCE_TEMPLATE)
-                else protocol.presented_name(alias, capability.name)
-            )
-            catalogue.setdefault(key, (authorized, capability))
-    return catalogue
-
-
-class _Catalogued(Protocol):
-    """What a listing needs of the resolved binding it renders a tool from.
-
-    Narrowed to a protocol so the renderer cannot reach for more of a
-    connection than a name and an id, and so a test can hand it a stand-in.
-    """
-
-    @property
-    def alias(self) -> str: ...
-    @property
-    def connection_id(self) -> int: ...
-
-
-def _resource_entry(capability: Any, uri: str) -> dict[str, Any]:
-    """Render one resource the way a client reads it."""
-    schema = capability.input_schema if isinstance(capability.input_schema, dict) else {}
-    uri_field = "uriTemplate" if capability.kind is CapabilityKind.RESOURCE_TEMPLATE else "uri"
-    entry: dict[str, Any] = {uri_field: uri, "name": capability.name}
-    if capability.description:
-        entry["description"] = capability.description
-    if schema.get("mimeType"):
-        entry["mimeType"] = schema["mimeType"]
-    return entry
-
-
-def _prompt_entry(presented: str, capability: Any) -> dict[str, Any]:
-    """Render one prompt, under the name this session will call it by."""
-    schema = capability.input_schema if isinstance(capability.input_schema, dict) else {}
-    entry: dict[str, Any] = {"name": presented}
-    if capability.description:
-        entry["description"] = capability.description
-    if isinstance(schema.get("arguments"), list):
-        entry["arguments"] = schema["arguments"]
-    return entry
-
-
 async def _host_session(authorized: Authorized, authorization: str | None) -> Any:
     """Open or reuse the host session for one connection, fenced to this attempt.
 
@@ -1026,64 +234,10 @@ async def _host_session(authorized: Authorized, authorization: str | None) -> An
     return await _host().open(authorized.connection, secret=authorized.secret, key=key)
 
 
-def _host_tool_entry(presented: str, authorized: _Catalogued, capability: Any) -> dict[str, Any]:
-    """Render one merged catalogue entry the way a client reads it."""
-    return {
-        "name": presented,
-        "description": capability.description
-        or f"{capability.name} on the {authorized.alias} MCP server",
-        "inputSchema": capability.input_schema
-        if isinstance(capability.input_schema, dict)
-        else {"type": "object", "properties": {}},
-    }
-
-
-async def _host_initialize(payload: dict[str, Any], identity: dict[str, Any]) -> dict[str, Any]:
-    """Answer the handshake for the merged surface.
-
-    The requested revision is echoed when this platform implements it, because
-    the client decides in the handshake era and a server that answers with
-    something else is asking the client to disconnect. When it is not one we
-    implement, the newest we do is offered instead: a client that understands
-    the list will pick from it, and one that does not is at least told what it
-    is talking to rather than being driven with a guessed header.
-
-    **Every surface this endpoint answers is advertised.** The three families
-    are declared together because the client's next request comes from here: a
-    handshake that named only ``tools`` would leave ``resources/list`` and
-    ``prompts/list`` never asked for, and a capability the platform serves but
-    does not claim is indistinguishable from one it does not have. The two
-    sub-flags are the honest part of the claim -- ``listChanged`` is false
-    because this surface is request/response and cannot push, and
-    ``subscribe`` is false because it holds no resource subscription open
-    between calls.
-    """
-    params = payload.get("params")
-    requested = str(params.get("protocolVersion") or "") if isinstance(params, dict) else ""
-    agreed = requested if requested in protocol.PROFILES else protocol.PREFERRED_PROTOCOL_VERSION
-    aliases = sorted(str(row.get("alias") or "") for row in identity.get("mcp_bindings") or [])
-    return {
-        "protocolVersion": agreed,
-        "capabilities": {
-            "tools": {"listChanged": False},
-            "resources": {"subscribe": False, "listChanged": False},
-            "prompts": {"listChanged": False},
-        },
-        "serverInfo": {"name": "hybridinference-cloud-agent", "version": "1"},
-        "instructions": (
-            "Use the exact tool names returned by tools/list. This session's connections: "
-            + (", ".join(alias for alias in aliases if alias) or "none")
-            + ". Calls requiring confirmation wait for the owner in Approvals or the conversation's "
-            "Tools panel. An approval expiry means the call was not sent; ask the owner to review "
-            "the request or permissions before retrying."
-        ),
-    }
-
-
 async def _host_post(
     *,
     identity: dict[str, Any],
-    store: _McpRelayStorage,
+    store: McpRelayStorage,
     request: Request,
     authorization: str | None,
 ) -> Any:
@@ -1094,7 +248,7 @@ async def _host_post(
             document = _bounded_batch(json.loads(body or b"{}"))
         except (ValueError, RecursionError) as exc:
             return JSONResponse(
-                _error_reply(None, f"invalid JSON: {exc}", PARSE_ERROR), status_code=400
+                error_reply(None, f"invalid JSON: {exc}", PARSE_ERROR), status_code=400
             )
     except _BodyRefused as exc:
         return exc.response
@@ -1153,7 +307,7 @@ async def _host_call_stream(
     *,
     document: dict[str, Any],
     identity: dict[str, Any],
-    store: _McpRelayStorage,
+    store: McpRelayStorage,
     request: Request,
     authorization: str | None,
 ) -> AsyncIterator[bytes]:
@@ -1180,7 +334,7 @@ async def _host_call_stream(
                 except Exception:
                     logger.exception("agent_mcp_stream_call_failed")
                     body = json.dumps(
-                        _error_reply(
+                        error_reply(
                             document["id"],
                             "MCP relay could not confirm this call's result. Check external state before retrying a write.",
                             INTERNAL_ERROR,
@@ -1202,7 +356,7 @@ async def _host_document(
     *,
     document: Any,
     identity: dict[str, Any],
-    store: _McpRelayStorage,
+    store: McpRelayStorage,
     request: Request,
     authorization: str | None,
 ) -> Any:
@@ -1212,11 +366,11 @@ async def _host_document(
     stateless = False
     for payload in payloads:
         if not isinstance(payload, dict):
-            replies.append(_error_reply(None, "every message must be an object", INVALID_REQUEST))
+            replies.append(error_reply(None, "every message must be an object", INVALID_REQUEST))
             continue
         # Reading the body or an earlier call in this batch may have outlived
         # either fence. Keep the attempt captured at authentication throughout.
-        identity = await _recheck_fence(identity, store)
+        identity = await recheck_fence(identity, store)
         params = payload.get("params")
         meta = params.get("_meta") if isinstance(params, dict) else None
         stateless = stateless or isinstance(meta, dict)
@@ -1228,20 +382,20 @@ async def _host_document(
         request_id = payload.get("id")
         if method == protocol.INITIALIZE:
             replies.append(
-                _result_reply(
+                result_reply(
                     request_id,
-                    await _host_initialize(payload, identity),
+                    await initialize_result(payload, identity),
                     stateless=False,
                 )
             )
             continue
         if method == protocol.PING:
-            replies.append(_result_reply(request_id, {}, stateless=stateless))
+            replies.append(result_reply(request_id, {}, stateless=stateless))
             continue
         if method == protocol.TOOLS_LIST:
-            catalogue = await _host_catalogue(identity, store)
+            catalogue = await host_catalogue(identity, store)
             tools = [
-                _host_tool_entry(name, authorized, capability)
+                tool_entry(name, authorized, capability)
                 for name, (authorized, capability) in sorted(
                     catalogue.items(), key=lambda item: item[0]
                 )
@@ -1252,13 +406,7 @@ async def _host_document(
             # offered to every task; a scope turned off refuses writes itself.
             tools.extend(memory_tool.TOOL_DEFINITIONS)
             tools.sort(key=lambda tool: str(tool["name"]))
-            replies.append(
-                _result_reply(
-                    request_id,
-                    {"tools": tools},
-                    stateless=stateless,
-                )
-            )
+            replies.append(result_reply(request_id, {"tools": tools}, stateless=stateless))
             continue
         if method == protocol.TOOLS_CALL:
             replies.append(
@@ -1302,7 +450,10 @@ async def _host_document(
                 )
             )
             continue
-        replies.append(_error_reply(request_id, f"this surface does not implement {method!r}"))
+        if method == sandbox_tools.METHOD:  # the sandbox's gateway, reporting a program's tools
+            replies.append(await sandbox_tools.reply(payload, identity, store))
+            continue
+        replies.append(error_reply(request_id, f"this surface does not implement {method!r}"))
 
     if not replies:
         return Response(status_code=202)
@@ -1314,7 +465,7 @@ async def _host_listing(
     *,
     request_id: Any,
     identity: dict[str, Any],
-    store: _McpRelayStorage,
+    store: McpRelayStorage,
     stateless: bool,
 ) -> dict[str, Any]:
     """Answer one of the catalogue reads, filtered by this session's scopes.
@@ -1326,33 +477,33 @@ async def _host_listing(
     session may not touch.
     """
     if method == protocol.RESOURCES_LIST:
-        catalogue = await _host_catalogue(identity, store, CapabilityKind.RESOURCE)
-        return _result_reply(
+        catalogue = await host_catalogue(identity, store, CapabilityKind.RESOURCE)
+        return result_reply(
             request_id,
             {
                 "resources": [
-                    _resource_entry(capability, uri) for uri, (_, capability) in catalogue.items()
+                    resource_entry(capability, uri) for uri, (_, capability) in catalogue.items()
                 ]
             },
             stateless=stateless,
         )
     if method == protocol.RESOURCES_TEMPLATES_LIST:
-        catalogue = await _host_catalogue(identity, store, CapabilityKind.RESOURCE_TEMPLATE)
-        return _result_reply(
+        catalogue = await host_catalogue(identity, store, CapabilityKind.RESOURCE_TEMPLATE)
+        return result_reply(
             request_id,
             {
                 "resourceTemplates": [
-                    _resource_entry(capability, uri) for uri, (_, capability) in catalogue.items()
+                    resource_entry(capability, uri) for uri, (_, capability) in catalogue.items()
                 ]
             },
             stateless=stateless,
         )
-    catalogue = await _host_catalogue(identity, store, CapabilityKind.PROMPT)
-    return _result_reply(
+    catalogue = await host_catalogue(identity, store, CapabilityKind.PROMPT)
+    return result_reply(
         request_id,
         {
             "prompts": [
-                _prompt_entry(presented, capability)
+                prompt_entry(presented, capability)
                 for presented, (_, capability) in sorted(catalogue.items())
             ]
         },
@@ -1366,7 +517,7 @@ async def _host_fetch(  # noqa: PLR0912 complexity baseline, #771
     method: str,
     request_id: Any,
     identity: dict[str, Any],
-    store: _McpRelayStorage,
+    store: McpRelayStorage,
     authorization: str | None,
     stateless: bool,
     request: Request | None = None,
@@ -1383,7 +534,7 @@ async def _host_fetch(  # noqa: PLR0912 complexity baseline, #771
     reading = method == protocol.RESOURCES_READ
     key = settings.get("uri" if reading else "name")
     if not isinstance(key, str) or not key:
-        return _error_reply(
+        return error_reply(
             request_id, f"{method} needs a {'uri' if reading else 'name'}", INVALID_PARAMS
         )
 
@@ -1403,7 +554,7 @@ async def _host_fetch(  # noqa: PLR0912 complexity baseline, #771
                 raise ResourceResolutionError(
                     "That resource connection is not bound to this session."
                 )
-            authorized = await _resolve_live_binding(
+            authorized = await resolve_live_binding(
                 identity,
                 str(binding.get("alias") or ""),
                 store,
@@ -1414,20 +565,20 @@ async def _host_fetch(  # noqa: PLR0912 complexity baseline, #771
                 raise ResourceResolutionError("The selected resource connection changed.")
             capability = resource_capability(authorized.snapshot, authorized.binding, original_uri)
         except ResourceResolutionError as exc:
-            return _error_reply(request_id, str(exc))
+            return error_reply(request_id, str(exc))
         except HTTPException as exc:
             return _binding_error(request_id, exc)
         if capability is None:
-            return _error_reply(
+            return error_reply(
                 request_id, "That URI is not in this session's resource catalogue or templates."
             )
         kind = capability.kind
     else:
         kind = CapabilityKind.PROMPT
-        catalogue = await _host_catalogue(protocol.presenting(identity, key), store, kind)
+        catalogue = await host_catalogue(protocol.presenting(identity, key), store, kind)
         entry = catalogue.get(key)
         if entry is None:
-            return _error_reply(
+            return error_reply(
                 request_id,
                 f"{key!r} is not one of this session's prompts. Call prompts/list for the current set.",
             )
@@ -1435,12 +586,12 @@ async def _host_fetch(  # noqa: PLR0912 complexity baseline, #771
             # Resources and prompts are connections only: the platform's own
             # tools are a tool surface, so this catalogue holds nothing that is
             # not a resolved connection.
-            authorized, capability = await _refresh_catalogue_entry(
+            authorized, capability = await refresh_catalogue_entry(
                 cast("tuple[Authorized, Any]", entry), identity, store
             )
         except HTTPException as exc:
             return _binding_error(request_id, exc)
-    held = await _decide_call(
+    held = await decide_call(
         authorized,
         store,
         name=capability.name,
@@ -1459,7 +610,7 @@ async def _host_fetch(  # noqa: PLR0912 complexity baseline, #771
 
     try:
         session = await _host_session(authorized, authorization)
-        await _recheck_authorized(authorized, store)
+        await recheck_authorized(authorized, store)
         if reading:
             result = await _host().read_resource(session, uri=original_uri)
         else:
@@ -1470,13 +621,13 @@ async def _host_fetch(  # noqa: PLR0912 complexity baseline, #771
                 arguments=arguments if isinstance(arguments, dict) else None,
             )
     except HTTPException as exc:
-        await _finish_dispatches(authorized, store, status="failed")
+        await finish_dispatches(authorized, store, status="failed")
         return _binding_error(request_id, exc)
     except asyncio.CancelledError:
-        await asyncio.shield(_finish_dispatches(authorized, store, status="outcome_unknown"))
+        await asyncio.shield(finish_dispatches(authorized, store, status="outcome_unknown"))
         raise
     except HostError as exc:
-        await _finish_dispatches(authorized, store, status="outcome_unknown")
+        await finish_dispatches(authorized, store, status="outcome_unknown")
         logger.warning(
             "agent_mcp_host_read_failed",
             extra={
@@ -1488,14 +639,14 @@ async def _host_fetch(  # noqa: PLR0912 complexity baseline, #771
                 "detail": exc.kind,
             },
         )
-        return _error_reply(request_id, str(exc), INTERNAL_ERROR)
-    await _finish_dispatches(authorized, store, status="completed")
-    return _result_reply(
+        return error_reply(request_id, str(exc), INTERNAL_ERROR)
+    await finish_dispatches(authorized, store, status="completed")
+    return result_reply(
         request_id, scope_resource_result(result, authorized.connection_id), stateless=stateless
     )
 
 
-async def _release_web_search(store: _McpRelayStorage, *, call_id: str, job_id: str) -> None:
+async def _release_web_search(store: McpRelayStorage, *, call_id: str, job_id: str) -> None:
     """Release provider concurrency without ever replacing the call's outcome."""
     try:
         released = await store.web_search.release_web_search(call_id=call_id)
@@ -1516,7 +667,7 @@ async def _host_web_search(
     *,
     request_id: Any,
     identity: dict[str, Any],
-    store: _McpRelayStorage,
+    store: McpRelayStorage,
     stateless: bool,
     client: Any = None,
 ) -> dict[str, Any]:
@@ -1530,12 +681,12 @@ async def _host_web_search(
             provider=web_search.selected_provider(),
         )
     except web_search.WebSearchInputError as exc:
-        return _error_reply(request_id, str(exc), INVALID_PARAMS)
+        return error_reply(request_id, str(exc), INVALID_PARAMS)
 
     attempt_id = identity["attempt_id"]
     lease_generation = identity["lease_generation"]
     if attempt_id is None or lease_generation <= 0:
-        return _result_reply(
+        return result_reply(
             request_id,
             {
                 "content": [
@@ -1554,7 +705,7 @@ async def _host_web_search(
             job_id=str(identity["job_id"]),
             attempt_id=attempt_id,
             lease_generation=lease_generation,
-            **_residency_fence(identity),
+            **residency_fence(identity),
         )
     except Exception:
         logger.exception(
@@ -1564,7 +715,7 @@ async def _host_web_search(
                 "job_id": identity["job_id"],
             },
         )
-        return _result_reply(
+        return result_reply(
             request_id,
             {
                 "content": [
@@ -1594,14 +745,14 @@ async def _host_web_search(
                 "kind": admission.reason,
             },
         )
-        return _result_reply(
+        return result_reply(
             request_id,
             {"content": [{"type": "text", "text": message}], "isError": True},
             stateless=stateless,
         )
 
     try:
-        await _recheck_fence(identity, store)
+        await recheck_fence(identity, store)
         result = await web_search.search(search_arguments, client=client)
     except HTTPException as exc:
         return _binding_error(request_id, exc)
@@ -1614,7 +765,7 @@ async def _host_web_search(
                 "kind": exc.kind,
             },
         )
-        return _result_reply(
+        return result_reply(
             request_id,
             {
                 "content": [{"type": "text", "text": str(exc)}],
@@ -1623,7 +774,7 @@ async def _host_web_search(
             stateless=stateless,
         )
     else:
-        return _result_reply(
+        return result_reply(
             request_id,
             {
                 "content": [
@@ -1646,7 +797,7 @@ async def _host_call(
     *,
     request_id: Any,
     identity: dict[str, Any],
-    store: _McpRelayStorage,
+    store: McpRelayStorage,
     authorization: str | None,
     stateless: bool,
     request: Request | None = None,
@@ -1679,7 +830,7 @@ async def _host_call(
                 ),
                 repository=store.agent_memory,
             )
-        return _result_reply(request_id, result, stateless=stateless)
+        return result_reply(request_id, result, stateless=stateless)
     if name == web_search.TOOL_NAME and web_search.configured():
         return await _host_web_search(
             arguments,
@@ -1689,20 +840,20 @@ async def _host_call(
             stateless=stateless,
             client=get_http_client(request) if request is not None else None,
         )
-    catalogue = await _host_catalogue(protocol.presenting(identity, name), store)
+    catalogue = await host_catalogue(protocol.presenting(identity, name), store)
     entry = catalogue.get(name)
     if entry is None:
-        return _error_reply(
+        return error_reply(
             request_id,
             f"{name!r} is not one of this session's tools. Call tools/list for the current set.",
         )
     try:
-        authorized, capability = await _refresh_catalogue_entry(
+        authorized, capability = await refresh_catalogue_entry(
             cast("tuple[Authorized, Any]", entry), identity, store
         )
     except HTTPException as exc:
         return _binding_error(request_id, exc)
-    held = await _decide_call(
+    held = await decide_call(
         authorized,
         store,
         name=capability.name,
@@ -1722,7 +873,7 @@ async def _host_call(
     # new owner the old one's upstream state.
     try:
         session = await _host_session(authorized, authorization)
-        await _recheck_authorized(authorized, store)
+        await recheck_authorized(authorized, store)
         schema = getattr(capability, "input_schema", None)
         outcome = await _host().call_tool(
             session,
@@ -1731,13 +882,13 @@ async def _host_call(
             input_schema=schema if isinstance(schema, dict) else None,
         )
     except HTTPException as exc:
-        await _finish_dispatches(authorized, store, status="failed")
+        await finish_dispatches(authorized, store, status="failed")
         return _binding_error(request_id, exc)
     except asyncio.CancelledError:
-        await asyncio.shield(_finish_dispatches(authorized, store, status="outcome_unknown"))
+        await asyncio.shield(finish_dispatches(authorized, store, status="outcome_unknown"))
         raise
     except HostError as exc:
-        await _finish_dispatches(authorized, store, status="outcome_unknown")
+        await finish_dispatches(authorized, store, status="outcome_unknown")
         logger.warning(
             "agent_mcp_host_call_failed",
             extra={
@@ -1748,11 +899,9 @@ async def _host_call(
                 "kind": exc.kind,
             },
         )
-        return _error_reply(request_id, str(exc), INTERNAL_ERROR)
-    await _finish_dispatches(
-        authorized, store, status="failed" if outcome.is_error else "completed"
-    )
-    return _result_reply(
+        return error_reply(request_id, str(exc), INTERNAL_ERROR)
+    await finish_dispatches(authorized, store, status="failed" if outcome.is_error else "completed")
+    return result_reply(
         request_id,
         scope_resource_result(outcome.as_dict(), authorized.connection_id),
         stateless=stateless,
@@ -1763,14 +912,14 @@ async def _host_call(
 async def mcp_host_post(
     request: Request,
     authorization: str | None = Header(None),
-    store: _McpRelayStorage | None = Depends(get_storage),
+    store: McpRelayStorage | None = Depends(get_storage),
 ) -> Any:
     """Serve every connection of one job from a single MCP endpoint."""
     if store is None:
-        raise _refused(
+        raise refused(
             503, "invalid_request_error", "MCP is unavailable without a configured database."
         )
-    identity = await _authorize_fence(authorization, store)
+    identity = await authorize_fence(authorization, store)
     return await _host_post(
         identity=identity, store=store, request=request, authorization=authorization
     )
@@ -1787,7 +936,7 @@ async def mcp_host_get() -> Any:
     than saying so.
     """
     return JSONResponse(
-        _error_reply(
+        error_reply(
             None,
             "this endpoint answers requests only; it does not open a server-initiated stream",
         ),

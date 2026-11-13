@@ -8,7 +8,7 @@ from tests.unit.test_compute_reconcile import NOW, RELEASE, harness
 
 from cloud_agent.application import compute_reconcile
 from cloud_agent.ports.compute_resources import ComputeSchedulingSnapshot
-from cloud_agent.schemas_compute import RenewalPolicy
+from cloud_agent.schemas.compute import RenewalPolicy
 
 
 @pytest.mark.asyncio

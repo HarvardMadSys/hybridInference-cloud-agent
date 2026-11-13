@@ -31,8 +31,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from cloud_agent_shared.secret_redaction import MASKED
 
 #: A host advertises this when its runner and sandbox manager can launch a
 #: member on an owner connection: the exact Base URL instead of the host-local
@@ -81,8 +84,9 @@ LOCAL_TOKEN = re.compile(r"[0-9a-f]{64}")
 #: ``claude-sonnet@2025``); nothing that could leave a config value.
 MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}")
 #: Per connection. A new key or Base URL re-verifies every model in the save
-#: that makes it, so this bounds one save's provider calls.
-MAX_MODELS = 8
+#: that makes it, so this bounds one save's provider calls. Sixteen still fits
+#: in one owner's hourly check budget.
+MAX_MODELS = 16
 #: Longer than any provider key seen in practice, short enough to bound every
 #: config file and environment it is written into.
 MAX_API_KEY_CHARS = 4096
@@ -195,7 +199,7 @@ class ModelConnectionAccess(BaseModel):
     base_url: str = Field(..., min_length=8, max_length=MAX_BASE_URL_CHARS)
     #: What the connection's URL speaks: the upstream protocol of the plan.
     protocol: str
-    api_key: str = Field(..., repr=False)
+    api_key: Annotated[str, MASKED] = Field(..., repr=False)
     #: What the member's CLI speaks, when the plan translates; empty is direct,
     #: and then left out, so a direct claim is what it was before translation.
     client_protocol: str = Field("", exclude_if=lambda value: not value)
@@ -204,7 +208,7 @@ class ModelConnectionAccess(BaseModel):
     #: with its own platform key for this member, connection revision, plan
     #: and model, so a sibling holding the same provider key cannot compute
     #: it. A secret like the key: masked in output, never in a repr.
-    local_token: str = Field("", repr=False, exclude_if=lambda value: not value)
+    local_token: Annotated[str, MASKED] = Field("", repr=False, exclude_if=lambda value: not value)
 
     @field_validator("connection_id")
     @classmethod

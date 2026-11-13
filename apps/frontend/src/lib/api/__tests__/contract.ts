@@ -1,7 +1,7 @@
 /**
  * Check a request the API client built against the backend's published contract.
  *
- * `gateway_contracts/agent-control-plane.openapi.json` is the OpenAPI document
+ * `apps/backend/openapi.json` is the OpenAPI document
  * the control plane serves; `tests/unit/test_api_surface_contract.py` keeps the
  * committed copy identical to it. The client tests mock `fetchWithAuth`, so
  * without this a path the backend renamed, or a body field it no longer
@@ -38,10 +38,7 @@ type Document = {
   components: { schemas: Record<string, Schema> };
 };
 
-const CONTRACT = resolve(
-  __dirname,
-  '../../../../../../gateway_contracts/agent-control-plane.openapi.json',
-);
+const CONTRACT = resolve(__dirname, '../../../../../backend/openapi.json');
 
 let contract: Document | null = null;
 

@@ -7,7 +7,7 @@ with the arguments that runtime happens to want. A signature can only drift
 from its caller if something checks them against each other.
 
 So this calls `prepare_live` on every id in the registry with the exact keyword
-set its session passes: `_JsonResidentSession._prepare_live` for the four JSON
+set its session passes: `JsonResidentSession._prepare_live` for the four JSON
 protocols, and `ClaudeCodeLiveSession` for Claude Code. It is a compile-time
 check written as a test, which is what Python leaves you when the sessions
 reach a runtime through a table rather than a type.
@@ -29,12 +29,12 @@ from cloud_agent_host.runtimes import (
     registered_runtimes,
 )
 
-#: Exactly what `_JsonResidentSession._prepare_live` passes. Keep in step with
+#: Exactly what `JsonResidentSession._prepare_live` passes. Keep in step with
 #: that call by hand — see the module docstring for why this is not imported.
 _SESSION_KWARGS: dict[str, Any] = {
     "workdir": "/workspace",
     "model": "glm-5.1",
-    "gateway_base_url": "http://gateway:8080",
+    "model_base_url": "http://gateway:8080",
     "credential": "agr.fake.fake",
     "provides_isolation": False,
     "mcp_config": EMPTY_RUNTIME_MCP_CONFIG,
@@ -48,7 +48,7 @@ _SESSION_KWARGS: dict[str, Any] = {
 _CLAUDE_SESSION_KWARGS: dict[str, Any] = {
     "workdir": "/workspace",
     "model": "",
-    "gateway_base_url": "http://gateway:8080",
+    "model_base_url": "http://gateway:8080",
     "credential": "agr.fake.fake",
     "provides_isolation": False,
     "mcp_config": EMPTY_RUNTIME_MCP_CONFIG,

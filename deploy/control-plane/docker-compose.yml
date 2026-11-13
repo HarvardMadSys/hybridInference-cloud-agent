@@ -6,47 +6,88 @@
 # single file that started both would make "add a runner host" mean "add a
 # second control plane".
 #
-#   browser ──→ control-plane :8000 ──→ postgres
-#                    │
-#                    └──HTTPS──→ the FreeInference gateway
-#                                (identity, model catalog, inference grants)
+#   browser ──→ web / edge ──→ control-plane :8000 ──→ postgres
 #
-# **The gateway is reachable over HTTP and nothing else.** No gateway database
-# DSN appears here, and neither `API_KEY_SECRET` nor `JWT_SECRET_KEY` may ever
-# be set on this machine — a control plane holding either could mint gateway
-# credentials for itself, which is the coupling the whole split exists to end.
+# Accounts, sessions and administration live in this deployment's own
+# database. Models run on each owner's own model connections, reached from the
+# sandboxes over public egress; this machine holds no provider key of its own.
 #
-# Start it with:
-#   docker compose -f deploy/control-plane/docker-compose.yml up -d
-# after filling in an env file; see ENVIRONMENT.md for every variable and
-# `docs/developer/smoke.md` for a first run.
+# A new installation needs no env file: the `keys` service generates the
+# deployment's keys into their own volume, and everything else is set from the
+# web app (`/setup/administrator`, then Admin). Start it with `deploy.sh`, or by
+# hand with:
+#   AGENT_DEPLOYMENT_SHA=$(git rev-parse HEAD) \
+#     docker compose -f deploy/control-plane/docker-compose.yml up -d
+# ENVIRONMENT.md lists the optional overrides; `docs/developer/smoke.md` walks
+# through a first run.
 
 services:
-  # Runs to completion before the API is allowed to start. Alembic owns the
-  # schema — the service creates no tables at startup — so an API container
-  # racing an unmigrated database is not a slow start, it is a crash loop
-  # against tables that do not exist.
-  migrate:
+  # Runs to completion before anything that needs a key. It stores each
+  # deployment key the environment sets, keeps the stored ones, and generates
+  # the missing ones only while the bundled database volume holds no database
+  # (apps/backend/cloud_agent/deployment/deployment_keys.py). Root, to give
+  # each file to the one user that reads it, but with no network and only the
+  # capabilities that needs.
+  keys:
+    # The one service that builds the control-plane image; migrate, the API and
+    # both relays run that same image and never build or pull it. Five builds
+    # would be five images: Compose labels each with its service, so the API and
+    # the MCP relay would differ, and automatic Server setup refuses a control
+    # plane whose two listeners do not run one image. It is this service because
+    # everything else depends on it, so any `up` builds it first. The project
+    # name keeps two stacks on one machine from sharing a tag, and the commit
+    # keeps an image built for another one from being started as this one.
+    image: ${COMPOSE_PROJECT_NAME}-control-plane:${AGENT_DEPLOYMENT_SHA:-unknown}
     build:
       context: ../..
       dockerfile: deploy/control-plane/Dockerfile
       args:
         SOURCE_COMMIT: ${AGENT_DEPLOYMENT_SHA:-unknown}
+    entrypoint: ["python", "-m", "cloud_agent.deployment.deployment_keys"]
+    command: ["prepare"]
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_READ_SEARCH]
+    environment:
+      AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:-}
+      AGENT_POSTGRES_PASSWORD: ${AGENT_POSTGRES_PASSWORD:-}
+      AGENT_POSTGRES_USER: ${AGENT_POSTGRES_USER:-cloudagent}
+      AGENT_POSTGRES_DB: ${AGENT_POSTGRES_DB:-cloudagent}
+      AGENT_LOCAL_SESSION_SECRET: ${AGENT_LOCAL_SESSION_SECRET:-}
+      AGENT_SETTINGS_ENCRYPTION_KEY: ${AGENT_SETTINGS_ENCRYPTION_KEY:-}
+      AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET:-}
+    volumes:
+      - agent-keys:/run/cloud-agent/keys
+      - agent-postgres:/run/cloud-agent/database:ro
+    restart: "no"
+
+  # Runs to completion before the API is allowed to start. Alembic owns the
+  # schema — the service creates no tables at startup — so an API container
+  # racing an unmigrated database is not a slow start, it is a crash loop
+  # against tables that do not exist.
+  migrate:
+    # The image `keys` builds; see there.
+    image: ${COMPOSE_PROJECT_NAME}-control-plane:${AGENT_DEPLOYMENT_SHA:-unknown}
+    pull_policy: never
     command: ["alembic", "upgrade", "head"]
     environment:
-      AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:?Postgres DSN for the agent-owned database}
+      AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:-}
+    volumes:
+      - agent-keys:/run/cloud-agent/keys:ro
     depends_on:
+      keys:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
     restart: "no"
     networks: [control-plane]
 
   control-plane:
-    build:
-      context: ../..
-      dockerfile: deploy/control-plane/Dockerfile
-      args:
-        SOURCE_COMMIT: ${AGENT_DEPLOYMENT_SHA:-unknown}
+    # The image `keys` builds; see there.
+    image: ${COMPOSE_PROJECT_NAME}-control-plane:${AGENT_DEPLOYMENT_SHA:-unknown}
+    pull_policy: never
     restart: unless-stopped
     labels:
       io.hybridinference.deployment.sha: ${AGENT_DEPLOYMENT_SHA:?exact commit this control plane serves}
@@ -66,44 +107,83 @@ services:
       # Empty means the public npm registry; hosts download from the same one.
       AGENT_RUNTIME_REGISTRY_URL: ${AGENT_RUNTIME_REGISTRY_URL:-}
       # --- Database ---------------------------------------------------------
-      # A database this service owns outright. Sharing the gateway's would
-      # reintroduce exactly the coupling the split removes.
-      AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:?Postgres DSN for the agent-owned database}
+      # A database this service owns outright, holding its accounts too.
+      AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:-}
 
-      # --- The gateway, over HTTP only --------------------------------------
-      # Optional after the one-time import: saved Admin settings are authoritative.
-      GATEWAY_BASE_URL: ${GATEWAY_BASE_URL:-}
-      GATEWAY_JWKS_URL: ${GATEWAY_JWKS_URL:-}
-      # Authorizes this service to mint and revoke inference grants. A service
-      # credential: it must never reach a sandbox or a browser.
-      GATEWAY_GRANT_DISPATCH_TOKEN: ${GATEWAY_GRANT_DISPATCH_TOKEN:-}
-      GATEWAY_GRANT_BASE_PATH: ${GATEWAY_GRANT_BASE_PATH:-/internal/agent-grants}
-      GATEWAY_GRANT_BINDING_ID: ${GATEWAY_GRANT_BINDING_ID:-}
-      # The exact identity authority, independent of the transport URL. Both
-      # listeners compare it with the same database binding during startup.
-      GATEWAY_ISSUER: ${GATEWAY_ISSUER:-}
-      # The consent page a sign-in starts at. Server-side: the whole PKCE round
-      # trip is assembled in the control plane now, so the web app no longer
-      # needs its own copy of this.
-      GATEWAY_AUTHORIZE_URL: ${GATEWAY_AUTHORIZE_URL:-}
-      # Where the gateway sends the browser back — this service's callback, as
-      # the public internet addresses it, and **byte-identical to an entry in
-      # the gateway's IDENTITY_ALLOWED_REDIRECTS**, which is matched as an exact
-      # string. Configured rather than derived from request headers so that
-      # whatever sits in front of this service cannot decide where sign-in
-      # returns to.
-      AGENT_SESSION_REDIRECT_URI: ${AGENT_SESSION_REDIRECT_URI:-}
-      # Where the browser lands once the cookie is set: the web app's public
-      # origin including any base path, e.g. https://example.org/agents.
+      # --- Public addresses -------------------------------------------------
+      # This API's public address, such as https://agents.example.org/api.
+      # MCP sign-in callbacks and compute node registration are built from it
+      # unless they have their own address.
+      AGENT_PUBLIC_API_URL: ${AGENT_PUBLIC_API_URL:-}
+      # The web app's public origin, e.g. https://agents.example.org. Account
+      # mail links (verification, password reset, email change) are built
+      # from it alone.
       AGENT_WEB_BASE_URL: ${AGENT_WEB_BASE_URL:-}
 
       # --- This service's own secrets ---------------------------------------
       # Legacy values are imported once. Missing runtime keys are configured
       # through administrator setup; no service uses a default signing secret.
+      # AGENT_SESSION_SECRET is only the fallback root for encrypted settings
+      # where AGENT_SETTINGS_ENCRYPTION_KEY is unset.
       AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET:-}
       AGENT_SETTINGS_ENCRYPTION_KEY: ${AGENT_SETTINGS_ENCRYPTION_KEY:-}
       AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:-}
       AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:-}
+      # --- Accounts ----------------------------------------------------------
+      # The key every session, emailed token and abuse counter is hashed under.
+      # Required: at least 32 bytes, and different from AGENT_SESSION_SECRET.
+      AGENT_LOCAL_SESSION_SECRET: ${AGENT_LOCAL_SESSION_SECRET:-}
+      AGENT_LOCAL_SIGNUP_ENABLED: ${AGENT_LOCAL_SIGNUP_ENABLED:-true}
+      AGENT_SMTP_HOST: ${AGENT_SMTP_HOST:-}
+      AGENT_SMTP_PORT: ${AGENT_SMTP_PORT:-}
+      AGENT_SMTP_SECURITY: ${AGENT_SMTP_SECURITY:-starttls}
+      AGENT_SMTP_USERNAME: ${AGENT_SMTP_USERNAME:-}
+      AGENT_SMTP_PASSWORD: ${AGENT_SMTP_PASSWORD:-}
+      AGENT_SMTP_FROM: ${AGENT_SMTP_FROM:-}
+      # Initial values of Admin → Settings → Accounts, imported once.
+      AGENT_LOCAL_SIGNUP_REQUIRE_EMAIL_VERIFICATION: ${AGENT_LOCAL_SIGNUP_REQUIRE_EMAIL_VERIFICATION:-true}
+      AGENT_LOCAL_SIGNUP_APPROVAL: ${AGENT_LOCAL_SIGNUP_APPROVAL:-manual}
+      AGENT_LOCAL_SIGNUP_ADMIN_NOTIFY: ${AGENT_LOCAL_SIGNUP_ADMIN_NOTIFY:-true}
+      AGENT_LOCAL_SIGNUP_NOTIFY_EMAILS: ${AGENT_LOCAL_SIGNUP_NOTIFY_EMAILS:-}
+      AGENT_LOCAL_TERMS_URL: ${AGENT_LOCAL_TERMS_URL:-}
+      AGENT_LOCAL_SMS_ENABLED: ${AGENT_LOCAL_SMS_ENABLED:-false}
+      AGENT_LOCAL_SMS_PROVIDER: ${AGENT_LOCAL_SMS_PROVIDER:-none}
+      AGENT_LOCAL_SMS_DEFAULT_COUNTRY_CODE: ${AGENT_LOCAL_SMS_DEFAULT_COUNTRY_CODE:-}
+      AGENT_LOCAL_SMS_ALLOWED_PREFIXES: ${AGENT_LOCAL_SMS_ALLOWED_PREFIXES:-}
+      AGENT_TENCENT_CLOUD_SECRET_ID: ${AGENT_TENCENT_CLOUD_SECRET_ID:-}
+      AGENT_TENCENT_CLOUD_SECRET_KEY: ${AGENT_TENCENT_CLOUD_SECRET_KEY:-}
+      AGENT_TENCENT_CLOUD_TOKEN: ${AGENT_TENCENT_CLOUD_TOKEN:-}
+      AGENT_TENCENT_SMS_REGION: ${AGENT_TENCENT_SMS_REGION:-ap-guangzhou}
+      AGENT_TENCENT_SMS_SDK_APP_ID: ${AGENT_TENCENT_SMS_SDK_APP_ID:-}
+      AGENT_TENCENT_SMS_SIGN_NAME: ${AGENT_TENCENT_SMS_SIGN_NAME:-}
+      AGENT_TENCENT_SMS_TEMPLATE_ID: ${AGENT_TENCENT_SMS_TEMPLATE_ID:-}
+      AGENT_TURNSTILE_SITE_KEY: ${AGENT_TURNSTILE_SITE_KEY:-}
+      AGENT_TURNSTILE_SECRET_KEY: ${AGENT_TURNSTILE_SECRET_KEY:-}
+      AGENT_LOCAL_ADMIN_EMAILS: ${AGENT_LOCAL_ADMIN_EMAILS:-}
+      AGENT_LOCAL_TERMS_TEXT: ${AGENT_LOCAL_TERMS_TEXT:-}
+      AGENT_LOCAL_SESSION_TTL_DAYS: ${AGENT_LOCAL_SESSION_TTL_DAYS:-30}
+      AGENT_LOCAL_LOGIN_RATE_LIMIT_PER_15MIN: ${AGENT_LOCAL_LOGIN_RATE_LIMIT_PER_15MIN:-5}
+      AGENT_LOCAL_LOGIN_ACCOUNT_RATE_LIMIT_PER_15MIN: ${AGENT_LOCAL_LOGIN_ACCOUNT_RATE_LIMIT_PER_15MIN:-50}
+      AGENT_LOCAL_LOGIN_RATE_LIMIT_PER_HOUR_PER_IP: ${AGENT_LOCAL_LOGIN_RATE_LIMIT_PER_HOUR_PER_IP:-20}
+      AGENT_LOCAL_SIGNUP_RATE_LIMIT_PER_HOUR: ${AGENT_LOCAL_SIGNUP_RATE_LIMIT_PER_HOUR:-5}
+      AGENT_LOCAL_SIGNUP_RATE_LIMIT_PER_DAY: ${AGENT_LOCAL_SIGNUP_RATE_LIMIT_PER_DAY:-10}
+      AGENT_LOCAL_SIGNUP_REQUIRE_RESOLVED_CLIENT_IP: ${AGENT_LOCAL_SIGNUP_REQUIRE_RESOLVED_CLIENT_IP:-false}
+      AGENT_LOCAL_UNRESOLVED_SIGNUP_RATE_LIMIT_PER_HOUR: ${AGENT_LOCAL_UNRESOLVED_SIGNUP_RATE_LIMIT_PER_HOUR:-5}
+      AGENT_LOCAL_UNRESOLVED_SIGNUP_RATE_LIMIT_PER_DAY: ${AGENT_LOCAL_UNRESOLVED_SIGNUP_RATE_LIMIT_PER_DAY:-10}
+      AGENT_LOCAL_EMAIL_PROVIDER: ${AGENT_LOCAL_EMAIL_PROVIDER:-smtp}
+      AGENT_TENCENT_SES_REGION: ${AGENT_TENCENT_SES_REGION:-ap-guangzhou}
+      AGENT_TENCENT_SES_FROM_EMAIL: ${AGENT_TENCENT_SES_FROM_EMAIL:-}
+      AGENT_TENCENT_SES_FROM_NAME: ${AGENT_TENCENT_SES_FROM_NAME:-}
+      AGENT_TENCENT_SES_TEMPLATE_VERIFICATION: ${AGENT_TENCENT_SES_TEMPLATE_VERIFICATION:-0}
+      AGENT_TENCENT_SES_TEMPLATE_PASSWORD_RESET: ${AGENT_TENCENT_SES_TEMPLATE_PASSWORD_RESET:-0}
+      AGENT_TENCENT_SES_TEMPLATE_APPROVAL: ${AGENT_TENCENT_SES_TEMPLATE_APPROVAL:-0}
+      AGENT_TENCENT_SES_TEMPLATE_REJECTION: ${AGENT_TENCENT_SES_TEMPLATE_REJECTION:-0}
+      AGENT_TENCENT_SES_TEMPLATE_ADMIN_SIGNUP: ${AGENT_TENCENT_SES_TEMPLATE_ADMIN_SIGNUP:-0}
+      AGENT_TENCENT_SES_TEMPLATE_NOTICE: ${AGENT_TENCENT_SES_TEMPLATE_NOTICE:-0}
+      AGENT_LOCAL_INFERENCE_PROVISIONING_ENABLED: ${AGENT_LOCAL_INFERENCE_PROVISIONING_ENABLED:-false}
+      AGENT_LOCAL_INFERENCE_PROVISIONING_API_URL: ${AGENT_LOCAL_INFERENCE_PROVISIONING_API_URL:-}
+      AGENT_LOCAL_INFERENCE_PROVISIONING_WEB_URL: ${AGENT_LOCAL_INFERENCE_PROVISIONING_WEB_URL:-}
+      AGENT_LOCAL_INFERENCE_PROVISIONING_DISPATCH_TOKEN: ${AGENT_LOCAL_INFERENCE_PROVISIONING_DISPATCH_TOKEN:-}
       # The blocks the hosts add to the sandbox's protected space. Checking an
       # owner's SSH server refuses an address in them, as the sandbox would.
       AGENT_EGRESS_PROTECTED_CIDRS: ${AGENT_EGRESS_PROTECTED_CIDRS:-}
@@ -114,8 +194,6 @@ services:
       # Editable first-time Server setup defaults. The deployer supplies the
       # physical node's SSH hostname; a container hostname is not an SSH target.
       AGENT_CONTROL_PLANE_SSH_HOST: ${AGENT_CONTROL_PLANE_SSH_HOST:-}
-      # Omit when the gateway API hostname is also its SSH address.
-      AGENT_GATEWAY_SSH_HOST: ${AGENT_GATEWAY_SSH_HOST:-}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
       # Imported once into admin Settings; subsequent changes are made there.
       AGENT_WEB_APP_NAME: ${AGENT_WEB_APP_NAME:-}
@@ -124,14 +202,12 @@ services:
       AGENT_WEB_STATUS_URL: ${AGENT_WEB_STATUS_URL:-}
       AGENT_WEB_DOCS_URL: ${AGENT_WEB_DOCS_URL:-}
       AGENT_WEB_CONTACT_URL: ${AGENT_WEB_CONTACT_URL:-}
-      AGENT_WEB_GATEWAY_URL: ${AGENT_WEB_GATEWAY_URL:-}
-      AGENT_WEB_FEATURE_RAG: ${AGENT_WEB_FEATURE_RAG:-}
       # Optional compute management runs only on this stable main listener.
       # Mount the operator configuration using docker-compose.compute.yml.
       AGENT_COMPUTE_CONFIG: ${AGENT_COMPUTE_CONFIG:-}
       AGENT_COMPUTE_SECRET_KEY: ${AGENT_COMPUTE_SECRET_KEY:-}
       AGENT_CLOUDLAB_API_URL: ${AGENT_CLOUDLAB_API_URL:-}
-      # Imported once; blank derives it from AGENT_SESSION_REDIRECT_URI.
+      # Imported once; blank derives it from AGENT_PUBLIC_API_URL.
       AGENT_COMPUTE_REGISTRATION_URL: ${AGENT_COMPUTE_REGISTRATION_URL:-}
       # Where automatic setup finds the sandbox image a release published.
       # Unset keeps the default; an explicit empty value turns the lookup off.
@@ -141,15 +217,6 @@ services:
       # (AGENT_CHAT_IDLE_TIMEOUT_S); refreshing this lease does not keep an
       # otherwise idle container running.
       AGENT_RESIDENCY_TTL_S: ${AGENT_RESIDENCY_TTL_S:-1800}
-      # What a runner presents to claim work. Without it every claim is 401 and
-      # the queue simply never drains — with nothing in the control plane's own
-      # logs saying why, because the refusal is correct.
-      # The gateway alert relay's door (/v1/agent/service/oncall/*). Optional
-      # as a pair: a deployment without on-call sets neither, the door answers
-      # 401/503, and nothing else changes. The user id decides whose role and
-      # quota every on-call analysis runs under.
-      AGENT_ONCALL_DISPATCH_TOKEN: ${AGENT_ONCALL_DISPATCH_TOKEN:-}
-      AGENT_ONCALL_USER_ID: ${AGENT_ONCALL_USER_ID:-}
 
       # --- Sandbox deletion archives ---------------------------------------
       # Imported once; subsequent bucket/endpoint changes use Admin Settings.
@@ -191,18 +258,7 @@ services:
       AGENT_OPERATION_PROFILING_DEPLOYMENT: ${AGENT_OPERATION_PROFILING_DEPLOYMENT:-default}
       AGENT_ALERT_WEBHOOK_URL: ${AGENT_ALERT_WEBHOOK_URL:-}
       AGENT_DEFAULT_EXECUTION_PROFILE: ${AGENT_DEFAULT_EXECUTION_PROFILE:-untrusted-kata-v1}
-      # --- Publishing and source control ------------------------------------
-      # The only component that holds a git credential, which is precisely what
-      # keeps the sandbox credential-free. Unset means this deployment never
-      # publishes — it starts anyway rather than refusing.
-      AGENT_GITHUB_TOKEN: ${AGENT_GITHUB_TOKEN:-}
-      # `:-dev` and not `:-`. Compose passes an empty string as a *set*
-      # variable, and `os.getenv(name, "dev")` returns that empty string rather
-      # than the default — so a blank here silently means "open the PR against
-      # a branch called ''". Same for the API base below.
-      AGENT_PUBLISH_BASE_BRANCH: ${AGENT_PUBLISH_BASE_BRANCH:-dev}
-      AGENT_GIT_AUTHOR_NAME: ${AGENT_GIT_AUTHOR_NAME:-}
-      AGENT_GIT_AUTHOR_EMAIL: ${AGENT_GIT_AUTHOR_EMAIL:-}
+      # --- Source control ---------------------------------------------------
       AGENT_REPO_ALLOWLIST: ${AGENT_REPO_ALLOWLIST:-}
       # The GitHub App and GitLab OAuth behind Integrations. Optional as a
       # group: a deployment that configures neither simply offers no
@@ -212,6 +268,7 @@ services:
       AGENT_GITHUB_APP_CLIENT_ID: ${AGENT_GITHUB_APP_CLIENT_ID:-}
       AGENT_GITHUB_APP_CLIENT_SECRET: ${AGENT_GITHUB_APP_CLIENT_SECRET:-}
       AGENT_GITHUB_APP_INSTALL_URL: ${AGENT_GITHUB_APP_INSTALL_URL:-}
+      AGENT_GITHUB_COAUTHOR: ${AGENT_GITHUB_COAUTHOR:-}
       # Prefer the path form. A private key in an environment variable is
       # readable by anything that can list the process environment, and lands
       # in `docker inspect`, crash dumps and most log shippers.
@@ -236,27 +293,21 @@ services:
       # from whatever host a request arrived on would differ per proxy and fail
       # that registration. Unset means a connection can still use a static
       # credential, and only the browser flow is refused.
-      # Optional override; otherwise MCP reuses the public API prefix from
-      # AGENT_SESSION_REDIRECT_URI, which this deployment already requires.
+      # Optional override; otherwise MCP uses AGENT_PUBLIC_API_URL.
       AGENT_MCP_PUBLIC_BASE_URL: ${AGENT_MCP_PUBLIC_BASE_URL:-}
       # Optional legacy import; configure the managed app in Admin Settings.
       AGENT_MCP_GITHUB_CLIENT_ID: ${AGENT_MCP_GITHUB_CLIENT_ID:-}
       AGENT_MCP_GITHUB_CLIENT_SECRET: ${AGENT_MCP_GITHUB_CLIENT_SECRET:-}
 
       # Both widen what a user-added MCP connection may dial, and both are off
-      # by default. Private space is reachable only through a user connector;
-      # plain HTTP would put the credential on the wire in the clear. They are
-      # separate variables because they are separate risks.
+      # by default. A private address may be this service itself; plain HTTP
+      # would put the credential on the wire in the clear. They are separate
+      # variables because they are separate risks.
       AGENT_MCP_ALLOW_PRIVATE_TARGETS: ${AGENT_MCP_ALLOW_PRIVATE_TARGETS:-}
       AGENT_MCP_ALLOW_PLAIN_HTTP: ${AGENT_MCP_ALLOW_PLAIN_HTTP:-}
-      # Owners' own model connections. Off until every control-plane replica
-      # runs a release that knows them: an older one would run a turn on a
-      # connection as a Gateway turn. See ENVIRONMENT.md before turning it on.
+      # Owners' own model connections, the only inference source. On unless
+      # set to false for maintenance, which stops every new turn.
       AGENT_MODEL_CONNECTIONS_ENABLED: ${AGENT_MODEL_CONNECTIONS_ENABLED:-}
-      # Imported once, then owned by Admin Settings → Sandbox execution. The
-      # model a new task starts on when its owner has chosen nothing. Set
-      # empty for no default; `-`, not `:-`, keeps that empty value.
-      AGENT_DEFAULT_MODEL: ${AGENT_DEFAULT_MODEL-deepseek-v4-flash}
 
       # --- Workspaces -------------------------------------------------------
       # Authorizes this service to the hosts' sandbox managers. Per-host
@@ -273,6 +324,7 @@ services:
       # AGENT_BROKER_URL_ALLOWED_HOSTS; check each deploy root's .env.
       AGENT_SANDBOX_MANAGER_URL_ALLOWED_HOSTS: ${AGENT_SANDBOX_MANAGER_URL_ALLOWED_HOSTS:-${AGENT_BROKER_URL_ALLOWED_HOSTS:-}}
     volumes:
+      - agent-keys:/run/cloud-agent/keys:ro
       - agent-pgadmin-bootstrap:/var/lib/cloud-agent/pgadmin-bootstrap
       # The GitHub App key, read-only, as a file. `AGENT_GITHUB_APP_PRIVATE_KEY_PATH`
       # names a path *inside* this container, so setting it without mounting
@@ -280,6 +332,11 @@ services:
       # at the first publish. Points at /dev/null when unconfigured so the
       # stack still renders without a key.
       - ${AGENT_GITHUB_APP_PRIVATE_KEY_FILE:-/dev/null}:/etc/cloud-agent/github-app.pem:ro
+      # The deployment's own public content, read-only: Terms of Service, the
+      # Team page and the source link, kept in the deployment's repository
+      # (apps/backend/cloud_agent/deployment/site_content.py lists the files). The
+      # recipe's default directory holds none, which configures none of them.
+      - ${AGENT_SITE_CONTENT_DIR:-./site-content}:/etc/cloud-agent/site:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -297,11 +354,9 @@ services:
   # simply does not contain them, which is the difference between a policy and
   # a fact.
   mcp-relay:
-    build:
-      context: ../..
-      dockerfile: deploy/control-plane/Dockerfile
-      args:
-        SOURCE_COMMIT: ${AGENT_DEPLOYMENT_SHA:-unknown}
+    # The image `keys` builds; see there.
+    image: ${COMPOSE_PROJECT_NAME}-control-plane:${AGENT_DEPLOYMENT_SHA:-unknown}
+    pull_policy: never
     command:
       - uvicorn
       - cloud_agent.app:create_mcp_app
@@ -316,11 +371,12 @@ services:
       # should be able to.
       - "${AGENT_MCP_RELAY_BIND:-127.0.0.1}:${AGENT_MCP_RELAY_PORT:-8001}:8001"
     environment:
-      AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:?Postgres DSN for the agent-owned database}
+      AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:-}
       # Both listeners decrypt the shared admin settings using the same key.
       AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET:-}
+      # The relay answers owner identity the same way the main API does.
+      AGENT_LOCAL_SESSION_SECRET: ${AGENT_LOCAL_SESSION_SECRET:-}
       AGENT_SETTINGS_ENCRYPTION_KEY: ${AGENT_SETTINGS_ENCRYPTION_KEY:-}
-      GATEWAY_ISSUER: ${GATEWAY_ISSUER:-}
       AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:-}
       # The relay resolves each owner's stored MCP connection and therefore
       # must decrypt it under the same key/domain as the main control-plane
@@ -329,6 +385,68 @@ services:
       AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:-}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
       AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
+    volumes:
+      - agent-keys:/run/cloud-agent/keys:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    networks: [control-plane]
+
+  # The GitHub relay: git and gh in a sandbox reach GitHub as the
+  # conversation's owner, without the owner's token ever entering a sandbox.
+  # Same image, database and lifespan, a third listener holding nothing but the
+  # relay's catch-all route (`create_github_relay_app`).
+  #
+  # It terminates TLS for github.com and api.github.com with a certificate
+  # this deployment's own CA signs (deploy/control-plane/github-relay-certs.sh);
+  # sandboxes trust that CA for those two names only. Behind a profile:
+  # `COMPOSE_PROFILES=github-relay` turns it on, together with the host's
+  # github-tunnel and AGENT_SANDBOX_GITHUB_RELAY_CA_FILE.
+  github-relay:
+    profiles: [github-relay]
+    # The image `keys` builds; see there.
+    image: ${COMPOSE_PROJECT_NAME}-control-plane:${AGENT_DEPLOYMENT_SHA:-unknown}
+    pull_policy: never
+    command:
+      - uvicorn
+      - cloud_agent.app:create_github_relay_app
+      - --factory
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8443"
+      - --ssl-certfile
+      - /etc/cloud-agent/github-relay/relay.pem
+      - --ssl-keyfile
+      - /etc/cloud-agent/github-relay/relay.key
+    restart: unless-stopped
+    ports:
+      # Loopback, like the MCP relay: only the hosts' github-tunnel reaches it.
+      - "${AGENT_GITHUB_RELAY_BIND:-127.0.0.1}:${AGENT_GITHUB_RELAY_PORT:-8443}:8443"
+    environment:
+      AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:-}
+      AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET:-}
+      AGENT_LOCAL_SESSION_SECRET: ${AGENT_LOCAL_SESSION_SECRET:-}
+      AGENT_SETTINGS_ENCRYPTION_KEY: ${AGENT_SETTINGS_ENCRYPTION_KEY:-}
+      AGENT_CONTROL_TOKEN_SECRET: ${AGENT_CONTROL_TOKEN_SECRET:-}
+      # The owner's GitHub user token is stored encrypted under this key, and
+      # renewed with the App's client credentials.
+      AGENT_SOURCE_CONTROL_ENCRYPTION_KEY: ${AGENT_SOURCE_CONTROL_ENCRYPTION_KEY:-}
+      AGENT_GITHUB_API: ${AGENT_GITHUB_API:-https://api.github.com}
+      AGENT_GITHUB_APP_ID: ${AGENT_GITHUB_APP_ID:-}
+      AGENT_GITHUB_APP_CLIENT_ID: ${AGENT_GITHUB_APP_CLIENT_ID:-}
+      AGENT_GITHUB_APP_CLIENT_SECRET: ${AGENT_GITHUB_APP_CLIENT_SECRET:-}
+      AGENT_GITHUB_APP_PRIVATE_KEY_PATH: ${AGENT_GITHUB_APP_PRIVATE_KEY_PATH:-/etc/cloud-agent/github-app.pem}
+      AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
+      AGENT_LOG_FORMAT: ${AGENT_LOG_FORMAT:-text}
+    volumes:
+      - agent-keys:/run/cloud-agent/keys:ro
+      - ${AGENT_GITHUB_APP_PRIVATE_KEY_FILE:-/dev/null}:/etc/cloud-agent/github-app.pem:ro
+      # relay.pem (the leaf for github.com and api.github.com) and relay.key.
+      # The CA's own key is not needed here and should not be mounted.
+      - ${AGENT_GITHUB_RELAY_TLS_DIR:-./github-relay-tls}:/etc/cloud-agent/github-relay:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -337,11 +455,11 @@ services:
     networks: [control-plane]
 
   # The browser-facing app. Two classes of configuration meet here, and the
-  # difference is deliberate: `basePath` and the browser's API prefix are
-  # properties of the image variant, resolved when the bundle is compiled, so
-  # they are build arguments and a change to either is a rebuild. The
-  # deployment's identity — name, organisation, status page, the gateway's
-  # origin — is read by the server on every request instead, so it is
+  # difference is deliberate: the browser's API prefix is a property of the
+  # image, resolved when the bundle is compiled, so it is a build argument and
+  # a change to it is a rebuild. The
+  # deployment's identity — name, organisation, status page, contact — is
+  # read by the server on every request instead, so it is
   # `environment:` below and changing it restarts the container rather than
   # rebuilding the image.
   web:
@@ -349,25 +467,10 @@ services:
       context: ../..
       dockerfile: deploy/control-plane/Dockerfile.web
       args:
-        # Where this app is mounted. `/agents` serves it under the gateway's
-        # own hostname, which keeps the session cookie same-origin and takes
-        # CORS out of the deployment entirely. Empty for a deployment that
-        # owns its own hostname.
-        #
-        # **Required, not defaulted to empty**, and the three below with it.
-        # Empty is a real answer for one deployment shape and silently wrong
-        # for the other, and the wrongness does not show at start: the stack
-        # comes up healthy with the app mounted at the wrong path, calling the
-        # gateway instead of the control plane, and unable to sign anyone in.
-        # `?` (without `:`) requires an explicit choice while still accepting
-        # the empty string, which is the value for a deployment that owns its
-        # hostname. `:?` would contradict that contract by rejecting empty.
-        NEXT_PUBLIC_BASE_PATH: ${AGENT_WEB_BASE_PATH?the prefix this app is mounted under; empty string for a deployment that owns its own hostname}
-        # Relative on purpose when mounted under a prefix: a same-origin path
-        # means the cookie is sent without `SameSite=None`, and no absolute
-        # host has to be known at build time. Under a base path this is that
-        # base path plus `/api`, which the reverse proxy strips.
-        NEXT_PUBLIC_AGENT_API_URL: ${AGENT_WEB_API_URL:?control-plane base URL as the browser calls it, e.g. /agents/api}
+        # The browser calls the control plane at `/api` on the same origin;
+        # the edge in front routes it. The app is served at the root of its
+        # own hostname: mounting it under a path prefix was removed.
+        NEXT_PUBLIC_AGENT_API_URL: /api
         NEXT_PUBLIC_BUILD_SHA: ${BUILD_SHA:-}
         NEXT_PUBLIC_BUILD_TIMESTAMP: ${BUILD_TIMESTAMP:-}
     # Read per request by `apps/frontend/src/config/site.server.ts`. Display values only:
@@ -383,10 +486,6 @@ services:
       AGENT_WEB_STATUS_URL: ${AGENT_WEB_STATUS_URL:-}
       AGENT_WEB_DOCS_URL: ${AGENT_WEB_DOCS_URL:-}
       AGENT_WEB_CONTACT_URL: ${AGENT_WEB_CONTACT_URL:-}
-      # The gateway's origin, for links this app does not host. Sign-in does
-      # not pass through the browser any more, so nothing here starts one.
-      AGENT_WEB_GATEWAY_URL: ${AGENT_WEB_GATEWAY_URL:-}
-      AGENT_WEB_FEATURE_RAG: ${AGENT_WEB_FEATURE_RAG:-}
       AGENT_DEPLOYMENT_SHA: ${AGENT_DEPLOYMENT_SHA:-}
       AGENT_WEB_DEPLOYED_AT: ${AGENT_WEB_DEPLOYED_AT:-}
     restart: unless-stopped
@@ -399,21 +498,27 @@ services:
         condition: service_started
     networks: [control-plane]
 
-  # --- Optional: the edge for a deployment that owns its own hostname -------
-  # Under the gateway's hostname the console proxies `/agents/*` to these two
-  # services and this one has no job, which is why it sits behind a profile:
-  # those deployments never run it. On a standalone hostname
-  # (agents.example.org) the tunnel or load balancer in front points at this
-  # one port and nginx splits the origin — `/api/*` to the control plane with
+  # --- Optional: the edge ----------------------------------------------------
+  # Behind a profile, for a deployment whose own reverse proxy does not already
+  # split the origin. The tunnel or load balancer in front of the hostname
+  # (agents.example.org) points at this one port and nginx splits the origin — `/api/*` to the control plane with
   # the prefix stripped, everything else to the web app. One origin for both
   # is what lets the session cookie travel; two hostnames would not.
   #
-  # Enable with `COMPOSE_PROFILES=edge` in .env, and build the web app for the
-  # root: AGENT_WEB_BASE_PATH= (empty) and AGENT_WEB_API_URL=/api. Loopback by
-  # default, like every other published port here: the tunnel is on this host.
+  # Enable with `COMPOSE_PROFILES=edge` (or `--profile edge`). Loopback by default, like every other published port here: the tunnel is on this host.
   edge:
     profiles: [edge]
-    image: nginx:1.27.5-alpine
+    # Each third-party image here (this one, pgAdmin's, Postgres's) is named by
+    # its version tag and the digest of its multi-architecture index. The digest
+    # decides what runs, on an ARM64 control plane and an x86_64 machine alike;
+    # the tag says what that is. A tag alone runs whatever this machine's copy
+    # of it points to, and an artifact deployment pulls every tag again on each
+    # deploy, so a new upstream build could replace a service in the middle of
+    # an unrelated deploy. Change both together: `docker buildx imagetools
+    # inspect <name>:<tag>` prints the index digest, and the platforms it lists
+    # must still include linux/arm64 and linux/amd64. A release refuses a
+    # third-party image named any other way (deploy/release/artifact_compose.py).
+    image: nginx:1.27.5-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
     volumes:
       - ${AGENT_EDGE_CONFIG_FILE:-./edge.nginx.conf}:/etc/nginx/conf.d/default.conf:ro
     ports:
@@ -438,6 +543,10 @@ services:
       PGADMIN_CONFIG_SERVER_MODE: "True"
       PGADMIN_CONFIG_PROXY_X_PROTO_COUNT: "1"
       PGADMIN_CONFIG_SESSION_COOKIE_SECURE: ${AGENT_PGADMIN_COOKIE_SECURE:-True}
+      # The bundled server definition's database and user, which the entrypoint
+      # fills in on pgAdmin's first start: the postgres service's own below.
+      AGENT_POSTGRES_USER: ${AGENT_POSTGRES_USER:-cloudagent}
+      AGENT_POSTGRES_DB: ${AGENT_POSTGRES_DB:-cloudagent}
     volumes:
       - agent-pgadmin:/var/lib/pgadmin
       - agent-pgadmin-bootstrap:/run/cloud-agent/pgadmin-bootstrap:ro
@@ -456,15 +565,31 @@ services:
       start_period: 60s
       retries: 6
 
+  # AGENT_POSTGRES_DB is the database on this server that AGENT_DATABASE_URL
+  # uses. A new volume creates it and a new installation's URL names it; the
+  # healthcheck, pgAdmin's bundled server and the documented backup, drain and
+  # undrain commands open it. A deployment that moves the URL to another
+  # database here sets AGENT_POSTGRES_DB to that one too, or all of them stay
+  # on the database it left; the `keys` service warns while the two differ.
   postgres:
-    image: postgres:16-alpine
+    # Pinned like the edge's image (see there). Named `postgres:16-alpine`, it
+    # took a deployment from 16.15 to 16.16 during an unrelated deploy; a new
+    # PostgreSQL now arrives only with a release that changes this line, and
+    # docs/developer/upgrade-notes.md says when one does.
+    image: postgres:16.16-alpine@sha256:0adbf25a9e96d38823bb813f3ac0ed41fadb665c88f1df7fe6dbfb060cbdc106
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${AGENT_POSTGRES_USER:-cloudagent}
-      POSTGRES_PASSWORD: ${AGENT_POSTGRES_PASSWORD:?a password for the agent database}
+      # Read only when the volume is new: the `keys` service stores the
+      # deployment's password, or generates one for a new installation.
+      POSTGRES_PASSWORD_FILE: /run/cloud-agent/keys/AGENT_POSTGRES_PASSWORD
       POSTGRES_DB: ${AGENT_POSTGRES_DB:-cloudagent}
     volumes:
       - agent-postgres:/var/lib/postgresql/data
+      - agent-keys:/run/cloud-agent/keys:ro
+    depends_on:
+      keys:
+        condition: service_completed_successfully
     healthcheck:
       # `migrate` gates the API, and `migrate` waits on this. Without a real
       # check both would start against a Postgres that has accepted a TCP
@@ -479,18 +604,16 @@ services:
 
 networks:
   control-plane:
-    # **Named, so another stack can join it.** The gateway's frontend proxies
-    # `/agents/*` here (its `next.config.js` rewrites are this deployment's
-    # routing table), which means it has to resolve `web` and `control-plane`
-    # by name — and a compose-derived name like `cloudagent_control-plane`
+    # **Named, so another stack can join it.** A reverse proxy in another
+    # stack has to resolve `web` and `control-plane` by name — and a
+    # compose-derived name like `cloudagent_control-plane`
     # depends on the project name whoever ran `up` happened to use.
-    #
-    # The gateway's own overlay names its networks the same way and for the
-    # same reason; this is that pattern, pointed the other direction.
     name: ${AGENT_NETWORK_NAME:-cloud-agent}
     driver: bridge
 
 volumes:
+  # The deployment keys, one file each; see the `keys` service.
+  agent-keys:
   agent-postgres:
   agent-pgadmin:
   agent-pgadmin-bootstrap:

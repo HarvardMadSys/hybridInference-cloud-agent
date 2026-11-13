@@ -7,7 +7,7 @@ import threading
 import httpx
 import pytest
 
-from cloud_agent_host.sandbox_resources import (
+from cloud_agent_host.observe.sandbox_resources import (
     MAX_STATS_BYTES,
     SandboxResourceCollector,
     reading_from_stats,

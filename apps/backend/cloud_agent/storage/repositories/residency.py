@@ -9,8 +9,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent.storage._sql.fences import attempt_lease_is_live
 from cloud_agent.storage._sql.hosts import LIVE_ATTEMPT_HOST
-from cloud_agent.storage._sql.mcp_residency import mint_residency_sql
+from cloud_agent.storage._sql.sandbox_transitions import (
+    ESTABLISH_RESIDENCY_MEMBERS_SQL,
+    EXTEND_MEMBERS_SQL,
+    REAP_EXPIRED_RESIDENCIES_MEMBERS_SQL,
+    RELEASE_RESIDENCY_MEMBERS_SQL,
+    RELEASE_SHARED_RESIDENCY_IF_QUIESCENT_MEMBERS_SQL,
+)
 from cloud_agent.storage.deadlocks import retry_deadlock_victim
 
 if TYPE_CHECKING:
@@ -84,10 +91,7 @@ class PostgresResidencyRepository:
                 thread_id,
                 attempt_id,
             )
-            if earns is None or not await conn.fetchval(
-                "SELECT lease_expires_at > clock_timestamp() FROM agent_attempts WHERE id = $1",
-                attempt_id,
-            ):
+            if earns is None or not await attempt_lease_is_live(conn, attempt_id):
                 return None
             # Attempt, then membership: the order every admission writer keeps.
             member = await conn.fetchrow(
@@ -114,33 +118,11 @@ class PostgresResidencyRepository:
             # releasing the membership, so either it committed before the
             # job lock above was granted and this fresh snapshot sees the
             # tombstone, or it waits for this commit and its release then
-            # takes the generation minted here as well.
+            # takes the generation minted here as well. A local account whose
+            # access ended earns nothing either, by the same argument: its
+            # termination updates the running job before releasing.
             row = await conn.fetchrow(
-                f"""
-                UPDATE agent_thread_sandbox_memberships AS m
-                SET {mint_residency_sql("$2")},
-                    updated_at = NOW()
-                FROM agent_jobs j, agent_attempts a, agent_sandboxes g, agent_threads t
-                WHERE m.thread_id = $1 AND m.active_attempt_id = $3
-                  AND t.id = m.thread_id AND t.deleted_at IS NULL
-                  AND g.id = m.sandbox_id AND g.host = $4
-                  AND ($6::text IS NULL OR m.sandbox_id = $6)
-                  AND j.thread_id = m.thread_id
-                  AND j.current_attempt_id = a.id
-                  AND a.id = $3 AND a.job_id = j.id
-                  AND a.lease_generation = $5 AND a.host_id = $4
-                  AND a.status = 'running'
-                  AND a.lease_expires_at > clock_timestamp()
-                  AND {LIVE_ATTEMPT_HOST}
-                RETURNING m.thread_id, m.sandbox_id,
-                          m.residency_generation AS generation,
-                          m.residency_status AS status,
-                          m.residency_lease_expires_at AS lease_expires_at,
-                          m.residency_grant_id AS grant_id,
-                          m.residency_binding_id AS ledger_binding_id,
-                          m.residency_established_at AS established_at,
-                          m.residency_last_active_at AS last_active_at
-                """,
+                ESTABLISH_RESIDENCY_MEMBERS_SQL,
                 thread_id,
                 ttl_seconds,
                 attempt_id,
@@ -232,21 +214,7 @@ class PostgresResidencyRepository:
                     generations,
                 )
                 rows = await conn.fetch(
-                    """
-                    UPDATE agent_thread_sandbox_memberships m
-                    SET residency_lease_expires_at =
-                            clock_timestamp() + make_interval(secs => $3),
-                        residency_last_active_at = NOW()
-                    FROM unnest($1::text[], $2::bigint[]) AS beat(thread_id, generation),
-                         agent_sandboxes g
-                    WHERE m.thread_id = beat.thread_id
-                      AND m.residency_generation = beat.generation
-                      AND m.residency_status = 'hot'
-                      AND m.residency_lease_expires_at > clock_timestamp()
-                      AND g.id = m.sandbox_id AND ($4::text IS NULL OR g.host = $4)
-                    RETURNING m.thread_id, m.residency_generation,
-                              COALESCE(m.residency_grant_id, '') AS grant_id
-                    """,
+                    EXTEND_MEMBERS_SQL,
                     threads,
                     generations,
                     ttl_seconds,
@@ -269,15 +237,7 @@ class PostgresResidencyRepository:
         """
         async with self._pool.acquire() as conn:
             return await conn.fetchval(
-                """
-                UPDATE agent_thread_sandbox_memberships m
-                SET residency_status = 'none', residency_last_active_at = NOW()
-                FROM agent_sandboxes g
-                WHERE m.thread_id = $1 AND m.residency_generation = $2
-                  AND m.residency_status <> 'none'
-                  AND g.id = m.sandbox_id AND ($3::text IS NULL OR g.host = $3)
-                RETURNING COALESCE(m.residency_grant_id, '')
-                """,
+                RELEASE_RESIDENCY_MEMBERS_SQL,
                 thread_id,
                 generation,
                 host,
@@ -305,20 +265,7 @@ class PostgresResidencyRepository:
         """
         async with self._pool.acquire() as conn:
             return await conn.fetchval(
-                """
-                UPDATE agent_thread_sandbox_memberships m
-                SET residency_status = 'none', residency_last_active_at = NOW()
-                FROM agent_sandboxes g
-                WHERE m.thread_id = $1 AND m.residency_generation = $2
-                  AND m.sandbox_id = $4 AND g.id = m.sandbox_id AND g.host = $3
-                  AND m.residency_status <> 'none'
-                  AND m.process_generation <= $5
-                  AND m.resident_state IN ('stopped', 'lost')
-                  AND m.active_attempt_id IS NULL
-                  AND g.active_operation_count = 0
-                  AND g.snapshot_state <> 'snapshotting'
-                RETURNING COALESCE(m.residency_grant_id, '')
-                """,
+                RELEASE_SHARED_RESIDENCY_IF_QUIESCENT_MEMBERS_SQL,
                 thread_id,
                 generation,
                 host,
@@ -368,24 +315,7 @@ class PostgresResidencyRepository:
         """
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                """
-                WITH expired AS (
-                    SELECT m.thread_id, g.host
-                    FROM agent_thread_sandbox_memberships m
-                    JOIN agent_sandboxes g ON g.id = m.sandbox_id
-                    WHERE m.residency_status = 'hot'
-                      AND m.residency_lease_expires_at <= clock_timestamp()
-                    ORDER BY m.residency_lease_expires_at, m.thread_id
-                    LIMIT $1
-                    FOR UPDATE OF m SKIP LOCKED
-                )
-                UPDATE agent_thread_sandbox_memberships m
-                SET residency_status = 'none'
-                FROM expired
-                WHERE m.thread_id = expired.thread_id
-                RETURNING m.thread_id, m.residency_generation AS generation, expired.host,
-                          m.residency_grant_id AS grant_id
-                """,
+                REAP_EXPIRED_RESIDENCIES_MEMBERS_SQL,
                 limit,
             )
         return [dict(row) for row in rows]

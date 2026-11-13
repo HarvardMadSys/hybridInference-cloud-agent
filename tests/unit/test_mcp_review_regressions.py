@@ -42,7 +42,7 @@ class TestTheRedirectUri:
         authorization carried the per-connection one -- a prefix of the right
         answer, which is the kind of difference that only shows at the browser.
         """
-        from cloud_agent.api.mcp_connections import _callback_url
+        from cloud_agent.mcp.oauth_authorization import callback_url as _callback_url
 
         base = "https://agent.example.com"
         registered = _callback_url(base, 8)
@@ -124,7 +124,7 @@ class TestTheRuntimeRelayEntry:
         argv, _env = ClaudeCodeRuntime().prepare_live(
             workdir="/w",
             model="glm-5.1",
-            gateway_base_url="http://backend:8080",
+            model_base_url="http://backend:8080",
             credential="agr-credential",
             mcp_config=self._config(("github", "docs")),
         )
@@ -147,7 +147,7 @@ class TestTheRuntimeRelayEntry:
         _argv, env = runtime.prepare_live(
             workdir="/w",
             model="glm-5.1",
-            gateway_base_url="http://backend:8080",
+            model_base_url="http://backend:8080",
             credential="agr-credential",
             mcp_config=self._config(("github", "docs")),
         )
@@ -162,7 +162,7 @@ class TestTheRuntimeRelayEntry:
         argv, _env = ClaudeCodeRuntime().prepare_live(
             workdir="/w",
             model="glm-5.1",
-            gateway_base_url="http://backend:8080",
+            model_base_url="http://backend:8080",
             credential="agr-credential",
             mcp_config=self._config(()),
         )

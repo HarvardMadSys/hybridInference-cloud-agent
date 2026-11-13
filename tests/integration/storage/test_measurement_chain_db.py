@@ -30,16 +30,18 @@ from tests.support.migrations import apply_migrations
 
 from cloud_agent.api.deps import get_agent_app_credentials, get_storage
 from cloud_agent.app import create_app
-from cloud_agent.measurement_ingest import Owner
-from cloud_agent.measurement_persistence import (
+from cloud_agent.measurement.measurement_ingest import Owner
+from cloud_agent.measurement.measurement_persistence import (
     manifest_for_run,
     prepare_measurement,
     store_prepared,
 )
-from cloud_agent.measurement_writer import MeasurementWriter
+from cloud_agent.measurement.measurement_writer import MeasurementWriter
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import SCOPE_FULL, mint_worker_token
-from cloud_agent_host.runner import ClaimedJob, ControlPlane, deliver_measurements
+from cloud_agent_host.claimed_job import ClaimedJob
+from cloud_agent_host.control_plane_client import ControlPlane
+from cloud_agent_host.service.measurement_sender import deliver_measurements
 from cloud_agent_shared import operation_profiling
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
@@ -156,8 +158,11 @@ async def chain(monkeypatch, tmp_path, expires_at):
     )
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "chain-test-control-secret-of-32-bytes")
     monkeypatch.setenv("ADMIN_TOKEN", "admin-chain-test")
-    monkeypatch.setenv("AGENT_SESSION_SECRET", "chain-session-secret-32-bytes-min")
-    monkeypatch.setenv("GATEWAY_ISSUER", "https://gateway.example")
+    monkeypatch.setenv("AGENT_LOCAL_SESSION_SECRET", "chain-local-session-secret-of-32-bytes")
+    monkeypatch.setenv("AGENT_SETTINGS_ENCRYPTION_KEY", "chain-settings-key-of-at-least-32-bytes")
+    monkeypatch.setenv(
+        "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "acceptance-credential-key-of-32-bytes"
+    )
     sink = tmp_path / "records.jsonl"
     monkeypatch.setenv(operation_profiling.ENV_PROFILING_ENABLED, "true")
     monkeypatch.setenv(operation_profiling.ENV_PROFILING_SINK, str(sink))
@@ -174,12 +179,12 @@ async def chain(monkeypatch, tmp_path, expires_at):
         ),
     )
     operation_profiling.reset_cache()
-    from cloud_agent_host import runner as runner_mod
+    from cloud_agent_host.service import measurement_sender
 
     # This process remembers which measurements it has delivered, so a test
     # inherits the previous one's decisions unless it clears them -- and a
     # record the earlier test sent would look like a retry here.
-    runner_mod.reset_delivery_state()
+    measurement_sender.reset_delivery_state()
 
     app = create_app()
     app.dependency_overrides[get_storage] = lambda: _ChainStorage(Storage(pool))
@@ -408,7 +413,7 @@ async def test_delivering_the_same_record_twice_stores_one(chain, expires_at):
 async def test_live_delivery_reaches_postgres_without_a_jsonl_sink(chain, monkeypatch):
     """The optional baseline file is not a prerequisite for Admin storage."""
     pool, base_url, _sink = chain
-    from cloud_agent_host import runner as runner_mod
+    from cloud_agent_host.service import measurement_sender
 
     monkeypatch.delenv(operation_profiling.ENV_PROFILING_SINK, raising=False)
     measurement = operation_profiling.start_operation(
@@ -429,10 +434,9 @@ async def test_live_delivery_reaches_postgres_without_a_jsonl_sink(chain, monkey
         runtime="claude-code",
         model="m",
         worker_token=_token(),
-        sandbox_token="unused",
     )
 
-    runner_mod._enqueue_delivery(measurement, job=job, base_url=base_url, drain_s=0)
+    measurement_sender._enqueue_delivery(measurement, job=job, base_url=base_url, drain_s=0)
     for _ in range(200):
         async with pool.acquire() as conn:
             stored = await conn.fetchval(

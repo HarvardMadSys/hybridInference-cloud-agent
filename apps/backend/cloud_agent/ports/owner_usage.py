@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from cloud_agent.owner_usage import (
+    from cloud_agent.usage.owner_usage import (
         OwnerContainerCursor,
         OwnerContainerList,
         OwnerResourceHistory,
@@ -27,4 +27,8 @@ class OwnerUsageQueries(Protocol):
         self, user_id: str, *, buckets: list[tuple[datetime, datetime]]
     ) -> OwnerResourceHistory:
         """Running time and measured CPU and memory for each UTC day bucket."""
+        ...
+
+    async def first_record_at(self, user_id: str) -> datetime | None:
+        """When the owner's earliest retained run or container was created."""
         ...

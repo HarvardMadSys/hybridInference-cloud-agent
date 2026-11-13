@@ -56,7 +56,15 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, and they are strings
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-SOURCE_REPOSITORY = "HarvardMadSys/hybridInference-cloud-agent"
+#: The repository a release is built and published from, spelled exactly as
+#: GitHub spells `GITHUB_REPOSITORY`, from which the publication workflow builds
+#: `--publisher-run-url`. It was `HarvardMadSys/hybridInference-cloud-agent`
+#: until 2026-11-10 (one repository, GitHub id 1318346112), and the releases
+#: published before then carry that name. The schema accepts both names so those
+#: releases still validate; this generator writes, and accepts a run URL under,
+#: this one only. It is the trust anchor, so it is typed here rather than read
+#: from the environment.
+SOURCE_REPOSITORY = "HarvardMadSys/cloud-agent"
 SCHEMA_VERSION = 1
 RECIPE_FORMAT_VERSION = 1
 if artifact_catalog.manifest_schema_version() != SCHEMA_VERSION:
@@ -73,8 +81,7 @@ REGISTRY_PREFIX = "ghcr.io/harvardmadsys/"
 #: deploy scripts compare against, and a manifest that named a different
 #: protocol would describe a deployment that cannot install it.
 DEPLOY_PROTOCOL_FILE = REPO_ROOT / "deploy" / "DEPLOY_PROTOCOL"
-ALEMBIC_INI = REPO_ROOT / "alembic.ini"
-MIGRATIONS_DIR = REPO_ROOT / "migrations"
+PYPROJECT = REPO_ROOT / "pyproject.toml"
 
 #: The published contract, and the document this module validates its own output
 #: against before writing it.
@@ -95,7 +102,7 @@ EXPECTED_PLATFORMS: dict[str, tuple[str, ...]] = artifact_catalog.expected_platf
 WEB_VARIANTS: dict[str, str] = artifact_catalog.web_variants()
 
 #: The sandbox image's runtime labels. Duplicated from
-#: `cloud_agent_host.sandbox` on purpose — this module is imported by a
+#: `cloud_agent_host.container.sandbox` on purpose — this module is imported by a
 #: publication job that has no business loading the host package — and
 #: `test_release_manifest.py` fails if the two ever disagree.
 RUNTIME_LABEL_PREFIX = "org.freeinference.runtime."
@@ -118,7 +125,7 @@ def deploy_protocol(path: Path = DEPLOY_PROTOCOL_FILE) -> str:
     return value
 
 
-def database_revision(alembic_ini: Path = ALEMBIC_INI) -> str:
+def database_revision(pyproject: Path = PYPROJECT) -> str:
     """The Alembic revision this release migrates to.
 
     Asked of Alembic rather than parsed or typed. A release that named a
@@ -126,10 +133,10 @@ def database_revision(alembic_ini: Path = ALEMBIC_INI) -> str:
     compare two different things and call it agreement; two heads is a
     repository state that cannot be released at all, so it raises.
     """
-    config = Config(str(alembic_ini))
-    # Explicit, so the answer does not depend on the working directory: a
-    # deploy job runs this from wherever it happens to be.
-    config.set_main_option("script_location", str(MIGRATIONS_DIR))
+    # `[tool.alembic]` anchors `script_location` at the file with `%(here)s`,
+    # so the answer does not depend on the working directory: a deploy job
+    # runs this from wherever it happens to be.
+    config = Config(toml_file=str(pyproject))
     try:
         head = ScriptDirectory.from_config(config).get_current_head()
     except CommandError as error:

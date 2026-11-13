@@ -1,9 +1,10 @@
 """One network proof per request, and Docker reads the supervisor does not repeat.
 
-Each admitted request -- a turn's lease, an environment preparation, a
-workspace operation or a terminal -- proves its group's network once, and the
-runner's commands stand on that proof. A keystroke reaches a terminal that is
-already open without inspecting the container first.
+Each admitted request -- a turn's lease, an environment preparation that runs
+a script, a workspace operation or a terminal -- proves its group's network
+once, and the runner's commands stand on that proof. A preparation already
+done for the running boot runs nothing and proves nothing. A keystroke reaches
+a terminal that is already open without inspecting the container first.
 
 The core module retains the shared fakes; this file keeps these cases
 independently schedulable without extracting their fixture machinery.
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from tests.support.archive_policy import hooked_supervisor
 from tests.unit.test_shared_session_supervisor import (
     ASGITransport,
     AsyncClient,
@@ -32,11 +34,11 @@ from tests.unit.test_shared_session_supervisor import (
     time,
 )
 
-from cloud_agent_host.sandbox import TerminalProcess
+from cloud_agent_host.container.sandbox import TerminalProcess
 from cloud_agent_host.terminal_session import _TerminalSession
 
 if TYPE_CHECKING:
-    from cloud_agent_host.shared_session_supervisor import SharedSessionLease
+    from cloud_agent_host.supervisor.shared_session_state import SharedSessionLease
 
 
 def test_a_lease_claims_a_bridge_proof_only_for_a_call_that_made_one():
@@ -86,10 +88,10 @@ def test_a_request_after_a_failed_start_completion_is_proved_exactly_once(entryp
         if completions == 1:
             raise RuntimeError("marker clear failed")
 
-    supervisor = SharedChatSessionSupervisor(
+    supervisor = hooked_supervisor(
         manager,
-        starting_archive_prepare_hook=lambda *_args: None,
-        started_archive_hook=complete,
+        prepare_start=lambda *_args: None,
+        started=complete,
     )
     supervisor.register_manifest(_spec(), _members())
     manager.stop(_spec(), release_networks=False)
@@ -118,7 +120,8 @@ def test_a_request_after_a_failed_start_completion_is_proved_exactly_once(entryp
         )
         assert lease.network_verified is True, "the runner's commands stand on this proof"
     elif entrypoint == "environment":
-        preparer = SimpleNamespace(status=lambda _backend, _binding_id: {"ready": True})
+        ready = {"ready": True, "container_id": "container-shared", "boot_id": ""}
+        preparer = SimpleNamespace(status=lambda _backend, _binding_id: ready)
         supervisor.prepare_environment(
             "athr_source", SimpleNamespace(binding_id="binding"), preparer
         )

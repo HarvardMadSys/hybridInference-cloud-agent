@@ -1,3 +1,6 @@
+import { accountsEn } from './accounts';
+import { landingEn } from './landing';
+import { composerEn } from './composer';
 import { modelSelectionEn } from './modelSelection';
 import { usageEn } from './usage';
 
@@ -13,6 +16,8 @@ import { usageEn } from './usage';
  * Placeholders are `{name}` and are substituted by `translate()`.
  */
 export const en = {
+  ...accountsEn,
+  ...landingEn,
   'environment.title': 'Environment',
   'environment.configure': 'Configure Environment',
   'environment.sectionTitle': 'Environments',
@@ -278,6 +283,12 @@ export const en = {
   'workspaceFiles.copyFailed': 'Could not copy. Select the text and copy it manually.',
   'workspaceFiles.previewAlt': 'Preview of {name}',
   'workspaceFiles.imageFailed': 'This image could not be decoded. You can still download the file.',
+  'workspaceFiles.loadingImage': 'Loading image…',
+  'turnScreenshots.title': 'Screenshots',
+  'turnScreenshots.earlier': '{count} earlier screenshots are in the workspace files.',
+  'turnScreenshots.open': 'Open {name}',
+  'turnScreenshots.close': 'Close',
+  'turnScreenshots.failed': 'Could not load',
   'workspaceFiles.tooLarge':
     'This file exceeds the workspace preview limit. Preview and download are unavailable.',
   'workspaceFiles.binaryPreview':
@@ -333,12 +344,6 @@ export const en = {
   'turnResults.backToWorkspace': 'Back to current workspace',
   'turnResults.recordedTurn': 'Recorded changes · Turn {number}',
   'turnResults.recordedHint': 'This view shows the changes recorded for this turn.',
-  'composer.send': 'Send',
-  'composer.sendHint': 'Send — Enter to send, Shift+Enter for a new line',
-  'composer.queue': 'Queue',
-  'composer.queueHint': 'Send after the current turn finishes',
-  'composer.steer': 'Steer now',
-  'composer.steerHint': 'Send into the current turn — {keys}',
   'deployment.version': 'Version',
   'deployment.date': 'Deployed',
   'deployment.unavailable': 'Not available',
@@ -351,20 +356,10 @@ export const en = {
   'review.fixHint': 'Ask this review agent to fix its findings in the shared workspace',
   'watchPr.action': 'Watch PR and merge',
   'watchPr.start':
-    'Ask the agent to watch tests and reviews, then merge. Requires source-control tools with merge access.',
-  'watchPr.unavailable':
-    'This chat must be able to continue, and its latest changes must be in the PR, before starting a PR watch.',
+    'Ask the agent to watch tests and reviews, then merge. It acts on GitHub as you, so your GitHub account needs merge access.',
+  'watchPr.unavailable': 'Available once this chat can continue and nothing is running in it.',
   'watchPr.sendFailed': 'Could not start watching this PR.',
-  'publish.create': 'Create PR',
-  'publish.update': 'Update PR',
-  'publish.createHint': 'Push this workspace to an agent/… branch and open a draft PR.',
-  'publish.updateHint': 'Push the workspace’s latest changes to its draft PR.',
-  'publish.unavailable': 'Available once the running turn finishes.',
-  'publish.inProgress': 'Publishing changes…',
-  'publish.failed': 'Could not publish changes. Try again.',
-  'publish.unchanged': 'No changes to publish.',
-  'publish.unpublished': 'Changes not in the PR yet.',
-  'publish.sendFailed': 'Could not publish this workspace.',
+  'outcome.openPr': 'Open PR',
   'sideChat.new': 'New Side Chat',
   'sideChat.close': 'Close {name}',
   'sideChat.region': 'Side chat',
@@ -416,11 +411,9 @@ export const en = {
   'nav.aria': 'Product navigation',
   'nav.skipToWorkspace': 'Skip to workspace',
   'nav.status': 'Status',
-  'nav.docsAssistant': 'Docs Assistant',
   'nav.docs': 'Documentation',
   'nav.agents': 'Agents',
   'nav.admin': 'Admin',
-  'nav.dashboard': 'Dashboard',
   'nav.logOut': 'Log out',
   'nav.logOutFailed': 'Could not log out. You are still signed in; try again.',
   'nav.switchAccount': 'Switch account',
@@ -437,9 +430,6 @@ export const en = {
   'nav.expandTaskList': 'Expand task list',
   'nav.collapseTaskList': 'Collapse task list',
 
-  'shell.accessRequired.title': 'Agent access required',
-  'shell.accessRequired.body': 'This account has not been granted access to this Agent deployment.',
-  'shell.accessRequired.back': 'Back to Dashboard',
   'shell.renderError.title': 'This page could not be displayed',
   'shell.renderError.body':
     'Something on it failed to render. Retry, or open another chat or page.',
@@ -481,7 +471,7 @@ export const en = {
   'sidebar.moved': 'Order updated',
   'sidebar.newTask': 'New task',
   'sidebar.archived': 'Archived',
-  'sidebar.noJobs': 'No jobs yet.',
+  'sidebar.noJobs': 'No tasks yet.',
   'sidebar.resize': 'Resize task list',
   'sidebar.newTaskIn': 'New task in {project}',
   'sidebar.runningOrQueued': '{count} running or queued',
@@ -544,7 +534,10 @@ export const en = {
   'settings.backToChats': 'Back to chats',
   'settings.collapseNavigation': 'Collapse settings navigation',
   'settings.expandNavigation': 'Expand settings navigation',
-  'settings.personalDescription': 'Manage your profile, default model, and notifications.',
+  'settings.personalDescription': 'Manage your profile and notifications.',
+  'settings.models.title': 'Models',
+  'settings.models.description':
+    'Your personal model connections: the provider API keys and models your tasks run on.',
   'settings.plugins': 'Plugins & MCPs',
   'settings.pluginsDescription':
     'Connect MCP servers and manage the skills available to your agents.',
@@ -560,10 +553,11 @@ export const en = {
   'settings.environmentsDescription':
     'Manage repository environments, setup scripts, and personal variables.',
   'settings.helpDescription':
-    'Connect a repository, prepare its environment, and start your first chat.',
-  'settings.helpConnect': '1. Connect your GitHub account and choose repositories',
-  'settings.helpEnvironment': '2. Set up a repository environment (optional)',
-  'settings.helpChat': '3. Start a chat',
+    'Connect a model and a repository, prepare its environment, and start your first chat.',
+  'settings.helpModel': '1. Connect a model with your provider’s API key',
+  'settings.helpConnect': '2. Connect your GitHub account and choose repositories',
+  'settings.helpEnvironment': '3. Set up a repository environment (optional)',
+  'settings.helpChat': '4. Start a chat',
   'settings.title': 'My Settings',
   'settings.shortcuts.title': 'Keyboard shortcuts',
   'settings.shortcuts.description':
@@ -672,6 +666,7 @@ export const en = {
   'settings.projectMemory.projectsError': 'Could not load repositories.',
   'settings.projectMemory.noProjects': 'Repositories you work in appear here.',
   'settings.projectMemory.confirmTitle': 'Clear the memory of {repo}?',
+  ...composerEn,
   ...modelSelectionEn,
   'settings.notifications.title': 'Notifications',
   'settings.notifications.description':
@@ -720,7 +715,7 @@ export const en = {
   'settings.language.title': 'Language',
 
   'settings.gettingStarted.about': 'What is getting started?',
-  'settings.gettingStarted.help': 'Takes you from connecting GitHub to your first task.',
+  'settings.gettingStarted.help': 'Takes you from connecting a model to your first task.',
   'settings.gettingStarted.show': 'Show again',
   'settings.gettingStarted.shown': 'Shown',
 
@@ -780,8 +775,7 @@ export const en = {
   'archive.deleteSession': 'Permanently delete {title}',
   'archive.deleteAll': 'Permanently delete all',
   'archive.deleteFiltered': 'Permanently delete filtered',
-  'archive.deleteBusy':
-    'This session is preparing a fork or publishing. Try again after it finishes.',
+  'archive.deleteBusy': 'This session is preparing a fork. Try again after it finishes.',
   'archive.preparing': 'Collecting matching sessions…',
   'archive.prepareFailed':
     'Could not collect all matching sessions. No changes were made. Please try again.',
@@ -789,10 +783,9 @@ export const en = {
   'archive.deleteTitle': 'Permanently delete {count} sessions?',
   'archive.deleteBody':
     'You will no longer be able to view or restore these sessions, and any running task is stopped. This cannot be undone. Forked sessions and pushed branches or pull requests are unaffected; a workspace shared with other sessions is kept.',
-  'archive.deleteSkipped': '{count} sessions preparing a fork or publishing are excluded.',
+  'archive.deleteSkipped': '{count} sessions preparing a fork are excluded.',
   'archive.noDeletableTitle': 'No sessions can be deleted yet',
-  'archive.noDeletable':
-    'All matching sessions are preparing a fork or publishing. Try again after they finish.',
+  'archive.noDeletable': 'All matching sessions are preparing a fork. Try again after they finish.',
   'archive.bulkLimit':
     'Select at most {count} sessions at a time. Narrow your search or project and status filters, then try again.',
   'archive.scopeSession': 'Session: {title}',
@@ -807,8 +800,6 @@ export const en = {
   'archive.deleting': 'Deleting…',
   'archive.deleteFailed': 'Could not delete these sessions. Check your connection and try again.',
   'archive.forkInProgress': 'A selected session is being forked. Wait for the fork to finish.',
-  'archive.publicationPending':
-    'A selected session has unfinished publication. Wait for it to finish.',
   'archive.sessionNotFound': 'A selected session is no longer available.',
   'archive.selectionChanged': 'The selection has changed. Review the refreshed list and try again.',
   'archive.deletedOne': '1 session deleted',
@@ -835,7 +826,7 @@ export const en = {
   'composer.heading': 'What should the agent do?',
   'composer.subheading': 'Runs in an isolated sandbox.',
   'composer.subheadingFirstVisit':
-    'Describe a task. The agent works in an isolated sandbox and opens a draft pull request in your repository.',
+    'Describe a task. The agent works on a copy of your repository in an isolated sandbox, and opens a pull request when you ask.',
   'composer.subheadingTemporary':
     'Describe a task. The agent works in an isolated sandbox that starts empty.',
   'composer.repository': 'Repository',
@@ -884,7 +875,7 @@ export const en = {
   'composer.workflowReviewTitle': 'Review',
   'composer.workflowReview': 'Follow progress, review the changes, and continue the conversation.',
   'composer.loadConfigFailed': 'could not load config',
-  'composer.startFailed': 'could not start the job',
+  'composer.startFailed': 'could not start the task',
 
   // ── Start from scratch ─────────────────────────────────────────────────
   'temporaryWorkspace.name': 'Start from scratch',
@@ -921,6 +912,7 @@ export const en = {
   'attach.mcpTools': '{count} tools',
   'attach.mcpAdd': 'Add MCP',
   'attach.mcpRetry': 'Try again',
+  'attach.mcpManage': 'Manage connection',
   'attach.mcpDisabled': 'turned off',
   'attach.mcpDraft': 'not finished',
   'attach.mcpNeedsSignIn': 'needs sign-in',
@@ -1073,6 +1065,7 @@ export const en = {
   'gettingStarted.skip': 'Skip',
   'gettingStarted.hidden': 'Hidden. Bring it back in Settings.',
   'gettingStarted.undo': 'Undo',
+  'gettingStarted.model': 'Connect a model',
   'gettingStarted.connect': 'Connect GitHub',
   'gettingStarted.repository': 'Grant a repository',
   'gettingStarted.firstTask': 'Run your first task',
@@ -1084,10 +1077,9 @@ export const en = {
     'Your repository is cloned into the sandbox. The agent only edits this copy.',
   'firstRun.workspaceCreated':
     'The sandbox starts from an empty folder. Nothing is cloned, and nothing is published.',
-  'firstRun.publishing': 'Pushing the changes to an agent/… branch and opening a draft PR.',
-  'firstRun.doneTitle': 'Your first draft PR is ready',
+  'firstRun.doneTitle': 'Your first pull request is ready',
   'firstRun.doneBody':
-    'Review it on GitHub; merging is up to you. Want changes? Reply below, then Update PR.',
+    'Review it on GitHub; merging is up to you. Want changes? Reply below and ask the agent to push them to the PR.',
 
   // ── Pending message queue ───────────────────────────────────────────────
   'queue.region': 'Queued messages',
@@ -1318,9 +1310,6 @@ export const en = {
   'ssh.rotateHint':
     'Install the new key, then test it. The old key keeps working until the new one logs in; remove the old line afterwards.',
   'ssh.testNewKey': 'Test the new key',
-  'common.loading': 'Loading…',
-  'common.retry': 'Retry',
-  'common.refreshFailed': 'Refresh failed — showing the last successful read.',
 } as const;
 
 export type TranslationKey = keyof typeof en;

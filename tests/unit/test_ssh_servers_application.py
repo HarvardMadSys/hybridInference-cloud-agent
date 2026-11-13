@@ -20,7 +20,7 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from cloud_agent.application import ssh_servers as app
 from cloud_agent.application.ssh_servers import CheckFailed
-from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 
 _HOST_KEY = (
     ed25519.Ed25519PrivateKey.generate()

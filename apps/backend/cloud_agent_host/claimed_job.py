@@ -2,18 +2,19 @@
 
 These values describe the attempt handed to a host before execution begins.
 They depend on shared plugin validation, without loading the runner's sandbox,
-process, heartbeat, or publication orchestration.
+process, or heartbeat orchestration.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass, field, fields
+from typing import Any, Protocol, runtime_checkable
 
 from cloud_agent_shared.environment import BoundEnvironment
 from cloud_agent_shared.environment_snapshots import EnvironmentSnapshotRef
 from cloud_agent_shared.model_connections import ModelConnectionAccess
 from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, validate_sandbox_plugins
+from cloud_agent_shared.sandbox_mcp import SandboxMcpServer, parse_sandbox_mcp_servers
 from cloud_agent_shared.ssh_access import SshAccess
 
 
@@ -22,7 +23,7 @@ class LeaseLost(Exception):
 
 
 class ClaimUnreachable(Exception):
-    """The gateway could not be reached *to claim*, so no job was taken.
+    """The control plane could not be reached *to claim*, so no job was taken.
 
     Distinct from a transport failure later in the run: that one leaves an
     attempt running until its lease expires, and an operator needs to be sent
@@ -59,9 +60,6 @@ class ClaimedJob:
     runtime: str
     model: str
     worker_token: str
-    # The attempt's gateway grant. It does not enter the sandbox: each member's
-    # CLI runs on its own residency grant from `establish_shared_residency`.
-    sandbox_token: str
     execution_profile: str = "trusted-v1"
     # How hard the model should think on this turn, in the runtime's own
     # vocabulary. None is Auto: no flag, whatever the CLI and model default to.
@@ -79,16 +77,22 @@ class ClaimedJob:
     # The group's whole SSH state, present only for a group whose chats have
     # ever selected an SSH server. It carries private keys.
     ssh_access: SshAccess | None = field(default=None, repr=False)
-    # The owner's own model connection this turn runs on, key included; None
-    # for a Gateway turn. Its key is the member's credential, not a grant.
+    # The owner's own model connection this turn runs on, key included. None
+    # only for an environment test, which runs no agent. Its key is the
+    # member's credential.
     model_connection: ModelConnectionAccess | None = field(default=None, repr=False)
     # Explicit CLI plugins installed in this chat's private member state.
     plugins: list[dict[str, str]] = field(default_factory=list)
     # Read-only, single-repo, short-lived: what the runner clones with. Never
     # put in .git/config or the sandbox environment.
     clone_token: str | None = None
-    # A separate repository-scoped contents/PR write token for sandbox gh.
-    github_token: str | None = field(default=None, repr=False)
+    # The branch this conversation started from. The claim carries it in
+    # metadata under ``_agent_base_ref`` (``cloud_agent.schemas.jobs``);
+    # the column stores only the pinned commit, because a branch moves.
+    # None when the conversation named none, or the claim predates sending
+    # metadata. The checkout pins the name locally: a shallow clone has no
+    # remote-tracking branch to diff against.
+    base_ref: str | None = None
     parent_job_id: str | None = None
     turn_no: int = 1
     # MCP connection aliases this job was granted. Aliases only: the runner
@@ -96,6 +100,10 @@ class ClaimedJob:
     # because the sandbox reaches them through this service's MCP-only relay
     # rather than directly.
     mcp_bindings: list[str] = field(default_factory=list)
+    # MCP servers the user chose to run inside the sandbox, with their launch
+    # (cloud_agent_shared.sandbox_mcp). Their own keys ride in ``secret_env``
+    # for the slot's runner, and are masked like every marked claim field.
+    sandbox_mcp_servers: tuple[SandboxMcpServer, ...] = ()
     # The CLI version the control plane stamped on this attempt, resolved from
     # the thread's pin, the deployment's selection, or this host's default.
     # ``None`` from a control plane that predates selection — the image's
@@ -114,6 +122,8 @@ class ClaimedJob:
     # earlier turns' files, so only a new container or a turn that attached
     # something needs the import to run.
     turn_attachment_count: int = 0
+    #: What the platform wrapped the prompt in, by size (``started`` carries it).
+    context_injections: tuple[dict[str, Any], ...] = ()
 
     @classmethod
     def from_response(cls, body: dict[str, Any]) -> ClaimedJob:
@@ -151,10 +161,10 @@ class ClaimedJob:
             # the same thing as Auto — no separate "unknown" state to carry.
             reasoning_effort=body.get("reasoning_effort"),
             worker_token=body["worker_token"],
-            sandbox_token=body["sandbox_token"],
             clone_token=body.get("clone_token") or None,
-            github_token=body.get("github_token") or None,
+            base_ref=_claim_base_ref(body.get("metadata")),
             mcp_bindings=list(body.get("mcp_bindings") or []),
+            sandbox_mcp_servers=parse_sandbox_mcp_servers(body.get("sandbox_mcp_servers")),
             runtime_version=body.get("runtime_version") or None,
             thread_sandbox=(
                 dict(body["thread_sandbox"])
@@ -163,26 +173,96 @@ class ClaimedJob:
             ),
             thread_attachment_count=int(body.get("thread_attachment_count") or 0),
             turn_attachment_count=int(body.get("turn_attachment_count") or 0),
+            context_injections=_context_injections(body.get("context_injections")),
+        )
+
+    def started_context_fields(self) -> dict[str, Any]:
+        """What ``started`` records of the platform's prompt wrapping: sizes, never text."""
+        return (
+            {"context_injections": list(self.context_injections)} if self.context_injections else {}
         )
 
 
+# The control plane stores the branch the owner picked here. Duplicated rather
+# than imported: this package does not depend on the control plane.
+_BASE_REF_METADATA_KEY = "_agent_base_ref"
+_MAX_BASE_REF_CHARS = 256
+
+
+def _claim_base_ref(metadata: Any) -> str | None:
+    """The conversation's base branch, or ``None`` when the claim names none.
+
+    Shape is checked properly when the branch is pinned (``git
+    check-ref-format``). This only drops a value that cannot be a branch
+    name, so a forged or stale metadata entry cannot reach git's argv.
+    """
+    if not isinstance(metadata, dict):
+        return None
+    ref = metadata.get(_BASE_REF_METADATA_KEY)
+    if not isinstance(ref, str):
+        return None
+    # Reject before stripping: a trailing newline is a control character,
+    # and strip() would otherwise turn it into a normal branch name.
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in ref):
+        return None
+    ref = ref.strip()
+    if not ref or len(ref) > _MAX_BASE_REF_CHARS:
+        return None
+    return ref
+
+
+#: Platform injection records one claim carries, and the fields each may hold.
+_MAX_INJECTIONS = 10
+_INJECTION_FIELDS = ("producer", "items", "chars", "ascii", "cjk", "names")
+
+
+def _context_injections(value: Any) -> tuple[dict[str, Any], ...]:
+    """The claim's injection records, bounded; anything else is dropped, never fatal."""
+    if not isinstance(value, list):
+        return ()
+    records = []
+    for item in value[:_MAX_INJECTIONS]:
+        if isinstance(item, dict) and isinstance(item.get("producer"), str):
+            record = {key: item[key] for key in _INJECTION_FIELDS if key in item}
+            if isinstance(record.get("names"), list):
+                record["names"] = [str(name)[:120] for name in record["names"][:20]]
+            records.append(record)
+    return tuple(records)
+
+
+@runtime_checkable
+class _HoldsSecrets(Protocol):
+    """A claim value that names the credentials it puts into the sandbox."""
+
+    def secrets(self) -> dict[str, str]:
+        """Each credential by the name its ``[secret:NAME]`` marker shows."""
+        ...
+
+
 def claim_secret_values(job: ClaimedJob) -> dict[str, str]:
-    """Every value the claim put in the sandbox that output must never show."""
-    values = job.environment.secrets() if job.environment else {}
-    if job.ssh_access is not None:
-        values = {**values, **job.ssh_access.secrets()}
-    if job.model_connection is not None:
-        # With the token this member's CLI holds on a translated plan.
-        values = {**values, **job.model_connection.secrets()}
+    """Every value the claim put in the sandbox that output must never show.
+
+    Derived, not listed: every claim field holding secrets names its own, in
+    field order, which is the order the redactor picks a value's name in.
+    What each must name is its fields marked
+    :class:`~cloud_agent_shared.secret_redaction.Masked`, and
+    ``tests/unit/test_claim_secret_masking.py`` walks the claim to prove it does.
+    """
+    values: dict[str, str] = {}
+    for item in fields(job):
+        value = getattr(job, item.name)
+        for holder in value if isinstance(value, tuple | list) else (value,):
+            if isinstance(holder, _HoldsSecrets):
+                values.update(holder.secrets())
     return values
 
 
 def model_connection_launch(job: ClaimedJob) -> dict[str, str]:
-    """The process-fixed launch fields of a turn on an owner connection; none otherwise.
+    """The process-fixed launch fields of a turn's owner connection; none without one.
 
     Part of the launch a live process is compared against, so a turn after the
     key or endpoint changed starts a new process instead of borrowing one that
-    holds the old key, and a Gateway turn never borrows one that holds a key.
+    holds the old key.
     """
     return job.model_connection.launch_fields() if job.model_connection is not None else {}
 

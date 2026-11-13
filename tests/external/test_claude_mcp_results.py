@@ -130,7 +130,7 @@ async def test_claude_receives_github_results_after_relay_and_owner_approval(
         live_argv, env = runtime.prepare_live(
             workdir=str(tmp_path),
             model="test-model",
-            gateway_base_url=f"http://127.0.0.1:{model_port}",
+            model_base_url=f"http://127.0.0.1:{model_port}",
             credential="synthetic-model-key",
             config_dir=str(tmp_path / "claude-config"),
             mcp_config=RuntimeMCPConfig(

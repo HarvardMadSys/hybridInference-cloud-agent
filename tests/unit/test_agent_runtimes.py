@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from cloud_agent.domain.thread_stats import summarize_attempt_rollup
 from cloud_agent_host.runtimes import (
     MAX_INIT_TOOLS,
     MERGED_MCP_SERVER_NAME,
@@ -29,6 +30,7 @@ from cloud_agent_host.runtimes import (
     RuntimeMCPUnavailableError,
     get_runtime,
 )
+from cloud_agent_host.runtimes.codex.adapter import NATIVE_LAUNCHER
 from cloud_agent_shared.event_payloads import MAX_EVENT_PAYLOAD_BYTES, TRUNCATION_NOTICE
 from cloud_agent_shared.runtime_catalog import runtime_reasoning_efforts, runtimes_supporting_mcp
 
@@ -488,7 +490,7 @@ def test_claude_asks_for_the_answer_while_it_is_written():
     live, _ = ClaudeCodeRuntime().prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="https://gateway.example.com/v1",
+        model_base_url="https://gateway.example.com/v1",
         credential="ajt.a.b",
     )
     assert "--include-partial-messages" in live
@@ -513,13 +515,17 @@ def test_claude_previews_the_answer_text_and_nothing_else():
         ("msg_2:0", "Done."),
     ]
     # Thinking, a tool call's input and the message frame are consumed, not
-    # stored: the normalized transcript is the one the CLI gave without the flag.
+    # stored: the normalized transcript is the one the CLI gave without the flag,
+    # plus one usage event per model call, carrying the output count only its
+    # message_delta reports (see test_each_model_call_reports_its_output_as_it_ends).
     assert [event.event_type for event in events if event.event_type != "raw"] == [
         "thinking",
         "message",
         "tool_use",
+        "usage",
         "tool_result",
         "message",
+        "usage",
         "lifecycle",
     ]
     messages = [event.payload for event in events if event.event_type == "message"]
@@ -555,13 +561,107 @@ def test_a_preview_piece_is_not_a_model_response():
 
 
 def test_a_claude_subagents_text_is_not_previewed():
-    """A subagent's answer is reported by its complete lines only."""
+    """A subagent's answer is reported by its complete lines only.
+
+    Its stream yields nothing, not even an output count: the CLI does not
+    forward a subagent's stream, so its calls are counted by the ``result``.
+    """
     runtime = ClaudeCodeRuntime(clock=_Clock(step=1.0))
     for line in _partial_stream_lines():
         record = json.loads(line)
         if record["type"] == "stream_event":
             record["parent_tool_use_id"] = "toolu_task"
             assert runtime.parse_event(json.dumps(record)) is None
+
+
+def test_each_model_call_reports_its_output_as_it_ends():
+    """The running stats see a call's real output once it ends, not at the result.
+
+    Claude's ``assistant`` lines repeat the usage a call reported as it began
+    (output ``1`` here, ``0`` through the gateway), so while a turn ran its
+    output read as nothing. Each call's ``message_delta`` carries the count.
+    """
+    runtime = ClaudeCodeRuntime(clock=_Clock(step=1.0))
+    events = [e for line in _partial_stream_lines() if (e := runtime.parse_event(line))]
+
+    usage = [e.payload for e in events if e.event_type == "usage"]
+    assert usage == [
+        {"usage": {"output_tokens": 9}, "usage_id": "msg_1"},
+        {"usage": {"output_tokens": 5}, "usage_id": "msg_2"},
+    ]
+    blocks = [e.payload for e in events if e.event_type in {"thinking", "message", "tool_use"}]
+    assert {b["usage_id"] for b in blocks} == {"msg_1", "msg_2"}, "same ids as the blocks"
+    result = next(e for e in events if e.payload.get("usage_scope") == "attempt")
+    assert (
+        sum(u["usage"]["output_tokens"] for u in usage) == result.payload["usage"]["output_tokens"]
+    )
+
+    before_result = summarize_attempt_rollup(
+        attempt_id=1,
+        job_id="ajob_1",
+        events=[
+            {"event_type": e.event_type, "payload": e.payload, "seq": seq}
+            for seq, e in enumerate(events, start=1)
+            if e.payload.get("usage_scope") != "attempt"
+        ],
+    )
+    assert before_result.output_tokens == 14
+
+
+def test_a_call_reporting_its_output_twice_counts_the_later_total():
+    """``message_delta`` counts are cumulative; a call may send more than one.
+
+    The pinned CLI was seen reporting 2 and then 9 for one call. Each rise is
+    reported under the call's id, so the stats (largest per id) read 9.
+    """
+    runtime = ClaudeCodeRuntime()
+
+    def stream(event):
+        return runtime.parse_event(json.dumps({"type": "stream_event", "event": event}))
+
+    start = {"type": "message_start", "message": {"id": "msg_1", "usage": {"output_tokens": 1}}}
+    assert stream(start) is None
+    reported = [
+        event.payload
+        for count in (2, 9, 9, 4)
+        if (event := stream({"type": "message_delta", "usage": {"output_tokens": count}}))
+    ]
+    assert reported == [
+        {"usage": {"output_tokens": 2}, "usage_id": "msg_1"},
+        {"usage": {"output_tokens": 9}, "usage_id": "msg_1"},
+    ]
+    rollup = summarize_attempt_rollup(
+        attempt_id=1,
+        job_id="ajob_1",
+        events=[
+            {"event_type": "usage", "payload": payload, "seq": seq}
+            for seq, payload in enumerate(reported, start=1)
+        ],
+    )
+    assert rollup.output_tokens == 9
+
+
+@pytest.mark.parametrize(
+    "delta",
+    [
+        {"type": "message_delta", "usage": {}},
+        {"type": "message_delta", "usage": {"output_tokens": "9"}},
+        {"type": "message_delta", "usage": {"output_tokens": True}},
+        {"type": "message_delta", "usage": {"output_tokens": -1}},
+        {"type": "message_delta"},
+    ],
+)
+def test_a_delta_without_a_usable_output_count_adds_nothing(delta):
+    runtime = ClaudeCodeRuntime()
+    start = {"type": "message_start", "message": {"id": "msg_1", "usage": {"input_tokens": 3}}}
+    assert runtime.parse_event(json.dumps({"type": "stream_event", "event": start})) is None
+    assert runtime.parse_event(json.dumps({"type": "stream_event", "event": delta})) is None
+
+
+def test_a_delta_with_no_call_started_adds_nothing():
+    runtime = ClaudeCodeRuntime()
+    delta = {"type": "message_delta", "usage": {"output_tokens": 9}}
+    assert runtime.parse_event(json.dumps({"type": "stream_event", "event": delta})) is None
 
 
 def _pi_contract_lines() -> list[str]:
@@ -902,7 +1002,7 @@ def test_claude_points_at_the_gateway_and_disables_telemetry():
     argv, env = ClaudeCodeRuntime().prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="https://gateway.example.com/v1",
+        model_base_url="https://gateway.example.com/v1",
         credential="ajt.a.b",
     )
     # Prompts arrive on stdin, as stream-json, and each is echoed when read.
@@ -922,7 +1022,7 @@ def test_claude_native_requests_use_bounded_extended_retries():
     _argv, env = ClaudeCodeRuntime().prepare_live(
         workdir="/w",
         model="kimi-k3",
-        gateway_base_url="http://gateway",
+        model_base_url="http://gateway",
         credential="inference-credential",
     )
     assert env["CLAUDE_CODE_MAX_RETRIES"] == "15"
@@ -938,10 +1038,10 @@ def test_codex_config_targets_the_gateway():
     argv, env = CodexRuntime().prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="http://localhost:8000",
+        model_base_url="http://localhost:8000",
         credential="ajt.a.b",
     )
-    assert argv[0] == "codex"
+    assert argv[: len(NATIVE_LAUNCHER) + 1] == [*NATIVE_LAUNCHER, "codex"]
     assert argv[-1] == "app-server"
     assert env["CODEX_API_KEY"] == "ajt.a.b"
 
@@ -960,7 +1060,7 @@ def test_codex_keeps_its_native_state_in_the_state_root():
     argv, env = CodexRuntime().prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="http://backend:8080",
+        model_base_url="http://backend:8080",
         credential="ajt.a.b",
         provides_isolation=True,
         session_state_dir="/agent-state",
@@ -994,7 +1094,7 @@ def test_pi_runtime_targets_the_gateway_through_its_wrapper():
     argv, env = runtime.prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="http://backend:8080",
+        model_base_url="http://backend:8080",
         credential="ajt.a.b",
     )
 
@@ -1025,7 +1125,7 @@ def test_pi_native_session_is_persisted_and_resumed_explicitly():
     argv, env = runtime.prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="http://backend:8080",
+        model_base_url="http://backend:8080",
         credential="ajt.a.b",
         session_state_dir="/agent-state",
         resume_session_id="pi-session-123",
@@ -1043,10 +1143,10 @@ class _Unmediated(AgentRuntime):
     name = "unmediated"
 
     def prepare_live(
-        self, *, mcp_config: RuntimeMCPConfig, gateway_base_url: str, **_: object
+        self, *, mcp_config: RuntimeMCPConfig, model_base_url: str, **_: object
     ) -> tuple[list[str], dict[str, str]]:
         env: dict[str, str] = {}
-        self._accept_mcp(mcp_config, gateway_base_url=gateway_base_url, env=env)
+        self._accept_mcp(mcp_config, model_base_url=model_base_url, env=env)
         return ["unmediated"], env
 
 
@@ -1068,7 +1168,7 @@ def test_mcp_config_fails_closed_without_an_isolated_relay(runtime):
         runtime.prepare_live(
             workdir="/tmp/x",
             model="glm-5.1",
-            gateway_base_url="http://backend:8080",
+            model_base_url="http://backend:8080",
             credential="mcp-secret-must-not-leak",
             mcp_config=config,
         )
@@ -1093,7 +1193,7 @@ def test_a_sandbox_managered_runtime_emits_only_relay_endpoints_and_no_credentia
     argv, env = ClaudeCodeRuntime().prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="http://backend:8080",
+        model_base_url="http://backend:8080",
         credential="agr-inference-grant-must-not-leak",
         mcp_config=RuntimeMCPConfig(
             server_ids=("github",),
@@ -1120,7 +1220,7 @@ def test_claude_idle_timeout_covers_owner_approval_and_returns_its_outcome():
     argv, env = ClaudeCodeRuntime().prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="http://backend:8080",
+        model_base_url="http://backend:8080",
         credential="test-grant",
         mcp_config=RuntimeMCPConfig(
             server_ids=("github",), base_url="http://agent-mcp:8000", credential="test-mcp-token"
@@ -1144,7 +1244,7 @@ def test_runtime_credentials_stay_out_of_process_arguments(runtime):
     argv, _env = runtime.prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="http://backend:8080",
+        model_base_url="http://backend:8080",
         credential=credential,
         mcp_config=RuntimeMCPConfig(),
     )
@@ -1164,7 +1264,7 @@ def test_opencode_runtime_targets_the_gateway_through_its_wrapper():
     argv, env = runtime.prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="http://backend:8080",
+        model_base_url="http://backend:8080",
         credential="ajt.a.b",
     )
 
@@ -1181,7 +1281,7 @@ def test_opencode_native_session_id_and_xdg_state_are_explicit():
     _argv, env = OpencodeRuntime().prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="http://backend:8080",
+        model_base_url="http://backend:8080",
         credential="ajt.a.b",
         session_state_dir="/agent-state",
         resume_session_id="ses_open_123",
@@ -1204,7 +1304,7 @@ def test_kilo_runtime_targets_the_gateway_through_its_wrapper():
     argv, env = runtime.prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="http://backend:8080",
+        model_base_url="http://backend:8080",
         credential="ajt.a.b",
     )
 
@@ -1221,7 +1321,7 @@ def test_kilo_native_session_id_and_xdg_state_are_explicit():
     _argv, env = KiloRuntime().prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url="http://backend:8080",
+        model_base_url="http://backend:8080",
         credential="ajt.a.b",
         session_state_dir="/agent-state",
         resume_session_id="ses_kilo_123",
@@ -1236,20 +1336,90 @@ def test_system_telemetry_does_not_become_408_milestones():
 
     Shape taken from the first real staging job, not from documentation: it
     stored 412 lifecycle events, 408 of them ``subtype: "thinking_tokens"``,
-    which the UI then drew as 408 ticked-off steps. The first occurrence is
-    kept as a raw diagnostic so a new subtype stays discoverable; the rest are
-    dropped.
+    which the UI then drew as 408 ticked-off steps. A subtype nobody has
+    classified keeps its first occurrence as a raw diagnostic so it stays
+    discoverable; the rest are dropped.
     """
     runtime = ClaudeCodeRuntime()
-    line = json.dumps({"type": "system", "subtype": "thinking_tokens", "session_id": "s1"})
+    line = json.dumps({"type": "system", "subtype": "brand_new_counter", "session_id": "s1"})
 
     first = runtime.parse_event(line)
     assert first is not None
     assert first.event_type == "raw", "an unclassified subtype must not pass as a milestone"
-    assert "thinking_tokens" in first.payload["reason"]
+    assert "brand_new_counter" in first.payload["reason"]
 
     for _ in range(407):
         assert runtime.parse_event(line) is None, "repeats must be suppressed, not stored"
+
+
+# Shapes copied from staging's event log (claude-code 2.1.300), ids shortened.
+_KNOWN_SILENT_LINES = [
+    {"type": "system", "subtype": "status", "status": "requesting", "session_id": "s"},
+    {"type": "system", "subtype": "thinking_tokens", "estimated_tokens": 1, "session_id": "s"},
+    {
+        "type": "system",
+        "subtype": "task_started",
+        "task_id": "b1",
+        "tool_use_id": "t1",
+        "description": "Create venv",
+        "task_type": "local_bash",
+    },
+    {
+        "type": "system",
+        "subtype": "task_progress",
+        "task_id": "a1",
+        "usage": {"total_tokens": 3044, "tool_uses": 1},
+    },
+    {"type": "system", "subtype": "task_updated", "task_id": "a1", "patch": {"status": "done"}},
+    {"type": "system", "subtype": "task_notification", "task_id": "b1", "status": "completed"},
+    {"type": "system", "subtype": "background_tasks_changed", "tasks": [{"task_id": "a1"}]},
+    {"type": "system", "subtype": "session_title_changed", "title": "R3-A"},
+    {"type": "system", "subtype": "vcs_state_changed", "kind": "commit", "cwd": "/workspace"},
+    {
+        "type": "tool_progress",
+        "tool_use_id": "t1-heartbeat-0",
+        "tool_name": "mcp__session__x",
+        "elapsed_time_seconds": 30,
+        "heartbeat": True,
+    },
+    {
+        "type": "control_request",
+        "request_id": "r1",
+        "request": {"subtype": "can_use_tool", "tool_name": "AskUserQuestion", "input": {}},
+    },
+    {"type": "control_response", "response": {"subtype": "success", "request_id": "r1"}},
+    {"type": "control_cancel_request", "request_id": "r1"},
+]
+
+
+@pytest.mark.parametrize(
+    "record", _KNOWN_SILENT_LINES, ids=lambda r: str(r.get("subtype") or r["type"])
+)
+def test_understood_telemetry_is_not_reported_as_unclassified(record):
+    """Lines the adapter understands are not stored, not even once per job.
+
+    Left unclassified, each arrived as a raw diagnostic in every job (staging:
+    100 jobs had ``status``, 43 ``task_started``), which buries a line that
+    really is new.
+    """
+    assert ClaudeCodeRuntime().parse_event(json.dumps(record)) is None
+
+
+def test_an_unknown_type_is_reported_once_per_job():
+    """A heartbeat of an unknown type must not be stored per emission either.
+
+    Before, only system subtypes were deduplicated: ``tool_progress`` stored
+    388 rows across 28 staging jobs.
+    """
+    runtime = ClaudeCodeRuntime()
+    line = json.dumps({"type": "brand_new_heartbeat", "elapsed_time_seconds": 30})
+
+    first = runtime.parse_event(line)
+    assert first is not None and first.event_type == "raw"
+    assert first.payload["reason"] == "unknown type 'brand_new_heartbeat'"
+    assert all(runtime.parse_event(line) is None for _ in range(50))
+    other = runtime.parse_event(json.dumps({"type": "another_new_type"}))
+    assert other is not None and other.event_type == "raw"
 
 
 def test_real_milestones_still_arrive_as_lifecycle():
@@ -1367,7 +1537,7 @@ def test_the_contract_fixture_carries_the_harness_fields():
 
 def test_suppression_does_not_leak_between_jobs():
     """Each job gets its own adapter, so its first occurrence is still reported."""
-    line = json.dumps({"type": "system", "subtype": "thinking_tokens"})
+    line = json.dumps({"type": "system", "subtype": "brand_new_counter"})
     assert ClaudeCodeRuntime().parse_event(line) is not None
     assert ClaudeCodeRuntime().parse_event(line) is not None
 
@@ -1394,7 +1564,7 @@ def _mcp_argv(*server_ids: str) -> list[str]:
     argv, _env = ClaudeCodeRuntime().prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url=_MCP_GATEWAY,
+        model_base_url=_MCP_GATEWAY,
         credential="mcp-secret-must-not-leak",
         mcp_config=RuntimeMCPConfig(server_ids=server_ids),
     )
@@ -1426,7 +1596,7 @@ def test_the_relay_base_url_is_normalized_once():
     argv, _env = ClaudeCodeRuntime().prepare_live(
         workdir="/tmp/x",
         model="glm-5.1",
-        gateway_base_url=_MCP_GATEWAY,
+        model_base_url=_MCP_GATEWAY,
         credential="inference-credential",
         mcp_config=RuntimeMCPConfig(
             server_ids=("github",),
@@ -1449,7 +1619,7 @@ def test_requesting_mcp_with_no_relay_address_refuses_rather_than_guessing():
         ClaudeCodeRuntime().prepare_live(
             workdir="/tmp/x",
             model="glm-5.1",
-            gateway_base_url=_MCP_GATEWAY,
+            model_base_url=_MCP_GATEWAY,
             credential="inference-credential",
             mcp_config=RuntimeMCPConfig(server_ids=("github",)),
         )
@@ -1483,7 +1653,7 @@ def test_pi_loads_the_images_bridge_and_nothing_else():
     argv, env = PiRuntime().prepare_live(
         workdir="/w",
         model="glm-5.1",
-        gateway_base_url=_MCP_GATEWAY,
+        model_base_url=_MCP_GATEWAY,
         credential="inference-credential",
         mcp_config=RuntimeMCPConfig(
             server_ids=("github",),
@@ -1507,7 +1677,7 @@ def test_codex_and_kilo_carry_one_relay_and_a_separate_mcp_token(runtime):
     settings = {
         "workdir": "/w",
         "model": "glm-5.1",
-        "gateway_base_url": _MCP_GATEWAY,
+        "model_base_url": _MCP_GATEWAY,
         "credential": "inference-token",
         "mcp_config": RuntimeMCPConfig(
             server_ids=("github", "docs"),
@@ -1544,7 +1714,7 @@ def test_a_wrapper_runtime_publishes_the_relay_urls_and_the_token_reference():
     argv, env = OpencodeRuntime().prepare_live(
         workdir="/w",
         model="glm-5.1",
-        gateway_base_url=_MCP_GATEWAY,
+        model_base_url=_MCP_GATEWAY,
         credential="inference-credential",
         mcp_config=RuntimeMCPConfig(
             server_ids=("github", "docs"),
@@ -1573,7 +1743,7 @@ def test_a_wrapper_runtime_refuses_connections_it_has_no_credential_for():
         OpencodeRuntime().prepare_live(
             workdir="/w",
             model="glm-5.1",
-            gateway_base_url=_MCP_GATEWAY,
+            model_base_url=_MCP_GATEWAY,
             credential="inference-credential",
             mcp_config=RuntimeMCPConfig(server_ids=("github",), base_url=_MCP_GATEWAY),
         )
@@ -1583,7 +1753,7 @@ def _prepare(runtime, **kwargs):
     return runtime.prepare_live(
         workdir="/w",
         model="glm-5.3",
-        gateway_base_url="https://gw.test/v1",
+        model_base_url="https://gw.test/v1",
         credential="tok",
         **kwargs,
     )

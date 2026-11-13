@@ -16,7 +16,11 @@ from cloud_agent.api import source_control
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_agent_gitlab_oauth, get_storage
 from cloud_agent.ports import McpConnectionRepository, SourceControlRepository
-from cloud_agent.source_control import GitLabOAuthClient, GitLabOAuthConfig, SourceControlCipher
+from cloud_agent.source_control.source_control import (
+    GitLabOAuthClient,
+    GitLabOAuthConfig,
+    SourceControlCipher,
+)
 from cloud_agent.storage.assembly import Storage
 
 if TYPE_CHECKING:

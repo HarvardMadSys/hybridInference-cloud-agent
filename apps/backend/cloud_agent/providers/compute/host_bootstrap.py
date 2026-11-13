@@ -3,7 +3,7 @@
 The first supported bootstrap OS is Ubuntu 22.04/24.04 amd64 with passwordless
 sudo and KVM. Docker/Compose and pinned Kata can be installed by the trusted
 profile. Tunnel permissions and sandbox manager routing must already be provisioned on
-the stable control-plane/gateway machines and supplied through the profile.
+the stable control-plane machine and supplied through the profile.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Any
 
 from dotenv import dotenv_values
 
-from cloud_agent.compute_secrets import ComputeSecretError
 from cloud_agent.ports.external.compute_provider import ProviderError
 from cloud_agent.ports.external.host_bootstrap import (
     BootstrapResult,
@@ -30,6 +29,7 @@ from cloud_agent.ports.external.host_bootstrap import (
     RecordedHostState,
     TransferResult,
 )
+from cloud_agent.providers.compute.compute_secrets import ComputeSecretError
 from cloud_agent.providers.compute.release_scripts import _INVENTORY, _QUIESCE
 from cloud_agent.providers.compute.ssh import known_hosts_line
 from cloud_agent.providers.compute.transfer_scripts import (
@@ -556,7 +556,7 @@ with open(lock_path, 'a') as lock:
         run('data_mount_failed', ['systemctl', 'daemon-reload'])
     if params['install']:
         run('prerequisites_update_failed', ['apt-get', 'update'])
-        run('prerequisites_install_failed', ['apt-get', 'install', '-y', 'docker.io', 'docker-compose-v2', 'docker-buildx', 'curl', 'ca-certificates', 'xz-utils', 'zstd', 'rsync', 'nftables'])
+        run('prerequisites_install_failed', ['apt-get', 'install', '-y', 'docker.io', 'docker-compose-v2', 'docker-buildx', 'curl', 'ca-certificates', 'xz-utils', 'zstd', 'rsync', 'nftables', 'python3-yaml'])
         run('docker_start_failed', ['systemctl', 'enable', '--now', 'docker'])
         # The bundled script validates its pinned download checksum and KVM.
         run('kata_install_failed', ['bash', 'deploy/host/setup_kata_runtime.sh'])
@@ -606,9 +606,6 @@ print(json.dumps({'ready': ready, 'blocked_reasons': [] if ready else ['host_rea
 _REQUIRED_ENV = {
     "AGENT_SANDBOX_IMAGE",
     "AGENT_SANDBOX_MANAGER_TOKEN",
-    "AGENT_TUNNEL_SSH_DESTINATION",
-    "AGENT_TUNNEL_SSH_KEY",
-    "AGENT_TUNNEL_SSH_KNOWN_HOSTS",
     "AGENT_MCP_TUNNEL_SSH_DESTINATION",
     "AGENT_MCP_TUNNEL_SSH_KEY",
     "AGENT_MCP_TUNNEL_SSH_KNOWN_HOSTS",
@@ -627,21 +624,44 @@ _ALLOWED_NON_AGENT_ENV = {
     "COMPOSE_PROJECT",
     "SIBLING_COMPOSE_PROJECTS",
     "SHARED_READY_TIMEOUT",
-    "CLAUDE_CODE_EXTRA_VERSIONS",
-    "CODEX_EXTRA_VERSIONS",
-    "PI_EXTRA_VERSIONS",
-    "OPENCODE_EXTRA_VERSIONS",
-    "KILO_EXTRA_VERSIONS",
 }
+#: The relays a host's sandboxes and runner reach: the MCP-only relay and the
+#: control-plane API. Each has its own key and known_hosts file.
+_TUNNEL_PREFIXES = ("AGENT_MCP_TUNNEL", "AGENT_CONTROL_PLANE_TUNNEL")
 _FORBIDDEN_ENV = {
     "AGENT_COMPUTE_SECRET_KEY",
     "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY",
     "AGENT_CONTROL_TOKEN_SECRET",
     "AGENT_SESSION_SECRET",
+    "AGENT_LOCAL_SESSION_SECRET",
+    "AGENT_SMTP_PASSWORD",
     "AGENT_SANDBOX_ALLOW_OPEN_NETWORK",
     "AGENT_EGRESS_AGENT_TIER",
     "ALLOW_UNSAFE_CONTAINER_BACKEND",
 }
+
+
+#: Host settings of the removed Gateway inference relay and account mode. The
+#: host recipe refuses them too (``sandbox_host.sh``).
+_RETIRED_ENV = frozenset(
+    {
+        "AGENT_AUTH_MODE",
+        "AGENT_GATEWAY_URL",
+        "AGENT_GATEWAY_HOSTNAME",
+        "AGENT_TUNNEL_SSH_DESTINATION",
+        "AGENT_TUNNEL_SSH_PORT",
+        "AGENT_TUNNEL_SSH_KEY",
+        "AGENT_TUNNEL_SSH_KNOWN_HOSTS",
+        "AGENT_TUNNEL_REMOTE_HOST",
+        "AGENT_TUNNEL_REMOTE_PORT",
+        "AGENT_TUNNEL_LISTEN_PORT",
+    }
+)
+
+
+def _retired_inference(values: dict[str, str | None]) -> bool:
+    """Whether a profile still configures the removed Gateway inference relay or mode."""
+    return any(value for name, value in values.items() if name in _RETIRED_ENV)
 
 
 def _repack(source: bytes, assets: dict[str, bytes]) -> bytes:
@@ -759,6 +779,45 @@ def _remote_reasons(value: object) -> tuple[str, ...]:
     return tuple(reason for reason in value if _remote_reason(reason) is not None)
 
 
+def _check_host_environment(values: dict[str, str | None]) -> None:
+    """Refuse a host environment outside the approved security boundary."""
+    if _retired_inference(values):
+        raise ProviderError(
+            "deployment_profile_invalid",
+            "Deployment profile still configures the removed Gateway inference relay "
+            "or account mode (AGENT_AUTH_MODE, AGENT_GATEWAY_*, AGENT_TUNNEL_SSH_* and "
+            "the relay's ports); remove those settings",
+        )
+    if (
+        any(not name.startswith("AGENT_") and name not in _ALLOWED_NON_AGENT_ENV for name in values)
+        or any(name in values for name in _FORBIDDEN_ENV)
+        or values.get("AGENT_SANDBOX_BACKEND", "kata") != "kata"
+    ):
+        raise ProviderError(
+            "deployment_profile_invalid",
+            "Deployment profile violates the approved host security boundary",
+        )
+    if any(not values.get(name) for name in _REQUIRED_ENV):
+        raise ProviderError(
+            "deployment_profile_invalid",
+            "Deployment profile is missing required relay, sandbox manager or network settings",
+        )
+
+
+def _check_single_line(values: dict[str, str | None]) -> None:
+    """Refuse an environment value Compose's single quotes could not hold literally."""
+    for key, environment_value in values.items():
+        if (
+            not re.fullmatch(r"[A-Z][A-Z0-9_]*", key)
+            or environment_value is None
+            or any(c in environment_value for c in ("\n", "\r", "'", "\x00"))
+        ):
+            raise ProviderError(
+                "deployment_profile_invalid",
+                "Deployment environment must contain single-line values",
+            )
+
+
 class SshHostBootstrap:
     """Install and verify the existing host deployment recipe through SSH."""
 
@@ -863,12 +922,8 @@ class SshHostBootstrap:
             "identity": identity,
         }
 
-    async def _archive(  # noqa: C901, PLR0912 complexity baseline, #771
-        self,
-        profile: DeploymentProfile,
-        intent: BootstrapIntent,
-        enrollment_token: SecretStr | None,
-    ) -> bytes:
+    async def _trusted_bundle(self, profile: DeploymentProfile) -> bytes:
+        """Read the profile's source bundle and verify its digest."""
         # The compute worker shares the API's event loop. Reading, hashing and
         # repacking a bundle of up to 64 MiB takes seconds, so it runs in a
         # thread: requests and Host heartbeats are served meanwhile.
@@ -886,6 +941,15 @@ class SshHostBootstrap:
                 "deployment_profile_invalid",
                 "Trusted deployment bundle digest differs from its profile",
             )
+        return source
+
+    async def _archive(
+        self,
+        profile: DeploymentProfile,
+        intent: BootstrapIntent,
+        enrollment_token: SecretStr | None,
+    ) -> bytes:
+        source = await self._trusted_bundle(profile)
         approved = ("deployment:", "stored-profile:")
         if not profile.environment_ref.startswith(approved) or any(
             not ref.startswith(approved) for ref in profile.files.values()
@@ -906,23 +970,7 @@ class SshHostBootstrap:
         }.items():
             template = template.replace("{" + key + "}", value)
         values = manager_environment(dotenv_values(stream=io.StringIO(template), interpolate=False))
-        if (
-            any(
-                not name.startswith("AGENT_") and name not in _ALLOWED_NON_AGENT_ENV
-                for name in values
-            )
-            or any(name in values for name in _FORBIDDEN_ENV)
-            or values.get("AGENT_SANDBOX_BACKEND", "kata") != "kata"
-        ):
-            raise ProviderError(
-                "deployment_profile_invalid",
-                "Deployment profile violates the approved host security boundary",
-            )
-        if any(not values.get(name) for name in _REQUIRED_ENV):
-            raise ProviderError(
-                "deployment_profile_invalid",
-                "Deployment profile is missing required relay, sandbox manager or network settings",
-            )
+        _check_host_environment(values)
         values.update(
             {
                 "COMPOSE_PROJECT": intent.project,
@@ -942,16 +990,7 @@ class SshHostBootstrap:
             values["AGENT_ENROLL_TOKEN"] = enrollment_token.get_secret_value()
         else:
             values.pop("AGENT_ENROLL_TOKEN", None)
-        for key, environment_value in values.items():
-            if (
-                not re.fullmatch(r"[A-Z][A-Z0-9_]*", key)
-                or environment_value is None
-                or any(c in environment_value for c in ("\n", "\r", "'", "\x00"))
-            ):
-                raise ProviderError(
-                    "deployment_profile_invalid",
-                    "Deployment environment must contain single-line values",
-                )
+        _check_single_line(values)
         # Compose's single quotes disable interpolation; shell metacharacters
         # and dollar signs remain literal, never code or an environment lookup.
         env = "".join(f"{key}='{value}'\n" for key, value in values.items()).encode()
@@ -965,7 +1004,7 @@ class SshHostBootstrap:
             # OpenSSH refuses a private key without its final newline, and
             # profiles saved before inputs were kept exactly have lost it.
             assets[name] = ((await self._resolver.resolve(ref)).rstrip() + "\n").encode()
-        for prefix in ("AGENT_TUNNEL", "AGENT_MCP_TUNNEL", "AGENT_CONTROL_PLANE_TUNNEL"):
+        for prefix in _TUNNEL_PREFIXES:
             for suffix in ("SSH_KEY", "SSH_KNOWN_HOSTS"):
                 path = values[f"{prefix}_{suffix}"] or ""
                 relative = path.removeprefix(profile.deploy_root + "/")

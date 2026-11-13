@@ -14,11 +14,11 @@ import {
   receiveThreadChange,
   resetAgentPush,
 } from './agentPush';
-import { clearWorkspaceGitCache } from './workspaceGitCache';
+import { clearWorkspaceGitCache } from './workspace/workspaceGitCache';
 
 vi.mock('@/lib/api/agents', () => ({ getAgentJob: vi.fn(), getAgentJobThread: vi.fn() }));
 vi.mock('@/lib/api/questions', () => ({ listThreadQuestions: vi.fn() }));
-vi.mock('./workspaceGitCache', () => ({ clearWorkspaceGitCache: vi.fn() }));
+vi.mock('./workspace/workspaceGitCache', () => ({ clearWorkspaceGitCache: vi.fn() }));
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -108,11 +108,11 @@ describe('the shell read scope', () => {
     const pending = (threadId: string) => !reads[threadId].at(-1)!.aborted;
     read('thread-a');
     read('thread-b');
-    // A new message moves the conversation, a publication its workspace, and a
-    // rename is the owner's own: none of them changes the turn's questions.
+    // A new message moves the conversation, a queue hint its waiting messages,
+    // and a rename is the owner's own: none of them changes the turn's questions.
     act(() => {
       receiveThreadChange({ id: 'thread-a', revision: 2, title: 'Fix login' });
-      receiveHint('publication', 'thread-a');
+      receiveHint('queue', 'thread-a');
       receiveJobChange({ id: 'job-b', thread_id: 'thread-b', state: 'succeeded', revision: 2 });
       announceAgentSessionsChanged({ threadIds: ['thread-b'], title: 'Renamed' });
       vi.advanceTimersByTime(PUSH_BATCH_MS);
@@ -124,6 +124,14 @@ describe('the shell read scope', () => {
       vi.advanceTimersByTime(PUSH_BATCH_MS);
     });
     expect(pending('thread-a')).toBe(false);
+    read('thread-a');
+    read('thread-b');
+    act(() => {
+      receiveHint('question', 'thread-a');
+      vi.advanceTimersByTime(PUSH_BATCH_MS);
+    });
+    expect(pending('thread-a')).toBe(false);
+    expect(pending('thread-b')).toBe(true);
     read('thread-a');
     read('thread-b');
     act(() => {
@@ -147,35 +155,6 @@ describe('the shell read scope', () => {
       vi.advanceTimersByTime(PUSH_BATCH_MS);
     });
     expect(pending('thread-a')).toBe(false);
-    expect(listThreadQuestions).toHaveBeenCalledTimes(6);
-  });
-
-  it('rereads only the thread named by a native-question hint', () => {
-    vi.useFakeTimers();
-    vi.mocked(listThreadQuestions).mockResolvedValue({
-      job_id: 'job',
-      attempt_id: 1,
-      questions: [],
-    });
-    const wrapper = ({ children }: { children: ReactNode }) => (
-      <AgentReadProvider userId="alice">{children}</AgentReadProvider>
-    );
-    const reads = renderHook(() => useQuestionReads(), { wrapper }).result.current;
-    const readA = vi.fn(() => void reads.listThreadQuestions('thread-a'));
-    const readB = vi.fn(() => void reads.listThreadQuestions('thread-b'));
-    const leaveA = reads.watch('thread-a', { intervalMs: 60_000 }, readA);
-    const leaveB = reads.watch('thread-b', { intervalMs: 60_000 }, readB);
-    expect(listThreadQuestions).toHaveBeenCalledTimes(2);
-
-    act(() => {
-      receiveHint('question', 'thread-a');
-      vi.advanceTimersByTime(PUSH_BATCH_MS);
-    });
-
-    expect(readA).toHaveBeenCalledTimes(2);
-    expect(readB).toHaveBeenCalledOnce();
-    expect(listThreadQuestions).toHaveBeenCalledTimes(3);
-    leaveA();
-    leaveB();
+    expect(listThreadQuestions).toHaveBeenCalledTimes(7);
   });
 });

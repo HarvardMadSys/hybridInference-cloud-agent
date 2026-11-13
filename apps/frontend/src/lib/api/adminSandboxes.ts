@@ -69,6 +69,11 @@ export interface AdminSandbox {
   idle_deadline: string | null;
   updated_at: string;
   host_last_heartbeat_at: string | null;
+  /** The status of the host it names; null once no host of that name is registered. */
+  host_status?: string | null;
+  /** The newest incident's kind within 24 hours; listed sandboxes only. */
+  last_incident?: string | null;
+  last_incident_at?: string | null;
 }
 
 export type AdminSandboxState =
@@ -152,6 +157,13 @@ export interface AdminSandboxDetail {
 export interface AdminSandboxStopRequest {
   generation: number;
   container_id: string;
+  last_activity_at: string;
+}
+
+/** Only a cold sandbox, which its checkpoint holds, may name no container. */
+export interface AdminSandboxDeleteRequest {
+  generation: number;
+  container_id: string | null;
   last_activity_at: string;
 }
 
@@ -267,7 +279,7 @@ export function stopAdminSandbox(
 
 export function deleteAdminSandbox(
   sandboxId: string,
-  reviewed: AdminSandboxStopRequest,
+  reviewed: AdminSandboxDeleteRequest,
   signal?: AbortSignal,
   force = false,
   discard = false,

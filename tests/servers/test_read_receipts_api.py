@@ -6,10 +6,10 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from fastapi import FastAPI
+from tests.support.owners import SESSIONS, use_session_secret
 
-from cloud_agent import identity
 from cloud_agent.api import catalog
-from cloud_agent.api.deps import get_gateway_client, get_storage
+from cloud_agent.api.deps import get_owner_directory, get_storage
 from cloud_agent.app import install_admin_no_store
 
 PATH = "/v1/agent/conversations/read-receipts"
@@ -17,8 +17,7 @@ PATH = "/v1/agent/conversations/read-receipts"
 
 @pytest.fixture
 def app(monkeypatch):
-    monkeypatch.setenv(identity.ENV_ISSUER, "https://gateway.example")
-    monkeypatch.setenv(identity.ENV_SESSION_SECRET, "receipt-test-session-secret-long-enough")
+    use_session_secret(monkeypatch)
     application = FastAPI()
     application.include_router(catalog.router)
     install_admin_no_store(application, prefixes=(PATH,))
@@ -38,9 +37,9 @@ def app(monkeypatch):
         "allowed": True,
         "permissions": ["agent.use"],
     }
-    application.dependency_overrides[get_gateway_client] = lambda: gateway
+    application.dependency_overrides[get_owner_directory] = lambda: gateway
     application.dependency_overrides[get_storage] = lambda: SimpleNamespace(
-        conversation_queries=queries, conversation_commands=commands
+        local_accounts=SESSIONS, conversation_queries=queries, conversation_commands=commands
     )
     application.state.queries = queries
     application.state.commands = commands
@@ -48,7 +47,7 @@ def app(monkeypatch):
 
 
 def headers(owner="alice"):
-    return {"Authorization": f"Bearer {identity.mint_session(user_id=owner)}"}
+    return {"Authorization": f"Bearer {SESSIONS.sign_in(owner)}"}
 
 
 async def test_owner_is_session_bound_and_client_cannot_choose_thread_or_turn(app):

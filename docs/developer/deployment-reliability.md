@@ -110,8 +110,10 @@ Terminals and sandbox manager workspace operations always check, as does every c
 when the sandbox manager did not supply that proof.
 
 The turn child normally does not install and read back the host rules itself.
-The host service keeps the network guard its startup preflight verified. When
-it hands a turn over, it renews that verification if it is 45 seconds old. It
+The host service keeps the network guard its startup preflight verified, and
+renews that verification between claims once it is 35 seconds old, so handing a
+turn over does not wait for it; a verification still 45 seconds old at a
+handover, after a failed renewal say, is renewed then. It
 adds the verification time and its own helper image to the child's stdin
 payload, after stripping claim-supplied underscore keys, as it does for the
 qualification verdict. The child declines the turn, before accepting it, unless
@@ -124,12 +126,13 @@ itself, as every child did before the host handed its verification over, and
 accepts the turn only if that check passes. The sandbox manager still installs
 and reads back the rules before any group joins its bridge.
 
-Network-rule reads share a disposable helper; route reads use a separate helper
-without capabilities. Reconciliation caches inspections only within one
-command, rereads after mutations, and verifies the final bridge identity,
-membership and relay addresses. It skips unchanged guest hosts/resolver writes
-while retaining ownership, mode and symlink checks. These optimizations preserve
-the network policy and freshness requirements.
+Network-rule reads share one helper request, which the runner's or the
+sandbox manager's long-lived helper takes when it is free; route reads use a
+separate disposable helper without capabilities. Reconciliation caches
+inspections only within one command, rereads after mutations, and verifies the
+final bridge identity, membership and relay addresses. It skips unchanged guest
+hosts/resolver writes while retaining ownership, mode and symlink checks. These
+optimizations preserve the network policy and freshness requirements.
 
 A new chat's repository is cloned, scrubbed and archived on the host while the
 container starts. Its `checkout` measurement includes the remaining clone wait
@@ -137,7 +140,9 @@ container starts. Its `checkout` measurement includes the remaining clone wait
 stage; an earlier stop discards prepared source. Startup measurements attribute
 qualification to `preflight` and cover claim request through prompt dispatch,
 excluding queue wait and model response time. Declined children do not publish a
-successful startup. A host at capacity checks completed children every second.
+successful startup. A host at capacity claims again as soon as a turn's child
+exits or an environment test ends. Failing that, it checks again after a
+second, or after five seconds while an environment test holds one of its slots.
 
 ### Empty-queue waits and CI evidence
 
@@ -186,6 +191,48 @@ This checks common storage paths against the previous release. Authenticated
 browser flows and compatibility with every historical release need separate
 evidence.
 
+## Host and control plane one release apart
+
+Hosts deploy before the control plane, and a managed compute host follows a
+new control plane later, so for a while each side talks to the other's
+previous release. When a change touches any backend package or the locked
+dependencies (the wire is built from models and payload code spread well
+beyond the clients, and pydantic decides what parses), the same Postgres job
+runs
+[`scripts/check_mixed_protocol.py`](../../scripts/check_mixed_protocol.py)
+against the same previous release. It archives that release and gives it an
+environment from its own lock file, then runs four pairings, each on a
+random `mixed_protocol_test_*` database migrated by its control plane's own
+Alembic graph: this host against the previous control plane, the previous
+host against this control plane, and each release against itself as the
+baseline.
+
+In each pairing the control plane's real application serves on loopback,
+and the host's own enrollment, claim and attempt client register and
+heartbeat, run a new chat's turn and two follow-ups, see a cancellation,
+settle, abandon and finish, and carry out a stop and a residency eviction
+the control plane orders. A scripted sandbox manager stands in for Docker. A
+pairing fails when a call is refused, when a receiver's own model rejects a
+message or would silently drop a field it carries, or when the database
+differs from the baseline's after any of those steps. It runs no image, no
+sandbox and no model, so it does not replace the release acceptance or the
+Kata check.
+
+Four more pairings check the control plane's own calls to a host's sandbox
+manager: this release's client against the previous release's sandbox manager,
+the previous client against this one, and each against itself. Behind each
+sandbox manager is the fake supervisor from that release's tests. They cover
+the inventory, a member's status, group registration, a residency loss, an SSH
+access push and terminal suspend and resume, and fail on a refused call, a
+dropped field, or an answer missing a key the client's own release sends.
+
+Run it against disposable local Postgres with the same tag as above:
+
+```bash
+TEST_DB_HOST=127.0.0.1 TEST_DB_PORT=5432 \
+  uv run python scripts/check_mixed_protocol.py --base "$ROLLING_BASE_TAG"
+```
+
 ## Detection after deployment
 
 The main API runs one queue monitor; the MCP listener runs none. After two
@@ -207,7 +254,7 @@ operation, which uses the host recipe's drain. External process/HTTP monitoring
 remains necessary because a dead API cannot monitor itself.
 
 Events are logged even without external delivery. To enable notifications, set
-`AGENT_ALERT_WEBHOOK_URL` in the control-plane `.env` to an operator-owned
+`AGENT_ALERT_WEBHOOK_URL` in the control plane's environment or `.env` to an operator-owned
 receiver. Queue alerts send JSON with `text`, `event`, `deployment_sha` and
 aggregate `queue` counts. The receiver must accept that contract; chat providers
 may need an adapter. Deployment-workflow alerts belong to the downstream
@@ -242,23 +289,14 @@ new work queued until the retry succeeds. The queue monitor detects this state.
 These checks protect and expose interrupted deployments; activation still spans
 two machines and PostgreSQL without a single transaction.
 
-### Snapshot publication failures
+### Push and pull-request failures
 
-A publication that fails — a refused patch, an unavailable GitHub credential,
-a failed Git or PR request — leaves its snapshot `failed` with a reason and its
-sandbox group `dirty`; the included agent turns stay successful. It does not
-hold the workspace back: the owner's next **Create PR** / **Update PR** request
-captures a new snapshot of the whole diff since the last published commit,
-which supersedes the failed one. If the failed attempt had already pushed its
-commit, the publisher recorded that commit as the snapshot's
-`pushed_commit_sha` before pushing, and the next snapshot builds on it rather
-than treating it as a moved branch. GitHub rate limits and transient
-draft-PR refusals are retried automatically. The full rules are in
-[Resume, Fork, and publication](operations.md#resume-fork-and-publication).
-
-To investigate one, read the snapshot's `last_error`, the anchor job's event
-whose phase is `shared_snapshot_publish_rejected`, and GitHub's branch and PR
-state.
-Do not edit snapshot or group state in the database: marking a snapshot
-published or clearing `dirty` bypasses the ordered publication lineage. Fix
-the cause — access, network, or the refused content — and publish again.
+The platform does not publish workspaces, so there is no publication to retry
+or repair. A push or pull request the agent could not make is part of its
+turn: the transcript shows what git or `gh` printed, and the owner asks again
+once the cause is fixed. The GitHub relay logs each request it refuses itself
+as `agent_github_relay_refused`, or `agent_github_relay_push_refused` for a
+push, with the conversation and job, and each pull request it records as
+`agent_github_relay_pull_request_recorded`. A refusal from GitHub itself, such
+as branch protection, push protection or a missing App permission, appears
+only in the transcript. See [the GitHub relay](operations.md#the-github-relay).

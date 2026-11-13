@@ -7,11 +7,14 @@
 
 import type { AdminUsageAggregate, AdminUsageDay, AdminUsageFilters } from '@/lib/api/adminUsage';
 
-import { money } from '../runs/shared';
-
 const DAY_MS = 86_400_000;
 
-export type UsageMetric = 'cost' | 'turns' | 'calls' | 'tokens_in' | 'tokens_out';
+/**
+ * What a selection can be measured by: its turns and the tokens their agents
+ * reported. There is no cost or model-call count: agents report neither, and
+ * each owner's provider bills its own connection.
+ */
+export type UsageMetric = 'turns' | 'tokens_in' | 'tokens_out';
 
 /** How the toolbar names each identity a selection can be narrowed to. */
 export const IDENTITY_LABELS = {
@@ -24,18 +27,14 @@ export const IDENTITY_LABELS = {
 /**
  * One metric of an aggregate as a number.
  *
- * Null means the metric was not recorded, never zero: a turn without a usage
- * snapshot has no known cost, and adding it as $0 would understate the total.
+ * Null means no agent reported the metric, never zero: a turn whose agent
+ * reported nothing has no known tokens, and adding it as 0 would understate
+ * the total.
  */
 export function metricValue(aggregate: AdminUsageAggregate, metric: UsageMetric): number | null {
   if (metric === 'turns') return aggregate.run_count;
   const totals = aggregate.totals;
   if (!totals) return null;
-  if (metric === 'calls') return totals.calls;
-  if (metric === 'cost') {
-    const amount = totals.spent_usd == null ? Number.NaN : Number(totals.spent_usd);
-    return Number.isFinite(amount) ? amount : null;
-  }
   return totals[metric] ?? null;
 }
 
@@ -50,44 +49,27 @@ export function compactCount(value: number | null | undefined): string {
   return Math.abs(value) < 10_000 ? value.toLocaleString('en-US') : COMPACT.format(value);
 }
 
-/** A cost to the cent. The exact recorded amount is kept for a tooltip. */
-export function costDisplay(value: string | null | undefined): {
-  display: string;
-  exact: string | null;
-} {
-  const { exact } = money(value);
-  if (exact === null) return { display: '—', exact: null };
-  const amount = Number(exact);
-  if (amount === 0) return { display: '$0', exact };
-  if (amount < 0.01) return { display: '<$0.01', exact };
-  return {
-    display: `$${amount.toLocaleString('en-US', {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    })}`,
-    exact,
-  };
-}
-
 /** A metric's value as the headline shows it, with the exact figure when it was shortened. */
 export function metricDisplay(
   aggregate: AdminUsageAggregate,
   metric: UsageMetric,
 ): { display: string; exact: string | null } {
-  if (metric === 'cost') return costDisplay(aggregate.totals?.spent_usd);
   const value = metricValue(aggregate, metric);
   const display = compactCount(value);
   const whole = value === null ? null : value.toLocaleString('en-US');
   return { display, exact: whole !== display ? whole : null };
 }
 
-/** A chart value: a cost to the cent, a count as the headline shortens it. */
-export function formatMetric(metric: UsageMetric, value: number | null): string {
-  if (value === null) return '—';
-  if (metric !== 'cost') return compactCount(value);
-  if (value === 0) return '$0';
-  if (value < 0.01) return '<$0.01';
-  return `$${value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+/** A chart value, shortened as the headline shortens it. */
+export function formatMetric(value: number | null): string {
+  return value === null ? '—' : compactCount(value);
+}
+
+/** Input and output tokens together, or null while neither was reported. */
+export function reportedTokens(aggregate: AdminUsageAggregate): number | null {
+  const totals = aggregate.totals;
+  if (!totals || (totals.tokens_in == null && totals.tokens_out == null)) return null;
+  return (totals.tokens_in ?? 0) + (totals.tokens_out ?? 0);
 }
 
 /**
@@ -150,8 +132,8 @@ function count(value: number, noun: string): string {
  * What keeps these numbers from being final.
  *
  * `clauses` is the one line the page shows, and only when it is not empty:
- * turns still running, turns not fully counted, and calls whose cost the
- * cost total is missing. `detail` is the breakdown behind it, for a tooltip.
+ * turns still running and turns not fully counted. `detail` is the
+ * breakdown behind it, for a tooltip.
  */
 export function notFinal(aggregate: AdminUsageAggregate): { clauses: string[]; detail: string[] } {
   const statuses = aggregate.status_counts;
@@ -159,35 +141,27 @@ export function notFinal(aggregate: AdminUsageAggregate): { clauses: string[]; d
   if (aggregate.active_runs) clauses.push(`${count(aggregate.active_runs, 'turn')} still running`);
   const incomplete = aggregate.run_count - (statuses.available ?? 0);
   if (incomplete > 0) clauses.push(`${count(incomplete, 'turn')} not fully counted`);
-  const uncosted = aggregate.unknown_rows?.spent_usd ?? 0;
-  if (uncosted) clauses.push(`${count(uncosted, 'model call')} without a recorded cost`);
 
   const detail: string[] = [];
   if (statuses.pending) detail.push(`${count(statuses.pending, 'turn')} without usage yet`);
   if (statuses.unavailable) {
-    detail.push(`${count(statuses.unavailable, 'turn')} whose usage could not be read`);
+    detail.push(`${count(statuses.unavailable, 'turn')} whose agent reported no usage`);
   }
   if (statuses.partial) detail.push(`${count(statuses.partial, 'turn')} partly counted`);
-  if (statuses.stale) {
-    detail.push(`${count(statuses.stale, 'turn')} not updated since a failed read`);
-  }
-  if (aggregate.estimated_calls) {
-    detail.push(`${count(aggregate.estimated_calls, 'model call')} with estimated tokens`);
-  }
   return { clauses, detail };
 }
 
 /**
  * A group's share of the selection, for the bar beside it.
  *
- * Measured by cost when the selection has one, else by model calls, else by
- * turns, so a selection whose cost was never recorded still ranks by use.
+ * Measured by reported tokens when the selection has any, else by turns, so
+ * a selection whose agents reported nothing still ranks by use.
  */
 export function share(group: AdminUsageAggregate, whole: AdminUsageAggregate): number {
-  for (const metric of ['cost', 'calls', 'turns'] as const) {
-    const total = metricValue(whole, metric);
+  for (const measure of [reportedTokens, (usage: AdminUsageAggregate) => usage.run_count]) {
+    const total = measure(whole);
     if (total !== null && total > 0) {
-      return Math.min(1, Math.max(0, (metricValue(group, metric) ?? 0) / total));
+      return Math.min(1, Math.max(0, (measure(group) ?? 0) / total));
     }
   }
   return 0;

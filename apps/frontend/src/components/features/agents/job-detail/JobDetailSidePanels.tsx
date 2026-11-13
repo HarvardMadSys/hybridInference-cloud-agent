@@ -10,10 +10,10 @@ import type {
 import { memo, useCallback, useRef, type CSSProperties } from 'react';
 import { WorkspaceEnvironment } from '../environment/WorkspaceEnvironment';
 import { PaneResizer } from '../PaneResizer';
-import type { RecordedFileSelection } from '../recordedTurnOutputs';
+import type { RecordedFileSelection } from '../conversation/recordedTurnOutputs';
 import type { AgentJob } from '../types';
-import type { SideChatTab, WorkspaceTab } from '../useWorkspaceTabs';
-import { WorkspaceTabBar } from '../WorkspaceTabBar';
+import type { SideChatTab, WorkspaceTab } from '../workspace/useWorkspaceTabs';
+import { WorkspaceTabBar } from '../workspace/WorkspaceTabBar';
 import { GitPanel } from './GitPanel';
 import {
   RecordedDiffPanel,
@@ -47,6 +47,7 @@ const WORKSPACE_JOB_FIELDS = [
   'model',
   'reasoningEffort',
   'runtime',
+  'conversationState',
 ] as const;
 
 type WorkspaceJob = Pick<AgentJob, (typeof WORKSPACE_JOB_FIELDS)[number]>;

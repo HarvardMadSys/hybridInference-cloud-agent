@@ -25,7 +25,6 @@ describe('application settings organization', () => {
     ['Sign-in', 'Identity & access'],
     ['Security', 'Identity & access'],
     ['Source control', 'Source control'],
-    ['Publication', 'Source control'],
     ['Attachments', 'Content'],
     ['Skills', 'Content'],
     ['Task titles', 'Content'],
@@ -34,7 +33,6 @@ describe('application settings organization', () => {
     ['Database tools', 'Operations'],
     ['Compute', 'Compute'],
     ['Execution', 'Compute'],
-    ['Gateway', 'Gateway'],
     ['MCP', 'MCP'],
     ['Appearance', 'Appearance'],
     ['Sandbox archives', 'Sandbox archives'],
@@ -56,22 +54,22 @@ describe('application settings organization', () => {
     expect(applicationSettingGroup(field)).toBe('General');
   });
 
-  it('groups provider credentials together across source control and publication', () => {
+  it('groups the GitHub App and the agents’ commit co-author together', () => {
     const app = definition('github_app_id', 'Source control');
-    const publication = definition('github_publish_token', 'Publication');
-    expect(applicationCategory(app)).toBe(applicationCategory(publication));
+    const coauthor = definition('github_coauthor', 'Source control');
+    expect(applicationCategory(app)).toBe(applicationCategory(coauthor));
     expect(applicationSettingGroup(app)).toBe('GitHub');
-    expect(applicationSettingGroup(publication)).toBe('GitHub');
+    expect(applicationSettingGroup(coauthor)).toBe('GitHub');
   });
 
   it.each([
-    ['gateway_base_url', 'Gateway connection'],
-    ['gateway_request_timeout_s', 'Gateway connection'],
+    ['web_base_url', 'Public addresses'],
+    ['public_api_url', 'Public addresses'],
     ['attachments.max_file_bytes', 'Attachments'],
-    ['task_titles.timeout_seconds', 'Task titles'],
+    ['task_titles.max_chars', 'Task titles'],
     ['default_execution_profile', 'Sandbox execution'],
     ['sandbox_manager_token', 'Sandbox execution'],
-    ['site.feature_rag', 'Branding'],
+    ['site.org_name', 'Branding'],
     ['log_level', 'Logging'],
     ['mcp_allow_private_targets', 'MCP connections'],
   ])('organizes %s into its related group', (key, group) => {

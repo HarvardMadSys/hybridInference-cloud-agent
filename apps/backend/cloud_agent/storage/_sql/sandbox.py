@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent.domain.sandbox_group import GroupState, sql_list
 from cloud_agent.ports.sandbox import TerminalControlRoute
 from cloud_agent.storage._sql.hosts import (
     JOB_HOST_SQL,
@@ -79,57 +80,15 @@ THREAD_SANDBOX_SOURCE = f"""
         g.resident_slot_capacity, m.native_state,
         m.forked_from_thread_id, m.fork_anchor_job_id,
         g.last_activity_at AS group_last_activity_at,
+        -- The newest pull request this conversation's agent opened through
+        -- the GitHub relay.
         (
-            SELECT snapshot.state
-            FROM agent_sandbox_snapshots snapshot
-            WHERE snapshot.sandbox_id = g.id
-            ORDER BY snapshot.workspace_epoch DESC, snapshot.id DESC
-            LIMIT 1
-        ) AS workspace_publication_state,
-        -- The newest snapshot was published without a pull request: its
-        -- capture found nothing to publish.
-        (
-            SELECT snapshot.state = 'published' AND snapshot.published_pr_url IS NULL
-            FROM agent_sandbox_snapshots snapshot
-            WHERE snapshot.sandbox_id = g.id
-            ORDER BY snapshot.workspace_epoch DESC, snapshot.id DESC
-            LIMIT 1
-        ) AS workspace_publication_unchanged,
-        (
-            SELECT snapshot.published_pr_url
-            FROM agent_sandbox_snapshots snapshot
-            WHERE snapshot.sandbox_id = g.id AND snapshot.published_pr_url IS NOT NULL
-            ORDER BY snapshot.workspace_epoch DESC, snapshot.id DESC
+            SELECT pr.url
+            FROM agent_thread_pull_requests pr
+            WHERE pr.thread_id = m.thread_id
+            ORDER BY pr.created_at DESC, pr.number DESC
             LIMIT 1
         ) AS workspace_pr_url,
-        -- Something the owner has not published: a turn settled since the
-        -- last snapshot, or a last publication that failed. Turns settle in
-        -- order and a publication takes all of them, so each member's newest
-        -- settled turn answers for the ones before it. A Fork's copies of its
-        -- source's turns ran in no workspace of their own, and a temporary
-        -- workspace has nowhere to publish to.
-        EXISTS (
-            SELECT 1 FROM agent_threads published_to
-            WHERE published_to.id = m.thread_id AND published_to.repo IS NOT NULL
-        ) AND (
-            EXISTS (
-                SELECT 1 FROM agent_thread_sandbox_memberships settled
-                JOIN agent_jobs settled_job ON settled_job.id = settled.last_settled_job_id
-                WHERE settled.sandbox_id = g.id
-                  AND settled_job.fork_source_job_id IS NULL
-                  AND NOT EXISTS (
-                      SELECT 1 FROM agent_snapshot_jobs held
-                      WHERE held.job_id = settled.last_settled_job_id
-                  )
-            )
-            OR COALESCE((
-                SELECT snapshot.state = 'failed'
-                FROM agent_sandbox_snapshots snapshot
-                WHERE snapshot.sandbox_id = g.id
-                ORDER BY snapshot.workspace_epoch DESC, snapshot.id DESC
-                LIMIT 1
-            ), FALSE)
-        ) AS workspace_unpublished_changes,
         g.workspace_epoch,
         {NATIVE_FORK_CAPABLE} AS native_fork_capable,
         -- The host holding this group can hand a message to a running turn of
@@ -191,7 +150,7 @@ THREAD_SANDBOX_SOURCE = f"""
                 'format_version', c.format_version
             )
             FROM agent_sandbox_checkpoints c
-            WHERE g.state = 'restoring' AND c.id = g.restore_checkpoint_id
+            WHERE g.state = {GroupState.RESTORING.sql} AND c.id = g.restore_checkpoint_id
         ) AS restore
     FROM agent_thread_sandbox_memberships m
     JOIN agent_sandboxes g ON g.id = m.sandbox_id
@@ -201,7 +160,7 @@ THREAD_SANDBOX_SOURCE = f"""
 # The columns of ``THREAD_SANDBOX_SOURCE`` a claim chooses its turn by, under
 # the same names, and none of the projections. A claim walks every queued turn
 # until one is runnable on the claiming host; joined to the full source, each
-# turn it passed paid for its group's publication state, members and host
+# turn it passed paid for its pull request, its group's members and host
 # capabilities, which only the turn handed out returns.
 THREAD_SANDBOX_CLAIM_SOURCE = """
 (
@@ -275,7 +234,8 @@ WORKSPACE_READY_SQL = f"""(
     m.context_status <> 'lost'
     AND m.native_state <> 'lost'
     AND g.state NOT IN (
-        'provisioning', 'stopping', 'stopped_dirty', 'lost'
+        {GroupState.PROVISIONING.sql}, {GroupState.STOPPING.sql},
+        {GroupState.STOPPED_DIRTY.sql}, {GroupState.LOST.sql}
     )
     AND g.stop_requested_at IS NULL
     AND {UNDELETED_GROUP_SQL}
@@ -300,7 +260,8 @@ WORKSPACE_READY_SQL = f"""(
 # the checkpoint it is recreated from.
 FENCE_START_SQL = (
     "start_seq = start_seq + 1, "
-    "restore_checkpoint_id = CASE WHEN state IN ('cold', 'restoring') "
+    "restore_checkpoint_id = CASE WHEN state IN "
+    f"{sql_list(GroupState.COLD, GroupState.RESTORING)} "
     "THEN restore_checkpoint_id ELSE NULL END"
 )
 
@@ -458,13 +419,13 @@ async def release_failed_restore(conn: Any, attempt_id: int, detail: str) -> str
     # Memberships before their group, the order every writer keeps. The
     # restoring member may already hold the attempt from its reservation.
     await conn.execute(
-        """
+        f"""
         UPDATE agent_thread_sandbox_memberships
         SET active_attempt_id = NULL, updated_at = NOW()
         WHERE active_attempt_id = $1
           AND sandbox_id IN (
               SELECT id FROM agent_sandboxes
-              WHERE restore_attempt_id = $1 AND state = 'restoring'
+              WHERE restore_attempt_id = $1 AND state = {GroupState.RESTORING.sql}
           )
         """,
         attempt_id,
@@ -473,11 +434,12 @@ async def release_failed_restore(conn: Any, attempt_id: int, detail: str) -> str
         f"""
         UPDATE agent_sandboxes
         SET state = CASE
-                WHEN restore_attempts >= {MAX_RESTORE_ATTEMPTS} THEN 'lost' ELSE 'cold'
+                WHEN restore_attempts >= {MAX_RESTORE_ATTEMPTS} THEN {GroupState.LOST.sql}
+                ELSE {GroupState.COLD.sql}
             END,
             container_id = NULL, restore_attempt_id = NULL,
             last_error = $2, last_activity_at = NOW(), updated_at = NOW()
-        WHERE restore_attempt_id = $1 AND state = 'restoring'
+        WHERE restore_attempt_id = $1 AND state = {GroupState.RESTORING.sql}
         RETURNING state
         """,
         attempt_id,
@@ -500,11 +462,11 @@ async def release_unstarted_restore(conn: Any, attempt_id: int) -> bool:
     """
     return (
         await conn.fetchval(
-            """
+            f"""
             UPDATE agent_sandboxes g
-            SET state = 'cold', restore_attempt_id = NULL,
+            SET state = {GroupState.COLD.sql}, restore_attempt_id = NULL,
                 restore_attempts = g.restore_attempts - 1, updated_at = NOW()
-            WHERE g.restore_attempt_id = $1 AND g.state = 'restoring'
+            WHERE g.restore_attempt_id = $1 AND g.state = {GroupState.RESTORING.sql}
               AND NOT EXISTS (
                   SELECT 1 FROM agent_thread_sandbox_memberships m
                   WHERE m.sandbox_id = g.id AND m.active_attempt_id = $1

@@ -38,7 +38,7 @@ vi.mock('@/components/providers/AuthProvider', async () => {
   const actual = await vi.importActual<typeof import('@/components/providers/AuthProvider')>(
     '@/components/providers/AuthProvider',
   );
-  return { hasAgentPermission: actual.hasAgentPermission };
+  return { ...actual };
 });
 vi.mock('@/lib/api/admin', () => ({
   getAgentRunnerHosts: vi.fn(),
@@ -121,8 +121,8 @@ function organizedApplicationSnapshot(): AgentAdminSettings {
     ['gateway_authorize_url', 'Sign-in', 'Sign-in authorization URL'],
     ['trust_proxy_headers', 'Security', 'Trust forwarded client addresses'],
     ['github_app_id', 'Source control', 'GitHub App ID'],
-    ['publish_base_branch', 'Publication', 'Default pull request base branch'],
-    ['publish_git_timeout_s', 'Publication', 'Publication Git timeout'],
+    ['github_coauthor', 'Source control', 'Agent commit co-author'],
+    ['github_request_timeout_s', 'Source control', 'GitHub request timeout'],
     ['sandbox_archive.bucket', 'Sandbox archives', 'Sandbox archive S3 bucket'],
     ['sandbox_archive.endpoint', 'Sandbox archives', 'Sandbox archive S3 endpoint'],
   ];
@@ -607,7 +607,7 @@ describe('application category tabs', () => {
 
   it.each([
     ['Sign-in', 'Identity & access', 'Sign-in authorization URL'],
-    ['Publication', 'Source control', 'Default pull request base branch'],
+    ['Security', 'Identity & access', 'Trust forwarded client addresses'],
   ])(
     'resolves an existing %s category URL to %s after definitions load',
     async (legacy, merged, label) => {
@@ -633,15 +633,15 @@ describe('application category tabs', () => {
     },
   );
 
-  it('focuses a linked Publication field in the merged Source control page', async () => {
+  it('focuses a linked Source control field beside the other GitHub settings', async () => {
     vi.mocked(getAgentAdminSettings).mockResolvedValue(organizedApplicationSnapshot());
     window.history.replaceState(
       null,
       '',
-      '/admin/settings#application-setting-publish_git_timeout_s',
+      '/admin/settings#application-setting-github_request_timeout_s',
     );
     renderSettings();
-    const input = await screen.findByLabelText('Publication Git timeout');
+    const input = await screen.findByLabelText('GitHub request timeout');
     await waitFor(() => expect(input).toHaveFocus());
     expectVisibleSetting(input);
     expect(screen.getByRole('tabpanel', { name: 'Source control' })).toBeVisible();
@@ -1585,24 +1585,24 @@ describe('settings search', () => {
     vi.mocked(getAgentAdminSettings).mockResolvedValue(organizedApplicationSnapshot());
     renderSettings();
     await screen.findByRole('tab', { name: 'Appearance' });
-    const input = screen.getByLabelText('Publication Git timeout');
+    const input = screen.getByLabelText('Trust forwarded client addresses');
     // The field is always rendered; its tab is inactive until search selects it.
     expect(input).not.toBeVisible();
     expect(input.closest('details')).toBeNull();
 
-    const results = searchFor('PUBLICATION timeout');
+    const results = searchFor('SECURITY forwarded');
     expect(within(results).getAllByRole('button')).toHaveLength(1);
     fireEvent.click(
       within(results).getByRole('button', {
-        name: 'Open Publication Git timeout in Source control',
+        name: 'Open Trust forwarded client addresses in Identity & access',
       }),
     );
 
     await waitFor(() => expect(input).toHaveFocus());
     expectVisibleSetting(input);
-    expect(screen.getByRole('tabpanel', { name: 'Source control' })).toBeVisible();
+    expect(screen.getByRole('tabpanel', { name: 'Identity & access' })).toBeVisible();
     expect(new URLSearchParams(window.location.search).get('tab')).toBe(
-      categoryTabId('Source control'),
+      categoryTabId('Identity & access'),
     );
     expect(screen.getByRole('searchbox', { name: 'Search settings' })).toHaveValue('');
     expect(

@@ -23,7 +23,9 @@ _MIGRATIONS = (
 @pytest.mark.parametrize("filename", _MIGRATIONS)
 def test_online_index_downgrade_can_retry_after_an_interrupted_drop(filename: str) -> None:
     """Every autocommitted drop tolerates a prior attempt having completed it."""
-    migration = runpy.run_path(str(_ROOT / "migrations" / "versions" / filename))
+    migration = runpy.run_path(
+        str(_ROOT / "apps" / "backend" / "migrations" / "versions" / filename)
+    )
     statements: list[str] = []
     downgrade = migration["downgrade"]
     downgrade.__globals__["context"] = SimpleNamespace(is_offline_mode=lambda: False)

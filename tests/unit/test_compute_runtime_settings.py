@@ -10,18 +10,18 @@ import httpx
 import pytest
 
 from cloud_agent import settings
-from cloud_agent.compute_config import (
-    ComputeConfiguration,
-    current_observation_seconds,
-    current_poll_seconds,
-    current_registration_url,
-)
-from cloud_agent.compute_registry import build_registry
 from cloud_agent.domain.compute import ComputeRefusal
 from cloud_agent.ports.external.compute_provider import (
     UNCHECKED_CLOUDLAB_HOST_KEY_REF,
 )
 from cloud_agent.providers.compute.cloudlab import CloudLabProvider
+from cloud_agent.providers.compute.compute_config import (
+    ComputeConfiguration,
+    current_observation_seconds,
+    current_poll_seconds,
+    current_registration_url,
+)
+from cloud_agent.providers.compute.compute_registry import build_registry
 from cloud_agent.workers import compute_resources
 
 
@@ -200,7 +200,7 @@ def test_explicit_configuration_stays_fixed_while_runtime_reads_current_saved_va
         {
             "compute.poll_seconds": 35,
             "compute.observation_seconds": 90,
-            "session_redirect_uri": "https://agents.example/api/v1/session/callback",
+            "public_api_url": "https://agents.example/api",
         },
     )
     assert current_poll_seconds(fixed) == 17

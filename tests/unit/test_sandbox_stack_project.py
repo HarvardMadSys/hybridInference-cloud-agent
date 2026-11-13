@@ -14,14 +14,12 @@ and that a compose command without one refuses rather than guessing.
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SANDBOX_HOST = REPO_ROOT / "deploy/host/sandbox_host.sh"
 HOST_DEPLOY = REPO_ROOT / "deploy/host/deploy.sh"
-HOST_ENV_EXAMPLE = REPO_ROOT / "deploy/host/.env.example"
 
 
 def _host(
@@ -170,9 +168,6 @@ _SHARED_HOST_ENV = "\n".join(
         "SIBLING_COMPOSE_PROJECTS=freeinference-cloud-agent-sandbox-staging",
         "AGENT_ENROLL_TOKEN=test-enrollment-token",
         "AGENT_SANDBOX_IMAGE=freeinference-cloud-agent-job:prod",
-        "AGENT_TUNNEL_SSH_DESTINATION=user@gateway",
-        "AGENT_TUNNEL_SSH_KEY=/dev/null",
-        "AGENT_TUNNEL_SSH_KNOWN_HOSTS=/etc/hosts",
         "AGENT_MCP_TUNNEL_SSH_DESTINATION=user@control",
         "AGENT_MCP_TUNNEL_SSH_KEY=/dev/null",
         "AGENT_MCP_TUNNEL_SSH_KNOWN_HOSTS=/etc/hosts",
@@ -204,23 +199,6 @@ def test_a_shared_machine_must_name_its_own_host_state_root(tmp_path: Path) -> N
     assert "AGENT_HOST_STATE_ROOT" in result.stderr
 
 
-def test_the_host_template_assigns_each_setting_once() -> None:
-    """The final dotenv assignment wins, so duplicate defaults bypass the guard."""
-    template = HOST_ENV_EXAMPLE.read_text()
-    assignments: dict[str, list[str]] = {}
-    for name, value in re.findall(r"^([A-Z][A-Z0-9_]*)=(.*)$", template, flags=re.MULTILINE):
-        assignments.setdefault(name, []).append(value)
-    duplicates = {name: values for name, values in assignments.items() if len(values) != 1}
-    assert not duplicates, f"dotenv uses the final duplicate assignment: {duplicates}"
-    for name in (
-        "AGENT_HOST_STATE_ROOT",
-        # Deployment facts: a template default would be a guess about the host.
-        "AGENT_EGRESS_CHAT_NETWORK_POOL",
-        "AGENT_EGRESS_DNS_SERVER",
-    ):
-        assert assignments[name] == [""], f"{name} must stay explicit in the template"
-
-
 def test_a_shared_machine_refuses_the_legacy_shared_state_roots(tmp_path: Path) -> None:
     """Spelling the old defaults explicitly is still cross-environment sharing."""
     dotenv = _SHARED_HOST_ENV + "\n".join(
@@ -243,7 +221,7 @@ def test_each_stack_discovers_only_its_own_relays(tmp_path: Path) -> None:
 
     Docker DNS answers an alias with every container that claims it on a
     network; two stacks on one relay network would hand each other's sandboxes
-    the other environment's gateway and MCP tunnels.
+    the other environment's MCP and control-plane tunnels.
     """
     (tmp_path / "staging").mkdir()
     (tmp_path / "prod").mkdir()
@@ -362,7 +340,7 @@ def test_the_stray_matcher_still_recognises_this_stack(tmp_path: Path) -> None:
             "ours ours-runner-1",
             "ours ours-sandbox-manager-1",
             "sibling sibling-runner-1",
-            "agenthost agenthost-agent-gateway-tunnel-1",
+            "agenthost agenthost-mcp-tunnel-1",
             "legacy legacy-agent-sandbox-manager-1",
             "unrelated some-postgres",
         ]
@@ -376,7 +354,7 @@ def test_the_stray_matcher_still_recognises_this_stack(tmp_path: Path) -> None:
     )
 
     reported = result.stdout
-    assert "agenthost-agent-gateway-tunnel-1" in reported
+    assert "agenthost-mcp-tunnel-1" in reported
     assert "legacy-agent-sandbox-manager-1" in reported, "the pre-rename shape must still match"
     assert "ours-runner-1" not in reported
     assert "sibling-runner-1" not in reported

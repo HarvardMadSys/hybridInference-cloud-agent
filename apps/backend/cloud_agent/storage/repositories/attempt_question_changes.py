@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import asyncpg
 
-from cloud_agent.storage._sql.attempts import lock_live_attempt
+from cloud_agent.storage._sql.fences import lock_live_attempt
 
 
 async def notify_question_change(

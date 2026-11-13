@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from cloud_agent import deploy_readiness, settings
+from cloud_agent import settings
+from cloud_agent.deployment import deploy_readiness
 from cloud_agent.storage import assembly
 
 
@@ -93,7 +94,7 @@ async def _run_readiness(
 async def test_preactivation_bootstraps_settings_before_the_new_api_starts(monkeypatch):
     monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "legacy-sandbox-manager-token")
     monkeypatch.setenv("GATEWAY_GRANT_DISPATCH_TOKEN", "legacy-gateway-token")
-    monkeypatch.setenv("AGENT_PUBLISH_BASE_BRANCH", "legacy-branch")
+    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "legacy/repo")
     repository = _SettingsRepository()
 
     await _run_readiness(monkeypatch, repository, expected_token="legacy-sandbox-manager-token")
@@ -104,7 +105,7 @@ async def test_preactivation_bootstraps_settings_before_the_new_api_starts(monke
         definition.storage_key in repository.values for definition in settings.MIGRATED_SETTINGS
     )
     assert settings.setting_env("GATEWAY_GRANT_DISPATCH_TOKEN") == "legacy-gateway-token"
-    assert settings.text_setting("publish_base_branch") == "legacy-branch"
+    assert settings.text_setting("repo_allowlist") == "legacy/repo"
     assert repository.values["workspace_broker_token"] != "legacy-sandbox-manager-token"
 
 
@@ -114,27 +115,27 @@ async def test_preactivation_preserves_complete_saved_settings_over_stale_env(mo
         settings.encode_changes(
             {
                 "sandbox_manager_token": "saved-sandbox-manager-token",
-                "publish_base_branch": "saved-branch",
+                "repo_allowlist": "saved/repo",
             }
         )
     )
     repository = _SettingsRepository(revision=7, values=values)
     monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "stale-sandbox-manager-token")
-    monkeypatch.setenv("AGENT_PUBLISH_BASE_BRANCH", "stale-branch")
+    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "stale/repo")
 
     await _run_readiness(monkeypatch, repository, expected_token="saved-sandbox-manager-token")
 
     assert repository.seeds == []
     assert repository.revision == 7
     assert repository.values == values
-    assert settings.text_setting("publish_base_branch") == "saved-branch"
+    assert settings.text_setting("repo_allowlist") == "saved/repo"
 
 
 async def test_preactivation_imports_missing_fields_without_replacing_saved_values(monkeypatch):
     saved = settings.encode_changes(
         {
             "sandbox_manager_token": "saved-sandbox-manager-token",
-            "publish_base_branch": "saved-branch",
+            "repo_allowlist": "saved/repo",
         }
     )
     migrated = {definition.storage_key for definition in settings.MIGRATED_SETTINGS}
@@ -143,7 +144,7 @@ async def test_preactivation_imports_missing_fields_without_replacing_saved_valu
     }
     repository = _SettingsRepository(revision=7, values={**legacy, **saved})
     monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "stale-sandbox-manager-token")
-    monkeypatch.setenv("AGENT_PUBLISH_BASE_BRANCH", "stale-branch")
+    monkeypatch.setenv("AGENT_REPO_ALLOWLIST", "stale/repo")
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "newly-imported-control-token-of-32-bytes")
 
     await _run_readiness(monkeypatch, repository, expected_token="saved-sandbox-manager-token")
@@ -155,7 +156,7 @@ async def test_preactivation_imports_missing_fields_without_replacing_saved_valu
     assert all(
         definition.storage_key in repository.values for definition in settings.MIGRATED_SETTINGS
     )
-    assert settings.text_setting("publish_base_branch") == "saved-branch"
+    assert settings.text_setting("repo_allowlist") == "saved/repo"
     assert (
         settings.setting_env("AGENT_CONTROL_TOKEN_SECRET")
         == "newly-imported-control-token-of-32-bytes"

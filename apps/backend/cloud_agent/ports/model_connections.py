@@ -24,6 +24,8 @@ class ModelConnectionRepository(Protocol):
 
         ``values["model_checks"]`` maps every model to the verification the
         saving request made; nothing else creates a connection.
+        Local account admission is checked under its row lock through commit;
+        ``ModelConnectionAccessEnded`` refuses a revoked or suspended owner.
         """
         ...
 
@@ -64,6 +66,8 @@ class ModelConnectionRepository(Protocol):
         Guarded by both revisions and the model list the verification read. A
         new key or Base URL raises both revisions; ``model_checks`` becomes the
         whole map, at the resulting config revision.
+        ``ModelConnectionAccessEnded`` refuses a local owner whose admission
+        ended during verification, checked under the account lock through commit.
         """
         ...
 

@@ -14,8 +14,8 @@ from typing import Any
 
 import pytest
 
-from cloud_agent_host import sandbox as sandbox_mod
-from cloud_agent_host.sandbox import ContainerBackend, SandboxError
+from cloud_agent_host.container import sandbox as sandbox_mod
+from cloud_agent_host.container.sandbox import ContainerBackend, SandboxError
 from cloud_agent_shared.egress import network_from_env
 
 _NETWORK = network_from_env(
@@ -24,7 +24,6 @@ _NETWORK = network_from_env(
         "AGENT_EGRESS_CHAT_NETWORK_POOL": "10.240.0.0/16",
         "AGENT_EGRESS_DNS_SERVER": "1.1.1.1",
         "AGENT_RELAY_NETWORK": "agent-relays",
-        "AGENT_GATEWAY_URL": "http://agent-gateway:8080",
         "AGENT_SANDBOX_MCP_URL": "http://agent-mcp:8000",
     }
 )

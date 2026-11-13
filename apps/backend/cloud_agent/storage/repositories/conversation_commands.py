@@ -13,11 +13,11 @@ from typing import TYPE_CHECKING, Any
 import asyncpg
 
 from cloud_agent.domain.execution import QUEUED, SUCCEEDED
+from cloud_agent.domain.execution_profiles import default_execution_profile
 from cloud_agent.domain.ids import new_job_id, new_thread_id
 from cloud_agent.domain.pending_messages import QUEUE_PAUSED_ARCHIVED
 from cloud_agent.domain.read_receipts import READ_RECEIPT_BATCH_SIZE
 from cloud_agent.domain.requests import check_client_request
-from cloud_agent.execution_profiles import default_execution_profile
 from cloud_agent.goals.models import GOAL_REPORT_PROTOCOL
 from cloud_agent.storage._sql.attachments import claim_attachments
 from cloud_agent.storage._sql.goals import (
@@ -31,17 +31,16 @@ from cloud_agent.storage._sql.pending_messages import PAUSE_QUEUE_SQL
 from cloud_agent.storage._sql.read_receipts import merge_read_receipts
 from cloud_agent.storage._sql.rows import job_row_to_dict, load_json
 from cloud_agent.storage._sql.sandbox import lock_memberships
+from cloud_agent.storage._sql.sandbox_transitions import (
+    RELEASE_THREADS_RESIDENCIES_SQL,
+)
 from cloud_agent.storage._sql.ssh import enable_ssh_servers
 from cloud_agent.storage.repositories.environments import bind_environment
 from cloud_agent.storage.repositories.goals import new_goal_id
-from cloud_agent.task_titles import (
-    fallback_title,
-    normalize_generated_title,
-    thread_title_needs_generation,
-)
+from cloud_agent.task_titles import fallback_title
 
 if TYPE_CHECKING:
-    from cloud_agent.goals.models import GoalInput
+    from cloud_agent.schemas.goals import GoalInput
 
 
 def _goal_round_metadata(inherited: Any) -> dict[str, Any]:
@@ -441,15 +440,7 @@ class PostgresConversationCommands:
             # them: the update's plan picks its own order.
             await lock_memberships(conn, thread_ids)
             released = await conn.fetch(
-                """
-                UPDATE agent_thread_sandbox_memberships m
-                SET residency_status = 'none', residency_last_active_at = NOW()
-                FROM agent_sandboxes g
-                WHERE m.thread_id = ANY($1::text[]) AND m.residency_status <> 'none'
-                  AND g.id = m.sandbox_id
-                RETURNING m.thread_id, m.residency_generation AS generation, g.host,
-                          COALESCE(m.residency_grant_id, '') AS grant_id
-                """,
+                RELEASE_THREADS_RESIDENCIES_SQL,
                 thread_ids,
             )
             # Uploaded bytes are removed outright, not soft-deleted with the
@@ -556,98 +547,6 @@ class PostgresConversationCommands:
                 title,
             )
         return dict(row) if row is not None else None
-
-    async def get_thread_title_prompt(
-        self, *, job_id: str, attempt_id: int, lease_generation: int
-    ) -> str | None:
-        """Return the first prompt if this fenced attempt may still name its thread."""
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT t.title, t.title_source, first.task_prompt
-                FROM agent_jobs j
-                JOIN agent_threads t ON t.id = j.thread_id
-                JOIN agent_jobs first ON first.thread_id = t.id AND first.turn_no = 1
-                JOIN agent_attempts a ON a.id = j.current_attempt_id AND a.job_id = j.id
-                WHERE j.id = $1 AND a.id = $2 AND a.lease_generation = $3
-                  AND t.deleted_at IS NULL AND NOT j.cancel_requested
-                  AND (
-                      (j.state = 'running' AND a.status = 'running'
-                       AND a.lease_expires_at > clock_timestamp())
-                      OR (j.state = 'succeeded' AND a.status = 'finished')
-                  )
-                """,
-                job_id,
-                attempt_id,
-                lease_generation,
-            )
-        if row is None or not thread_title_needs_generation(row["title_source"], row["title"]):
-            return None
-        return str(row["task_prompt"])
-
-    async def set_generated_thread_title(
-        self, *, job_id: str, attempt_id: int, lease_generation: int, title: str
-    ) -> bool:
-        """Save a missing/recovered title while its attempt remains current."""
-        if normalize_generated_title(title) is None:
-            return False
-        async with self._pool.acquire() as conn, conn.transaction():
-            locked_attempt = await conn.fetchval(
-                "SELECT id FROM agent_attempts WHERE id = $1 AND lease_generation = $2 FOR SHARE",
-                attempt_id,
-                lease_generation,
-            )
-            if locked_attempt is None:
-                return False
-            # Match follow-up/fork lock ordering: thread before job. Locking the
-            # source also makes a simultaneous manual rename win in either order.
-            thread = await conn.fetchrow(
-                """
-                SELECT t.id, t.title, t.title_source FROM agent_threads t
-                JOIN agent_jobs j ON j.thread_id = t.id
-                WHERE j.id = $1 AND t.deleted_at IS NULL
-                FOR UPDATE OF t
-                """,
-                job_id,
-            )
-            if thread is None or not thread_title_needs_generation(
-                thread["title_source"], thread["title"]
-            ):
-                return False
-            authority = await conn.fetchrow(
-                """
-                SELECT j.state AS job_state, a.status AS attempt_status
-                FROM agent_attempts a
-                JOIN agent_jobs j ON j.id = a.job_id
-                WHERE j.id = $1 AND j.current_attempt_id = a.id
-                  AND a.id = $2 AND a.lease_generation = $3 AND NOT j.cancel_requested
-                  AND (
-                      (j.state = 'running' AND a.status = 'running')
-                      OR (j.state = 'succeeded' AND a.status = 'finished')
-                  )
-                FOR SHARE OF j
-                """,
-                job_id,
-                attempt_id,
-                lease_generation,
-            )
-            if authority is None:
-                return False
-            if authority["job_state"] == "running" and not await conn.fetchval(
-                "SELECT lease_expires_at > clock_timestamp() FROM agent_attempts WHERE id = $1",
-                attempt_id,
-            ):
-                return False
-            updated = await conn.fetchval(
-                """
-                UPDATE agent_threads SET title = $2, title_source = 'generated'
-                WHERE id = $1 AND deleted_at IS NULL
-                RETURNING id
-                """,
-                thread["id"],
-                title,
-            )
-            return updated is not None
 
     async def set_thread_pinned(
         self, *, job_id: str, user_id: str, pinned: bool
@@ -807,7 +706,7 @@ class PostgresConversationCommands:
             parent["id"],
             parent["turn_no"] + 1,
             parent["user_id"],
-            parent["published_commit_sha"] or parent["base_sha"],
+            parent["base_sha"],
             prompt,
             parent["runtime"],
             parent["model"],
@@ -983,13 +882,9 @@ async def insert_follow_up(
         return {"error": "sandbox_context_lost"}
     turn_no = parent["turn_no"] + 1
     connection_id = model_connection_id if model else parent["model_connection_id"]
-    # An owner connection takes no effort setting, so a switch onto one never
-    # carries the Gateway turn's depth along with it.
-    effort = (
-        None
-        if reset_reasoning_effort or connection_id
-        else (reasoning_effort or parent["reasoning_effort"])
-    )
+    # Inherited like the model; the caller checked the resulting level against
+    # the connection's declared levels (``require_usable``).
+    effort = None if reset_reasoning_effort else (reasoning_effort or parent["reasoning_effort"])
     previous_skills = load_json(parent["skills"]) if parent["skills"] is not None else None
     selected_skills = previous_skills if skills is None else skills
     if selected_skills == [] and previous_skills is None:
@@ -1013,7 +908,7 @@ async def insert_follow_up(
         parent["id"],
         turn_no,
         user_id,
-        parent["published_commit_sha"] or parent["base_sha"],
+        parent["base_sha"],
         prompt,
         parent["runtime"],
         model or parent["model"],

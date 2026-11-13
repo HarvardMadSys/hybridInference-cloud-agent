@@ -11,7 +11,6 @@ import {
   type AgentMemoryScope,
 } from '@/lib/api/agentMemory';
 import { getInsights, type WorkInsights } from '@/lib/api/insights';
-import { getModelPreference } from '@/lib/api/modelPreference';
 import { getUserProfile } from '@/lib/api/userProfile';
 import { LOCALE_STORAGE_KEY } from '@/lib/i18n/locales';
 import { SiteConfigProvider } from '@/components/providers/SiteConfigProvider';
@@ -19,6 +18,7 @@ import { NEUTRAL_SITE_CONFIG } from '@/config/site';
 import { IntegrationsView } from './IntegrationsView';
 import { KeyboardShortcutsSettingsView } from '../settings/KeyboardShortcutsSettingsView';
 import { MemorySettingsView } from '../settings/MemorySettingsView';
+import { ModelsSettingsView } from '../settings/ModelsSettingsView';
 import { MySettingsView } from '../settings/MySettingsView';
 import { PluginsSettingsView } from '../settings/PluginsSettingsView';
 import { EnvironmentsSettingsView } from '../settings/EnvironmentsSettingsView';
@@ -37,13 +37,9 @@ import { listSkills } from '@/lib/api/skills';
 import { listSshServers } from '@/lib/api/sshServers';
 vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
 vi.mock('@/lib/api/userProfile', () => ({ getUserProfile: vi.fn(), saveUserProfile: vi.fn() }));
-vi.mock('@/lib/api/modelPreference', () => ({
-  getModelPreference: vi.fn(),
-  saveModelPreference: vi.fn(),
-}));
-// My Settings also lists personal model connections; this deployment offers none.
+// The Models page lists personal model connections; this deployment offers none.
 vi.mock('@/lib/api/modelConnections', () => ({
-  MAX_MODELS: 8,
+  MAX_MODELS: 16,
   listModelConnections: () =>
     Promise.resolve({ configured: true, enabled: false, connections: [] }),
 }));
@@ -191,15 +187,7 @@ beforeEach(() => {
   });
   localStorage.clear();
   document.documentElement.lang = 'en';
-  vi.mocked(getModelPreference).mockResolvedValue({
-    default_model: null,
-    last_model: 'model-a',
-    effective_model: 'model-a',
-    deployment_default: null,
-    models: ['model-a', 'model-b'],
-  });
   vi.mocked(getAgentConfig).mockResolvedValue({
-    models: ['model-a', 'model-b'],
     repos: [],
     runtimes: ['codex'],
     github_connected: true,
@@ -431,7 +419,7 @@ describe('IntegrationsView', () => {
     expect(within(section).getByRole('switch', { name: '启用记忆' })).toBeChecked();
     expect(within(section).queryByRole('heading', { name: '建议' })).not.toBeInTheDocument();
     expect(screen.getByRole('tab', { name: '项目记忆' })).toBeInTheDocument();
-    expect(screen.getByText('管理你的个人资料、默认模型和通知。')).toBeInTheDocument();
+    expect(screen.getByText('管理你的个人资料和通知。')).toBeInTheDocument();
     expect(screen.getByRole('heading', { level: 1, name: '键盘快捷键' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: '键盘快捷键' })).toBeInTheDocument();
   });
@@ -773,4 +761,19 @@ describe('IntegrationsView', () => {
     // no longer carries a placeholder pill.
     expect(screen.queryAllByText('Coming soon')).toHaveLength(0);
   });
+});
+
+it('the Models page offers model connections, and neither page has a default-model pin', async () => {
+  const { unmount } = render(<ModelsSettingsView />);
+  expect(screen.getByRole('heading', { level: 1, name: 'Models' })).toBeInTheDocument();
+  await screen.findByRole('region', { name: 'Personal model connections' });
+  expect(screen.queryByRole('region', { name: 'Default model' })).not.toBeInTheDocument();
+  unmount();
+  render(<MySettingsView />);
+  expect(screen.getByRole('region', { name: 'Profile' })).toBeInTheDocument();
+  expect(screen.getByRole('region', { name: 'Notifications' })).toBeInTheDocument();
+  expect(
+    screen.queryByRole('region', { name: 'Personal model connections' }),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByRole('region', { name: 'Default model' })).not.toBeInTheDocument();
 });

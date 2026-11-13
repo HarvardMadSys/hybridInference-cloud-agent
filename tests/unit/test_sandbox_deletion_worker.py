@@ -10,11 +10,11 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from cloud_agent import sandbox_manager_routing
 from cloud_agent.logging_utils import JsonLogFormatter
 from cloud_agent.ports.sandbox import DeletionFailureDecision
-from cloud_agent.sandbox_archive import ArchiveReceipt, ArchiveUpload
-from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_archive.sandbox_archive import ArchiveReceipt, ArchiveUpload
+from cloud_agent.sandbox_manager import sandbox_manager_routing
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 from cloud_agent.workers import sandbox_deletion as worker
 
 SHA256 = "a" * 64

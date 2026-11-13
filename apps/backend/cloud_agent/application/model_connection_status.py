@@ -23,8 +23,10 @@ from cloud_agent.application.model_connection_check import CHECK_MESSAGES
 from cloud_agent.domain.model_connections import (
     FAILED,
     current_check,
+    model_effort_offer,
     model_paths,
 )
+from cloud_agent.domain.model_efforts import facts_view
 from cloud_agent_shared.model_connections import PROTOCOLS
 
 #: When several APIs could not be checked, the reason an owner can act on first.
@@ -109,6 +111,10 @@ def model_status(row: dict[str, Any], model: str) -> dict[str, Any]:
         ],
         "protocols": results,
         "checked_at": entry.get("checked_at") if entry is not None else None,
+        # What the provider's listings declared about reasoning levels, per
+        # API; ``not_read`` for a model whose facts predate them.
+        "efforts": facts_view(entry),
+        "efforts_checked_at": entry.get("efforts_checked_at") if entry is not None else None,
     }
 
 
@@ -129,6 +135,24 @@ def connection_statuses(row: dict[str, Any]) -> list[dict[str, Any]]:
     return [model_status(row, model) for model in row.get("models") or []]
 
 
+def model_efforts(row: dict[str, Any]) -> dict[str, dict[str, dict[str, Any]]]:
+    """Each usable model with, per agent that can run it, the reasoning levels it is offered.
+
+    Exactly what ``require_usable`` accepts for an effort: a level listed here,
+    or Auto.
+    """
+    offers: dict[str, dict[str, dict[str, Any]]] = {}
+    for model in row.get("models") or []:
+        per_runtime = {
+            runtime: offer.as_dict()
+            for runtime in sorted(model_paths(row, model))
+            if (offer := model_effort_offer(row, model, runtime)) is not None
+        }
+        if per_runtime:
+            offers[model] = per_runtime
+    return offers
+
+
 def usable_runtimes(row: dict[str, Any]) -> dict[str, list[str]]:
     """Each listed model with the agents that can run it now; a model with none is left out."""
     usable = {model: sorted(model_paths(row, model)) for model in row.get("models") or []}
@@ -141,6 +165,7 @@ __all__ = [
     "UNSUPPORTED_STATUS",
     "UNVERIFIED",
     "connection_statuses",
+    "model_efforts",
     "model_status",
     "usable_runtimes",
     "verification_status",

@@ -33,8 +33,8 @@ def good_log() -> str:
             "[deploy] previous: unknown",
             "[deploy] pulling release images",
             "[deploy] starting deployment database",
+            "[deploy] checking that the Agent database is empty or holds Cloud Agent accounts",
             "[deploy] migrating deployment database",
-            "[deploy] checking the Agent database identity issuer",
             "[deploy] waiting for bootstrap control plane at http://127.0.0.1:8000/healthz",
             "[deploy] bootstrap control plane: ok",
             "[deploy] bootstrap MCP relay: ok",
@@ -53,33 +53,31 @@ def result(log: str, returncode: int = 1) -> subprocess.CompletedProcess[str]:
 
 def test_the_variants_are_the_ones_a_release_carries() -> None:
     """Pin the deployed contract independently of the catalog projection."""
-    assert ac.VARIANTS == {"root": ("", "/api"), "agents": ("/agents", "/agents/api")}
+    assert ac.VARIANTS == {"root": ("", "/api")}
 
 
-@pytest.mark.parametrize(
-    ("variant", "base", "api"), [("root", "", "/api"), ("agents", "/agents", "/agents/api")]
-)
-def test_the_mount_shape_and_the_browser_path_are_one_decision(
-    variant: str, base: str, api: str
-) -> None:
-    environment = ac.synthetic_environment(COMPOSE, variant, "p")
-    assert environment["AGENT_WEB_VARIANT"] == variant
-    assert environment["AGENT_WEB_BASE_PATH"] == base
-    assert environment["AGENT_WEB_API_URL"] == api
+def test_the_deployment_selects_the_root_console() -> None:
+    environment = ac.synthetic_environment(COMPOSE, "root", "p")
+    assert environment["AGENT_WEB_VARIANT"] == "root"
+    # The console's mount and API path are the image's, not the deployment's.
+    assert "AGENT_WEB_BASE_PATH" not in environment
+    assert "AGENT_WEB_API_URL" not in environment
+    with pytest.raises(ac.AcceptanceFailure):
+        ac.synthetic_environment(COMPOSE, "agents", "p")
 
 
 # --------------------------------------------------------------- environment
 
 
 def test_the_environment_satisfies_every_variable_the_stack_requires() -> None:
-    environment = ac.synthetic_environment(COMPOSE, "agents", "p")
+    environment = ac.synthetic_environment(COMPOSE, "root", "p")
     missing = sorted(ac.required_variables(COMPOSE) - set(environment))
     assert not missing, f"the stack would refuse to interpolate: {missing}"
 
 
 def test_the_release_s_own_variables_are_never_in_the_deployment_s_env() -> None:
     """The negative case exists because a deployment that sets these is refused."""
-    environment = ac.synthetic_environment(COMPOSE, "agents", "p")
+    environment = ac.synthetic_environment(COMPOSE, "root", "p")
     assert "AGENT_DEPLOYMENT_SHA" not in environment
     assert not [name for name in environment if name.endswith("_IMAGE")]
     assert not [name for name in ac.required_variables(COMPOSE) if name.endswith("_IMAGE")]
@@ -87,7 +85,7 @@ def test_the_release_s_own_variables_are_never_in_the_deployment_s_env() -> None
 
 
 def test_the_database_url_matches_the_password_the_postgres_service_gets() -> None:
-    environment = ac.synthetic_environment(COMPOSE, "agents", "p")
+    environment = ac.synthetic_environment(COMPOSE, "root", "p")
     password = environment["AGENT_POSTGRES_PASSWORD"]
     assert environment["AGENT_DATABASE_URL"] == (
         f"postgresql://cloudagent:{password}@postgres:5432/cloudagent"
@@ -98,8 +96,8 @@ def test_the_database_url_matches_the_password_the_postgres_service_gets() -> No
 
 
 def test_two_acceptances_on_one_machine_do_not_share_a_port() -> None:
-    first = ac.synthetic_environment(COMPOSE, "agents", "one")
-    second = ac.synthetic_environment(COMPOSE, "agents", "two")
+    first = ac.synthetic_environment(COMPOSE, "root", "one")
+    second = ac.synthetic_environment(COMPOSE, "root", "two")
     ports = [
         value
         for environment in (first, second)
@@ -237,9 +235,7 @@ def test_acceptance_cleans_up_and_reallocates_ports_after_a_conflict(
     monkeypatch.setattr(ac.aa, "expected_services", lambda *a: {})
     monkeypatch.setattr(ac.aa, "check_running", lambda *a: ["running images verified"])
 
-    evidence = ac.accept(
-        manifest, tmp_path / "recipe.tar.gz", "agents", tmp_path, "acceptance-test"
-    )
+    evidence = ac.accept(manifest, tmp_path / "recipe.tar.gz", "root", tmp_path, "acceptance-test")
 
     assert evidence[-1] == "running images verified"
     expected = ["deploy", "cleanup", "deploy", "web"]
@@ -274,7 +270,7 @@ def test_acceptance_stops_when_retry_cannot_recover(monkeypatch, tmp_path, failu
     }
 
     with pytest.raises(ac.AcceptanceFailure, match=expected[failure]):
-        ac.accept(tmp_path / "manifest", tmp_path / "recipe", "agents", tmp_path, "acceptance-test")
+        ac.accept(tmp_path / "manifest", tmp_path / "recipe", "root", tmp_path, "acceptance-test")
 
     assert len(attempts) == (3 if failure == "persistent_conflict" else 1)
     assert len(cleanups) == {"persistent_conflict": 2, "unrelated": 0, "cleanup": 1}[failure]
@@ -306,11 +302,12 @@ def test_a_stage_that_never_happened_is_refused(stage: str) -> None:
 
 
 def test_the_stages_are_checked_in_order() -> None:
-    """A set would accept a deployment that migrated after checking identity."""
+    """A set would accept a deployment that migrated a database before checking it."""
     lines = good_log().splitlines()
     migrate = next(i for i, line in enumerate(lines) if "migrating deployment database" in line)
-    identity = next(i for i, line in enumerate(lines) if "identity issuer" in line)
-    lines[migrate], lines[identity] = lines[identity], lines[migrate]
+    check = next(i for i, line in enumerate(lines) if "holds Cloud Agent accounts" in line)
+    assert check < migrate
+    lines[migrate], lines[check] = lines[check], lines[migrate]
     with pytest.raises(ac.AcceptanceFailure, match="never got as far as"):
         ac.check_stages(result("\n".join(lines)))
 
@@ -451,8 +448,8 @@ def test_the_password_is_fixed_so_a_failure_can_be_reproduced() -> None:
     The database is reachable only from the stack's own network, holds
     synthetic data, and is removed with the project.
     """
-    first = ac.synthetic_environment(COMPOSE, "agents", "one")
-    second = ac.synthetic_environment(COMPOSE, "agents", "two")
+    first = ac.synthetic_environment(COMPOSE, "root", "one")
+    second = ac.synthetic_environment(COMPOSE, "root", "two")
     assert first["AGENT_POSTGRES_PASSWORD"] == second["AGENT_POSTGRES_PASSWORD"]
     assert first["AGENT_DATABASE_URL"] == second["AGENT_DATABASE_URL"]
     assert ac.ACCEPTANCE_PASSWORD in first["AGENT_DATABASE_URL"]
@@ -484,7 +481,15 @@ def test_the_credential_probe_compares_without_disclosing(monkeypatch) -> None:
             return json.dumps(
                 [f"AGENT_DATABASE_URL=postgresql://cloudagent:{secret}@postgres:5432/x"]
             )
-        return json.dumps([f"POSTGRES_PASSWORD={secret}"])
+        if arguments[0] == "inspect":
+            return json.dumps([f"POSTGRES_PASSWORD_FILE={ac.KEYS_DIR}/AGENT_POSTGRES_PASSWORD"])
+        assert arguments == (
+            "exec",
+            "container-postgres",
+            "cat",
+            f"{ac.KEYS_DIR}/AGENT_POSTGRES_PASSWORD",
+        )
+        return secret
 
     monkeypatch.setattr(ac, "docker", fake_docker)
     findings = ac.database_credentials("p")
@@ -495,6 +500,42 @@ def test_the_credential_probe_compares_without_disclosing(monkeypatch) -> None:
     digest = hashlib.sha256(secret.encode()).hexdigest()[:12]
     assert joined.count(digest) == 2, "matching passwords report the same digest on both halves"
     assert f"{len(secret)} characters" in joined
+
+
+def test_the_probe_reads_a_connection_the_environment_leaves_to_the_keys_volume(
+    monkeypatch,
+) -> None:
+    secret = "from-the-volume"
+    read: list[tuple[str, ...]] = []
+
+    def fake_docker(*arguments: str, check: bool = True) -> str:
+        if arguments[0] == "ps":
+            service = arguments[arguments.index("--filter", 3) + 1].split("=")[-1]
+            return f"container-{service}"
+        if arguments[0] == "inspect" and "control-plane" in arguments[1]:
+            return json.dumps(["AGENT_DATABASE_URL="])
+        if arguments[0] == "inspect":
+            return json.dumps([f"POSTGRES_PASSWORD_FILE={ac.KEYS_DIR}/AGENT_POSTGRES_PASSWORD"])
+        read.append(arguments)
+        if arguments[1] == "container-control-plane":
+            return f"postgresql://cloudagent:{secret}@postgres:5432/x"
+        return ""
+
+    monkeypatch.setattr(ac, "docker", fake_docker)
+    findings = ac.database_credentials("p")
+
+    assert findings[0] == (
+        f"postgres: {ac.KEYS_DIR}/AGENT_POSTGRES_PASSWORD could not be read from the container"
+    )
+    assert f"{len(secret)} characters" in findings[1]
+    assert ("exec", "container-control-plane", "cat", f"{ac.KEYS_DIR}/AGENT_DATABASE_URL") in read
+
+
+def test_the_stack_generates_the_keys_a_new_installation_lacks() -> None:
+    """Accepted the way a deployment with no .env starts: `keys` makes these."""
+    environment = ac.synthetic_environment(COMPOSE, "root", "p")
+    for name in ac.GENERATED_KEYS:
+        assert name not in environment
 
 
 def test_the_probe_says_so_when_there_is_nothing_to_inspect(monkeypatch) -> None:
@@ -519,8 +560,8 @@ def test_each_acceptance_gets_a_network_of_its_own() -> None:
     acceptances failed with `password authentication failed` against staging's
     database, which had never been given the password they held.
     """
-    first = ac.synthetic_environment(COMPOSE, "agents", "run-one")
-    second = ac.synthetic_environment(COMPOSE, "agents", "run-two")
+    first = ac.synthetic_environment(COMPOSE, "root", "run-one")
+    second = ac.synthetic_environment(COMPOSE, "root", "run-two")
     assert first["AGENT_NETWORK_NAME"] != second["AGENT_NETWORK_NAME"]
     assert "run-one" in first["AGENT_NETWORK_NAME"]
     assert first["AGENT_NETWORK_NAME"] != "cloud-agent", (
@@ -582,7 +623,7 @@ def test_the_web_bring_up_carries_the_commit_the_env_file_must_not(monkeypatch) 
 
 
 def test_the_commit_is_never_written_into_the_deployment_env_file() -> None:
-    environment = ac.synthetic_environment(COMPOSE, "agents", "p")
+    environment = ac.synthetic_environment(COMPOSE, "root", "p")
     assert "AGENT_DEPLOYMENT_SHA" not in environment
 
 

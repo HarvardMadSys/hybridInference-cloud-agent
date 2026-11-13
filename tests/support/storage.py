@@ -19,11 +19,15 @@ from __future__ import annotations
 import pathlib
 from typing import Any
 
+from tests.support.owners import CONNECTION_ID, connection_row
+
 from cloud_agent.ports.sandbox import TerminalControlRoute
 
 _PORTS = pathlib.Path(__file__).resolve().parents[2] / "apps" / "backend" / "cloud_agent" / "ports"
 
-#: One name per port module, which is also the assembly's attribute name.
+#: One name per port module, which is also the assembly's attribute name. A
+#: capability whose mirror port was removed is not here: its fake is a
+#: ``create_autospec`` of the caller's Protocol (see ``tests.support.narrow_fakes``).
 CAPABILITIES = frozenset(p.stem for p in _PORTS.glob("*.py") if p.name != "__init__.py") | {
     "admin_conversations",
     "admin_runs",
@@ -47,16 +51,31 @@ class AllCapabilities:
         return None
 
     async def list_model_connections(self, *, user_id: str) -> list[dict[str, Any]]:
-        """Legacy fixtures' owners have added no model connection of their own."""
-        return []
+        """Every fixture owner has one verified model connection, as every working owner does."""
+        return [connection_row(user_id)]
 
     async def get_model_connection(self, *, user_id: str, connection_id: str):
-        """No fixture owner has a model connection, so a named one reads as missing."""
-        return None
+        """The owner's one connection (:data:`~tests.support.owners.CONNECTION_ID`); any other is missing."""
+        return connection_row(user_id) if connection_id == CONNECTION_ID else None
+
+    async def bind_residency(self, **_kwargs: Any) -> bool:
+        """The connection is unchanged, so a residency binds at its current revision."""
+        return True
 
     async def scan_key_ciphertexts(self, *, sandbox_id: str, limit: int) -> list[str]:
         """Legacy fixtures' sandbox groups were never handed a model connection key."""
         return []
+
+    async def record_sandbox_incidents(self, **_kwargs: Any) -> list[dict[str, Any]]:
+        """Legacy fixtures store no sandbox incident."""
+        return []
+
+    async def untold_incidents(self, **_kwargs: Any) -> dict[str, Any] | None:
+        """Legacy fixtures' sandboxes have no incident to tell."""
+        return None
+
+    async def mark_attempt_incidents(self, **_kwargs: Any) -> None:
+        """Legacy fixtures keep no told-through cursor."""
 
     async def owns_job(self, *, job_id: str, user_id: str) -> bool:
         """Ownership as a fake's full job read answers it, as the routes once asked it."""

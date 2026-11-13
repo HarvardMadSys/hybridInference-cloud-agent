@@ -6,7 +6,6 @@ import {
   cachedShare,
   change,
   compactCount,
-  costDisplay,
   formatMetric,
   isPartialDay,
   metricDisplay,
@@ -14,6 +13,7 @@ import {
   notFinal,
   previousLabel,
   previousWindow,
+  reportedTokens,
   share,
   shortDay,
   tickIndexes,
@@ -24,13 +24,13 @@ function aggregate(overrides: Partial<AdminUsageAggregate> = {}): AdminUsageAggr
     run_count: 4,
     attempt_count: 4,
     totals: {
-      calls: 30,
+      calls: null,
       tokens_in: 40_086,
       tokens_out: 413,
       cache_read: 30_000,
       cache_write: null,
       reasoning: null,
-      spent_usd: '1.23456',
+      spent_usd: null,
     },
     unknown_rows: {
       tokens_in: 0,
@@ -38,13 +38,13 @@ function aggregate(overrides: Partial<AdminUsageAggregate> = {}): AdminUsageAggr
       cache_read: 0,
       cache_write: 2,
       reasoning: 4,
-      spent_usd: 0,
+      spent_usd: 4,
     },
     estimated_calls: 0,
     oldest_queried_at: '2026-09-09T10:01:00Z',
     runs_with_snapshot: 4,
     missing_attempts: 0,
-    status_counts: { available: 4, partial: 0, stale: 0, pending: 0, unavailable: 0 },
+    status_counts: { available: 4, partial: 0, pending: 0, unavailable: 0 },
     active_runs: 0,
     refreshing_runs: 0,
     ...overrides,
@@ -52,23 +52,22 @@ function aggregate(overrides: Partial<AdminUsageAggregate> = {}): AdminUsageAggr
 }
 
 describe('metricValue', () => {
-  it('reads every metric, with the cost as a number', () => {
+  it('reads every metric the agents reported', () => {
     const usage = aggregate();
     expect(metricValue(usage, 'turns')).toBe(4);
-    expect(metricValue(usage, 'calls')).toBe(30);
     expect(metricValue(usage, 'tokens_in')).toBe(40_086);
     expect(metricValue(usage, 'tokens_out')).toBe(413);
-    expect(metricValue(usage, 'cost')).toBeCloseTo(1.23456);
+    expect(reportedTokens(usage)).toBe(40_086 + 413);
   });
 
-  it('keeps an unrecorded metric unknown rather than zero', () => {
+  it('keeps an unreported metric unknown rather than zero', () => {
     const unread = aggregate({ totals: null, runs_with_snapshot: 0 });
     // Turns are counted from the database, so they are known without usage.
     expect(metricValue(unread, 'turns')).toBe(4);
-    expect(metricValue(unread, 'cost')).toBeNull();
-    expect(metricValue(unread, 'calls')).toBeNull();
-    const uncosted = aggregate({ totals: { ...aggregate().totals!, spent_usd: null } });
-    expect(metricValue(uncosted, 'cost')).toBeNull();
+    expect(metricValue(unread, 'tokens_in')).toBeNull();
+    expect(reportedTokens(unread)).toBeNull();
+    const partly = aggregate({ totals: { ...aggregate().totals!, tokens_out: null } });
+    expect(metricValue(partly, 'tokens_out')).toBeNull();
   });
 });
 
@@ -81,29 +80,18 @@ describe('number formats', () => {
     expect(compactCount(null)).toBe('—');
   });
 
-  it('shows a cost to the cent and keeps the recorded amount', () => {
-    expect(costDisplay('15.6350844')).toEqual({ display: '$15.64', exact: '15.6350844' });
-    expect(costDisplay('1234.5')).toEqual({ display: '$1,234.50', exact: '1234.5' });
-    expect(costDisplay('0')).toEqual({ display: '$0', exact: '0' });
-    expect(costDisplay('0.004')).toEqual({ display: '<$0.01', exact: '0.004' });
-    expect(costDisplay(null)).toEqual({ display: '—', exact: null });
-    expect(costDisplay('not a number')).toEqual({ display: '—', exact: null });
-  });
-
   it('offers the whole count behind a shortened headline', () => {
     expect(metricDisplay(aggregate(), 'tokens_in')).toEqual({ display: '40.1K', exact: '40,086' });
-    expect(metricDisplay(aggregate(), 'calls')).toEqual({ display: '30', exact: null });
-    expect(metricDisplay(aggregate({ totals: null }), 'calls')).toEqual({
+    expect(metricDisplay(aggregate(), 'tokens_out')).toEqual({ display: '413', exact: null });
+    expect(metricDisplay(aggregate({ totals: null }), 'tokens_out')).toEqual({
       display: '—',
       exact: null,
     });
   });
 
-  it('formats a chart value by its metric', () => {
-    expect(formatMetric('cost', 4.756)).toBe('$4.76');
-    expect(formatMetric('cost', 0.004)).toBe('<$0.01');
-    expect(formatMetric('tokens_in', 25_712_000)).toBe('25.7M');
-    expect(formatMetric('turns', null)).toBe('—');
+  it('formats a chart value as the headline shortens it', () => {
+    expect(formatMetric(25_712_000)).toBe('25.7M');
+    expect(formatMetric(null)).toBe('—');
   });
 });
 
@@ -171,45 +159,36 @@ describe('notFinal', () => {
     expect(notFinal(aggregate())).toEqual({ clauses: [], detail: [] });
   });
 
-  it('names running turns, uncounted turns and calls without a cost', () => {
+  it('names running and not fully counted turns, and never an unrecorded cost', () => {
     const { clauses, detail } = notFinal(
       aggregate({
         active_runs: 1,
         runs_with_snapshot: 3,
-        status_counts: { available: 1, partial: 1, stale: 1, pending: 1, unavailable: 0 },
-        unknown_rows: { ...aggregate().unknown_rows!, spent_usd: 3 },
-        estimated_calls: 2,
+        status_counts: { available: 1, partial: 1, pending: 1, unavailable: 1 },
       }),
     );
-    expect(clauses).toEqual([
-      '1 turn still running',
-      '3 turns not fully counted',
-      '3 model calls without a recorded cost',
-    ]);
+    // No agent reports a cost, so its absence is not a gap in the numbers.
+    expect(clauses).toEqual(['1 turn still running', '3 turns not fully counted']);
     expect(detail).toEqual([
       '1 turn without usage yet',
+      '1 turn whose agent reported no usage',
       '1 turn partly counted',
-      '1 turn not updated since a failed read',
-      '2 model calls with estimated tokens',
     ]);
   });
 });
 
 describe('share', () => {
-  it('measures by cost when the selection has one', () => {
-    const whole = aggregate({ totals: { ...aggregate().totals!, spent_usd: '4' } });
-    const group = aggregate({ totals: { ...aggregate().totals!, spent_usd: '1' } });
+  it('measures by reported tokens when the selection has any', () => {
+    const whole = aggregate({
+      totals: { ...aggregate().totals!, tokens_in: 3_000, tokens_out: 1_000 },
+    });
+    const group = aggregate({
+      totals: { ...aggregate().totals!, tokens_in: 900, tokens_out: 100 },
+    });
     expect(share(group, whole)).toBeCloseTo(0.25);
   });
 
-  it('falls back to model calls, then to turns', () => {
-    const uncosted = { ...aggregate().totals!, spent_usd: null };
-    expect(
-      share(
-        aggregate({ totals: { ...uncosted, calls: 6 } }),
-        aggregate({ totals: { ...uncosted, calls: 30 } }),
-      ),
-    ).toBeCloseTo(0.2);
+  it('falls back to turns while nothing was reported', () => {
     expect(
       share(aggregate({ run_count: 1, totals: null }), aggregate({ run_count: 4, totals: null })),
     ).toBeCloseTo(0.25);

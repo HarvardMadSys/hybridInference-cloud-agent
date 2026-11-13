@@ -2,15 +2,15 @@
 
 Lifted out of the follow-up route unchanged, so that every writer of a person's
 next turn asks the same questions in the same order: is the session still open,
-is its native context still there, is the harness the thread's own, does the
-model resolve, is the effort offered for that model, may this owner still reach
+is its native context still there, is the harness the thread's own, can its
+model connection run it, may this owner still reach
 the repository, and do the skills and uploads it names still exist. A second
 copy of these rules would be a second place for them to drift.
 
-What comes back is the resolved form a store writes — canonical model id,
-validated effort, skill snapshots and the upload manifest — and never the raw
-request. Refusals are the route's own ``HTTPException``s, with the same types and
-messages the route has always answered with.
+What comes back is the resolved form a store writes (model and connection,
+validated effort, skill snapshots and the upload manifest) and never the raw
+request. Refusals are ``Refused``, with the same types and messages the route
+has always answered with.
 """
 
 from __future__ import annotations
@@ -18,20 +18,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from fastapi import HTTPException
-
 from cloud_agent.application.job_admission import (
-    model_catalog_unavailable,
+    model_connection_required,
     require_connection_source,
-    require_offered_effort,
     require_registered_runtime,
-    require_resolvable_model,
     resolve_attachment_selection,
     resolve_skill_selection,
 )
-from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
+from cloud_agent.domain.errors import Refused
 from cloud_agent.schemas import RESET_REASONING_EFFORT
-from cloud_agent.visible_models import ModelCatalogUnavailable, agent_model_catalog_bundle
+from cloud_agent.source_control.entitlement import RepoNotAllowed, require_entitled_repo
 
 if TYPE_CHECKING:
     from cloud_agent.ports import (
@@ -57,7 +53,7 @@ class PreparedFollowUp:
 
     ``model`` is the canonical id, or ``None`` to inherit the parent's.
     ``model_connection_id`` is its source when ``model`` is set -- the owner's
-    connection, or ``None`` for the Gateway -- and means nothing otherwise: an
+    connection -- and means nothing otherwise: an
     inherited model keeps the parent's source.
     ``reasoning_effort`` is the validated level, or ``None`` to inherit;
     ``reset_reasoning_effort`` is the one way to clear an inherited level back
@@ -73,32 +69,22 @@ class PreparedFollowUp:
     model_connection_id: str | None = None
 
 
-def sandbox_context_lost_error() -> HTTPException:
+def sandbox_context_lost_error() -> Refused:
     """Return the stable owner-facing error for an unrunnable retained chat."""
-    return HTTPException(
-        status_code=409,
-        detail={
-            "error": {
-                "type": "sandbox_context_lost",
-                "message": (
-                    "This chat's retained sandbox has an indeterminate or lost "
-                    "context and cannot safely accept another message."
-                ),
-            }
-        },
+    return Refused(
+        "conflict",
+        "sandbox_context_lost",
+        "This chat's retained sandbox has an indeterminate or lost "
+        "context and cannot safely accept another message.",
     )
 
 
-def session_archived_error() -> HTTPException:
+def session_archived_error() -> Refused:
     """Require an explicit unarchive before accepting another conversation turn."""
-    return HTTPException(
-        status_code=409,
-        detail={
-            "error": {
-                "type": "session_archived",
-                "message": "Unarchive this session before continuing the conversation.",
-            }
-        },
+    return Refused(
+        "conflict",
+        "session_archived",
+        "Unarchive this session before continuing the conversation.",
     )
 
 
@@ -110,60 +96,37 @@ async def _prepare_model(
     model_connection_id: str | None,
     reasoning_effort: str | None,
     store: _FollowUpStorage,
-    gateway: Any,
 ) -> tuple[str | None, str | None, bool]:
-    """The canonical model, the validated effort and whether it resets, for one turn.
+    """The model, the validated effort and whether it resets, for one turn.
 
-    A model is named with its source. On an owner connection, the connection is
-    asked and the Gateway is not: neither its catalog nor its grants decide
-    whether a turn the owner's provider serves may run. An inherited model
-    keeps its source, and an inherited connection is checked again now, so a
-    message is refused while its author is looking rather than failing later.
+    A model is named with its connection. An inherited model keeps its
+    connection, and an inherited connection is checked again now, so a message
+    is refused while its author is looking rather than failing later. A turn
+    with no connection at all (one following a turn from before connections
+    were the only source) is refused: there is nothing else to run it on.
+
+    The effort is checked as the turn will run it: the one sent, or the
+    parent's when omitted (inherited, as the model is), or Auto after
+    ``"auto"``. An inherited level the new model does not offer is refused
+    with the levels it does, never dropped or replaced.
     """
     reset_effort = reasoning_effort == RESET_REASONING_EFFORT
     requested_effort = None if reset_effort else reasoning_effort
+    effective_effort = (
+        None if reset_effort else (requested_effort or parent.get("reasoning_effort"))
+    )
     connection_id = model_connection_id if model else parent.get("model_connection_id")
-    if connection_id:
-        await require_connection_source(
-            store.model_connections,
-            user_id=user["user_id"],
-            connection_id=str(connection_id),
-            runtime=parent["runtime"],
-            model=model or parent["model"],
-            reasoning_effort=requested_effort,
-        )
-        return model, None, reset_effort
-    # A follow-up may switch models; the switched-to model gets the same
-    # fail-fast as a fresh job. An omitted model inherits the parent's, which
-    # was validated when it was chosen. One catalog read serves both the
-    # model resolution and the effort check when both are needed (issue #781);
-    # the read happens lazily so an inherit-both follow-up pays none.
-    canonical = None
-    catalog: tuple[list[str], dict[str, str], dict[str, list[str]]] | None = None
-    if model:
-        try:
-            catalog = await agent_model_catalog_bundle(gateway, user_id=user["user_id"])
-        except ModelCatalogUnavailable:
-            raise model_catalog_unavailable() from None
-        canonical = await require_resolvable_model(
-            model, gateway=gateway, user=user, catalog=catalog
-        )
-    # Effort is per turn, like the model, and inherits when omitted. Unlike the
-    # model it needs a way *back*: null already means "no override, inherit", so
-    # clearing an inherited effort takes the explicit reset sentinel. Validated
-    # against the model this turn will run — which may be the switched-to one,
-    # and a pair that was offered last turn need not be offered this one.
-    effort: str | None = None
-    if requested_effort is not None:
-        effort = await require_offered_effort(
-            requested_effort,
-            runtime=parent["runtime"],
-            model=canonical or parent["model"],
-            gateway=gateway,
-            user=user,
-            efforts=catalog[2] if catalog is not None else None,
-        )
-    return canonical, effort, reset_effort
+    if not connection_id:
+        raise model_connection_required()
+    await require_connection_source(
+        store.model_connections,
+        user_id=user["user_id"],
+        connection_id=str(connection_id),
+        runtime=parent["runtime"],
+        model=model or parent["model"],
+        reasoning_effort=effective_effort,
+    )
+    return model, requested_effort, reset_effort
 
 
 async def prepare_follow_up(
@@ -177,7 +140,6 @@ async def prepare_follow_up(
     reasoning_effort: str | None,
     store: _FollowUpStorage,
     app_credentials: Any | None,
-    gateway: Any,
     model_connection_id: str | None = None,
 ) -> PreparedFollowUp:
     """Check a follow-up against the turn it would follow, and resolve it.
@@ -203,18 +165,12 @@ async def prepare_follow_up(
     if runtime is not None:
         require_registered_runtime(runtime)
         if runtime != parent["runtime"]:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": {
-                        "type": "invalid_request",
-                        "message": (
-                            f"this thread runs on {parent['runtime']!r} and a thread's "
-                            "harness is fixed; start a new chat to use "
-                            f"{runtime!r}"
-                        ),
-                    }
-                },
+            raise Refused(
+                "invalid",
+                "invalid_request",
+                f"this thread runs on {parent['runtime']!r} and a thread's "
+                "harness is fixed; start a new chat to use "
+                f"{runtime!r}",
             )
     canonical, effort, reset_effort = await _prepare_model(
         parent,
@@ -223,7 +179,6 @@ async def prepare_follow_up(
         model_connection_id=model_connection_id,
         reasoning_effort=reasoning_effort,
         store=store,
-        gateway=gateway,
     )
     try:
         # A temporary workspace has no repository to lose access to.
@@ -235,10 +190,7 @@ async def prepare_follow_up(
                 app_credentials=app_credentials,
             )
     except RepoNotAllowed as exc:
-        raise HTTPException(
-            status_code=403,
-            detail={"error": {"type": "repo_not_allowed", "message": str(exc)}},
-        ) from exc
+        raise Refused("forbidden", "repo_not_allowed", str(exc)) from exc
     # An unavailable account integration must not prevent unrelated conversation
     # work. The runner receives only usable servers, resolved when it claims
     # this turn, and Tools retains each connection's diagnosis.
@@ -251,8 +203,7 @@ async def prepare_follow_up(
         store.attachments, user_id=user["user_id"], attachment_ids=attachment_ids
     )
     return PreparedFollowUp(
-        # Canonical, or the parent's when omitted — never the alias the caller
-        # typed, which the gateway's grant would not match.
+        # The model named with its connection, or the parent's when omitted.
         model=canonical if model else None,
         model_connection_id=model_connection_id if model else None,
         reasoning_effort=effort,

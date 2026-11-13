@@ -3,9 +3,9 @@ Moved from the source repository at the freeze commit `764a6f97`
 (`docs/developer/agent-sandbox-operations.md`). The move's provenance table and
 the historical verification records are in
 docs/agents/reviews/2026-08-04-sandbox-operations-verification-baseline.md.
-"The gateway" means the HybridInference inference/identity service; the job
-API, store, publisher, MCP relay and admin host switch belong to this service's
-control plane.
+The job API, store, accounts, MCP and GitHub relays and admin host switch
+belong to this service's control plane. Gateway sign-in, admission and
+inference were removed; see the cutover in upgrade-notes.md.
 -->
 
 # Cloud agent sandbox — operations
@@ -13,8 +13,8 @@ control plane.
 This is a task-based runbook; you do not need to read it from beginning to end.
 Use it to provision hosts, deploy Cloud Agent, protect retained workspaces, and
 diagnose job or network failures. The control plane owns the job API, database,
-publisher, MCP relay, and admin settings. The gateway provides inference and
-identity over HTTP.
+accounts and admission, the MCP and GitHub relays, and admin settings. Every turn
+runs on a model connection its owner added with their own provider key.
 
 Start with the task you need:
 
@@ -30,7 +30,7 @@ Start with the task you need:
 | Add a host on another machine | [Tunnels and sandbox manager routing](#running-runners-on-another-machine) |
 | Upgrade an existing deployment | [Upgrade notes](upgrade-notes.md) |
 | Deploy or roll back a release | [Rolling deployment order](#rolling-deployment-order), [deployment reliability](deployment-reliability.md) |
-| Preserve an old database or apply a maintenance migration | [Old-chain conversion](#preserving-an-old-chain-database), [database rebuild](#rebuilding-the-agent-database), [maintenance migrations](#applying-migrations-that-are-not-backwards-compatible) |
+| Archive an old database or apply a maintenance migration | [Archiving a Gateway-era database](#preserving-an-old-chain-database), [maintenance migrations](#applying-migrations-that-are-not-backwards-compatible) |
 | Protect workspaces and monitor disk use | [Sandbox archives](#sandbox-archives), [retained Docker storage](#retained-docker-storage-on-a-host), [storage measurement](#how-full-is-the-sandbox-storage) |
 | Diagnose connectivity | [The sandbox network](#the-sandbox-network), [refusal messages](#when-something-is-refused) |
 | Configure or troubleshoot tools and repository access | [MCP servers](#mcp-servers), [repository entitlements](#who-may-run-a-job-against-which-repository) |
@@ -50,7 +50,7 @@ Replace every `<...>` placeholder before running a command.
 ## Admin Settings
 
 Use **Admin → Settings** to manage application and integration configuration,
-publication, web appearance, operational intervals, upload and skill limits,
+web appearance, operational intervals, upload and skill limits,
 task-title generation, sandbox/workspace limits, and sandbox archives. These
 settings are stored in the Agent database.
 
@@ -77,13 +77,10 @@ configured, the **Administrator setup required** prompt links to the fields
 that still need attention.
 
 Admin Settings is operator access, and `agent.admin` should be granted only to
-people trusted to operate the deployment. It edits the session and host
-signing keys and the Gateway public-key URL, so an administrator can sign in as
-any user, and the GitHub API URL that the App's, the publication token's and
-users' own GitHub credentials are sent to. Saved credentials stay write-only,
-and the Gateway dispatch token is bound to the Gateway API URL's origin: moving
-that URL to another origin is refused while the token is kept. Clear the token,
-save the URL, then enter the token again.
+people trusted to operate the deployment. It edits the host signing key and
+the account settings (sign-up, approval, mail transport and administrator
+addresses), and the GitHub API URL that the App's and users' own GitHub
+credentials are sent to. Saved credentials stay write-only.
 
 Apply migrations before an upgrade as described in the
 [upgrade notes](upgrade-notes.md), then start the main control-plane listener
@@ -104,14 +101,13 @@ page request. This fallback contains no session or access decisions and does
 not survive a web-process restart.
 Apply changes to subsequent operations as described beside each setting.
 
-The import of registered environment settings refuses a
-`GATEWAY_GRANT_DISPATCH_TOKEN`, `AGENT_ONCALL_DISPATCH_TOKEN`,
+The import of registered environment settings refuses an
 `AGENT_CONTROL_TOKEN_SECRET` or `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY` shorter
 than 32 bytes: the listener stops with an error naming the variable before
 anything is written, so rolling back is safe. Check their lengths before the
-first deployment of this release. Replacing one has its usual cost: the
-dispatch token changes on both sides, a new control key needs hosts
-re-enrolled, and a new encryption key orphans saved user connections. Values
+first deployment of this release. Replacing one has its usual cost: a new
+control key needs hosts re-enrolled, and a new encryption key orphans saved
+user connections. Values
 already saved in Admin Settings keep working. The same import refuses an
 `AGENT_GITHUB_APP_INSTALL_URL` that is not an `https://github.com` URL and an
 `AGENT_GITLAB_OAUTH_REDIRECT_URI` that is not HTTPS (or HTTP on localhost),
@@ -127,25 +123,57 @@ shows the value in effect; save a valid value or confirm **Restore default**
 to clear the warning. Undecryptable or unencrypted stored credentials still
 stop the listener.
 
-For a new installation, provision the database, a stable
-`AGENT_SETTINGS_ENCRYPTION_KEY` of at least 32 bytes and a separate random
-`ADMIN_TOKEN`, plus the infrastructure/build fields in the minimal
-`deploy/control-plane/.env.example`. Bootstrap the setup UI before enrolling
-execution hosts or running the normal deployment readiness gate:
+A new installation needs no `.env`: nothing is filled in by hand. Start the
+web application before enrolling execution hosts or running the normal
+deployment readiness gate. From the deployment checkout:
 
 ```bash
 AGENT_DEPLOYMENT_SHA=$(git rev-parse HEAD) docker compose -p cloudagent \
-  --env-file .env -f deploy/control-plane/docker-compose.yml \
-  up -d --build control-plane mcp-relay web
+  -f deploy/control-plane/docker-compose.yml --profile edge \
+  up -d --build control-plane mcp-relay web edge
 ```
 
-Open `<web base path>/setup` and enter the recovery token. This route is outside
-the sign-in guard. It uses the ordinary administrator API and audit trail;
-unauthenticated visitors cannot read or change settings. Reloading or locking
-the page clears its in-memory token. Complete Gateway sign-in, execution and
-user credential fields, then enroll hosts and run the usual deployment command.
+The browser reaches the web app and the API on one origin, with the API at
+`/api`. The `edge` profile is the nginx that splits that origin, on
+`127.0.0.1:3003` (`AGENT_EDGE_BIND`, `AGENT_EDGE_PORT`); point the TLS proxy or
+tunnel in front of the hostname at it. Leave the profile out only when that
+proxy already routes `/api/*` to the control plane with the prefix stripped and
+everything else to the web app.
+
+Before anything else starts, the `keys` service sees that the bundled
+database volume holds no database yet and generates a random database password
+with its matching `AGENT_DATABASE_URL`, `AGENT_LOCAL_SESSION_SECRET` and
+`AGENT_SETTINGS_ENCRYPTION_KEY` into the `agent-keys` volume
+([how the keys are kept](../../ENVIRONMENT.md#settings-and-bootstrap-configuration)).
+An artifact deployment's first `prepare` phase does the same
+([release artifacts](../../deploy/release/README.md)).
+
+To use another database, set `AGENT_DATABASE_URL` in the deployment's
+environment or a `.env` beside it, together with an `AGENT_LOCAL_SESSION_SECRET`
+and an `AGENT_SETTINGS_ENCRYPTION_KEY`: the `keys` service cannot prove such a
+database is new, so it refuses to generate them. It stores every value it is
+given, never replaces a stored value with a generated one, and after one start
+the lines can be deleted. Back the keys up apart from the database from now on
+([Disaster recovery](disaster-recovery.md)): the settings root key decrypts
+every saved secret.
+
+On its first start the control plane creates its settings with a random host
+signing key, user and compute credential encryption keys and sandbox manager
+credential (server setup writes that credential into each host), and logs a
+one-time setup code (`agent_local_setup_pending`). Open `/setup/administrator`,
+enter that code and create the first administrator, then confirm the site
+address the page offers (the public web address account emails link to). Setup
+ends on Admin → Servers: add the first server there with **Add server**, which
+writes that host's configuration ([Compute resources](operations-compute.md)),
+and run the usual deployment command.
 Optional integrations need setup only when their configuration has been started.
 The shared-live deployment gate continues to require qualified host readiness.
+
+`/setup` is the recovery door when no administrator can sign in.
+It needs `ADMIN_TOKEN`, which a deployment sets only when it wants that door.
+The route is outside the sign-in guard. It uses the ordinary administrator API
+and audit trail; unauthenticated visitors cannot read or change settings.
+Reloading or locking the page clears its in-memory token.
 
 Existing installations can retain the environment `AGENT_SESSION_SECRET`
 fallback for the settings root. Before removing that legacy environment entry,
@@ -153,8 +181,7 @@ set `AGENT_SETTINGS_ENCRYPTION_KEY` to the **same original value**. Both listene
 same effective key. Back it up with the database. Before changing that key,
 re-encrypt stored settings from the old key to the new one and coordinate the
 listener rollout; replacing the environment value alone makes existing
-ciphertext unreadable. The saved session signing key can be changed separately
-from this stable root. The saved user/compute encryption keys continue to protect
+ciphertext unreadable. The saved user/compute encryption keys continue to protect
 their separate credential stores; the API rejects replacing or resetting an
 existing encryption key without a separate credential re-encryption procedure.
 
@@ -263,7 +290,7 @@ SQL remain available through the separately configured pgAdmin service below.
 Open **Admin → Database → Open pgAdmin** to manage PostgreSQL. The page checks
 the private service before offering the link. The existing same-origin API
 proxy carries pgAdmin pages, assets, forms, downloads, and SQL requests, so the
-gateway and standalone edge need no new public route or port. Every request
+public edge needs no new route or port. Every request
 requires current `agent.admin` permission. pgAdmin retains its own login and
 CSRF checks; Agent cookies and bearer credentials are never sent upstream.
 
@@ -333,13 +360,15 @@ Concurrent setup attempts cannot replace the first credentials. The private
 `agent-pgadmin` during deployments. pgAdmin mounts the bootstrap volume read-only.
 
 Sign in with the pgAdmin email and password you chose. The initial server
-definition points to `postgres:5432`, database/user `cloudagent`. Enter the
-deployment's PostgreSQL password when connecting. If the database name or user
-differs, supply a custom `AGENT_PGADMIN_SERVERS_FILE` before initialization, or
-edit the connection in pgAdmin. Database passwords are not preloaded or exposed
-in the dashboard. Saved accounts and connections persist in the separate
-`agent-pgadmin` volume. Setup does not reset an existing account, including on a
-container restart. Manage later accounts and password changes in pgAdmin.
+definition points to `postgres:5432`, with the database `AGENT_POSTGRES_DB`
+names and the user `AGENT_POSTGRES_USER` names (`cloudagent` unless the
+deployment sets them). Enter the deployment's PostgreSQL password when
+connecting. pgAdmin imports that definition only at its first setup, so after
+changing either variable, edit the connection in pgAdmin to match. Database
+passwords are not preloaded or exposed in the dashboard. Saved accounts and
+connections persist in the separate `agent-pgadmin` volume. Setup does not
+reset an existing account, including on a container restart. Manage later
+accounts and password changes in pgAdmin.
 
 For the HTTP-only local stack, use `AGENT_PGADMIN_COOKIE_SECURE=False` alongside
 the existing local Agent-cookie setting. Keep the default `True` for HTTPS.
@@ -371,56 +400,46 @@ POST /v1/agent/jobs             owner queues work
     → runner creates/starts     one retained Docker group and its writable layer
       → native Agent CLI        one live process/session per member chat
       → normalized events       streamed to the owner over SSE
-      → model calls             billed through the gateway into api_logs
-      → optional direct push    member's GH_TOKEN; skips the publisher's checks
-  → turn settles                nothing is published
-
-POST /v1/agent/threads/{id}/publish   owner asks (Create PR / Update PR)
-  → quiescent group snapshot    immutable diff for the trusted publisher
-  → publisher validates         .github/ block, secret scan, path escape, size
-    → agent/<origin-chat-id>    one stable branch per workspace group
-      → draft PR                merges follow the repository's GitHub rules
+      → model calls             the owner's provider, on their own key
+      → push and pull request   git/gh as the owner, through the GitHub relay
+  → turn settles                the workspace stays in the retained sandbox
 ```
 
-The platform publishes only when the owner asks; see
-[Resume, Fork, and publication](#resume-fork-and-publication). The agent can
-also push and open pull requests itself, and **Watch PR and merge** asks it to
-merge once the PR satisfies its required checks and reviews.
-Branch protection and other GitHub rules on the repository decide what may
-merge without a person.
+The platform never pushes or opens a pull request itself. When the owner asks
+for one, the agent commits, pushes a branch and opens the pull request as the
+owner, through the [GitHub relay](#the-github-relay), and the pull requests it
+opens are recorded for the conversation; see
+[Resume, Fork, and pull requests](#resume-fork-and-pull-requests).
+**Watch PR and merge** asks it to merge once the PR satisfies its required
+checks and reviews. Branch protection and other GitHub rules on the repository
+decide what may merge without a person.
 
 Keep these credential boundaries intact:
 
-- **No long-lived repository credential enters the sandbox.** The host
-  captures a quiescent group diff; the control-plane publisher holds the
-  GitHub token it publishes with. The runner holds
-  a clone credential, but it is read-only, scoped to the one repository, and
-  deliberately never recorded in `.git/config`: the checkout adds no remote,
-  the credential travels in git's environment rather than its argv, and the
-  runner refuses to start the agent if it finds the token anywhere under
-  `.git/`.
-- **The only repository credential in the sandbox is short-lived.** When the
-  GitHub App is configured, the owning member receives `GH_TOKEN`: an App
-  installation token limited to `contents: write` and `pull_requests: write`
-  on the job's repository, expiring after about one hour. Pushes made with it
-  skip the publisher's patch gate. See [credentials](#2-credentials).
-- **The sandbox also has two narrow, non-interchangeable credentials.** The
-  gateway-issued `agr` grant buys inference as the chat owner: it names the
-  allowed model, is scoped to one member residency, and is renewed only while
-  that exact host/member generation keeps heartbeating. Spend lands against
-  the owner's gateway daily quota. This service separately mints an
-  attempt-fenced `mcp` token that reaches only the MCP relay and only the
-  servers authorized by the conversation's current bindings. **There is no
-  per-job spend cap**; inference uses the owner's gateway quota. Neither credential can
-  write the event log, upload a replacement patch, or move the job to a
-  terminal state; the trusted runner holds the token that can.
-
-Resident inference grants use a mint identity that includes the member's durable
-residency generation. Retrying a mint for that generation recovers the same
-grant; replacing a process or retrying Fork with a new generation mints a fresh
-grant rather than recovering a revoked predecessor. Worker replacement revokes
-the previous grant best-effort, matching Fork cleanup; a gateway revocation
-outage does not prevent issuing the replacement.
+- **No repository credential enters the sandbox.** The owner's GitHub token
+  stays in the control plane, where only the GitHub relay uses it. The runner
+  holds a clone credential, but it is read-only, scoped to the one repository, and
+  deliberately never recorded in `.git/config`: `origin` is recorded as the
+  plain HTTPS URL, the credential travels in git's environment rather than
+  its argv, and the runner refuses to start the agent if it finds the token
+  anywhere under `.git/`.
+- **git and `gh` in the sandbox speak as the owner, without the owner's
+  token.** With the GitHub relay configured, a member's `GH_TOKEN` is its
+  residency's placeholder, which GitHub refuses. The control plane's GitHub
+  relay exchanges it for the owner's own token while the residency serves a
+  running turn, for the conversation's repository only, and refuses branch
+  deletion, tags, GraphQL and repository administration. Nothing on the
+  platform scans what it pushes. See [the GitHub relay](#the-github-relay).
+- **The sandbox also holds two narrow, non-interchangeable credentials.** The
+  member's CLI runs on its owner's provider key from the model connection the
+  turn names, handed over only in that owner's claim and residency (see
+  [owner model connections](#owner-model-connections)). This service
+  separately mints an attempt-fenced `mcp` token that reaches only the MCP
+  relay and only the servers authorized by the conversation's current
+  bindings. **There is no per-job spend cap and no local quota**; the owner's
+  provider keeps the key's quota and bill. Neither credential can write the
+  event log or move the job to a terminal state;
+  the trusted runner holds the token that can.
 
 ### Temporary workspaces
 
@@ -434,8 +453,9 @@ plane records that commit as the job's base. A request that also names
 a repository. The environment is the platform base, the owner's global
 variables, and the task's own overrides.
 
-Its turns settle without opening a workspace snapshot, so nothing is captured
-for the publisher and no branch or pull request is made. Everything else is an
+It has no repository for the GitHub relay to act for, so the relay sends its
+agent's GitHub requests without anyone's credential and records no pull
+request for it. Everything else is an
 ordinary conversation: archive, delete, Fork, Side Chat, goals, MCP, retention,
 checkpoints and S3 archiving behave as they do for a repository chat, and
 project memory is not built from it. `temporary=true` on `GET /v1/agent/jobs`,
@@ -455,52 +475,13 @@ While a configured GitHub App cannot be loaded (see
 [the credentials section](#2-credentials)), creating a temporary workspace
 answers `503` like any other job.
 
-### Automatic task titles
+### Conversation titles
 
-New conversations initially use the first meaningful prompt line, shortened to
-36 characters. After a claim is dispatched, conversations that still need a
-title get a background request to `GATEWAY_BASE_URL` using that attempt's
-existing inference grant and selected model. This is a separate request, not a
-CLI turn: it does not alter the task prompt or conversation. It always summarizes
-the conversation's original prompt, including when a later turn recovers naming.
-Each call uses at most 4,000 input characters and 256 output tokens, has a
-10-second deadline, and is attributed to the same owner and current job.
-
-The generated title summarizes the task in the user's language and retains
-relevant identifiers. The proxy's `⏳ The model is starting up` response is a
-model-server warmup status, not a generated title, even when the gateway returns
-it as an HTTP 200 completion. Warmup responses, transport failures, and transient
-HTTP errors get up to five calls with backoff, within a 120-second total deadline.
-Other malformed responses, including reasoning-only output, leave the fallback.
-If this window is exhausted, a later claim can try again; there is no idle
-background regeneration. The UI refreshes eligible titles for up to 130 seconds
-without waiting for the running turn to finish, and notifies navigation lists
-when a title arrives after the conversation becomes idle.
-
-Manual renames always take precedence, including a rename to the same text;
-each retry rechecks title ownership and the attempt fence. Follow-ups keep a
-valid conversation name, and forks inherit it. Legacy automatic or inherited
-titles containing the warmup status can recover on their next claim. Other
-existing titles remain unchanged, and no title data migration is required.
-
-### Draft prompt rewriting
-
-`POST /v1/agent/prompts/rewrite` prepares a draft without creating a job or
-starting a sandbox. It requires an owner session and current `agent.use`
-permission. The request contains `prompt`, `model`, optional `clarify`, and
-optional `answers` (`question` / `answer` pairs). With `clarify: true` and no
-answers it returns two to four clarification questions; otherwise it returns a
-complete prompt for the owner to review before submission. Answer-bearing
-requests always produce a rewrite rather than another question round.
-
-Each call resolves the selected model against the owner's current catalog and
-uses a fresh 120-second grant scoped to that model. Its opaque operation ID
-starts with `prompt-rewrite-`, so inference remains subject to the owner's
-Gateway quota while staying separate from job usage. The grant is revoked
-after the request and never renewed. The call has a 90-second total deadline;
-drafts and rewritten prompts are limited to 32,000 characters, with up to four
-clarification answers. Invalid, truncated, or warmup model responses are
-reported as errors without replacing the draft.
+New conversations use the first meaningful prompt line, shortened to 36
+characters, and the owner can rename them; a manual rename records its
+provenance. Follow-ups keep the conversation's name, and forks inherit it.
+There is no generated title and no prompt-rewriting endpoint: both needed
+platform inference, which was removed with the Gateway.
 
 ### Conversation status and run history
 
@@ -540,7 +521,7 @@ identity; stopped, completed, or replaced attempts cannot take a stale answer,
 and question answers are never queued as follow-up turns.
 
 Deploy the runner, Sandbox Manager and rebuilt sandbox image together. The
-`http-agent-live-bridge` helper pin is `4` (see
+`http-agent-live-bridge` helper pin is `5` (see
 [native conversation recall](context-recall.md)); helper `2` and earlier cannot
 execute native question replies, and anything older than the pin does not
 satisfy the turn-time attestation. Before starting a
@@ -559,7 +540,7 @@ records the GitHub account in `agent_github_accounts`, and stores only the
 installations GitHub reports in `agent_repo_grants`. Reconnecting removes grants
 for installations the user can no longer reach.
 
-The composer, job creation, claims, workspace reads, and publishing all check
+The composer, job creation, claims and workspace reads all check
 repositories **as the user**, through `/user/installations/{id}/repositories`.
 Only repositories the user can **push** to qualify, because the result is a
 branch and pull request. The response is cached for one minute per user. Do not
@@ -586,9 +567,10 @@ access** in the composer open the same page.
 
 **Deployment allowlist.** `AGENT_REPO_ALLOWLIST` supports single-tenant use
 against the operator's repositories. It is not per user: every user admitted to
-Cloud Agent may have the platform clone and publish to every listed repository
-with the deployment's GitHub credentials, so list only repositories all of them
-may work on. When the App's OAuth credentials and
+Cloud Agent may have the platform clone every listed repository with the
+deployment's GitHub App, so list only repositories all of them may work on. It
+grants no push: the GitHub relay pushes and opens pull requests only with the
+owner's own GitHub connection, and GitHub decides what that account may do. When the App's OAuth credentials and
 `AGENT_GITHUB_APP_INSTALL_URL` are configured, the composer still requires a
 connection before any repository can be selected, allowlisted ones included;
 until then a task runs in a [temporary workspace](#temporary-workspaces).
@@ -624,8 +606,8 @@ prompts, or raw container diagnostics.
 **Stop idle sandbox** requests a stop of the shared container, preserving its
 workspace and native sessions for a later turn. It applies to every member of
 the group. The API checks the reviewed container, generation, and last activity
-before accepting the request, and refuses a busy group, pending snapshot or
-publication work, or a group with open terminals or stale terminal observations.
+before accepting the request, and refuses a busy group or a group with open
+terminals or stale terminal observations.
 The request is recorded in the admin audit log. The host performs its own idle
 check before stopping the container.
 When the terminal report is zero, missing, or older than 90 seconds, opening or
@@ -685,6 +667,24 @@ checks for this provider-confirmed outcome. That recovery makes no host call and
 does not consume another retry; it requires the same provider termination and
 10-minute silence conditions.
 
+A `cold` sandbox lives only in its
+[checkpoint](#restoring-a-removed-hosts-sandboxes), so it never stops and has no
+container to archive: **Archive to S3 and delete** refuses it. **Delete without
+archive** deletes it at once, with no host call and no deletion worker, once the
+host it still names is gone: removed from the pool, forgotten, or silent for 30
+minutes. One transaction marks the sandbox `lost` and deleted, marks its chats'
+native context lost, fails their queued turns, and retires its checkpoint
+receipts (`superseded`); its trajectory and audit record `checkpoint_only`. The
+checkpoint objects stay in S3 under the bucket's lifecycle and retention rules,
+as archives do; the control plane does not delete objects. A failed restore can
+leave a cold sandbox with no container at all; it is deleted the same way.
+Until its host is gone, the details say so: the next message to one of its chats
+restores it, and **Remove stale entry** hides it once that host has not reported
+for 90 seconds. A host claiming one of its turns to restore it at the same
+moment wins, and the deletion changes nothing; a deletion that commits first
+leaves no turn to restore. Should a removed host come back, a container it kept
+for a deleted sandbox is removable as superseded.
+
 One deletion worker handles requests one at a time, in the order they became
 due. Only transient failures retry automatically, with exponential backoff from
 one minute to one hour; retries stop after eight claims or 24 hours from the
@@ -704,8 +704,9 @@ before the same fenced deletion request can be claimed again.
 
 Each claim pass marks at most 50 exhausted requests, oldest request first, before
 claiming due deletion work. Later worker passes continue through any remaining
-exhausted requests. Exhaustion state, trajectory events, and audit records commit
-together; updating the diagnostic attempt history is best-effort.
+exhausted requests. Exhaustion state and trajectory events commit together with
+the request's result on the audit log; updating the diagnostic attempt history
+is best-effort.
 
 **Sandboxes of deleted chats are removed automatically.** When an owner
 permanently deletes the last chat in a sandbox, the deletion worker asks the
@@ -751,6 +752,12 @@ visibility control for stopped sandboxes. Use **Include removed sandboxes**
 with **All states**, then **Restore to inventory**, to inspect retained entries.
 Resuming a sandbox removed only from inventory makes it visible again.
 
+Each inventory row shows a requested deletion as pending, failed, or deleted; a
+request whose automatic retries stopped shows as failed. A finished deletion,
+with or without an S3 archive, leaves the default inventory as a removal does:
+**Include removed sandboxes** lists it, and **Restore to inventory** shows it
+again.
+
 For batch operations, select individual inventory rows or **Select all visible
 sandboxes**, choose an action, then **Review selected sandboxes**. Selection
 applies only to the current state, search, host, and activity filters; hidden
@@ -760,7 +767,9 @@ eligible entries. Stop, archive-and-delete, deletion without an archive,
 inventory removal, and inventory restoration use the same checks as individual
 controls. Up to four requests run at once, and each result is reported
 separately. A stop or deletion result means the request was accepted; host
-completion is still asynchronous. Failed or skipped entries remain selected
+completion is still asynchronous, except for a cold sandbox's deletion, which is
+done when accepted. Every skipped entry says why, and the confirmation counts
+them. Failed or skipped entries remain selected
 for a new explicit review. Expired reviews and changed containers are refused,
 without automatically retrying a new container identity. No batch feature flag
 or additional migration is required.
@@ -803,7 +812,7 @@ container ID, image or generation:
 |---|---|
 | `GET /v1/agent/usage/containers` | Containers behind chats the owner has not deleted, active first, with limits and the latest sample of a running one. Fresh samples (90 seconds) are summed into current CPU and memory. |
 | `GET /v1/agent/usage/resources?days=` | Per UTC day: running time from the lifecycle events in `agent_sandbox_events`, and measured CPU and memory from `agent_sandbox_usage_days`. |
-| `GET /v1/agent/usage/tokens?days=` | The admin Usage aggregation, filtered to the owner's runs: cost, tokens and turns by day and by model. |
+| `GET /v1/agent/usage/tokens?days=` | The admin Usage aggregation, filtered to the owner's runs: reported tokens and turns by day and by model (see [Usage](#usage)). |
 
 Running time counts the `starting`, `running` and `stopping` states and has
 history back to `0046_admin_sandbox_trajectory`. CPU and memory history starts
@@ -815,16 +824,54 @@ the UTC days that time falls on: time that spans 00:00 UTC is split there, so
 the part before midnight counts on the day before. The page states how much of
 the running time the measurements cover. Disk usage is not measured.
 
-Days are UTC days on purpose: the Gateway's daily limit resets at 00:00 UTC,
-so the page's "today" and the limit's "today" agree. The page says so and
-shows that moment on the reader's clock. It labels model cost an estimate,
-not a bill, as the Gateway dashboard does.
+Days are UTC days, and the page says so and shows that moment on the reader's
+clock. It shows no cost: each owner's provider bills its own connection.
+
+## Usage
+
+The owner's Usage page (`/v1/agent/usage/tokens`), the admin Usage page
+(`/admin/agent/usage`), a run's usage footer (`/v1/agent/jobs/{id}/usage`) and
+the admin run detail show one thing: the tokens each turn's agent reported
+about its own model calls. Responses say so (`source: "runtime_reported"`;
+the per-job read's `runtime.source` is `"runtime"`). It is not a provider bill.
+Cloud Agent holds no pricing, quota or billing: the owner's provider keeps
+those for its key, and several Cloud Agent accounts using keys of one provider
+account still share that account's allowance.
+
+Each attempt's events are reduced once into an `agent_attempt_thread_stats`
+rollup (reducer version 2), which the thread statistics read too. A model
+call is counted once even when its report repeats; a retry's attempt is its
+own report; a Fork's copied history is not counted again. A turn whose agent
+reported nothing is shown as pending while it runs and unavailable after,
+never as zero, and a metric no reporting attempt carried is unknown, not 0.
+
+| Agent | What it reports | Input total |
+|---|---|---|
+| Claude Code | Anthropic counters per response: uncached input, cache reads, cache writes, output | The three input counters added |
+| pi | The same counters per assistant message | The three input counters added |
+| Codex 0.145.0 | `thread/tokenUsage/updated` per model call: `inputTokens` (cached included), `cachedInputTokens`, `cacheWriteInputTokens`, `outputTokens`, `reasoningOutputTokens` | `inputTokens` |
+| OpenCode, Kilo | No verified counter shape; any counter they emit is shown as reported | Unknown |
+
+Reasoning tokens are reported by Codex alone. They are part of output, shown
+beside it and never added to it. No agent reports a cost or a request count,
+so cost and model calls are always null.
+
+**What is not counted.** Codex reports every model call of its thread with
+the thread's running total. A call is credited to a turn only when the
+notification names that running turn, or comes from a subagent thread whose
+spawn was seen during that turn. Everything else stays a raw event and counts
+nowhere: a subagent's calls after the turn that spawned it has ended, a
+subagent spawned in an earlier turn or an earlier process, a notification
+replayed when a thread is resumed, and a malformed report. Allocating those
+calls to some turn would be a guess, so the totals are the calls an agent's
+report can tie to a turn, and a provider can bill more than they show. The
+Usage pages and the run footer say this where the numbers are shown.
 
 ## Reading a task's recorded events
 
-The admin console shows tool-call measurements in Resources and model records
-in LLM requests. It has no route to a task's raw runtime events: owners read
-their own through the session routes.
+The admin console shows tool-call measurements in Resources and the agent's
+reported token usage. It has no route to a task's raw runtime events: owners
+read their own through the session routes.
 
 **Do not read `agent_job_events.payload` directly.** A `psql` query returns
 prompt text, tool arguments and tool output with no audit record, no size bound
@@ -832,20 +879,45 @@ and no column allowlist. If an investigation needs a task's raw events, that is
 a reason to build an audited route, not a reason to go around the audit.
 
 **Reading the trail.** _Admin → Audit log_ (`GET /admin/agent/audit-log`)
-lists what administrators did, newest first: settings and agent-version
-changes, server actions (pause, remove, placement, adding or releasing a
-server) and measurement runs. It filters by `category` (`settings`,
-`servers`, `measurements`, `content`; `content` holds the event-content reads a
-since-retired admin route recorded) and pages with `before`, the oldest `id` of
-the previous page. The Servers page's polling
-reads are not recorded; rows they left before that changed stay in
-`agent_admin_audit_log` and are never listed. The page names an administrator
-by user id only, because identity tokens carry no display name.
+answers who did what, to whom, with what result, newest first. Each action is
+declared once in `cloud_agent/domain/audit.py`, which files it under a
+`category` (`accounts`, `settings`, `servers`, `sandboxes`, `measurements`,
+`sensitive_access`, `access_control`), names what it acted on (`target_type`
+and `target_id`) and the user it affected (`target_user_id`: the account
+itself, or the owner of a sandbox), and says whether its work runs later.
+Pages follow `before`, the oldest `id` of the previous page.
+
+- **Who acted** (`actor_type`) is derived by the database from `actor_id`:
+  `admin` (an administrator's session), `break_glass` (access that belongs to
+  no account: `ADMIN_TOKEN`, first-run setup, the bootstrap command), `service`
+  (a named automation), `system` (the control plane's own policy and workers),
+  `user` (an account changing itself) or `anonymous`. The page shows `admin`
+  and `break_glass` unless asked for everything (`actors=all`); break-glass
+  access is always shown, in red.
+- **Names** are kept as they were when the row was written, with a short id
+  beside them: erasing an account frees its login name for a new account.
+  Erasing an account deletes no audit row.
+- **What came of it.** `outcome` is `applied`, `refused`, `failed`,
+  `replayed`, or `requested` for work that runs later. A requested sandbox
+  deletion carries the deletion worker's final result; a requested compute
+  operation carries the operation's own state. The worker's steps are in the
+  sandbox's trajectory, not the audit log.
+- **One account or object.** `user=<account id>` shows everything about an
+  account (the users page links to it); `target_type=` with `target_id=`
+  everything about one host, sandbox or server operation.
+- **Recording never fails an action.** A row that cannot be written is logged
+  as `agent_admin_audit_write_failed`, counted in
+  `agent_admin_audit_write_failures`, and reported at the top of the page
+  for seven days; the action itself goes ahead.
+
+Reads are not recorded, nor are connection checks. Revision
+`0114_admin_audit_attribution` removed the polling reads older releases
+recorded.
 
 ## Teams
 
 Owners and admins manage their own teams from **Settings → Teams**. Platform
-administrators see every team under **Admin → Teams**, read-only:
+administrators see every team under **Admin → Users → Teams**, read-only:
 
 - The list (`GET /admin/agent/teams`) shows teams newest first, with the owner,
   active members, admins besides the owner, and join requests waiting for a
@@ -860,13 +932,17 @@ administrators see every team under **Admin → Teams**, read-only:
   requests and how many invitation links are open, expired, claimed or revoked.
   Departures are kept for good, so it lists every active member and the 50 who
   left or were removed most recently; `departed_member_count` counts them all.
-  That bounds the Gateway email lookups one view makes. Open requests are the
+  That bounds the account email reads one view makes. Open requests are the
   50 oldest likewise, and the team's `pending_request_count` counts them all.
   `GET /admin/agent/teams/{team_id}/audit-events` pages the team's own audit
   history with `before`.
 
-People are named by their profile name and Gateway account email, read on each
-request and never stored; an email the Gateway cannot read is left out. Nothing
+A team's member count in the list, and **Show in People** on its page, open
+its members in **Admin → Users → People**, where each row names the teams
+that person is in; each person on a team's page opens their account there.
+
+People are named by their profile name and account email, read on each
+request and never stored; an email that cannot be read is left out. Nothing
 on these pages changes a team, so they leave no admin audit record. Moving
 ownership of a team whose owner lost access is not available yet.
 
@@ -921,9 +997,8 @@ Discovery stores a capability snapshot. Templates prefill the form; they do
 not define a deployment-wide registry or server catalogue.
 
 MCP OAuth uses `AGENT_MCP_PUBLIC_BASE_URL` for the public API callback and
-`AGENT_WEB_BASE_URL` for the browser's return to `/integrations`. For a shared
-hostname deployment these can be `https://example.com/agents/api` and
-`https://example.com/agents` respectively. The page reports the authorization
+`AGENT_WEB_BASE_URL` for the browser's return to `/integrations`, for example
+`https://agents.example.org/api` and `https://agents.example.org`. The page reports the authorization
 result, verifies a stored credential before showing success, and directs the
 user to Test to discover the connection's tools.
 
@@ -1010,14 +1085,17 @@ the pinned CLI. It skips when those prerequisites are absent and belongs to the
 external tier. Run it deliberately after changes to the merged endpoint, host,
 or bridge; it crosses seams the per-layer suites do not.
 
-### Connector configuration
+### Where a connection runs
 
-No connector runtime ships, and the routes that registered, bound and revoked a
-user's machine are retired. A `user-connector` connection can still name a
-connector registered before then, and is refused at use. Deleting the
-connection removes its link to that connector, and the connector's authorization
-for it, in the same transaction. Managed-worker connections likewise require an
-available worker. Configuration support does not establish execution support.
+What the owner added decides where it runs: an address is a `remote` service
+behind this relay, and a command is a `sandbox` program
+([sandbox MCP servers](#sandbox-mcp-servers)). Nothing else runs one: there is
+no connector on the owner's machine and no managed worker, and the API refuses
+both locations. `0115_mcp_retire_dead_locations` moved every connection stored
+at `managed-worker` or `user-connector` to `sandbox`, with its command as
+stored ([upgrade notes](upgrade-notes.md#mcp-servers-run-in-two-places)). The
+connector tables and `agent_mcp_connections.connector_id` are unused, and a
+later migration drops them.
 
 ### Deployment and rollback
 
@@ -1060,7 +1138,7 @@ There is no feature switch or preview tier. Rollbacks must retain a schema-compa
 service and leave the migrated connection and binding data in place; fix forward
 when a schema downgrade would discard those records.
 
-MCP and connectors remain independent of the gateway inference path. Credential
+MCP is independent of the owner's model connection. Credential
 rotation uses the existing `AGENT_SOURCE_CONTROL_ENCRYPTION_KEY`; domain
 separation prevents source-control and MCP ciphertext from being read as each
 other.
@@ -1141,18 +1219,154 @@ The repository server loads without a prompt or approval step under that
 permission mode. Keep the flag unconditional, including for jobs with no MCP
 bindings.
 
+## Sandbox browser
+
+The sandbox image ships a headless Chromium (Debian's `chromium` package) and
+`cloud-agent-browser`, a root-owned launcher that runs one browser per sandbox.
+An agent runs `cloud-agent-browser start` and gets a CDP WebSocket URL that
+Playwright (`connectOverCDP`, Playwright MCP `--cdp-endpoint`), Puppeteer
+(`browserWSEndpoint`) and Chrome DevTools MCP (`--wsEndpoint`) connect to. The
+[design](../agents/specs/2026-11-02-computer-use-base-capability.md) records
+why it is built this way and what comes next.
+
+- **Shared by the sandbox.** A chat and its Forks share one browser, its tabs
+  and its sign-ins, as they share `/workspace`. It runs as its own user,
+  `agent-browser` (uid 10002), so a member's turn-end reap never stops it. The
+  host runs `cloud-agent-browser service start` as that user before each
+  member launch; a failure is logged and never blocks the chat.
+- **Isolation.** Chromium speaks CDP only over a pipe to the launcher, never on
+  a TCP port. The launcher serves it on loopback behind a random token, in
+  `/run/agent-browser`, which only `agent-browser` writes and only the sandbox
+  group reads. Each client gets its own CDP sessions and cannot reach another
+  client's.
+- **Chromium's own sandbox is off.** Docker's default seccomp profile refuses
+  the unprivileged user namespaces it needs, under runc and Kata alike, so the
+  launcher starts Chromium with `--no-sandbox`. The container and the Kata VM
+  stay the boundary. `cloud-agent-browser status` reports `chromium_sandbox`.
+  Where a probe passes but Chromium still cannot use its sandbox (Ubuntu's
+  AppArmor user-namespace restriction), the service falls back on its own and
+  says so in its log.
+- **Downloads.** Chromium cannot write into a member's private download
+  directory, so the service stages each download and the member's courier,
+  started by `cloud-agent-browser start`, copies it there. A download the
+  service could not hand over reaches the tool as canceled, and the service
+  log says why.
+- **Lifecycle.** The service starts Chromium when the first client connects
+  and stops it after 15 minutes without one (`CLOUD_AGENT_BROWSER_IDLE_S`). A
+  crashed Chromium comes back with the next connection. The profile
+  (`/home/agent-browser/profile`) stays in the retained container until it is
+  removed. `cloud-agent-browser stop` closes Chromium for every member.
+- **Resources.** Measured with the sandbox's limits: about 174 MiB and 140
+  threads idle, 321 MiB and 213 threads with four pages open. Both count
+  against the group's memory limit and its 512-process limit, which counts
+  threads. The launcher allows at most four renderer processes.
+- **Screenshots.** Tools write them to `/workspace/.cloud-agent-artifacts`
+  (`CLOUD_AGENT_ARTIFACTS_DIR`). It shows in the workspace files and is added to
+  `.git/info/exclude`, so it never reaches a diff or a published branch. A turn
+  shows the images written there while it ran (`GET
+  /v1/agent/jobs/{job_id}/artifacts/images`, at most 200, newest first), and an
+  image opens through `GET /v1/agent/jobs/{job_id}/files/image`, which answers
+  PNG, JPEG, GIF and WebP files, recognized by their bytes, up to 10 MiB, past
+  the text preview's bound.
+
+The image build starts the service and runs `cloud-agent-browser self-test` as
+the unprivileged user: two clients connect, one loads and screenshots a page,
+and the other must fail to reach its session. Run `cloud-agent-browser status`
+and `self-test` in a sandbox to check a host; `/run/agent-browser/daemon.log`
+has the service's log. A retained container created from an image without the
+browser has none until it is recreated.
+
+## Sandbox MCP servers
+
+An MCP connection can run in each chat's sandbox (location `sandbox`) instead
+of behind the relay, so it reaches the task's `localhost`, its files and the
+sandbox browser. The Playwright and Chrome DevTools presets drive that browser.
+The [design](../agents/specs/2026-11-02-computer-use-base-capability.md#in-sandbox-mcp-servers-phase-2)
+explains it.
+
+- **What may run there.** One exactly pinned package started by `npx` or `uvx`,
+  with no mount or working directory. An import pins a bare package name, or a
+  tag such as `latest`, to the release the public registry names then
+  (`cloud_agent/mcp/package_pins.py`); a range, or a package the registry
+  cannot find, is refused. It may use the owner's credentials, as
+  any command the agent runs may: keys pasted with it are sealed at rest and
+  named `secret://NAME`, and `${NAME}` is filled from the chat's environment.
+  A sealed key shorter than 8 characters is refused when it is added,
+  imported or set by an edit, as a short environment Secret is: the runner
+  masks only longer keys in the chat's output. One stored before that rule
+  still runs, unmasked.
+  The host hands both only to the slot's runner, in a file only that runner's
+  user reads (`/run/agent-mcp-slots/<slot>/secrets.json`). The admission names
+  variables, never values. An edit keeps every stored key it does not set, or
+  sets blank, and removes one whose `secret://NAME` its launch no longer names.
+  Stored keys stay only with the same program: the same command and the
+  same arguments, of which only the package's release may change. An edit
+  that changes anything else, such as the package, the command, a runner
+  option or an argument, is refused until it sends them again.
+- **How it runs.** Before it launches a member's CLI, the host writes the
+  slot's admission as root, then starts the image's MCP gateway,
+  `cloud-agent-mcp`, as `agent-mcp` (uid 10003) on
+  `http://127.0.0.1:47801/mcp`. Last, it starts the slot's runner as
+  `agent-mcp-<slot>` (uid 12001 + slot), which runs that slot's servers. The
+  CLI reaches them as the MCP server `sandbox` with its relay token. A server
+  can affect only its own slot. A failed step is logged and leaves the chat
+  without those tools, not without its turn.
+- **Changes.** Turning a server off, adding one or changing its version takes
+  effect at the next turn, which starts a new CLI that resumes the session.
+- **No approval step.** The relay's per-tool policies do not apply: a sandbox
+  server can do what the agent's shell can.
+- **Tools in settings.** When a chat's CLI lists a slot's tools, the gateway
+  reports each server's list to the relay (JSON-RPC method
+  `cloud_agent/sandbox_tools`, with the member's relay token). The control
+  plane stores a list only when it changed, and the connection's card shows it.
+- **Where to look.** `/run/agent-mcp/gateway.log` records the methods each
+  slot called, readable as `agent-mcp`. A slot's runner logs its servers'
+  starts and stops in `/run/agent-mcp-slots/<slot>/runner.log`, and each
+  server's own output is in `/run/agent-mcp-slots/<slot>/<alias>.log`, readable
+  as `agent-mcp-<slot>`. Admissions are in `/run/agent-mcp-admissions`.
+
+## Sandbox incidents
+
+A host records what goes wrong in each retained sandbox as **incidents**, in
+the sandbox's event list on the admin sandbox page; the sandbox list shows the
+newest one within a day under the sandbox's name. The
+[design](../agents/specs/2026-11-04-sandbox-incidents.md) explains it.
+
+- **What is recorded.** `out_of_memory` (Docker's `oom`: the OOM killer killed
+  some process in the container), `container_exited` (a `die` with no `kill`
+  before it, so nobody asked for it), `memory_high` and `pids_high` (a reading
+  at 90% of the limit), `browser_crashed` (Chromium exited with no stop
+  requested), and `mcp_server_failed` (a program could not start, or exited
+  on its own; it names the chat and the server). A stop, idle stop or deletion
+  the platform made is not an incident.
+- **Repeats.** The first of a kind goes out at once; repeats within the next
+  minute become one `.repeated` row with a count. A sandbox records at most 60
+  rows an hour, and one `dropped` row counts the rest.
+- **What people see.** A chat shows one line in a running turn for
+  `out_of_memory`, `container_exited` and its own `mcp_server_failed`. The
+  agent's next prompt lists what happened since it was last told, and a chat's
+  first prompt says the sandbox has a browser.
+- **What it carries.** Kinds, times, exit codes, limits and MCP aliases only:
+  no stderr, URL, command line or environment.
+- **Where to look.** The browser service journals to
+  `/run/agent-browser/events.jsonl`, each slot's MCP runner to
+  `/run/agent-mcp-slots/<slot>/events.jsonl`. The sandbox manager reads them
+  every minute and holds the rows until a heartbeat answer says
+  `incidents: "accepted"`; a control plane older than this release never
+  does, and the rows wait.
+
 ## Before a job can run for real
 
 Complete host provisioning, network checks, enrollment, and credentials before
 enabling job claims. Use this checklist for each deployment.
 
-### 0. The sandbox network needs its host rules, a resolver and both relays
+### 0. The sandbox network needs its host rules, a resolver and its relay
 
 Every sandbox group runs on one routable bridge of its own — setup, the agent
 and each Fork sibling alike — and this deployment's host nftables tables
 decide what it reaches: public IPv4 on TCP 80/443, the one resolver in
-`AGENT_EGRESS_DNS_SERVER`, and the group's two relays — the gateway tunnel for
-inference and the MCP tunnel for tools — and nothing else. There is no mode to
+`AGENT_EGRESS_DNS_SERVER`, and the group's MCP relay for tools — and nothing
+else. Model calls go to the owner's provider over the public TCP 443 rule. There is no mode to
 choose and no setting that opens it further; changing what a sandbox can reach
 is a design change. [The sandbox network](#the-sandbox-network) below has the
 whole rule set, how to read it on a host, and what each refusal means.
@@ -1162,16 +1376,16 @@ A host therefore needs, before it can run a job:
 - `AGENT_EGRESS_CHAT_NETWORK_POOL` and `AGENT_EGRESS_DNS_SERVER`. Neither has
   a default: the pool must be this deployment's own, and the resolver is the
   only DNS a sandbox can use.
-- Both relays running on the relay network, `AGENT_RELAY_NETWORK`, which the
+- The MCP relay running on the relay network, `AGENT_RELAY_NETWORK`, which the
   host compose derives as `<COMPOSE_PROJECT>-agent-relays`. It is declared
   `internal: true` and no sandbox group ever joins it: lifecycle code finds the
-  two tunnels there by alias and attaches them, under the same aliases, to each
-  group's bridge. If either alias has no running container there, or more than
+  MCP tunnel there by alias and attaches it, under the same alias, to each
+  group's bridge. If the alias has no running container there, or more than
   one, the group network is refused before the Agent CLI starts.
 - A kernel with nftables, bridge family included. Every runner's preflight
   installs this deployment's tables and reads them back before it claims
   anything.
-- Docker 28 or newer, client and daemon. Each relay joins a group bridge with
+- Docker 28 or newer, client and daemon. The relay joins a group bridge with
   a gateway priority of -1: a container on several networks takes its default
   route from the highest priority and then by network name, and
   `freeinference-chat-net-*` sorts before `<COMPOSE_PROJECT>_internal`, so at
@@ -1185,21 +1399,19 @@ Checks run at four points:
 1. `sandbox_host.sh prepare` validates network settings with the candidate
    runner image's parser before draining any runner.
 2. `sandbox_host.sh check` sends requests from containers on the relay network.
-   It requires HTTP 200 from inference `/health` and MCP `/healthz` before
-   publishing the exact-SHA ready marker. The runner's lower-level inference
-   probe accepts any HTTP response as reachability; that weaker probe cannot
-   release a deployment.
+   It requires HTTP 200 from MCP `/healthz` before publishing the exact-SHA
+   ready marker.
 3. Each runner's preflight installs and reads back the host nftables tables.
 4. Each group cold start checks inside the guest, as the sandbox user, for a
-   default route, the configured resolver, and both relay TCP ports. Failure
+   default route, the configured resolver, and the relay's TCP port. Failure
    stops the sandbox, preserves its workspace, and fails the turn.
 
 DNS resolution alone does not establish relay health: a tunnel can retain its
 name while its upstream is down.
 
-For a runner host that is not the gateway's, see
+For a runner host on another machine, see
 [Running runners on another machine](#running-runners-on-another-machine): the
-two relays are SSH tunnels to the gateway and to the MCP-only listener.
+MCP relay is an SSH tunnel to the MCP-only listener.
 
 Let Compose create the relay network. A network created by hand under the same
 name is refused because its labels do not match. The
@@ -1230,13 +1442,16 @@ runner cannot claim until its exact replica attests the retained protocol,
 container image/runtime pins, sandbox manager configuration, execution profile, and
 host capacity.
 
-Standalone, the host stack needs more than an enrolment credential. Start from
-`deploy/host/.env.example`: `COMPOSE_PROJECT`, `AGENT_SANDBOX_IMAGE`,
-`AGENT_EGRESS_CHAT_NETWORK_POOL` and `AGENT_EGRESS_DNS_SERVER` are required
-(`docker-compose.sandbox.yml` interpolates each with `:?`, so an unset value
-stops the render), alongside `AGENT_SANDBOX_MANAGER_TOKEN`, the three tunnel
-destinations with their own keys and known-hosts files, and the sandbox manager
-reverse-forward trio for the separate control-plane and host Compose stacks.
+Standalone, the host stack needs more than an enrolment credential, and none of
+it is written by hand: Admin → Servers → **Add server** writes the host's `.env`
+([Compute resources](operations-compute.md)). `COMPOSE_PROJECT`,
+`AGENT_SANDBOX_IMAGE`, `AGENT_EGRESS_CHAT_NETWORK_POOL` and
+`AGENT_EGRESS_DNS_SERVER` are required (`docker-compose.sandbox.yml`
+interpolates each with `:?`, so an unset value stops the render), alongside
+`AGENT_SANDBOX_MANAGER_TOKEN`, the two tunnel destinations with their own keys
+and known-hosts files, and the sandbox manager reverse-forward trio for the
+separate control-plane and host Compose stacks. A unit test holds server setup
+to writing every required one.
 
 ### 2. Credentials
 
@@ -1262,7 +1477,8 @@ container.
 key. Nothing needs to be minted or rotated by hand: the platform signs a
 nine-minute App JWT (`github_app.py`; GitHub refuses more than ten) and
 exchanges it for an hour-long token scoped to the installation covering the
-repository being published to.
+repository, which the runner's clone credential, branch lookups and
+repository reads use.
 
 The key reaches the container through a read-only bind mount, at a fixed path.
 Two variables, and they are not the same variable:
@@ -1294,8 +1510,8 @@ valid key — does not stop the control plane (issue #47):
 
 - Integrations and the task composer say GitHub is temporarily unavailable.
   Creating a job (a temporary workspace's too), a runner's claim, or a branch
-  lookup answers `503 source_control_unavailable` with `Retry-After: 30`; queued jobs, pending
-  publishes and goal wakeups wait without spending any retries.
+  lookup answers `503 source_control_unavailable` with `Retry-After: 30`; queued jobs
+  and goal wakeups wait without spending any retries.
 - The log carries one `ERROR` event, `source_control_load_failed`, with a
   `reason` (`key_file_unreadable`, `key_missing`, `key_invalid`, `unexpected`)
   and, for a file, its path and the OS error. It repeats only if the reason
@@ -1313,8 +1529,9 @@ database and takes precedence over the mounted key. The legacy
 import in deployments that pass it through. The mounted file remains available
 when the saved inline key is empty.
 
-For checkout and publication, the App needs `contents: write` and
-`pull_requests: write`. To enable **Create repository** in the workspace and
+For checkout, and for the pushes and pull requests agents make as their
+owners, the App needs `contents: write` and `pull_requests: write`: an owner's
+GitHub App user token holds only what both the App and the owner may do. To enable **Create repository** in the workspace and
 new-task pickers, also configure the GitHub App's repository permission
 **Repository creation: write**. GitHub also accepts
 **Administration: Read and write**, but Repository creation grants only the
@@ -1324,8 +1541,8 @@ Existing installations may need their owners to approve the updated
 permissions on GitHub. Without that permission,
 repository creation reports that the App cannot create repositories; existing
 tasks continue to use their existing permissions. The App does not need
-`workflows`, so a patch touching `.github/` cannot be pushed even if the gate
-were bypassed. Revocation is uninstalling the App.
+`workflows`; without it, GitHub refuses a push that changes a file under
+`.github/workflows/`. Revocation is uninstalling the App.
 
 Creation calls GitHub's `POST /user/repos` with the connected user's encrypted,
 refreshable GitHub App user token, kept in the control plane. It creates only
@@ -1350,8 +1567,7 @@ AGENT_GITHUB_APP_INSTALL_URL=https://github.com/apps/<app-slug>/installations/ne
 ```
 
 Set the callback to the **agent web's own origin**, where the callback page and
-session cookie live. For a web build with a base path, use
-`<origin><basePath>/connected?provider=github`. The authorize link sends no
+session cookie live. The authorize link sends no
 `redirect_uri`, so GitHub uses the App's first Callback URL. Update that setting
 whenever the web origin moves.
 
@@ -1374,41 +1590,67 @@ The same App also supplies the runner's clone credential, and the two are
 _not_ the same token. An installation token inherits every permission the App
 holds unless it asks for less, so the clone token is requested as
 `contents: read` on the single repository being worked on. Checkout does not
-inherit the publisher's broader authority.
+inherit the App's broader authority.
 
-The claim separately mints a single-repository installation token with
-`contents: write` and `pull_requests: write`, injected as `GH_TOKEN` in the
-owning sandbox member's Agent CLI environment. `GH_REPO` selects the job's
-repository and `GH_HOST` selects `github.com`; `gh` authenticates as the App
-installation, rather than as the user's account. The token is not written to
-Git or GitHub CLI configuration, shared workspace files, or the image. Setup
-scripts and standalone terminal sessions do not receive it. Git uses the
-`gh auth git-credential` helper through invocation-only environment settings,
-so `git push` and `gh pr create` can authenticate without an interactive login.
-The host clone credential stays read-only; user account/refresh tokens and
-the App's private key remain outside the sandbox.
+#### The GitHub relay
 
-Direct sandbox pushes bypass the trusted publisher's patch gate, including
-its workflow-file and secret checks. Repository branch protection and GitHub
-rules still apply. The App installation must grant Contents and Pull requests
-write access; token issuance failures return the claim to the queue.
+No GitHub token reaches a sandbox. Each member's residency carries a
+placeholder (`agh.`) that git and `gh` present to GitHub, and the owner as
+the commits' author (`GIT_AUTHOR_*`, from the owner's GitHub noreply
+address) with the deployment's `AGENT_GITHUB_COAUTHOR` as co-author. Every
+group bridge resolves `github.com` and `api.github.com` to the host's
+`github-tunnel`, so every process in the sandbox reaches the relay, and
+every process trusts the deployment's GitHub relay CA, whether or not it holds
+a placeholder: a setup script cloning a public repository goes through the
+relay too, as nobody. Before the first process starts, a root exec writes the
+CA and a bundle of the image's roots plus the CA to `/etc/freeinference/`,
+root-owned and read-only. The tunnel forwards TLS unopened to the control
+plane's GitHub relay, a listener of its own that holds the certificate.
 
-Each claim obtains a live token from the App's expiry-aware cache. When that
-token changes, the member resumes its native session in a replacement process
-so subsequent commands inherit the new credential. Installation tokens expire
-after about one hour; there is no in-turn renewal, so `gh` calls in a longer
-turn may require a new turn to obtain a fresh token.
+The relay accepts the placeholder only while its residency is the chat's hot
+one, serving a running, leased, unstopped turn on an enrolled host. It then
+sends the request with the owner's own GitHub App user token if the request
+is about the conversation's repository and on its allowlist, with no
+credential at all if it is about anything else, and refuses repository
+administration, secrets, GraphQL, branch deletion and tags. A pull request it
+sees created is recorded for the conversation. The owner's token is renewed
+in the control plane, so a long turn does not outlive it.
+
+To turn it on:
+
+1. Run `deploy/control-plane/github-relay-certs.sh <dir>`. Keep `ca.key`
+   offline; give `relay.pem` and `relay.key` to the control plane
+   (`AGENT_GITHUB_RELAY_TLS_DIR`) and `ca.pem` to every host
+   (`AGENT_SANDBOX_GITHUB_RELAY_CA_FILE`).
+2. Give `relay.key` to the relay's user. The `github-relay` container runs as
+   uid 10001 and reads the directory through a read-only bind mount, which
+   keeps host ownership, so a key the operator owns at `0600` fails with
+   `PermissionError`. Run the script as root, which sets the key to
+   `10001:10001` and `0400`, or run `sudo chown 10001:10001 <dir>/relay.key`
+   as the script prints. Move `ca.key` out of `<dir>` before you mount it.
+3. Enable the `github-relay` Compose profile on the control plane and on each
+   host, and give each host's `github-tunnel` its own SSH key restricted with
+   `permitopen` to the relay's port (`AGENT_GITHUB_TUNNEL_*`).
+4. Set `AGENT_GITHUB_COAUTHOR` to the App bot's noreply address.
+
+Nothing on the platform scans what goes through the relay: there is no
+workflow-file or secret check of its own. Repository branch protection,
+GitHub's push protection and the repository's CI still apply, and a push that
+changes a workflow needs the App's Workflows permission. The design is in
+[agent-native pull requests](../agents/specs/2026-11-04-agent-native-pull-requests.zh-CN.md).
 
 With no App configured the claim returns no clone token and the runner clones
 anonymously, which is enough for a public repository. A private repository
 needs the App.
 
-A static `AGENT_GITHUB_TOKEN` still works as a fallback for the trusted
-publisher, but it is a long-lived credential someone has to create and
-rotate; prefer the App. Sandbox GitHub authentication requires the App and
-never falls back to this static token.
-With neither, the publisher loop idles and says so — jobs still run and still
-produce patches, they just never become PRs.
+Without the App and the relay, agents cannot push or open pull requests: jobs
+still run, and their changes stay in the retained workspace, where the owner
+can read them in the Git pane or download them as an archive. There is no
+static-token fallback; `AGENT_GITHUB_TOKEN` is no longer read. A host with no
+relay also withholds the placeholder from the sandbox, so `git` and `gh` do
+not present a token GitHub would reject. The workspace is a shallow checkout
+of the pinned commit and its parent, and the conversation's base branch is a
+local branch at that commit, so a review can diff without fetching.
 
 ## Running self-hosted
 
@@ -1420,7 +1662,11 @@ Existing retained sandboxes remain on their original Host when this selection
 changes; neither Host Remove nor Forget destroys the underlying machine.
 
 Run the host agent as a **standing service** so queued jobs can be claimed after
-crashes and reboots. Configure enrollment and the shared sandbox manager token in `.env`.
+crashes and reboots. **Add server** writes the host's `.env` and runs the
+commands below for you; installing a host by hand from a hand-written `.env` is
+no longer a supported way to add one. What follows describes a host's
+configuration and lifecycle for operating one that exists. Its `.env` holds
+enrollment and the shared sandbox manager token.
 The example below includes the shared-kernel setting for trusted internal
 repositories. For untrusted repositories, use the default `kata` backend and
 complete [Kata provisioning](#provisioning-kata-on-a-runner-host).
@@ -1453,7 +1699,7 @@ deploy/host/sandbox_host.sh prepare  # pull or build, Kata smoke test, candidate
 deploy/host/sandbox_host.sh activate # drain, replace, prove
 ```
 
-Use the standalone host stack even on the gateway's machine, with tunnel
+Use the standalone host stack even on the control plane's machine, with tunnel
 destinations pointing to its local listeners. The old co-located
 `agent_runner.sh` overlay did not move; [the repository extraction record](../agents/reviews/2026-08-09-repository-extraction-record.md) records
 that decision. `preflight` checks Docker, retained-session configuration, host
@@ -1463,17 +1709,16 @@ it deploys.
 ### Host configuration reference
 
 The script validates the required environment before starting and surfaces
-the runner's own preflight verdict (gateway reachable, retained image/runtime
+the runner's own preflight verdict (control plane reachable, retained image/runtime
 usable, Docker data-root correct, relay network present and route-less, host
 network rules installed and read back) instead of leaving it in a detached
 log. Equivalent by hand:
 
 ```bash
-# Put a tested alternate version in the corresponding *_EXTRA_VERSIONS build
-# argument, then select it in Admin. Default versions are shared protocol pins
-# and change in source together with SHARED_SANDBOX_RUNTIME_PINS.
+# The image carries exactly the source-reviewed pins, which change together
+# with SHARED_SANDBOX_RUNTIME_PINS. Other agent versions are installed from
+# Admin -> Settings -> Agent versions, without a rebuild.
 docker build -f deploy/sandbox/Dockerfile.agent-sandbox \
-             --build-arg CLAUDE_CODE_EXTRA_VERSIONS="<exact-version>" \
              -t freeinference-cloud-agent-job:latest .
 
 AGENT_SANDBOX_IMAGE=freeinference-cloud-agent-job:latest \
@@ -1495,13 +1740,12 @@ with no leader and no sharding.
 | --- | --- | --- |
 | `AGENT_SANDBOX_BACKEND` | `kata` | `process` (no isolation) refuses to start unless `AGENT_SANDBOX_ALLOW_UNISOLATED=1`. On the default `kata`, deploy refuses until the host has the shim and one real container proves it gets its own kernel; `container` is an explicit, and loudly restated, shared-kernel downgrade |
 | `AGENT_SANDBOX_IMAGE` | required | Image built from `Dockerfile.agent-sandbox` or an equivalent deployment-owned image |
-| `*_EXTRA_VERSIONS` | blank | Comma-separated tested versions to bake beside each source-reviewed default. Select one for new chats in Admin; retained chats keep the version they started with. The five defaults are not host settings because runner/control-plane capability admission attests them as one protocol unit |
 | `AGENT_RUNTIME_DOWNLOAD_NETWORK` | `bridge` | Docker network for the download step of an agent update from the admin Settings page. Only npm runs there, with package scripts off; the scripts and the check run with no network ([design](../agents/specs/2026-10-15-agent-cli-updates-design.zh-CN.md)) |
-| `AGENT_RUNTIME_REGISTRY_URL` | public npm | Registry a host downloads updated agents from. Set the same value on the control plane, which reads the latest release from it. pi updates come from `@earendil-works/pi-coding-agent`; a private mirror must carry that package as well as the image's `@mariozechner` one |
+| `AGENT_RUNTIME_REGISTRY_URL` | public npm | Registry a host downloads updated agents from before its first heartbeat answer. Afterwards the host uses **Agent package registry** in Admin → Settings → Agent versions, which the control plane also lists versions from. pi updates come from `@earendil-works/pi-coding-agent`; a private mirror must carry that package as well as the image's `@mariozechner` one |
 | `AGENT_EGRESS_CHAT_NETWORK_POOL` | required | This deployment's RFC1918 IPv4 pool, one daemon-arbitrated `/29` per active group bridge. No default: it must be disjoint from every other deployment's pool on the machine — of two that overlap, the host rules refuse the one installed later — and from the host's Docker, VPN and private-service routes. A group's bridge is removed on stop and rebuilt on wake |
 | `AGENT_EGRESS_DNS_SERVER` | required | The one IPv4 resolver sandboxes may use, on TCP and UDP 53. It is the only exception to the protected ranges, so a site resolver on a private address or on this host works. Not loopback, and not inside the pool; see _Choosing the resolver_ below |
 | `AGENT_EGRESS_PROTECTED_CIDRS` | — | Comma-separated IPv4 blocks to refuse on top of the built-in host, private, link-local/metadata, CGNAT, multicast and reserved ranges — an institution's services on public addresses, for example. It can only add protection. Set the same value on the control plane, where an owner's SSH server and model connection checks refuse these blocks too |
-| `AGENT_RELAY_NETWORK` | derived | Where lifecycle finds the two relays; the host stack derives `<COMPOSE_PROJECT>-agent-relays`. It must exist and be `internal`, or preflight refuses, and no sandbox group ever joins it. Set it only to name an existing network |
+| `AGENT_RELAY_NETWORK` | derived | Where lifecycle finds the MCP relay; the host stack derives `<COMPOSE_PROJECT>-agent-relays`. It must exist and be `internal`, or preflight refuses, and no sandbox group ever joins it. Set it only to name an existing network |
 | `AGENT_EGRESS_SETUP_TIER`, `_AGENT_TIER` | removed | Retired with the network tiers and the Squid proxy, together with `AGENT_EGRESS_ALLOWLIST`, `AGENT_EGRESS_NETWORK_*`, `AGENT_EGRESS_PROXY_*`, `AGENT_EGRESS_STOP_GRACE`, `AGENT_SANDBOX_NETWORK` and `AGENT_SANDBOX_ALLOW_OPEN_NETWORK`. Nothing reads them, so setting one changes nothing; delete them from `.env` |
 | `AGENT_RUNNER_HOST` | host name | Enrolled execution environment, shared by every turn it runs — the unit the admin placement switch picks between. `deploy/host/sandbox_host.sh` fills it from the host's own name. Never derived inside the container, where the hostname is a container id. After enrolment the persisted credential is authoritative, so editing this renames nothing. Unset keeps the environment out of the pool and changes nothing else. Distinct from `AGENT_PHYSICAL_HOST`, which is the display-only inventory name grouping environments that share one server |
 | `AGENT_PHYSICAL_HOST` | host name | Physical server this environment runs on, reported at enrolment as the `physical_host` label and used to group the admin inventory. `sandbox_host.sh` defaults it to `hostname -s`; set it explicitly when invoking Compose directly. Never a container hostname or a runtime suffix |
@@ -1510,15 +1754,13 @@ with no leader and no sharding.
 | `AGENT_HOST_STORAGE_PROBE` | `overlay_root` | Which probe measures the filesystem holding the sandbox writable layers, shown as the Servers page's Storage column. `off` stops measuring storage on that host and is the rollback; an unrecognized name reports `unsupported` rather than measuring something else. A reading is published only for a topology the host deployment has attested; see _How full is the sandbox storage?_ |
 | `AGENT_STORAGE_MIN_AVAILABLE_MIB` | `1024` | Bootstrap value for **Storage reserve for new sandboxes**; the admin runtime setting replaces it after the host's first settings heartbeat. Fresh verified available space below this reserve declines a new sandbox allocation without spending the turn. Existing sandboxes may resume; unknown capacity does not establish a pressure verdict. This is an admission guard, not a disk quota |
 | `AGENT_SANDBOX_UID` / `_GID` | `10001` | Only for a custom sandbox image; must match its user |
-| `AGENT_REPO_ALLOWLIST` | — | Comma-separated `owner/name`, or `owner/*`, for the single-tenant dogfood. Every admitted user may have the platform clone and publish to the listed repositories. Users who connect the App themselves do not need it; unset simply means the only entitlement is a user's own connection |
+| `AGENT_REPO_ALLOWLIST` | — | Comma-separated `owner/name`, or `owner/*`, for the single-tenant dogfood. Every admitted user may have the platform clone the listed repositories with the deployment's App; pushing still needs the user's own GitHub connection. Users who connect the App themselves do not need it; unset simply means the only entitlement is a user's own connection |
 | `AGENT_GITHUB_APP_CLIENT_ID` / `_CLIENT_SECRET` | — | The App's OAuth half. Only the user-facing connect flow needs it; minting installation tokens uses the private key alone |
 | `AGENT_GITHUB_APP_INSTALL_URL` | — | GitHub App installation URL, `https://github.com/apps/<slug>/installations/new`. Offered after connecting whenever the App is not on the user's own account, and behind _Configure repositories_. The control plane adds a short-lived, user-bound `state`; set the App's Callback URL to the agent web's own origin, `<origin>/connected?provider=github` (see _2. Credentials_) |
 | `AGENT_GITLAB_OAUTH_CLIENT_ID` / `_CLIENT_SECRET` | — | GitLab.com OAuth application credentials, kept on the control plane. Configure only `read_user` and `read_api` scopes |
 | `AGENT_GITLAB_OAUTH_REDIRECT_URI` | — | Exact registered callback, normally `<frontend>/agents/connected?provider=gitlab`. HTTPS is required except for localhost development |
 | `AGENT_SANDBOX_MCP_URL` | — | Host only: MCP-only relay URL as this host's sandboxes see it. The standalone host compose derives it from the MCP tunnel alias, and the control plane no longer reads it; never point it at inference or the full control API |
 | `AGENT_MCP_TUNNEL_*` | — | Remote MCP-only listener destination and independent restricted SSH key/known-hosts; see `ENVIRONMENT.md` for the complete set |
-| `AGENT_GITHUB_TOKEN` | — | Control-plane fallback publisher credential; unset means the publisher idles |
-| `AGENT_PUBLISH_BASE_BRANCH` | `dev` | What a draft PR targets when its job named no branch of its own. A job started from a branch targets _that_ branch; this is only the fallback |
 
 The authenticated `/agents/integrations` page is the only supported place to
 start either OAuth flow. OAuth state is unpredictable, bound to the signed-in
@@ -1527,27 +1769,11 @@ uses PKCE. GitLab access and refresh tokens are encrypted before persistence,
 rotated on refresh, never returned to the browser, and revoked best-effort on
 disconnect.
 
-GitHub repositories retain the complete Agent lifecycle: checkout, branch
-discovery, push, and draft PR publishing use short-lived GitHub App installation
-tokens. Draft PR titles summarize the captured user and assistant messages across
-the shared session through a bounded inference request under a separate,
-owner-scoped grant, which each try of a publication mints for itself and revokes
-when its title is written. A Fork's copies of earlier turns are read once, in the chat
-they were copied from. A session longer than one request is summarized in at
-most four fragments, all at once, and the title is written from their summaries
-within the same one-minute budget. A longer session is not sent to the model at
-all (fallback reason `conversation_too_long`). Generic completion text is
-rejected and retried. If inference is unavailable, the publisher uses the first
-concrete line from each included turn's closing summary, skipping headings and
-generic completion preambles. It
-falls back to the changed files when no usable summary exists. The
-`agent_pr_title_generation_failed` log records the snapshot ID and fallback
-reason as structured fields, plus the exception type and HTTP status when
-available, without logging conversation text or credentials. Enable JSON logging
-in Admin Settings to see these fields. The original task remains in the PR body.
-A conversation keeps one draft PR across its turns while that PR is open; once
-someone closes or merges it, the next published snapshot opens a new draft PR
-from the same `agent/…` branch.
+GitHub repositories retain the complete Agent lifecycle. Checkout and branch
+discovery use short-lived GitHub App installation tokens; the agent pushes and
+opens pull requests as the owner through [the GitHub relay](#the-github-relay).
+The agent writes the branch, commits, pull-request title and description
+itself, and the platform adds nothing to them.
 GitLab is intentionally narrower in this release: it verifies the
 authenticated GitLab user and shows their accessible projects for discovery.
 GitLab projects do not appear in the Agent task composer, and the control plane does
@@ -1638,6 +1864,52 @@ The per-turn table is therefore a member-UID lifecycle census of process starts 
 after that turn's cursor, not a point-in-time snapshot of resident processes
 that were already running before the turn and not a whole-container total.
 
+#### Faster VM boot settings (opt-in)
+
+Two settings may shorten the VM boot that every new or resumed sandbox group
+waits for. Both stay off until they are qualified on a Kata host
+([#1054](https://github.com/HarvardMadSys/hybridInference-cloud-agent/issues/1054)).
+To try them on one host, pass them to the installer:
+
+```bash
+sudo KATA_STATIC_SANDBOX_RESOURCES=true KATA_DEFAULT_MEMORY_MIB=1024 \
+  deploy/host/setup_kata_runtime.sh
+```
+
+- `KATA_STATIC_SANDBOX_RESOURCES=true` sets `runtime.static_sandbox_resource_mgmt`.
+  Kata then boots each VM with its container's `--cpus` and `--memory` already
+  added to `default_vcpus` and `default_memory`, instead of hot-plugging them
+  after boot. The VM cannot grow afterwards. Nothing on the platform resizes a
+  running sandbox, and a group keeps the limits it was created with, so this
+  loses nothing. Nothing caps the VM at the host's memory either: a VM larger
+  than the host's memory plus 1 GiB, the most Kata lets QEMU address, fails to
+  start, where hot-plug would stop adding memory at the host's limit.
+- `KATA_DEFAULT_MEMORY_MIB` sets `hypervisor.qemu.default_memory`, otherwise
+  Kata's 2048 MiB. Each VM gets it on top of its container's memory limit,
+  with or without static sizing. It must hold what that limit does not cover:
+  the guest kernel, its page structures for all of the VM's memory (64 bytes
+  per 4 KiB page), and the Kata agent. A container started without a limit,
+  such as a deployment probe, gets nothing else. The installer refuses less
+  than 256 MiB, which Kata would replace with 2048 MiB without saying so.
+
+The installer writes them to one drop-in, `config.d/cloud-agent-vm-boot.toml`
+beside the runtime configuration, and `--check` reads them back from it, so
+deployment passes nothing. Kata applies every file in that directory over the
+main configuration, so `--check` refuses any other file there and any change
+to this one. An install without the settings deletes the drop-in, says so,
+and restores Kata's defaults. The control plane's automated deploy of a
+managed compute host is such an install whenever it installs prerequisites,
+which it does by default, so each of those deploys reverts the settings until
+they are passed to the installer again. They are for qualification runs until
+the defaults switch. Every install starts a new runtime generation, so
+runners requalify the guest either way.
+
+VM templating stays off: it shares kernel memory and RNG/KASLR state across
+tenants. The release's uncompressed copy of the same debug kernel is not
+offered either. QEMU boots it directly, without the decompressor that
+randomizes the kernel's address (KASLR), so every guest would run its kernel at
+the same published addresses.
+
 #### Guest networking
 
 Docker's embedded DNS resolver (`127.0.0.11`) is outside the guest. After each
@@ -1675,10 +1947,10 @@ AGENT_SANDBOX_BACKEND=kata deploy/host/sandbox_host.sh check
 
 `preflight` verifies the configured image and guest kernel. `check` starts relay
 probes under Kata on the relay network (`AGENT_RELAY_NETWORK`) and requires
-HTTP 200 from inference `/health` and MCP `/healthz`. It also checks the live
+HTTP 200 from MCP `/healthz`. It also checks the live
 runner's full sandbox preflight — which installs and reads back the host
 tables — sandbox manager, and control-plane paths. The relay network is only where
-lifecycle finds the two relays; retained groups get their own bridges during
+lifecycle finds the MCP relay; retained groups get their own bridges during
 activation, and the in-guest check at each cold start covers the path from
 there. The compose `..._internal` network is the host services' network and
 cannot substitute for either check.
@@ -2136,6 +2408,24 @@ uses the separate [restorable checkpoints](#restorable-checkpoints) below, and
 the retained Docker writable layer remains authoritative for normal stop/start
 continuity.
 
+The first prompt waits for the initial capture, not for S3. The Sandbox Manager
+writes the bundle under
+`AGENT_SANDBOX_ARCHIVE_STATE_DIR/initial-uploads/<sha256(namespace)>/`, fsyncs
+it, writes the sandbox's initial marker naming those bytes, and returns. A
+background upload then stores the object under the policy revision the marker
+pinned and removes the directory (event `sandbox_initial_archive_uploaded`,
+`deferred: true`). A failed attempt is retried after 5 seconds, 30 seconds, 2
+minutes, then every 10 minutes until S3 holds the object
+(`sandbox_initial_archive_deferred_retry`), and again after a Sandbox Manager
+restart; a later attempt of the same chat that probes the marker uploads from
+the same directory. Until then that directory holds the only copy of the chat's
+pre-prompt workspace, so keep it on the host's persistent state disk and drain
+it before removing a host. When it is full (8 GiB, counting one new bundle's
+worst case) or cannot be written, the capture stores the object before the
+prompt starts, as it always did (`sandbox_initial_archive_handoff_unavailable`
+when unwritable). A bundle that no longer matches its marker is dropped and
+logged as `sandbox_initial_archive_handoff_corrupt`.
+
 A stop the Sandbox Manager did not perform cleanly has no final archive. This
 covers a host crash or reboot, a Sandbox Manager that exited while sandboxes
 kept running, a `docker stop` issued behind it, and a native transport that
@@ -2191,8 +2481,8 @@ see [Restoring a removed host's sandboxes](#restoring-a-removed-hosts-sandboxes)
   become `verified` once a restore has loaded and started them.
 - Each receipt names the control plane's start fence (`start_seq`) for the run
   its stop ended. Every path that may start the container (a turn, a workspace
-  file, terminal, Git or environment request, a Fork, a snapshot capture or a
-  base import) advances the fence first and sends the value it took with the
+  file, terminal, Git or environment request, or a Fork) advances the fence
+  first and sends the value it took with the
   request itself: in its body, or for a workspace request in an
   `X-Agent-Start-Seq` header. An open terminal's input, resize and close
   cannot start the container, so they take no fence. The Sandbox Manager
@@ -2210,8 +2500,10 @@ see [Restoring a removed host's sandboxes](#restoring-a-removed-hosts-sandboxes)
   state, and anything installed outside `/workspace`. Credential tmpfs mounts
   are not part of a commit. It also holds the Sandbox Manager's own archive
   markers for the generation that stopped; a restored container reads a marker
-  from an earlier generation of its group as absent and writes its own. Bucket lifecycle and retention rules apply to the
-  `v2/` prefix like the rest of the archives.
+  from an earlier generation of its group as absent and writes its own. Host
+  reconciliation reads it the same way, so a restored container left stopped
+  before its first start owes no final archive. Bucket lifecycle and retention
+  rules apply to the `v2/` prefix like the rest of the archives.
 
 #### Restoring a removed host's sandboxes
 
@@ -2227,9 +2519,8 @@ credential was revoked is handed on by the reaper's next pass.
 
 Nothing starts a group on a removed host, since that host never reports the
 stop that would cover it again. A workspace request (Files, Terminal, Git or
-an environment retry) answers `workspace_unavailable` (409), a Fork is refused,
-and a publication's capture and base import wait until the group has moved. A
-checkpoint still in flight therefore covers its group when it lands, and a
+an environment retry) answers `workspace_unavailable` (409) and a Fork is
+refused. A checkpoint still in flight therefore covers its group when it lands, and a
 request or Fork that finds the group covered hands it on at once: the request
 answers `workspace_restoring`.
 
@@ -2242,7 +2533,9 @@ credential and any deployment drain fence are left to the removal flow.
 A `cold` group does not keep its old host from being forgotten, by **Forget**
 or by permanently removing the server: it no longer needs that machine. It
 keeps naming the host it last ran on until a claim moves it to the claiming
-host. Every other undeleted group still blocks forgetting.
+host. Every other undeleted group still blocks forgetting. Once that host is
+gone, **Delete without archive** deletes a `cold` group at once, without any
+host (see [sandbox inventory](#sandbox-inventory-resource-usage-and-controls)).
 
 The next turn of any chat in a `cold` group is claimed by any host that
 advertises `sandbox-restore-v1` with archives enabled, except the host that
@@ -2451,15 +2744,14 @@ job. That conservative choice prevents duplicate prompt/tool execution.
 
 On the host, the reaper's close of that member's residency also ends the
 activation that ran on it, as an abandon would, so a Fork sibling's group can
-still go idle and its publication snapshot is not refused as an active
-mutation. A turn that was running when the runner died was already aborted
+still go idle. A turn that was running when the runner died was already aborted
 when the runner's turn stream to the sandbox manager closed. A runner that
 hung instead still holds that stream: the close interrupts its turn, and the
 activation ends once the stream has closed the turn. A stream its runner no
 longer reads may never get that far, so the sandbox manager's sweep closes a
 turn still open 60 seconds after the loss. The reaper waits for the host's
 sandbox manager at most 5 seconds per member for its close of a residency,
-the members one pass reaps side by side, and revokes each member's grant
+the members one pass reaps side by side, and releases each member's residency
 either way: the host's next heartbeat is told the generation is lost and
 closes the process itself, so a host that no longer answers, usually the
 reason the lease expired, does not hold up the pass for every other host.
@@ -2479,7 +2771,7 @@ deactivate a healthy group:
 - `AGENT_TERMINAL_HARD_TTL_SECONDS` (8 hours) bounds one PTY even if it stays
   noisy forever. It is a resource/security guard, not sandbox deactivation;
 - `AGENT_RESIDENCY_TTL_S` defaults to 1800 seconds and fences each member's
-  live-process ownership plus renewable inference grant. Losing that lease
+  live-process ownership. Losing that lease
   demotes/restarts the member, and ends with LOST context an unfinished
   activation that had taken on its process, once any turn it was running has
   closed; it does not itself stop a healthy chat group or create another
@@ -2496,7 +2788,7 @@ bounded queues; oversized native CLI records stop the affected member. Resource
 checkpoints continue to reach the control plane while CLI output is silent. See
 [Host execution limits](host-execution-limits.md) for the limits and boundaries.
 
-#### Resume, Fork, and publication
+#### Resume, Fork, and pull requests
 
 There is no retained/shared feature flag or runtime allowlist switch. Claude
 Code, Codex, Pi, OpenCode, and Kilo are claimable only after exact
@@ -2514,65 +2806,22 @@ runners never emit `replay`; the API accepts it only so an attempt admitted by
 the previous generation can finish during a parallel rollout, and historical
 rows remain readable in the UI.
 
-A settled turn publishes nothing. The platform publishes a workspace only when
-its owner asks (`POST /v1/agent/threads/{thread_id}/publish`, the conversation's
-Create PR / Update PR button): the request advances the group's epoch and opens
-a snapshot holding every turn settled since the last one, and capture, the
-secret scan, the push, the draft PR and the base import follow as before. A
-request while a turn runs in the workspace is refused (`turn_running`); one
-while a publication is on its way returns that publication. Until the owner
-asks, a settled workspace holds nothing back: it stops when idle and its chat
-can be deleted. Its unpublished turns live in the retained sandbox, and in its
-checkpoint once it stops cleanly. See the
-[design](../agents/specs/2026-10-15-manual-publication-design.zh-CN.md).
+A settled turn leaves its changes in the retained workspace; the platform
+neither captures nor publishes them. Every follow-up starts from the
+conversation's own base, so the workspace's Git view shows every change the
+conversation made. A settled workspace holds nothing back: it stops when idle
+and its chat can be deleted. Its changes live in the retained sandbox, and in
+its checkpoint once it stops cleanly.
 
-After a publication request, the snapshot and draft-PR fields change
-asynchronously. The detail view and recent-task list poll only while that
-publication state is pending/capturing/captured/publishing, and stop at
-published/failed; other terminal jobs do not acquire a background
-polling loop.
-
-A snapshot whose patch the publisher refuses, whose capture the host refuses,
-or whose five publication retries run out stays `failed` with its reason, and
-its group is marked `dirty`. It is not retried. The owner's next request opens
-the group's next snapshot, which supersedes it: every snapshot is the whole
-diff from the last published commit, so it carries the failed changes too, and
-is refused in turn if it still holds what was refused. Snapshots still publish
-in epoch order; only a failed one stops holding the later ones back. If the
-failed attempt had already pushed its commit to the `agent/<thread>` branch
-(the draft-PR step failed after the push, or the push landed after it timed
-out), that commit is the group's own: the publisher records it as the
-snapshot's `pushed_commit_sha` before pushing it, and does not push a commit it
-could not record. The later snapshot builds on it: the branch fast-forwards to
-the later snapshot's tree and the draft PR is opened then. Any other commit on
-the branch is still refused as a moved branch until that branch is deleted;
-the platform never force-pushes. A GitHub rate limit, answered with a 403 or a
-429, is retried after the wait GitHub names (`Retry-After`, or the reset time
-of an exhausted limit), up to an hour, and so is a published base's import
-whose credential hit one. A draft-PR refusal that names only its head branch
-(`head invalid`), which GitHub can answer until it has seen the branch just
-pushed, is retried within the same five-attempt budget; an invalid base branch
-is refused for good.
-
-The base import adds a published commit's objects to the workspace and writes
-no ref, HEAD or index, so Git's own housekeeping prunes them once their pack is
-old enough (two weeks for a default `git gc`). A capture that then finds the
-published base missing is not failed: the sandbox manager refuses it with a
-409 of its own, the group returns to `importing` for the same published base,
-the publisher fetches that commit from GitHub again and imports it, and the
-capture runs once the import completes. That bundle is cut from the commit the
-workspace started from, which its own history keeps, because Git prunes the
-published commits together. A missing base that no snapshot published has
-nothing to fetch, and its capture fails as before. A publication waiting on a
-base import that keeps failing (GitHub no longer serves the commit, access was
-withdrawn, or the workspace cannot take the bundle) fails after an hour and
-leaves its group `dirty`; the owner's next request captures, and imports,
-again.
-
-An import completes only for the generation and container it was sent to. If
-the group's host is removed and another host restores the group while an
-import is still out, the old host's late answer changes nothing, and the
-import is sent again to the restored container.
+When the owner asks for a pull request, the agent opens it through
+[the GitHub relay](#the-github-relay), and pushing again to that pull
+request's branch updates it, as it would locally. Each pull request the relay
+sees created is recorded in `agent_thread_pull_requests` for the
+conversation. A job's `published_pr_url` is the first pull request its own
+turn opened, and `workspace_pr_url` the conversation's newest. A Fork does not
+inherit its parent's records, and a pull request someone opens on GitHub
+directly is not recorded; paste its link into the conversation instead. See
+the [design](../agents/specs/2026-11-04-agent-native-pull-requests.zh-CN.md).
 
 Admission checks free space only through the
 [storage reserve](#how-full-is-the-sandbox-storage); disk-pressure alerting and
@@ -2799,221 +3048,31 @@ does not write `.deployed-sha`.
 
 ### Preserving an old-chain database
 
-An old Alembic revision cannot be upgraded by the rewritten graph. If the
-history must survive, use `scripts/convert_legacy_database_copy.py` on a
-**separately restored copy**, not the selected-state rebuild below. The converter
-currently supports exactly `0025_retained_followup_gate`; other old revisions
-need their own audited conversion. It keeps all original rows and columns in
-`legacy_archive`, creates the real baseline with constraints enabled, copies the
-supported live state, and applies the repository's additive migrations in one
-transaction. It refuses active jobs, other clients and an already-converted copy.
+Every database from before the independent-accounts release, whether on the
+retired pre-2026-09-10 Alembic chain or on the current one, is keyed by
+HybridInference Gateway owner IDs. This release does not serve one, convert
+one, or map its owners to accounts: the identity-namespace check refuses it
+before anything is migrated. Keep such a database untouched as the archive
+and rollback source, with its dump, checksum, configuration and root keys, and
+start the release on a new, empty database
+([cutover](upgrade-notes.md#independent-accounts-cutover)).
 
-1. Drain before the final snapshot and stop all Agent database writers. Keep a
-   full custom-format PostgreSQL dump, its checksum, the current code/images and
-   Agent configuration. Rehearse restoring the dump in an isolated PostgreSQL
-   instance with no applications attached; do not use the live database as the
-   conversion destination.
-2. Name the restored database `agent_legacy_copy_<unique_name>`. Set
-   `LEGACY_COPY_DATABASE_URL` privately to that copy; the tool deliberately never
-   falls back to `AGENT_DATABASE_URL`. Use the intended target release checkout
-   and its Python dependencies. Audit first, then convert, using new report paths:
-
-   ```bash
-   python scripts/convert_legacy_database_copy.py \
-     --database agent_legacy_copy_rehearsal --report audit.json
-   python scripts/convert_legacy_database_copy.py \
-     --database agent_legacy_copy_rehearsal --report conversion.json --apply
-   ```
-
-   Reports contain counts/hashes, not user rows or credentials. Retain them
-   privately with the backup. A failed transaction leaves the original schema
-   intact. A report I/O error requires inspecting the copy before retrying.
-3. Verify all archived rows, retained public data and sequence high-water marks.
-   Exercise the target version's storage queries and a fresh write on the copy.
-   Retired `replay` telemetry survives in the archive; its public continuity field
-   becomes NULL, since it is not a native resume mode. Retired artifact tables
-   remain available for operator recovery in the archive, not in the current API.
-4. Establish the original Gateway issuer independently, then explicitly adopt
-   that issuer on the converted copy using the procedure in
-   [minimal-identity.md](minimal-identity.md). Conversion does not bind a namespace
-   or make the copy ready for traffic. Preserve the existing host credential,
-   owner identities and retained filesystem paths.
-5. For cutover, repeat the proven procedure from a fresh, quiescent snapshot.
-   Point only Agent at the converted database after verification. Keep ingress
-   closed while validating both roles. Before new writes, recovery can restore
-   the preserved source configuration/database. After new writes, do not point
-   old code at the new schema or discard the new database: recovery must retain
-   and reconcile the new data. Prefer a tested compatible artifact recovery.
-
-The complete conversion contract is
+`scripts/convert_legacy_database_copy.py` still converts a separately restored
+copy of a `0025_retained_followup_gate` database, keeping every original row in
+`legacy_archive`, for an operator who needs to read old history with the
+current schema. The converted copy is still Gateway-owned and is refused like
+the original; never point a deployment at it. The conversion contract is
 [the legacy database copy plan](../agents/specs/2026-09-18-legacy-database-copy.md).
 
 ### Rebuilding the agent database
 
-This procedure preserves selected state from a deployment using the **retired
-Alembic chain** and intentionally discards task history. It was rehearsed on
-2026-09-10. Use [copy conversion](#preserving-an-old-chain-database) when history
-must survive. This table selection predates later credential and configuration
-additions; do not use it as a generic reset procedure for a current database.
-
-The schema baseline was rewritten on 2026-09-10 (`0001_schema_baseline`), and
-a database stamped with any revision of the old chain fails
-`alembic upgrade head` with "can't locate revision". Such a database is
-converted on a copy as above, or rebuilt only when discarding task history is
-intentional. The selected-state rebuild below is **not** "drop the database and deploy":
-the runner keeps its host credential in a file and never re-enrols while
-that file exists, so an empty `agent_runner_hosts` turns every heartbeat into
-a 401, the runner logs `agent_host_credential_rejected` and stops claiming, and
-the control-plane deploy waits for a fresh heartbeat that never comes. The
-compose-effective location is
-`${AGENT_HOST_STATE_ROOT:-/var/lib/hybridinference/agent-host}/credential`
-(set in `deploy/host/docker-compose.sandbox.yml`); the code default
-`AGENT_HOST_CREDENTIAL_FILE=/var/lib/hybridinference/agent-host-credential`
-(`enrollment.py`) applies only to a runner started outside that compose file,
-and `AGENT_HOST_STATE_ROOT` becomes mandatory once `SIBLING_COMPOSE_PROJECTS`
-is set. The
-host's registration must survive the rebuild. So must the users' source
-control and MCP connections, which are credentials nobody can re-mint from
-the database side, and the identity-namespace binding, which says which
-Gateway minted the `user_id`s those rows are keyed by: `deploy.sh` runs
-`python -m cloud_agent.identity_namespace --check` before either listener
-starts, and that check refuses to start an API over owner data with no issuer
-to attribute it to.
-
-Rehearsed on a copy of the old schema (2026-09-10), including the ways the
-naive version fails: a positional insert lands values in the wrong columns
-because the rewritten baseline orders some differently, a host row restored
-with its old `slots_used` never claims again because the attempts that held
-those slots are gone, a restore that leaves the identity binding behind stops
-the API at startup, and a restored `draining` host never claims again because
-nothing undoes the drain. Every `docker compose` below is the
-invocation `deploy/control-plane/deploy.sh` makes — project, env file,
-compose file — and it runs in the deploy root with the target commit checked
-out. The examples use the control-plane deploy script's default project,
-`cloudagent`; substitute your own.
-
-1. Record which hosts are taking work, then let them finish. The drain below
-   is this rebuild's own and has to be undone in step 5, but only for the
-   hosts it is applied to: a host that was already `draining`, `offline` or
-   `disabled` before the rebuild must stay that way, and the heartbeat will
-   not put one back online. So write the undo before making the change, then
-   drain from the admin page (or
-   `POST /admin/agent/runner-hosts/<host>/drain`), wait until the host holds
-   no running attempts, and only then stop the services that hold database
-   connections, leaving Postgres up:
-
-   ```bash
-   docker exec cloudagent-postgres-1 psql -U cloudagent -d cloudagent -Atc \
-     "SELECT format('UPDATE agent_runner_hosts SET status = ''online'' WHERE host = %L;', host) \
-      FROM agent_runner_hosts WHERE status = 'online'" \
-     > cloudagent-undrain-$(date +%F).sql
-   docker exec cloudagent-postgres-1 psql -U cloudagent -d cloudagent -Atc \
-     "SELECT host, status, slots_used FROM agent_runner_hosts; \
-      SELECT count(*) FROM agent_attempts WHERE status = 'running'"
-   docker stop cloudagent-control-plane-1 cloudagent-mcp-relay-1 cloudagent-web-1
-   ```
-
-2. Take the forensic dump of everything, then the data-only dump of the state
-   that survives — the host registrations, the three user connection tables,
-   and the identity-namespace binding those `user_id`s belong to — then the
-   placement policy as one statement. `--column-inserts` is load-bearing (see
-   above), and `format('%L')` is what keeps an unpinned `active_host` a SQL
-   `NULL` rather than an empty string the new foreign key would refuse:
-
-   ```bash
-   docker exec cloudagent-postgres-1 pg_dump -U cloudagent -Fc cloudagent > cloudagent-$(date +%F).dump
-   docker exec cloudagent-postgres-1 pg_dump -U cloudagent --data-only --column-inserts \
-     -t agent_runner_hosts -t agent_repo_grants -t agent_gitlab_connections \
-     -t agent_mcp_connections -t agent_identity_namespace \
-     cloudagent > cloudagent-state-$(date +%F).sql
-   docker exec cloudagent-postgres-1 psql -U cloudagent -d cloudagent -Atc \
-     "SELECT format('UPDATE agent_runner_policy SET active_host = %L, runtime_versions = %L::jsonb;', \
-                    active_host, runtime_versions) FROM agent_runner_policy" \
-     > cloudagent-policy-$(date +%F).sql
-   ```
-
-3. Build the target's `migrate` image **before** touching the database. The
-   migrations are copied into the image at build time, not mounted from the
-   checkout, so a stale image would rebuild the old chain into the empty
-   database:
-
-   ```bash
-   export AGENT_DEPLOYMENT_SHA="$(git rev-parse HEAD)"
-   docker compose -p cloudagent --env-file .env -f deploy/control-plane/docker-compose.yml config --services
-   docker compose -p cloudagent --env-file .env -f deploy/control-plane/docker-compose.yml build migrate
-   ```
-
-4. Recreate the database, apply the baseline, and check what it is stamped
-   with:
-
-   ```bash
-   docker exec cloudagent-postgres-1 psql -U cloudagent -d postgres \
-     -c 'DROP DATABASE cloudagent' -c 'CREATE DATABASE cloudagent OWNER cloudagent'
-   docker compose -p cloudagent --env-file .env -f deploy/control-plane/docker-compose.yml \
-     run --rm --no-deps migrate
-   docker exec cloudagent-postgres-1 psql -U cloudagent -d cloudagent -Atc \
-     'SELECT version_num FROM alembic_version'
-   ```
-
-   The version must be the head of the rewritten chain (`0001_schema_baseline`
-   or a later revision on it); an `00xx_…` from the old chain means step 3 ran
-   the wrong image.
-
-5. Restore the surviving state, reset the counter that described attempts
-   that no longer exist, undo this rebuild's drain, restore the policy, and
-   read back the identity binding:
-
-   ```bash
-   docker exec -i cloudagent-postgres-1 psql -U cloudagent -d cloudagent -v ON_ERROR_STOP=1 < cloudagent-state-$(date +%F).sql
-   docker exec cloudagent-postgres-1 psql -U cloudagent -d cloudagent -c 'UPDATE agent_runner_hosts SET slots_used = 0'
-   docker exec -i cloudagent-postgres-1 psql -U cloudagent -d cloudagent -v ON_ERROR_STOP=1 < cloudagent-undrain-$(date +%F).sql
-   docker exec -i cloudagent-postgres-1 psql -U cloudagent -d cloudagent -v ON_ERROR_STOP=1 < cloudagent-policy-$(date +%F).sql
-   docker exec cloudagent-postgres-1 psql -U cloudagent -d cloudagent -Atc \
-     'SELECT gateway_issuer FROM agent_identity_namespace'
-   ```
-
-   `slots_used` counts running attempts on the host, and the rebuild kept
-   none; a restored non-zero value would park every new task at "queued"
-   once it reached `slots_total`, with a runner that authenticates and
-   heartbeats normally.
-
-   The drain needs the same treatment for the same reason. `draining` is
-   written to the row and the heartbeat deliberately never clears it, so the
-   restored host authenticates, heartbeats, and still claims nothing; step 6
-   then fails readiness with `pinned host ... is not shared-live ready: ...
-status is draining`. Replaying step 1's generated statements puts back
-   exactly the hosts that were online, and leaves a host that was already
-   drained or disabled alone.
-
-   The last statement must print the issuer the old database was bound to. If
-   it prints nothing, the old database had no binding: verify the original
-   Gateway issuer before the rebuild, then adopt it with
-   `python -m cloud_agent.identity_namespace --adopt-existing --issuer
-<original-issuer>`. Do not adopt the currently configured issuer without
-   that check, and do not drop the check — it is what stops the rebuild from
-   silently handing one Gateway's `user_id`s to another.
-
-6. Deploy the target commit as usual. `migrate` finds the database at head,
-   the control plane starts, and the runner's next heartbeat authenticates
-   against the restored `credential_hash`; readiness then sees a fresh
-   heartbeat and the deploy completes. If the runner logged
-   `agent_host_credential_rejected` meanwhile, restart the host stack after
-   step 5: a refused runner stays idle until it is restarted, and the
-   credential it holds is valid again.
-
-7. Prove it end to end before calling it done: create a task and confirm it
-   is claimed (`SELECT state FROM agent_jobs` reaches `running`), then a
-   follow-up, a cancel, a fork, a publish, and a restart of the host stack
-   with a follow-up into the retained chat afterwards.
-
-If the host registration cannot be restored, the fallback is a controlled
-re-enrolment: remove the credential file on the host (the path named above),
-mint an enrolment token
-from the admin surface, set `AGENT_ENROLL_TOKEN` for one start, and confirm the
-first heartbeat before enabling retained chats.
-
-Conversation history is not carried over by design; the forensic dump is read
-with a throwaway `postgres:16-alpine` when needed and never imported back.
+The selected-state rebuild this section used to describe carried host
+registrations, user connections and the Gateway identity binding into a
+rewritten schema. With accounts of its own, a deployment has nothing to carry
+forward from a Gateway-era database: its owners, connections and MCP grants
+belong to Gateway user IDs that no account holds. Archive it as described
+above and start fresh. Re-enroll hosts with new enrollment tokens; owners
+re-register, apply and add their model connections again.
 
 ### Applying migrations that are not backwards-compatible
 
@@ -3078,14 +3137,19 @@ The runner holds no database connection — its heartbeats are HTTP calls to the
 control plane — so stopping the control plane, the MCP relay and the web tier
 leaves the database with no writer.
 
+The `psql` commands below run in the bundled Postgres container and open its
+`POSTGRES_DB`, the database `AGENT_POSTGRES_DB` names. That must be the one
+`AGENT_DATABASE_URL` uses ([database settings](../../ENVIRONMENT.md#database)).
+
 1. Drain the hosts, keep the generated `cloudagent-undrain-*.sql`, and wait for
    two counts to reach zero. Neither can be settled once the writers stop, so
    both are waited out here, as in step 1 of the rebuild above:
 
    ```bash
-   docker exec cloudagent-postgres-1 psql -U cloudagent -d cloudagent -Atc \
-     "SELECT count(*) FROM agent_attempts WHERE status = 'running'; \
-      SELECT count(*) FROM agent_session_forks WHERE state IN ('preparing', 'materialized')"
+   docker exec -i cloudagent-postgres-1 sh -c 'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At' <<'SQL'
+   SELECT count(*) FROM agent_attempts WHERE status = 'running';
+   SELECT count(*) FROM agent_session_forks WHERE state IN ('preparing', 'materialized');
+   SQL
    ```
 
    A fork still `preparing` or `materialized` is one its coordinator has not
@@ -3106,7 +3170,8 @@ leaves the database with no writer.
 
    ```bash
    export AGENT_DEPLOYMENT_SHA="$(git rev-parse HEAD)"
-   docker compose -p cloudagent --env-file .env -f deploy/control-plane/docker-compose.yml build migrate
+   # `keys` builds the control-plane image that `migrate` runs.
+   docker compose -p cloudagent --env-file .env -f deploy/control-plane/docker-compose.yml build keys
    docker compose -p cloudagent --env-file .env -f deploy/control-plane/docker-compose.yml \
      run --rm --no-deps migrate
    ```
@@ -3116,7 +3181,8 @@ leaves the database with no writer.
    claim:
 
    ```bash
-   docker exec -i cloudagent-postgres-1 psql -U cloudagent -d cloudagent -v ON_ERROR_STOP=1 < cloudagent-undrain-$(date +%F).sql
+   docker exec -i cloudagent-postgres-1 sh -c 'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' \
+     < cloudagent-undrain-$(date +%F).sql
    deploy/control-plane/deploy.sh "${AGENT_DEPLOYMENT_SHA}"
    ```
 
@@ -3371,13 +3437,14 @@ than through a dispatch request from the control plane. These rules apply:
   polled recently, but the authoritative operational signals are its enrolled
   heartbeat and sandbox manager probe, not whether one runner happened to claim recently.
 
-Adding a _second_ machine is not only this switch. The configured model and
-MCP endpoints use the two relays on the sandbox's group bridge, with private
-addresses otherwise blocked by the host rules. A runner box that is not the
-gateway's host needs the two tunnels described next, and everything in
-[§0 above](#0-the-sandbox-network-needs-its-host-rules-a-resolver-and-both-relays).
-The gateway's public inference address may also be reachable; replay of a
-leaked grant there is an [accepted risk](#mcp-prerequisite-and-accepted-inference-grant-risk).
+Adding a _second_ machine is not only this switch. The MCP endpoint uses the
+relay on the sandbox's group bridge, with private addresses otherwise blocked
+by the host rules; model calls go to each owner's provider over public HTTPS.
+A runner box on another machine needs the two tunnels described next, and
+everything in
+[§0 above](#0-the-sandbox-network-needs-its-host-rules-a-resolver-and-its-relay).
+An owner's provider key in a sandbox is an
+[accepted exposure](#mcp-prerequisite-and-accepted-owner-key-exposure).
 Preflight refuses at startup rather than failing jobs at their first model or
 MCP call, but it refuses _there_, on that machine, not here.
 
@@ -3387,18 +3454,18 @@ A second machine is worth adding for capacity, or because it is the one with
 the hardware. What makes it more than "run the script over there" is how a
 sandbox reaches the platform. Its group bridge routes to the public internet,
 but only on TCP 80/443, and the host rules refuse private addresses except for
-the group's fixed relays. The configured gateway and MCP endpoints use those
-relays, SSH tunnels that lifecycle code finds on the relay network and attaches
-to each group's bridge. A separate control-plane relay remains visible only to
-the runner:
+the group's fixed MCP relay, an SSH tunnel that lifecycle code finds on the
+relay network and attaches to each group's bridge. Model calls go to the
+owner's provider over public HTTPS. A separate control-plane relay remains
+visible only to the runner:
 
 ```text
 runner host                                      service host(s)
 ┌──────────────────────────────────────┐
 │ [sandbox, its own group bridge]      │
-│   ├→ gateway-tunnel ─────────────────┼──ssh──→ inference :8080
 │   ├→ mcp-tunnel ─────────────────────┼──ssh──→ MCP-only :8001
 │   └→ host rules and NAT ─────────────┼────────→ public IPv4, TCP 80/443 only
+│                                      │          (the owner's model provider)
 │                                      │
 │ [runner, internal network]           │
 │   └→ control-plane-tunnel ───────────┼──ssh──→ control API :8000
@@ -3412,8 +3479,8 @@ same public TCP 80/443 as everything else. The control-plane tunnel never joins
 a group bridge, and its address on the runner's network is a private one the
 host rules refuse from every group.
 
-**Why ssh rather than exposing the gateway's port.** Sandboxes carry scoped
-inference grants and runners carry enrolled-host credentials. Binding either
+**Why ssh rather than exposing the service ports.** Sandboxes carry scoped MCP
+tokens and runners carry enrolled-host credentials. Binding either
 service to the lab network puts those capabilities in cleartext on a shared
 segment. The tunnel keeps each service listening on loopback.
 
@@ -3425,27 +3492,27 @@ deploy/host/sandbox_host.sh down
 ```
 
 `deploy/host/docker-compose.sandbox.yml` contains the runner, sandbox manager,
-three purpose-scoped tunnels, and two networks: the stack's own network and the
-route-less relay network. Runner and sandbox manager create group bridges through Docker.
-This is the supported standalone topology. It does not start a gateway
-`backend`, as the source repository's old overlay could do through its
-`depends_on: backend` declaration.
+two purpose-scoped tunnels (MCP and control plane), and two networks: the
+stack's own network and the route-less relay network. Runner and sandbox
+manager create group bridges through Docker. This is the supported standalone
+topology. A host environment that still configures the removed inference
+tunnel (`AGENT_GATEWAY_URL`, `AGENT_GATEWAY_HOSTNAME`, `AGENT_TUNNEL_*`) is
+refused.
 
 | Variable | Notes |
 | --- | --- |
-| `AGENT_TUNNEL_*` | Inference relay destination, key, known-hosts file and ports; remote default `127.0.0.1:8080` |
 | `AGENT_MCP_TUNNEL_*` | MCP-only relay's independent destination and SSH material; remote default `127.0.0.1:8001`. Do not point it at the full control API on 8000 |
 | `AGENT_CONTROL_PLANE_TUNNEL_*` | Runner-only control API relay; remote default `127.0.0.1:8000`. It is deliberately absent from sandbox networks |
 | `AGENT_*_TUNNEL_SSH_KEY` | Private key, mounted read-only. Each relay has its own key and its own account on the far machine, restricted as [described below](#authorizing-the-tunnels-on-the-far-machines); no relay needs a shell or permission to open another relay's port |
 | `AGENT_*_TUNNEL_SSH_KNOWN_HOSTS` | Required host-key file for each relay. Host checking is not disableable: an unverified hop would hand scoped tokens and tunnel traffic to whatever answers there |
-| `AGENT_GATEWAY_HOSTNAME` / `AGENT_MCP_HOSTNAME` | The two names a sandbox resolves on its group bridge, `agent-gateway` and `agent-mcp` by default. Do not replace them with service addresses: a relay named by IP is refused at startup |
+| `AGENT_MCP_HOSTNAME` | The name a sandbox resolves on its group bridge, `agent-mcp` by default. Do not replace it with a service address: a relay named by IP is refused at startup |
 | `AGENT_CONTROL_PLANE_HOSTNAME` | Runner-only control relay name, `agent-control-plane` by default |
 
 Generate the known-hosts entry and compare its key fingerprint with a trusted
 record for the service host:
 
 ```bash
-ssh-keyscan -p 22 "<gateway-host>" > /etc/agent-tunnel/known_hosts
+ssh-keyscan -p 22 "<control-plane-host>" > /etc/agent-tunnel/known_hosts
 ```
 
 #### Authorizing the tunnels on the far machines
@@ -3456,13 +3523,11 @@ accounts below, writes and reads back their sshd policy, and refuses an
 existing policy that would widen it. Authorize a tunnel by hand only when that
 is not available, and then reproduce exactly what it generates.
 
-Give each relay a dedicated account with no shell: the inference account on the
-gateway machine, the MCP and control accounts on the control-plane machine.
-Each account's `authorized_keys` holds one line:
+Give each relay a dedicated account with no shell, the MCP and control
+accounts on the control-plane machine. Each account's `authorized_keys` holds
+one line:
 
 ```text
-# gateway machine, inference account
-command="",restrict,port-forwarding,permitopen="127.0.0.1:8080" ssh-ed25519 AAAA... inference
 # control-plane machine, MCP account
 command="",restrict,port-forwarding,permitopen="127.0.0.1:8001" ssh-ed25519 AAAA... mcp
 # control-plane machine, control account
@@ -3476,7 +3541,7 @@ key's `permitlisten` names its single reverse listener — the control-plane
 machine's Docker bridge gateway and this host's `AGENT_SANDBOX_MANAGER_REVERSE_PORT` —
 and each account gets its `Match User` block from
 [`deploy/host/sshd-tunnels.conf.example`](../../deploy/host/sshd-tunnels.conf.example).
-The inference and MCP blocks set `AllowTcpForwarding local` and
+The MCP block sets `AllowTcpForwarding local` and
 `PermitListen none`. The control block allows that one `PermitListen` with
 `GatewayPorts clientspecified`. Install the blocks before any other `Match`
 block that could apply to these accounts, run `sshd -t`, and confirm each
@@ -3484,8 +3549,7 @@ account with `sshd -T -C user=<account>,host=localhost,addr=127.0.0.1` before
 reloading sshd.
 
 Run `sandbox_host.sh check` from the host checkout. Sandbox-runtime containers
-on the relay network must receive HTTP 200 from inference `/health` and MCP
-`/healthz`. The live runner must pass full sandbox preflight, including host
+on the relay network must receive HTTP 200 from MCP `/healthz`. The live runner must pass full sandbox preflight, including host
 table read-back, and reach the sandbox manager and control plane. Requests from the
 host shell do not exercise these container paths.
 
@@ -3573,10 +3637,10 @@ means the route failed.
 
 ### Three things about this topology that look like details and are not
 
-**The runner is not the gateway image.** It builds from
+**The runner is not the control-plane image.** It builds from
 `Dockerfile.agent-runner`, which adds a Docker client to create/inspect the
 retained chat container and `git` to prepare a credential-scrubbed source
-archive. The gateway image has neither, and a runner built from it fails
+archive. The control-plane image has neither, and a runner built from it fails
 preflight on every host.
 
 **There is no host worktree mapping.** For the first turn, the trusted runner
@@ -3603,9 +3667,9 @@ portable setup archive. Package managers reach their public registries directly
 over HTTPS — there is no proxy to configure — and anything that needs another
 port, Git over SSH for one, is refused. The one exception is an owner's own
 checked SSH servers, each reachable only from the chats that enabled it
-([SSH servers](#ssh-servers)). Long-lived platform and upstream
-credentials stay outside the sandbox; member-scoped inference and MCP tokens
-enter their CLI processes. The sandbox runs unprivileged, so `apt install`
+([SSH servers](#ssh-servers)). Long-lived platform credentials stay outside
+the sandbox; the owner's provider key and member-scoped MCP tokens enter their
+CLI processes. The sandbox runs unprivileged, so `apt install`
 does not work — use `pip --user`, a virtualenv, `npm ci`.
 
 New chats can also select up to eight runtime plugins through **+ → Plugins**
@@ -3647,8 +3711,7 @@ Allowed:
 - the one resolver in `AGENT_EGRESS_DNS_SERVER`, on TCP and UDP 53. It is
   checked before the protected ranges, so a resolver on a private address or
   on this host works — on port 53 only;
-- the group's own two relays, by exact bridge, address and port: the gateway
-  tunnel for inference and the MCP tunnel for tools;
+- the group's own MCP relay, by exact bridge, address and port;
 - the exact public IPv4 address and port of each SSH server the group's owner
   registered, checked and enabled for one of its chats, by exact bridge, in the
   `ssh_targets` set. It is consulted after the protected ranges, so a protected
@@ -3681,37 +3744,27 @@ of timing out; IPv6 is dropped silently.
 **What it does not promise** (design §2). TCP 80/443 is a port rule: nothing
 inspects what travels inside, so DNS over HTTPS or a tunnel on those ports is
 not prevented. Nothing stops a sandbox sending the repository, or its own
-short-lived tokens, to a public host. And the platform's own public addresses
-may be reachable. MCP tool calls remain absent from the public main API;
-public replay of inference grants is accepted as described below.
+short-lived tokens or its owner's provider key, to a public host. And the
+platform's own public addresses may be reachable. MCP tool calls remain absent
+from the public main API; the owner-key exposure is accepted as described
+below.
 
-#### MCP prerequisite and accepted inference-grant risk
-
-Design §3 records the 2026-09-25 decision to accept inference-grant leakage
-and replay for real-user deployments, replacing the separate internal
-inference entry as a release prerequisite.
+#### MCP prerequisite and accepted owner-key exposure
 
 **MCP isolation remains required.** Done in #327: the main API no longer
 mounts the tool-call router, so the MCP tunnel must point at 8001 (see
 [MCP servers](#mcp-servers)).
 
-**Inference keeps its existing path.** The CLI holds its member's grant and
-the inference tunnel keeps its current gateway target (8080 by default).
-No separate gateway listener or host credential-substitution relay is needed
-for this decision. Code or instructions encountered by a task may cause its
-grant to leave the sandbox and be replayed through a reachable gateway API.
-Those calls consume the owner's quota and platform inference resources,
-subject to the owner's model permissions, grant expiry and revocation;
-they acquire no other user's identity, MCP tools or platform-management rights.
+**Model calls go to the owner's provider.** The member's CLI holds its owner's
+provider key for the turn it runs (see
+[owner model connections](#owner-model-connections)). Code or instructions
+encountered by a task may cause that key to leave the sandbox. Calls made with
+it spend the owner's own provider quota; they acquire no other user's
+identity, MCP tools or platform-management rights. The owner revokes it at
+the provider; deleting the connection here does not revoke it upstream.
 
-A resident grant renews while its process remains live, including between
-turns. The short TTL and default 30-minute idle stop are not absolute limits
-measured from a leak. Existing stop, replacement, takeover and release paths
-still revoke grants, with expiry as the fallback if revocation fails.
-
-The v4 deployer update and old-network cleanup still apply. This decision
-does not waive Kata/network acceptance, member isolation, long-lived
-credential restrictions, account quota checks or other release gates.
+This decision does not waive Kata/network acceptance, member isolation,
+long-lived credential restrictions or other release gates.
 
 #### The host tables
 
@@ -3728,36 +3781,49 @@ table="cloud_agent_ca$digits"
 ```
 
 The runner and the sandbox manager hold no `NET_ADMIN` and are not in the host's network
-namespace. They change host rules through a short-lived helper: their own
-image, run in the host's network namespace with `NET_ADMIN` and no other
-capability and a read-only root filesystem — the `host_nft` function below has
-the same shape. Each guard step is one helper: a short Python step in it runs
-`nft` for the install and its read-back together, or reads, compares and
-writes one bridge's relay exceptions, because starting the helper costs far
-more than the `nft` calls it makes. It runs under runc whatever the
-daemon's default runtime is, because a Kata VM would change its own kernel's
-rules, not the host's.
+namespace. They change host rules through a helper: their own image, run in
+the host's network namespace with `NET_ADMIN` and no other capability and a
+read-only root filesystem — the `host_nft` function below has the same shape.
+Each guard step is a short Python step that runs `nft` for the install and its
+read-back together, or reads, compares and writes one bridge's relay
+exceptions. Starting a helper costs far more than the `nft` calls it makes, so
+the runner and the sandbox manager each keep one helper running while they use
+it and hand it one step at a time on its standard input; a turn's own process
+starts a helper per step. That helper has the same flags and a name of its
+own, listens on nothing, reads the kernel afresh for every step, and exits when
+its process does or after 15 seconds without a step; a fresh one replaces it
+every five minutes. A step that finds it busy runs in a helper of its own, as
+every step once did. A step it fails or answers wrongly runs again in a helper
+of its own only once the failed helper's `docker run` client has been killed
+and its container removed by name and confirmed gone, and within the minute a
+step always had; if that cannot be confirmed, the step fails, and later steps
+try the removal again. The process then logs
+`network_guard_helper_discarded` and runs every step in a helper of its own for
+five minutes. Every helper runs under runc whatever the daemon's default
+runtime is, because a Kata VM would change its own kernel's rules, not the
+host's.
 
 - **Installed before anything joins a bridge.** The runner's and the sandbox manager's
   startup preflight install the tables and read them back — every chain, its
   hook and its rule count, the protected set, the registered pool — and any
   difference stops the runner claiming and the sandbox manager starting. Group network
-  work repeats the check and trusts a pass for 60 seconds. While anything of this
-  deployment runs — a group, one that is stopping, or an environment test or
-  prebuild — the sandbox manager's sweep renews that pass after 45 seconds, so a
-  start or wake never waits for the install and read-back itself. A host where
-  nothing runs starts no helper for it: the next start or wake renews a lapsed
-  pass before its group joins a bridge. The runner renews its own pass when it
-  hands a turn over and that pass is 45 seconds old. The turn's process
-  normally runs no helper of its own: it takes the runner's pass, and declines
-  the turn if the runner's check failed or its pass is missing or unreadable. A
+  work repeats the check and trusts a pass for 60 seconds. The sandbox manager's
+  sweep renews that pass after 45 seconds, whether anything of this deployment
+  runs or not, so a start or wake never waits for the install and read-back
+  itself; on a host where nothing runs, that is one install and read-back about
+  every 45 seconds. The runner renews its own pass between claims once it is 35
+  seconds old, so a turn it hands over does not wait for it either; a pass still
+  45 seconds old at a handover, after a failed renewal say, is renewed then. The
+  turn's process normally runs no helper of its own: it takes the runner's pass,
+  and declines the turn if the runner's check failed or its pass is missing or
+  unreadable. A
   process that starts so slowly that the pass is 60 seconds old when it reads
   it logs `network_guard_verification_aged_out`, runs the install and
   read-back itself, and accepts the turn only if that check passes.
 - **Scoped to this deployment.** The tables recognise traffic by the bridge
   interface prefix. They never flush or edit another deployment's rules, so
   several deployments can share a host.
-- **Relays by exact endpoint.** When a group's relays are attached, their
+- **Relays by exact endpoint.** When a group's relay is attached, its
   bridge, address and port are written to a `relays` set in both tables, and
   removed with the bridge. Every activation and workspace command re-syncs its
   bridge's exceptions; an update the guard already made for that same Docker
@@ -3875,9 +3941,9 @@ these:
 - `AGENT_EGRESS_DNS_SERVER='…' must be one IPv4 resolver address` or
   `… must be reachable from a group bridge` — unset, not IPv4, loopback,
   unspecified, or inside the pool;
-- `AGENT_GATEWAY_URL='…' names a relay by IP; use its network alias`, and the
-  same for `AGENT_SANDBOX_MCP_URL` — each group bridge gives a relay a fresh
-  address, so only its name carries over.
+- `AGENT_SANDBOX_MCP_URL='…' names a relay by IP; use its network alias` —
+  each group bridge gives the relay a fresh address, so only its name carries
+  over.
 
 Preflight — until it passes, the runner claims nothing and the sandbox manager does not
 start:
@@ -3901,7 +3967,7 @@ start:
   `… overlaps the host route … on …` — a network the host already has; see
   [Overlapping pools](#overlapping-pools);
 - `the sandbox network needs Docker 28 or newer, client and daemon` — the
-  relays' gateway priority needs both; see §0.
+  relay's gateway priority needs both; see §0.
 
 Group lifecycle. These fail the turn or operation that needed the group's
 network; the workspace is kept:
@@ -4049,7 +4115,7 @@ leave it, and leave anything you cannot attribute.
    the cleanup. A `down` run from the previous release will already have
    removed some of them.
 
-7. Update `.env` from the new `deploy/host/.env.example`. Set
+7. Update the host's `.env`. Set
    `AGENT_EGRESS_CHAT_NETWORK_POOL`, which no longer has a default, and
    `AGENT_EGRESS_DNS_SERVER`. The old default pool was `10.240.0.0/16`: if two
    deployments on this machine both kept it, give one of them another, or the
@@ -4169,27 +4235,24 @@ and the owner SSH servers entry in [AGENTS.md](../../AGENTS.md) §7.
 
 An owner adds their own inference endpoint under **Settings → My settings →
 Personal model connections** (`/settings/my-settings`): a name, a Base URL,
-an API key and up to eight model ids. **Verify and save** verifies every model
+an API key and up to sixteen model ids. **Verify and save** verifies every model
 before anything is stored, and Cloud Agent works out which APIs each model
-serves. The models then appear in the composer beside the Gateway's, for the
-agents that can use them. Such a turn runs on the owner's key and bill and
-needs no Gateway grant, catalog or quota; login and Agent admission still go
-through the Gateway. Design, protocol matrix and accepted risks:
+serves. The models then appear in the composer, for the agents that can use
+them; they are the only models anything runs on. A turn runs on the owner's
+key and bill. Design, protocol matrix and accepted risks:
 [model connection design](../agents/specs/2026-10-27-user-model-connections.zh-CN.md),
 and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
 
-- **Turning it on.** `AGENT_MODEL_CONNECTIONS_ENABLED` is off by default. Turn
-  it on only after every host **and every control-plane replica** runs this
-  release: an older control plane does not read the source columns, so it
-  would claim, resume or queue a turn on a connection as a Gateway turn, and
-  no host capability can stop that. The setting gates admission only. Turning
-  it off stops new connections, re-enabling one and new turns or messages on
-  one; turns already admitted still run on their connection or fail, never on
-  the Gateway. It is not a way to stop running work.
-- **Rolling back.** Once any owner has saved a connection, do not run an
-  older control plane, with or without the setting: conversations that ran on
-  a connection keep their source and would continue on the Gateway under older
-  code. Downgrading `0106` refuses while any connection, any turn or waiting
+- **Turning it off.** `AGENT_MODEL_CONNECTIONS_ENABLED` is on unless it is
+  set to `0`, `false` or `no`, and connections are the only inference, so
+  with it off no new turn starts. To hold new turns until every host and
+  control-plane replica runs this release, set it to `false` before the
+  rollout and unset it afterwards. The setting gates admission only. Turning it off stops new connections, re-enabling one and
+  new turns or messages on one; turns already admitted still run on their
+  connection or fail. It is not a way to stop running work.
+- **Rolling back.** Do not run a release from before independent accounts
+  against this database: it would read neither the accounts nor the
+  connection sources. Downgrading `0106` refuses while any connection, any turn or waiting
   message that names one, or any member resident on one exists — finished
   conversations included. Removing them is a data decision to make first.
 - **Migration and key.** `0106_user_model_connections` adds the tables and the
@@ -4215,11 +4278,37 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
   derived from the stored facts, never stored. A saved model always has
   facts and at least one agent; one without current facts (a backstop that
   should not occur) runs on nothing, and the composer does not offer it.
-  Reasoning effort is Auto only.
   A pairing a model cannot serve is refused when the task or message is
   submitted, and again at every claim and residency; nothing falls back to
-  the Gateway, another model or another API, and there is no trial and error
+  another connection, model or API, and there is no trial and error
   at inference time.
+- **Reasoning levels come from the provider's declaration.** Beside every
+  verification, and when the owner chooses **Refresh reasoning levels** on a
+  saved connection (one hourly check), the control plane reads the provider's
+  two model listings once, under the same address rules: `GET <Base URL>/models`
+  with the bearer key, read for each model's `reasoning.supported_efforts`
+  (OpenRouter's and the HybridInference gateway's field) and its
+  `effort.supported_levels` (DeepSeek's List Models field, which describes
+  Chat Completions only and never lists `none`, so `none` is never inferred;
+  where an entry carries both fields and they disagree, Chat Completions is
+  unknown), and `GET /v1/models?limit=1000` at the Anthropic base with
+  `x-api-key`, read for `capabilities.effort` (the Anthropic Models API's,
+  also answered by the gateway). That is at most two requests per read and no
+  inference. Per model
+  and API it stores `supported` with the levels, `unsupported` (declared: none)
+  or `unknown` (the listing failed, does not list the model, or declares
+  nothing or something malformed); unknown is never read as unsupported, and
+  nothing is inferred from a model's name or from a request being accepted. An
+  agent is offered the declared levels of the API its plan finally calls (Chat
+  Completions on a translated plan) that its pinned CLI can send, and Auto.
+  Auto adds nothing to the launch, so a turn at Auto sends what it always did.
+  A chosen level is stored with the turn, inherited by follow-ups, queued
+  messages, goal rounds and Fork like the model, and checked again at every
+  submission, claim and residency; a level the model does not offer is
+  refused with the offered ones (`effort_level_unsupported`), never renamed or
+  dropped. On a translated plan the helper sends the turn's level as
+  `reasoning_effort` on every Chat request; the CLI's own effort field, which
+  Claude Code fills with `high` even at Auto, is never forwarded.
 - **Verify before saving.** Creating a connection, and an edit that changes
   its key or Base URL or adds models, verifies inside the saving request
   before anything is written: every model the connection would list for a
@@ -4237,8 +4326,8 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
   save answers `409 model_connection_changed`. A rename, removing models,
   enabling or disabling makes no provider call. The request carries the
   normalized endpoint, key and models it commits, so nothing a client sends
-  can stand in for a verification. At most eight models per connection keep
-  one save to at most 48 provider requests and two waves of four models.
+  can stand in for a verification. At most sixteen models per connection keep
+  one save to at most 96 provider requests and four waves of four models.
   Verification has a 240-second overall deadline; exceeding it answers
   `504 model_connection_verification_timeout` without writing anything. The
   deployment edge permits this duration; any additional proxy must permit it
@@ -4275,8 +4364,7 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
   longer suitable connection fails the turn at its claim with that reason.
 - **What a turn does.** The claim carries the connection's exact Base URL,
   protocol, credential revision and key; the runner masks the key. The
-  residency binds the member to that revision and hands it the key instead of
-  minting a grant. The member's CLI is configured with that URL (for Claude
+  residency binds the member to that revision and hands it the key. The member's CLI is configured with that URL (for Claude
   Code, `ANTHROPIC_BASE_URL` as above) and the key in its environment and
   activation tmpfs, never in argv; an OpenAI CLI is never given a Messages
   connection's key, nor Claude Code an OpenAI one. A later turn
@@ -4286,14 +4374,13 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
   revision and the plan (`client>upstream`); a change of path while a turn
   starts fails that start rather than mixing the two.
 - **Scan history.** When a key is bound to a residency, an encrypted scanning
-  copy is recorded under a separate domain against that sandbox group and
-  connection revision. Trusted snapshot and publication scans of the group
-  look for every key it used, including rotated and deleted ones and those of
-  same-owner Fork members, and nothing from other groups. The copy stays with
-  the sandbox group record after the connection is deleted; it is still a
-  real provider key, and deleting the connection here does not revoke it at
-  the provider. A group whose history exceeds the scan bound fails the scan
-  closed rather than skipping keys.
+  copy is still recorded under a separate domain against that sandbox group
+  and connection revision, but nothing reads it any more: the workspace
+  snapshot scan that used it was removed with the platform publisher, and
+  nothing on the platform scans what an agent pushes. The copy stays with the
+  sandbox group record after the connection is deleted; it is still a real
+  provider key, and deleting the connection here does not revoke it at the
+  provider.
 - **Translated turns.** For Codex or Claude Code on a model whose only usable
   API is Chat Completions, the host installs `/usr/local/libexec/model-protocol-translator.pyz`
   (built from `cloud_agent_host/protocol_translator.py` and
@@ -4341,12 +4428,10 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
   (including `AGENT_EGRESS_PROTECTED_CIDRS`), the connection is pinned to the
   checked addresses, redirects are not followed, no proxy is used, and no
   upstream body or key is echoed or logged.
-- **Usage.** The owner's provider bills these turns and the Gateway ledger
-  records none of them. A turn's usage shows runtime token counts and says the
-  cost is the provider's; conversation totals mark themselves incomplete, and
-  an admin's run detail says the owner's provider bills it. The owner and admin
-  usage aggregates still count such a turn as a run whose Gateway usage is
-  `unavailable` — never as zero cost, but without naming the provider either.
+- **Usage.** The owner's provider bills these turns. A run's usage footer, the
+  admin run detail and the Usage pages show the tokens the agent reported and
+  say the provider bills it; there is no cost. What is and is not counted is
+  in [Usage](#usage).
 
 ## Reusable cloud environments
 
@@ -4411,12 +4496,12 @@ capacity; its returning host cannot claim new work until cleanup is acknowledged
 the enrolled host receives only its own expired test IDs and removes the exact
 labelled containers before acknowledging cleanup. Do not delete unrelated groups
 or bypass lease/container identity checks to clear capacity. Archived, unreferenced
-versions are collected after 30 days; existing workspace, test and publication
-bindings keep their historical encrypted values for redaction/scanning.
+versions are collected after 30 days; existing workspace and test bindings keep
+their historical encrypted values for redaction.
 
 Owner-provided credentials can be read and sent outside by user code through the
-existing network. Known-value masking and trusted publish scans do not cover
-encoded secrets, raw owner terminals/files, or direct Git pushes. Platform-held
+existing network. Known-value masking does not cover encoded secrets, raw owner
+terminals/files, or Git pushes, and nothing on the platform scans a push. Platform-held
 long-lived credentials, reserved variable names and fixed egress remain protected.
 
 Environment setup, startup and actions share executable package data in
@@ -4439,7 +4524,7 @@ recorded in the team's audit log. Design:
 
 - **Each member's own container.** A team environment is shared configuration,
   not a shared workspace. A member's task runs in that member's own container
-  with the team's variables and scripts, the member's inference grant and
+  with the team's variables and scripts, the member's own model and MCP
   connections, and the member's personal global variables at run time only
   (install-only ones are left out; the team's definition of a name wins). The
   installation is therefore the same for every member, which is what lets the
@@ -4454,8 +4539,7 @@ recorded in the team's audit log. Design:
   `team_environment_revoked` (403, logged as
   `agent_job_team_environment_revoked`); a turn already running finishes.
   Terminals, actions, Fork, preparation and runtime refresh on such a
-  conversation return 409; masking and publication scanning still read its
-  values.
+  conversation return 409; masking still reads its values.
   Rejoining does not revive old conversations: the generation has moved on.
   A member's repository default naming a team environment they can no longer
   use is cleared when they next start a task.

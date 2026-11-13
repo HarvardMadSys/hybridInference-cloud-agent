@@ -9,21 +9,23 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud_agent_host import chat_sandbox
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container import chat_sandbox
+from cloud_agent_host.container.chat_sandbox import (
     CHAT_PROBE_LABEL,
-    GUEST_OBSERVER_PROBE_ATTEMPTS,
-    MEMBER_REAPER_TARGET,
     MEMBER_UID_BASE,
-    PROBE_ABANDONED_AFTER_S,
     ChatSandboxInspection,
     ChatSandboxManager,
     ChatSandboxSpec,
     ChatSandboxStatus,
 )
-from cloud_agent_host.guest_observer import GUEST_OBSERVER_BINARY
-from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
-from cloud_agent_host.tool_windows import ToolMark
+from cloud_agent_host.container.chat_sandbox_members import MEMBER_REAPER_TARGET
+from cloud_agent_host.container.chat_sandbox_observation import (
+    GUEST_OBSERVER_PROBE_ATTEMPTS,
+    PROBE_ABANDONED_AFTER_S,
+)
+from cloud_agent_host.container.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
+from cloud_agent_host.observe.guest_observer import GUEST_OBSERVER_BINARY
+from cloud_agent_host.observe.tool_windows import ToolMark
 from cloud_agent_shared.egress import network_from_env
 
 
@@ -38,7 +40,6 @@ def _network_manager():
             "AGENT_EGRESS_CHAT_NETWORK_POOL": "10.240.0.0/16",
             "AGENT_EGRESS_DNS_SERVER": "1.1.1.1",
             "AGENT_RELAY_NETWORK": "agent-relays",
-            "AGENT_GATEWAY_URL": "http://agent-gateway:8080",
             "AGENT_SANDBOX_MCP_URL": "http://agent-mcp:8000",
         }
     )
@@ -80,7 +81,7 @@ def test_privileged_exec_checks_the_container_runtime_and_uses_its_id(monkeypatc
             )
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
     if actual_runtime == KATA_RUNTIME:
         manager._kata_privileged_exec(spec, [GUEST_OBSERVER_BINARY, "--self-test"])
         assert "inspected-container-id" in calls[-1]
@@ -134,8 +135,8 @@ def test_kata_exec_delivers_eof_and_preserves_input_and_literal_arguments(monkey
     literal = "spaces ' \" $HOME $(false) `false`\nnext line"
     real_run = subprocess.run
     monkeypatch.setattr(
-        manager,
-        "_require",
+        manager.exact,
+        "require",
         lambda spec: SimpleNamespace(running=True, container_id=container_id),
     )
 
@@ -156,7 +157,7 @@ def test_kata_exec_delivers_eof_and_preserves_input_and_literal_arguments(monkey
             os.close(read_fd)
             os.close(write_fd)
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.run", docker_exec)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.run", docker_exec)
     result = manager.exec_capture(
         spec,
         [
@@ -244,7 +245,7 @@ def test_readiness_requires_events_and_member_isolation_and_cleans_up(monkeypatc
             stderr="no lifecycle events",
         )
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
     monkeypatch.setattr(manager, "exec_capture", capture)
     monkeypatch.setattr(manager, "_kata_privileged_exec", privileged)
     # `marker_transport` is a race the probe now retries; the suite does not
@@ -341,7 +342,7 @@ def test_a_probe_removes_only_its_own_namespaces_abandoned_probes(monkeypatch):
             )
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
     manager._remove_abandoned_probes()
     assert [argv[-1] for argv in calls if argv[1:3] == ["rm", "--force"]] == ["abandoned"]
 
@@ -356,7 +357,7 @@ def test_retained_discovery_never_adopts_a_probe(monkeypatch):
             return SimpleNamespace(returncode=0, stdout=json.dumps(row), stderr="")
         raise AssertionError(f"a probe must not be inspected or adopted: {argv}")
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
     assert manager.list() == []
 
 
@@ -364,7 +365,8 @@ def test_backend_refuses_claim_readiness_when_observer_probe_fails(monkeypatch):
     backend = _manager().backend
     backend._kernel_probe["guest_kernel"] = "previous-guest-kernel"
     monkeypatch.setattr(
-        "cloud_agent_host.sandbox.subprocess.run", lambda *a, **kw: SimpleNamespace(returncode=0)
+        "cloud_agent_host.container.sandbox.subprocess.run",
+        lambda *a, **kw: SimpleNamespace(returncode=0),
     )
 
     def refuse(self):
@@ -604,7 +606,7 @@ def _probe_stubs(monkeypatch, manager, *, cursor, observations):
             return SimpleNamespace(returncode=0, stdout=json.dumps(status).encode(), stderr=b"")
         return SimpleNamespace(returncode=0, stdout=b"freeinference-tool-mark-v1\n", stderr=b"")
 
-    monkeypatch.setattr(manager, "_run", run)
+    monkeypatch.setattr(manager.exact, "run", run)
     monkeypatch.setattr(manager, "exec_capture", capture)
     monkeypatch.setattr(
         manager,

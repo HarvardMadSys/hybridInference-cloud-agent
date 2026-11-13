@@ -8,13 +8,18 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from tests.support.owners import SESSIONS, account_record
 
 from cloud_agent.api import environments
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_storage
-from cloud_agent.environments import EnvironmentNotFound
+from cloud_agent.environments.environments import EnvironmentNotFound
 
 pytestmark = pytest.mark.asyncio
+
+
+#: The owner these direct calls run as, still allowed when a terminal opens.
+_ALICE = SimpleNamespace(get_account=AsyncMock(return_value=account_record("alice")))
 
 
 @pytest.fixture
@@ -25,7 +30,9 @@ async def client():
     )
     app = FastAPI()
     app.include_router(environments.router)
-    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(environments=repository)
+    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
+        local_accounts=SESSIONS, environments=repository
+    )
     app.dependency_overrides[require_agent_owner] = lambda: {"user_id": "alice"}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
         yield http, repository
@@ -92,7 +99,7 @@ async def test_pydantic_extra_value_errors_do_not_echo_submitted_secret(client):
 
 
 async def test_withdrawn_test_owner_gets_no_credentials_or_container(monkeypatch):
-    from cloud_agent.api.deps import get_agent_app_credentials, get_gateway_client
+    from cloud_agent.api.deps import get_agent_app_credentials, get_owner_directory
 
     run = {
         "id": "test-run",
@@ -114,8 +121,10 @@ async def test_withdrawn_test_owner_gets_no_credentials_or_container(monkeypatch
     credentials = SimpleNamespace(token_for=AsyncMock())
     app = FastAPI()
     app.include_router(environments.router)
-    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(environments=repository)
-    app.dependency_overrides[get_gateway_client] = lambda: gateway
+    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
+        local_accounts=SESSIONS, environments=repository
+    )
+    app.dependency_overrides[get_owner_directory] = lambda: gateway
     app.dependency_overrides[get_agent_app_credentials] = lambda: credentials
     app.dependency_overrides[environments.verify_claiming_host] = lambda: {
         "host": "runner",
@@ -144,7 +153,9 @@ async def test_unrelated_job_validation_keeps_field_detail_and_internal_errors_s
     app = FastAPI()
     app.include_router(jobs.router)
     app.dependency_overrides[require_agent_owner] = lambda: {"user_id": "alice"}
-    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(conversation_commands=commands)
+    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
+        local_accounts=SESSIONS, conversation_commands=commands
+    )
     async with AsyncClient(
         transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://test"
     ) as http:
@@ -159,8 +170,8 @@ async def test_unrelated_job_validation_keeps_field_detail_and_internal_errors_s
 
 async def test_only_environment_encryption_errors_use_the_environment_handler():
     from cloud_agent.app import create_app
-    from cloud_agent.environments import EnvironmentEncryptionError
-    from cloud_agent.source_control import SourceControlError
+    from cloud_agent.environments.environments import EnvironmentEncryptionError
+    from cloud_agent.source_control.source_control import SourceControlError
 
     app = create_app()
 
@@ -263,7 +274,9 @@ async def test_an_action_stopped_while_preparing_does_not_run_untracked(monkeypa
         "deploy",
         idempotency_key="key",
         user={"user_id": "alice"},
-        store=SimpleNamespace(environments=repo, conversation_queries=object()),
+        store=SimpleNamespace(
+            environments=repo, conversation_queries=object(), local_accounts=_ALICE
+        ),
         credentials=None,
     )
 
@@ -279,7 +292,7 @@ async def test_an_action_stopped_while_preparing_does_not_run_untracked(monkeypa
 async def test_lost_terminal_becomes_an_explicit_unknown_result_not_an_endless_404(
     monkeypatch, operation
 ):
-    from cloud_agent.sandbox_manager_client import SandboxManagerError
+    from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 
     run = {"id": "run", "state": "running", "terminal_id": "term_run"}
     repo = SimpleNamespace(
@@ -349,7 +362,7 @@ async def test_empty_binding_terminal_does_not_prepare_or_interrupt_a_running_tu
     from starlette.requests import Request
 
     from cloud_agent.api import workspace
-    from cloud_agent.sandbox_manager_client import SandboxManagerError
+    from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
     from cloud_agent.schemas import AgentTerminalSessionCreateRequest
     from cloud_agent_shared.environment import BoundEnvironment
 
@@ -374,6 +387,7 @@ async def test_empty_binding_terminal_does_not_prepare_or_interrupt_a_running_tu
         ),
     )
     store = SimpleNamespace(
+        local_accounts=_ALICE,
         environments=SimpleNamespace(
             get_environment_binding=AsyncMock(return_value=BoundEnvironment(binding_id="empty"))
         ),
@@ -405,7 +419,9 @@ async def test_test_retry_returns_original_before_github_or_latest_config(monkey
     app = FastAPI()
     app.include_router(environments.router)
     app.dependency_overrides[require_agent_owner] = lambda: {"user_id": "alice"}
-    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(environments=repository)
+    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
+        local_accounts=SESSIONS, environments=repository
+    )
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     entitlement = AsyncMock()
     monkeypatch.setattr(environments, "_entitled", entitlement)
@@ -444,7 +460,7 @@ async def test_workspace_get_only_reads_and_redacts_without_persistence(monkeypa
         )
     )
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_job",
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.sandbox_manager_for_job",
         AsyncMock(return_value=broker),
     )
     result = await environments.workspace_environment("job", user={"user_id": "alice"}, store=store)
@@ -454,7 +470,7 @@ async def test_workspace_get_only_reads_and_redacts_without_persistence(monkeypa
 
 
 async def test_a_team_environment_is_created_for_its_team_and_refusals_say_why(monkeypatch):
-    from cloud_agent.environments import EnvironmentForbidden
+    from cloud_agent.environments.environments import EnvironmentForbidden
 
     repository = SimpleNamespace(
         save_environment=AsyncMock(
@@ -469,7 +485,9 @@ async def test_a_team_environment_is_created_for_its_team_and_refusals_say_why(m
     )
     app = FastAPI()
     app.include_router(environments.router)
-    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(environments=repository)
+    app.dependency_overrides[get_storage] = lambda: SimpleNamespace(
+        local_accounts=SESSIONS, environments=repository
+    )
     app.dependency_overrides[require_agent_owner] = lambda: {"user_id": "alice"}
     monkeypatch.setattr(environments, "_entitled", AsyncMock())
     body = {"name": "Shared", "repo": "org/app", "revision": 0, "team_id": "ateam_1"}

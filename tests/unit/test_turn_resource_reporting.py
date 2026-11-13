@@ -19,14 +19,18 @@ from unittest.mock import Mock
 
 import httpx
 import pytest
+from tests.support.owners import connection_access
 
-from cloud_agent_host import runner as runner_mod
-from cloud_agent_host.member_resources import CheckpointSchedule
-from cloud_agent_host.runner import ClaimedJob, ControlPlane, LeaseLost
+from cloud_agent_host.claimed_job import ClaimedJob, LeaseLost
+from cloud_agent_host.container.sandbox import ContainerBackend
+from cloud_agent_host.control_plane_client import ControlPlane
+from cloud_agent_host.observe.member_resources import CheckpointSchedule
 from cloud_agent_host.runtimes import get_runtime
-from cloud_agent_host.sandbox import ContainerBackend
+from cloud_agent_host.turn import group_reservation, shared_live_attempt, turn_child, turn_stream
+from cloud_agent_shared import shared_protocol
 
 _JOB = ClaimedJob(
+    model_connection=connection_access("claude-code"),
     job_id="ajob_1",
     attempt_id=7,
     attempt_no=1,
@@ -36,9 +40,8 @@ _JOB = ClaimedJob(
     runtime="claude-code",
     model="model",
     worker_token="ajt.a.b",
-    sandbox_token="grant",
     thread_id="athr_1",
-    runtime_version=runner_mod.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
+    runtime_version=shared_protocol.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
 )
 
 
@@ -87,14 +90,14 @@ def _json_body(request: httpx.Request) -> dict[str, Any]:
     return json.loads(request.content)
 
 
-def _stamp() -> dict[str, Any]:
+def _stamp(**_: object) -> dict[str, Any]:
     return {
         "sandbox_image_digest": "sha256:shared-image",
-        "runtime_versions": dict(runner_mod.SHARED_SANDBOX_RUNTIME_PINS),
+        "runtime_versions": dict(shared_protocol.SHARED_SANDBOX_RUNTIME_PINS),
         "runtime_versions_available": {
-            key: [value] for key, value in runner_mod.SHARED_SANDBOX_RUNTIME_PINS.items()
+            key: [value] for key, value in shared_protocol.SHARED_SANDBOX_RUNTIME_PINS.items()
         },
-        "helper_versions": dict(runner_mod.SHARED_SANDBOX_HELPER_PINS),
+        "helper_versions": dict(shared_protocol.SHARED_SANDBOX_HELPER_PINS),
     }
 
 
@@ -124,12 +127,16 @@ def _run_terminal_turn(
     retained = Mock()
     retained.sandbox_metadata.return_value = {}
     retained.has_binary.return_value = True
-    monkeypatch.setattr(runner_mod, "ChatSandboxManager", lambda _backend: manager)
-    monkeypatch.setattr(runner_mod, "RetainedChatBackend", lambda *_args, **_kwargs: retained)
-    monkeypatch.setattr(runner_mod, "_resident_base_ready", lambda *_args: True)
+    monkeypatch.setattr(group_reservation, "ChatSandboxManager", lambda _backend: manager)
+    monkeypatch.setattr(
+        shared_live_attempt, "RetainedChatBackend", lambda *_args, **_kwargs: retained
+    )
+    monkeypatch.setattr(shared_live_attempt, "_resident_base_ready", lambda *_args: True)
     prepared = SimpleNamespace(import_into=lambda *_args, **_kwargs: "b" * 40, discard=lambda: None)
-    monkeypatch.setattr(runner_mod, "_prefetch_retained_source", lambda **_kwargs: prepared)
-    monkeypatch.setattr(runner_mod, "runtime_version_unavailable", lambda *_args: None)
+    monkeypatch.setattr(
+        shared_live_attempt, "_prefetch_retained_source", lambda **_kwargs: prepared
+    )
+    monkeypatch.setattr(shared_live_attempt, "runtime_version_unavailable", lambda *_args: None)
     if control is None:
         control = Mock(spec=ControlPlane)
         control.reserve_chat_sandbox.side_effect = _reservation
@@ -156,25 +163,24 @@ def _run_terminal_turn(
         "process_generation": 1,
     }
     supervisor.settle_shared.return_value = {"native_session_id": "native-new"}
-    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda: supervisor)
+    monkeypatch.setattr(shared_live_attempt, "sandbox_manager_from_env", lambda: supervisor)
     monkeypatch.setattr(
-        runner_mod,
+        shared_live_attempt,
         "_stream_shared_agent_turn",
         lambda **_kwargs: (0, "", [], frame, None),
     )
     finish = Mock()
 
-    result = runner_mod._run_shared_live_attempt(
+    result = shared_live_attempt._run_shared_live_attempt(
         runtime=get_runtime("claude-code"),
         job=replace(
             _JOB,
-            runtime_version=runner_mod.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
+            runtime_version=shared_protocol.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
         ),
         control=control,
         heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
-        gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=finish,
     )
@@ -303,12 +309,12 @@ def test_a_transport_error_never_fails_a_turn_that_already_ran():
 )
 def test_an_unpostable_snapshot_is_not_released_for_posting(payload):
     """A rejected report reads as a platform error, which is worse than silence."""
-    assert runner_mod._reportable_turn_resources(payload) is None
+    assert turn_stream._reportable_turn_resources(payload) is None
 
 
 def test_the_reported_snapshot_is_the_sandbox_manager_payload_unchanged():
     payload = _snapshot(state="collecting", report_seq=4)
-    assert runner_mod._reportable_turn_resources(payload) is payload
+    assert turn_stream._reportable_turn_resources(payload) is payload
 
 
 def test_the_terminal_frame_snapshot_is_posted_before_the_lease_is_finished(monkeypatch):
@@ -406,9 +412,9 @@ def test_a_running_checkpoint_is_posted_as_collecting_during_the_stream(monkeypa
     supervisor.start_shared_turn.return_value = SandboxManager()
     # The heartbeat thread is not the subject here, and a no-op keeps the
     # stream from reaching a control plane that does not exist on the wire.
-    monkeypatch.setattr(runner_mod, "Heartbeater", Mock())
+    monkeypatch.setattr(turn_child, "Heartbeater", Mock())
     try:
-        exit_code, _tail, _errors, _result_frame, _reported = runner_mod._stream_shared_agent_turn(
+        exit_code, _tail, _errors, _result_frame, _reported = turn_stream._stream_shared_agent_turn(
             supervisor=supervisor,
             job=_JOB,
             control=control,
@@ -437,10 +443,10 @@ def test_the_sandbox_manager_and_the_runner_agree_about_where_the_summary_lives(
     hand-built fixture kept the test green. This asserts the producer's actual
     key path and the consumer's read of it in one place.
     """
-    from cloud_agent_host.guest_observer import GuestObservation
-    from cloud_agent_host.sandbox_manager import build_turn_resources
-    from cloud_agent_host.shared_session_supervisor import SharedTurnTelemetry
-    from cloud_agent_host.tool_windows import ToolWindowTracker
+    from cloud_agent_host.manager_api.turns import build_turn_resources
+    from cloud_agent_host.observe.guest_observer import GuestObservation
+    from cloud_agent_host.observe.tool_windows import ToolWindowTracker
+    from cloud_agent_host.supervisor.member_sessions import SharedTurnTelemetry
 
     payload = _snapshot()
     telemetry = SharedTurnTelemetry(

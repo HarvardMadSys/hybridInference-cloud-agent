@@ -36,17 +36,27 @@ independent contract fixture when compatibility changes.
 
 ## What the generator checks, and what it deliberately does not
 
-The generator requires all six artifacts, with distinct digests and exactly
+The generator requires all five artifacts, with distinct digests and exactly
 these platforms:
 
 | Role | Variant | Platform |
 |---|---|---|
 | `control` | — | `linux/arm64` |
 | `web` | `root`, base path `""` | `linux/arm64` |
-| `web` | `agents`, base path `/agents` | `linux/arm64` |
 | `runner` | — | `linux/amd64` |
 | `sandbox` | — | `linux/amd64` |
 | `tunnel` | — | `linux/amd64` |
+
+The `agents` web variant (base path `/agents`) is retired: it is no longer
+built, and the schema keeps accepting it in published v1 manifests
+(`manifest_contract.retired_web_variants`) so a rollback still validates.
+
+New manifests name the source repository `HarvardMadSys/cloud-agent`, and the
+generator accepts a `publisher_run_url` only under that name. The repository
+was `HarvardMadSys/hybridInference-cloud-agent` until 2026-11-10, and releases
+published before then carry that name in `source_repository`,
+`publisher_run_url`, and the recipe URL. The schema accepts exactly these two
+names, so those releases still validate.
 
 Image references must use digests under this organization's registry. The
 schema enforces role and web-variant cardinality, and the generator validates
@@ -106,7 +116,7 @@ uv run python deploy/release/build_recipe.py \
 RECIPE_SHA256=$(sha256sum release/recipe.tar.gz | cut -d' ' -f1)
 uv run python -m deploy.release.release_manifest \
   --inputs release/inputs.json \
-  --recipe-url "https://github.com/HarvardMadSys/hybridInference-cloud-agent/releases/download/agent-${SOURCE_COMMIT}/recipe.tar.gz" \
+  --recipe-url "https://github.com/HarvardMadSys/cloud-agent/releases/download/agent-${SOURCE_COMMIT}/recipe.tar.gz" \
   --recipe-sha256 "${RECIPE_SHA256}" \
   --publisher-run-url "${PUBLISHER_RUN_URL:?Set the publisher Actions run URL}" \
   --output release/release.json
@@ -135,7 +145,7 @@ The tests also check `org.opencontainers.image.revision`,
 `io.hybridinference.artifact.role`, and the web variant's
 `io.hybridinference.artifact.base_path`. Dockerfiles default the revision to
 `unknown`; publication must supply the source commit. These checks establish
-startup behavior, not successful job execution, real Gateway integration, or
+startup behavior, not successful job execution or
 Kata readiness on an execution host.
 
 ## Control-plane integration acceptance
@@ -150,7 +160,7 @@ compares running containers with the manifest through
 |---|---|
 | Checkout-free installation with no image build | Execution host, Kata, and real jobs |
 | Registry pulls and digest identity of running containers | Any additional architecture |
-| Real Postgres migrations and identity-namespace check | Gateway contracts and browser sign-in |
+| The read-only account-namespace check, then real Postgres migrations | Browser sign-in |
 | Healthy API and MCP listeners; correct web variant labels | User-visible console behavior |
 | Refusal of conflicting configured images before pulling | Independent registry validation by the downstream resolver |
 
@@ -175,7 +185,7 @@ tags are storage conventions; deployments select the manifest's digests.
 | `ghcr.io/harvardmadsys/cloud-agent-sandbox` | Sandbox, with a separate visibility setting for bundled third-party CLIs |
 
 After its smoke test passes, each digest receives a tag such as
-`control-<sha>`, `web-agents-<sha>`, or `sandbox-<sha>`. These tags help people
+`control-<sha>`, `web-root-<sha>`, or `sandbox-<sha>`. These tags help people
 inspect images and are not deployment selectors.
 
 Tags such as `buildcache-sandbox-2026-w42` are the publication workflow's layer
@@ -227,18 +237,24 @@ python3.12 -m venv /opt/cloud-agent/deployer
   -r /opt/cloud-agent/release/recipe/deploy/release/requirements.txt
 ```
 
-Keep `DEPLOY_ROOT` stable across releases. Its `.env`, `.deployed-sha`, and
-`.shared-live-ready` describe the persistent deployment, while each extracted
-recipe can live elsewhere. For a new installation, create that root and fill
-its `.env` using the appropriate recipe's control-plane or host `.env.example`.
+Keep `DEPLOY_ROOT` stable across releases. Its optional `.env`,
+`.deployed-sha`, and `.shared-live-ready` describe the persistent deployment,
+while each extracted recipe can live elsewhere. For a new installation, create
+that root. The control plane needs no `.env`: its first `prepare` phase starts
+the `keys` service, which generates the database, account and settings keys
+into the `agent-keys` volume, as described in
+[the new-installation steps](../../docs/developer/operations.md#admin-settings);
+a `.env` holds only the overrides the deployment chooses. A host's `.env` is
+the one server setup writes; a downstream deployer that manages its hosts
+itself writes the same variables
+([host configuration](../../docs/developer/operations.md#host-configuration-reference)).
 For an existing installation, retain its configuration, Compose project name,
 host enrollment root, and Docker data root. Generated Compose files stay under
 `DEPLOY_ROOT` so relative mounts preserve their data paths; the edge proxy
 configuration comes from the selected recipe.
 
-Select `AGENT_WEB_VARIANT=root` or `agents` in the control-plane configuration.
-If omitted, `AGENT_WEB_BASE_PATH` selects the variant: empty or unset selects
-`root`, and `/agents` selects `agents`.
+`AGENT_WEB_VARIANT` may be omitted or set to `root`, the only web image. A
+leftover `AGENT_WEB_BASE_PATH` with a value is refused.
 
 Set the artifact environment on the control-plane machine:
 

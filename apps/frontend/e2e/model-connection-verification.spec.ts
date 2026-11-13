@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './network-change';
 
 import {
   chatOnly,
@@ -63,19 +63,8 @@ const TEXT = {
   },
 } as const;
 
-test.beforeEach(async ({ page, request }) => {
+test.beforeEach(async ({ request }) => {
   expect((await request.post('/__fixture/reset')).ok()).toBe(true);
-  await page.route('**/api/v1/agent/model-preference', (route) =>
-    route.fulfill({
-      json: {
-        default_model: null,
-        last_model: null,
-        effective_model: null,
-        deployment_default: null,
-        models: ['fixture-model'],
-      },
-    }),
-  );
 });
 
 test.afterEach(async ({ request }) => {
@@ -162,7 +151,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
         return route.fulfill({ json: saved });
       });
 
-      await page.goto('/settings/my-settings');
+      await page.goto('/settings/models');
       const region = page.getByRole('region', { name: text.region, exact: true });
       await page.getByRole('button', { name: text.add, exact: true }).click();
       const form = region.locator('form');
@@ -253,7 +242,6 @@ for (const locale of ['en', 'zh-CN'] as const) {
           json: {
             repos: ['fixture/repository'],
             runtimes: ['claude-code', 'codex'],
-            models: ['fixture-model'],
             default_model: null,
             github_connected: true,
             github_install_url: null,
@@ -282,19 +270,18 @@ for (const locale of ['en', 'zh-CN'] as const) {
       const agent = page.getByRole('button', { name: 'Agent', exact: true });
       const model = page.getByRole('button', { name: text.model, exact: true });
       await agent.click();
-      await page.getByRole('option', { name: 'codex', exact: true }).click();
+      await page.getByRole('option', { name: 'Codex', exact: true }).click();
       await model.click();
-      await expect(
-        page.getByRole('option', { name: `chat-model · ${name}`, exact: true }),
-      ).toBeVisible();
+      // The connection's own models, named alone: no other connection lists them.
+      await expect(page.getByRole('option', { name: 'chat-model', exact: true })).toBeVisible();
       await expect(page.getByRole('option', { name: /claude-model/ })).toHaveCount(0);
       await expect(page.getByRole('listbox')).not.toContainText(PROTOCOL_NAMES);
       await page.keyboard.press('Escape');
 
       await agent.click();
-      await page.getByRole('option', { name: 'claude-code', exact: true }).click();
+      await page.getByRole('option', { name: 'Claude Code', exact: true }).click();
       await model.click();
-      await page.getByRole('option', { name: `claude-model · ${name}`, exact: true }).click();
+      await page.getByRole('option', { name: 'claude-model', exact: true }).click();
       await page.locator('#new-task-prompt').fill('Run Claude Code on my provider');
       await page.locator('#new-task-prompt').press('Enter');
       await expect.poll(() => jobs.length).toBe(1);
@@ -306,7 +293,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
 
       // Codex cannot run the Messages-only model: the pick is kept, marked, and holds Run.
       await agent.click();
-      await page.getByRole('option', { name: 'codex', exact: true }).click();
+      await page.getByRole('option', { name: 'Codex', exact: true }).click();
       await expect(model).toContainText(text.unavailable);
       await expect(page.getByRole('button', { name: text.run, exact: true })).toBeDisabled();
     });
@@ -352,17 +339,6 @@ test.describe('verification without a protocol menu', () => {
         localStorage.setItem('agents.locale', 'en');
         localStorage.setItem('agents.theme', theme);
       }, variant.theme);
-      await page.route('**/api/v1/agent/model-preference', (route) =>
-        route.fulfill({
-          json: {
-            default_model: null,
-            last_model: null,
-            effective_model: null,
-            deployment_default: null,
-            models: ['fixture-model'],
-          },
-        }),
-      );
       const posted: unknown[] = [];
       let release!: () => void;
       const allowed = new Promise<void>((resolve) => {
@@ -386,7 +362,7 @@ test.describe('verification without a protocol menu', () => {
         });
         return route.fulfill({ status: 201, json: saved });
       });
-      await page.goto('/settings/my-settings');
+      await page.goto('/settings/models');
       await page.getByRole('button', { name: 'Add connection', exact: true }).click();
       const form = page.getByRole('region', { name: 'Personal model connections' }).locator('form');
       await expect(form.getByRole('combobox')).toHaveCount(0);

@@ -12,7 +12,8 @@ import {
   type AgentJobApi,
 } from '@/lib/api/agents';
 
-import { FirstRunProvider, useFirstRun } from './firstRun';
+import { MODEL_CONNECTIONS_CHANGED } from './composer/modelConnectionEvents';
+import { FirstRunProvider, firstRunSteps, useFirstRun } from './firstRun';
 
 const nav = vi.hoisted(() => ({ pathname: '/' }));
 
@@ -27,7 +28,6 @@ function config(overrides: Partial<AgentConfigApi> = {}): AgentConfigApi {
   return {
     repos: [],
     runtimes: ['claude-code'],
-    models: ['model-a'],
     github_connected: false,
     github_install_url: '/agents/integrations',
     ...overrides,
@@ -209,6 +209,42 @@ describe('FirstRunProvider', () => {
     expect(screen.getByTestId('row')).toHaveTextContent('{"hidden":false,"next":null}');
   });
 
+  it('puts the model connection first: nothing runs without one', async () => {
+    vi.mocked(listAgentConversations).mockResolvedValue(page([]));
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ model_connections_enabled: true, model_connection_required: true }),
+    );
+
+    render(app());
+
+    await waitFor(() =>
+      expect(screen.getByTestId('page')).toHaveTextContent(
+        '"step":{"next":"model","done":0,"total":4}',
+      ),
+    );
+  });
+
+  it('finishes the model step when a connection is saved, without a page change', async () => {
+    vi.mocked(listAgentConversations).mockResolvedValue(page([]));
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ model_connections_enabled: true, model_connection_required: true }),
+    );
+    render(app());
+    await waitFor(() => expect(screen.getByTestId('page')).toHaveTextContent('"next":"model"'));
+
+    vi.mocked(getAgentConfig).mockResolvedValue(
+      config({ model_connections_enabled: true, model_connection_required: false }),
+    );
+    window.dispatchEvent(new Event(MODEL_CONNECTIONS_CHANGED));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('page')).toHaveTextContent(
+        '"step":{"next":"connect","done":1,"total":4}',
+      ),
+    );
+    expect(getAgentConfig).toHaveBeenCalledTimes(2);
+  });
+
   it('tells nothing to anyone while the first answer is out', async () => {
     vi.mocked(listAgentConversations).mockReturnValue(new Promise(() => {}));
 
@@ -218,5 +254,40 @@ describe('FirstRunProvider', () => {
     expect(screen.getByTestId('page')).toHaveTextContent(
       '{"newcomer":false,"onlyThreadId":null,"step":null}',
     );
+  });
+});
+
+describe('firstRunSteps', () => {
+  const ids = (overrides: Partial<AgentConfigApi>) =>
+    firstRunSteps(config(overrides)).map(({ id, done }) => `${id}${done ? ' (done)' : ''}`);
+
+  it('lists GitHub and the first task where model connections are not offered', () => {
+    expect(ids({})).toEqual(['connect', 'repository', 'task']);
+    expect(ids({ model_connections_enabled: false, model_connection_required: true })).toEqual([
+      'connect',
+      'repository',
+      'task',
+    ]);
+  });
+
+  it('leaves out the GitHub steps nobody can take here', () => {
+    const model = { model_connections_enabled: true, model_connection_required: true };
+    expect(ids({ ...model, github_install_url: null })).toEqual(['model', 'task']);
+    expect(ids({ ...model, github_load_status: 'unavailable' })).toEqual(['model', 'task']);
+  });
+
+  it('has nothing to set up without a model step or GitHub', () => {
+    expect(ids({ github_install_url: null })).toEqual([]);
+  });
+
+  it('marks each step behind the owner as done', () => {
+    expect(
+      ids({
+        model_connections_enabled: true,
+        model_connection_required: false,
+        github_connected: true,
+        repos: ['owner/repository'],
+      }),
+    ).toEqual(['model (done)', 'connect (done)', 'repository (done)', 'task']);
   });
 });

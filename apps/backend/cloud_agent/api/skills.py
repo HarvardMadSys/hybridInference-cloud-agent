@@ -9,8 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from cloud_agent.api._owner_auth import require_agent_owner
 from cloud_agent.api.deps import get_agent_app_credentials, get_storage, require_store
-from cloud_agent.entitlement import RepoNotAllowed, require_entitled_repo
-from cloud_agent.github_app import GitHubAppError
+from cloud_agent.api.errors import typed_error
 from cloud_agent.skills.imports import (
     SkillImportNotFound,
     fetch_github_skill,
@@ -25,6 +24,8 @@ from cloud_agent.skills.models import (
     SkillSummary,
     SkillView,
 )
+from cloud_agent.source_control.entitlement import RepoNotAllowed, require_entitled_repo
+from cloud_agent.source_control.github_app import GitHubAppError
 
 if TYPE_CHECKING:
     from cloud_agent.ports.skills import SkillRepository
@@ -99,28 +100,16 @@ class ImportGitHubSkill(BaseModel):
 
 def skill_http_error(exc: SkillError) -> HTTPException:
     """Map a domain refusal to a useful owner-facing error."""
-    return HTTPException(
-        status_code=409 if isinstance(exc, SkillConflict) else 400,
-        detail={
-            "error": {
-                "type": "skill_conflict" if isinstance(exc, SkillConflict) else "invalid_skill",
-                "message": str(exc),
-            }
-        },
+    return typed_error(
+        409 if isinstance(exc, SkillConflict) else 400,
+        "skill_conflict" if isinstance(exc, SkillConflict) else "invalid_skill",
+        str(exc),
     )
 
 
 def skill_not_found() -> HTTPException:
     """Use the owner API error envelope for missing library entries."""
-    return HTTPException(
-        status_code=404,
-        detail={
-            "error": {
-                "type": "skill_not_found",
-                "message": "Skill not found. Refresh your library.",
-            }
-        },
-    )
+    return typed_error(404, "skill_not_found", "Skill not found. Refresh your library.")
 
 
 async def _github_preview(

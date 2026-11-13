@@ -16,6 +16,7 @@ vi.mock('@/lib/api/modelConnections', async (importOriginal) => ({
   updateModelConnection: vi.fn(),
   deleteModelConnection: vi.fn(),
   discoverModels: vi.fn(),
+  refreshModelConnectionEfforts: vi.fn(),
 }));
 
 const EVERY = ['claude-code', 'codex', 'kilo', 'opencode', 'pi'];
@@ -129,7 +130,7 @@ beforeEach(() => {
     configured: true,
     enabled: true,
     checks_per_hour: 20,
-    max_models: 8,
+    max_models: 16,
     connections: [connection],
   });
 });
@@ -151,14 +152,13 @@ describe('adding a connection', () => {
     expect(form.querySelector('textarea, select, datalist')).toBeNull();
     expect(form).not.toHaveTextContent(/Chat Completions|Responses|Anthropic Messages|Advanced/);
     expect(screen.getByLabelText('API key')).toHaveAttribute('type', 'password');
-    // The actions, in order: the model line's own two (listing is optional and
-    // waits for a URL and key), then the one primary action, then Cancel.
+    // Key visibility precedes the model actions, the one primary action and Cancel.
     expect(
       within(form)
         .getAllByRole('button')
         .filter((button) => button.getAttribute('type') !== null)
-        .map((button) => button.textContent),
-    ).toEqual(['Add', 'Load models from provider', 'Verify and save', 'Cancel']);
+        .map((button) => button.getAttribute('aria-label') ?? button.textContent),
+    ).toEqual(['Show API key', 'Add', 'Load models from provider', 'Verify and save', 'Cancel']);
     expect(form.querySelectorAll('.ui-button-primary')).toHaveLength(1);
     expect(within(form).getByRole('button', { name: 'Load models from provider' })).toBeDisabled();
     expect(within(form).getByText(/may bill/)).toBeVisible();
@@ -496,4 +496,60 @@ it('shows a Chinese reason and readable agent names after a mixed verification r
     'Claude Code, Codex, Kilo Code, OpenCode, pi',
   );
   expect(screen.queryByText('The model did not call the tool.')).not.toBeInTheDocument();
+});
+
+describe('reasoning levels', () => {
+  const declared: api.ModelStatus = {
+    ...ready('shared-model'),
+    efforts: {
+      chat_completions: { status: 'supported', levels: ['high', 'max'] },
+      responses: { status: 'supported', levels: ['high', 'max'] },
+      anthropic_messages: { status: 'unknown', levels: [], reason: 'listing_unavailable' },
+    },
+  };
+
+  it('says what the provider declares, and that a model verified earlier is unknown', async () => {
+    vi.mocked(api.listModelConnections).mockResolvedValue({
+      configured: true,
+      enabled: true,
+      connections: [{ ...connection, model_status: [declared, ready('another-model')] }],
+    });
+    renderSettings();
+    expect(
+      await within(region()).findByText('Reasoning levels the provider declares: high, max'),
+    ).toBeVisible();
+    // Never read: unknown, which is not the same as "none".
+    expect(
+      within(region()).getByText(
+        'The provider does not say which reasoning levels it accepts; tasks run at Auto.',
+      ),
+    ).toBeVisible();
+  });
+
+  it('refreshes a saved connection and shows the answer', async () => {
+    vi.mocked(api.refreshModelConnectionEfforts).mockResolvedValue({
+      ...connection,
+      model_status: [declared, ready('another-model')],
+    });
+    renderSettings();
+    fireEvent.click(
+      await within(region()).findByRole('button', { name: 'Refresh reasoning levels' }),
+    );
+    expect(
+      await within(region()).findByText('Reasoning levels the provider declares: high, max'),
+    ).toBeVisible();
+    expect(api.refreshModelConnectionEfforts).toHaveBeenCalledWith(connection.id);
+    expect(api.updateModelConnection).not.toHaveBeenCalled();
+  });
+
+  it('keeps the card as it was when a refresh fails', async () => {
+    vi.mocked(api.refreshModelConnectionEfforts).mockRejectedValue(new Error('limit'));
+    renderSettings();
+    fireEvent.click(
+      await within(region()).findByRole('button', { name: 'Refresh reasoning levels' }),
+    );
+    expect(await within(region()).findByRole('alert')).toHaveTextContent(
+      'Could not refresh the reasoning levels. Nothing was changed; try again later.',
+    );
+  });
 });

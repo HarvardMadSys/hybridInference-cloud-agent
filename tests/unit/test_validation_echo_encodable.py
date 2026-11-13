@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from cloud_agent.api._owner_auth import authenticate_agent_owner
-from cloud_agent.api.deps import get_gateway_client
+from cloud_agent.api.deps import get_owner_directory
 from cloud_agent.app import create_app
 
 
@@ -26,7 +26,7 @@ class _Gateway:
 @pytest.fixture
 def client() -> TestClient:
     app = create_app()
-    app.dependency_overrides[get_gateway_client] = _Gateway
+    app.dependency_overrides[get_owner_directory] = _Gateway
     app.dependency_overrides[authenticate_agent_owner] = lambda: {
         "user_id": "user-owner",
         "role": "free",

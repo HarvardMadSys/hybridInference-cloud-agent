@@ -32,7 +32,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from cloud_agent_host.chat_sandbox_models import (
+from cloud_agent_host.container.chat_sandbox_models import (
     CHAT_NAMESPACE_LABEL,
     CHAT_RUNTIME_LABEL,
     CHAT_RUNTIME_VERSION_LABEL,
@@ -58,9 +58,15 @@ WORK_LABEL = f"{LABEL}.work"
 #: removes it, once it is too old to belong to a copy still running.
 SOURCE_LABEL = f"{LABEL}.source"
 
-#: How long a discovered menu is reused. Short: a version that finished
-#: downloading should be offered on the next beat, not a minute later.
+#: How long a discovered menu is answered before it is read again. Short: a
+#: version that finished downloading should be offered on the next beat, not a
+#: minute later. Past it the menu is still answered, and read again in the
+#: background (:meth:`DownloadedVersions.versions`).
 _CACHE_S = 5.0
+#: The oldest menu answered without waiting for Docker. The host service's
+#: heartbeat asks every beat, so its menu never gets this old; a process that
+#: asks rarely waits for a new one rather than offering an old one.
+_STALE_S = 60.0
 #: How long what chats run is reused for a menu too long to report. Read only
 #: then, but a host can stay that way a while, and every beat and claim asks.
 _IN_USE_CACHE_S = 60.0
@@ -255,27 +261,73 @@ def by_runtime(images: list[RuntimeImage]) -> dict[str, list[str]]:
 
 
 class DownloadedVersions:
-    """A briefly cached :func:`discover`, for the version stamp."""
+    """A cached :func:`discover`, for the version stamp, read off the paths that wait on it.
+
+    Listing images by label takes seconds on a host that holds many (about
+    3 s with some 1,500), and every beat and every claim asks. So a menu that
+    has been read is answered at once: once it is ``_CACHE_S`` old, Docker is
+    read again in the background, one read at a time, and the next caller
+    gets what it found. A caller waits for Docker only for the first menu of
+    the process, the first after :meth:`invalidate`, one older than
+    ``_STALE_S``, or one it asks to be ``fresh``.
+    """
 
     def __init__(self, docker: str, namespace: str) -> None:
         self._docker = docker
         self._namespace = namespace
         self._lock = threading.Lock()
-        self._read_at = float("-inf")
+        #: When the menu held was read: ``None`` before the first read, and
+        #: after :meth:`invalidate`, so the next caller waits for a new one.
+        self._read_at: float | None = None
         self._versions: dict[str, list[str]] = {}
+        #: Moved on by every invalidation and every read a caller waited for,
+        #: so a background read begun before either never replaces it.
+        self._generation = 0
+        #: The background read in flight, if any.
+        self._refresher: threading.Thread | None = None
         #: The versions this host was told to hold. The runner wires in its
         #: downloader's; a process with none has no targets.
         self.targets: Callable[[], Collection[tuple[str, str]]] | None = None
+        #: Its own lock: reading what chats run takes Docker seconds too, and
+        #: must not hold up a caller the menu would answer at once.
+        self._in_use_lock = threading.Lock()
         self._in_use: set[tuple[str, str]] = set()
         self._in_use_at = float("-inf")
 
-    def versions(self) -> dict[str, list[str]]:
-        """Downloaded versions per runtime, at most a few seconds old."""
+    def versions(self, *, fresh: bool = False) -> dict[str, list[str]]:
+        """Downloaded versions per runtime, without waiting for Docker once there is a menu.
+
+        The menu answered is at most ``_STALE_S`` old, and normally one
+        background read behind; ``fresh`` waits for Docker to be read now.
+        """
         with self._lock:
-            if time.monotonic() - self._read_at >= _CACHE_S:
+            now = time.monotonic()
+            if fresh or self._read_at is None or now - self._read_at >= _STALE_S:
                 self._versions = by_runtime(discover(self._docker, self._namespace))
-                self._read_at = time.monotonic()
+                self._read_at = now
+                self._generation += 1
+            elif now - self._read_at >= _CACHE_S and self._refresher is None:
+                self._refresher = threading.Thread(
+                    target=self._refresh,
+                    args=(self._generation,),
+                    name="agent-runtime-versions",
+                    daemon=True,
+                )
+                self._refresher.start()
             return {runtime: list(found) for runtime, found in self._versions.items()}
+
+    def _refresh(self, generation: int) -> None:
+        """Read Docker in the background; keep what it says unless something newer came first."""
+        started = time.monotonic()
+        found: dict[str, list[str]] | None = None
+        try:
+            found = by_runtime(discover(self._docker, self._namespace))
+        finally:
+            with self._lock:
+                self._refresher = None
+                if found is not None and generation == self._generation:
+                    self._versions = found
+                    self._read_at = started
 
     def needed(self) -> set[tuple[str, str]]:
         """What a menu too long to report keeps first: targets, and what chats run.
@@ -283,7 +335,7 @@ class DownloadedVersions:
         What chats run is at most a minute old; when Docker cannot say, the
         last answer stands.
         """
-        with self._lock:
+        with self._in_use_lock:
             if time.monotonic() - self._in_use_at >= _IN_USE_CACHE_S:
                 found = chat_versions(self._docker, self._namespace)
                 if found is not None:
@@ -295,6 +347,11 @@ class DownloadedVersions:
         return needed
 
     def invalidate(self) -> None:
-        """Read Docker again next time: a download has just finished."""
+        """Wait for Docker next time: a download has just finished, or a version was removed.
+
+        The next caller reads the menu itself rather than being answered the
+        old one, and a background read already under way is discarded.
+        """
         with self._lock:
-            self._read_at = float("-inf")
+            self._read_at = None
+            self._generation += 1

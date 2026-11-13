@@ -24,12 +24,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     ChatSandboxManager,
     ChatSandboxSpec,
-    _terminal_bashrc,
 )
-from cloud_agent_host.sandbox import ContainerBackend
+from cloud_agent_host.container.chat_sandbox_terminal import _terminal_bashrc
+from cloud_agent_host.container.sandbox import ContainerBackend
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux" or shutil.which("bash") is None or not os.path.exists("/bin/sh"),
@@ -44,8 +44,8 @@ def _wrapper_script(monkeypatch) -> str:
     )
     manager = ChatSandboxManager(ContainerBackend(image="img"))
     monkeypatch.setattr(
-        manager,
-        "_require",
+        manager.exact,
+        "require",
         lambda _spec: SimpleNamespace(running=True, container_id="container-01"),
     )
     captured: list[list[str]] = []
@@ -63,7 +63,7 @@ def _wrapper_script(monkeypatch) -> str:
         captured.append(list(argv))
         return Process()
 
-    monkeypatch.setattr("cloud_agent_host.chat_sandbox.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("cloud_agent_host.container.chat_sandbox.subprocess.Popen", fake_popen)
     manager.spawn_terminal(spec, rows=24, cols=80).wait()
     command = captured[0]
     return command[command.index("-c") + 1]

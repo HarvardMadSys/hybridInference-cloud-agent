@@ -7,10 +7,14 @@ from typing import Any
 
 import pytest
 
-from cloud_agent_host import tree_copy
-from cloud_agent_host.kilo_mcp import KILO_MCP_PATCH_SHA256, KILO_MCP_VERSION, ensure_kilo_runtime
+from cloud_agent_host.container.sandbox import SandboxError
+from cloud_agent_host.member_setup import tree_copy
 from cloud_agent_host.runtime_images import SOURCE_LABEL, WORK_LABEL
-from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.runtimes.http_bridge.kilo_mcp import (
+    KILO_MCP_PATCH_SHA256,
+    KILO_MCP_VERSION,
+    ensure_kilo_runtime,
+)
 from cloud_agent_shared.shared_protocol import SHARED_SANDBOX_RUNTIME_PINS
 
 NAMESPACE = "freeinference-cloud-agent-sandbox-staging"
@@ -59,14 +63,19 @@ class FakeManager:
             return SimpleNamespace(returncode=self.activate_exit, stderr=b"not protected")
         return SimpleNamespace(returncode=0, stderr=b"")
 
-    def _require(self, _spec):
+    @property
+    def exact(self):
+        """The stand-in is its own identity gate."""
+        return self
+
+    def require(self, _spec):
         return SimpleNamespace(container_id="chat-container")
 
-    def _run(self, argv, *, timeout):
+    def run(self, argv, *, timeout):
         self.runs.append((argv, timeout))
         return SimpleNamespace(returncode=0, stdout="source-container\n", stderr="")
 
-    def _run_bytes(self, argv, *, timeout, **streams):
+    def run_bytes(self, argv, *, timeout, **streams):
         self.copies.append((argv, streams))
         return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 

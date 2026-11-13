@@ -6,6 +6,12 @@ control plane only. The relay's listener deliberately does not contain it,
 because a sandbox must not be able to add a connection or approve a call --
 reachability is a stronger control than a scope check on each route.
 
+This module's router serves the whole surface. The connection routes are
+here; browser sign-in is in ``mcp_authorization``, the decisions on held calls
+in ``mcp_invocations`` and a session's selections in ``mcp_thread_bindings``,
+whose routes it copies in. What a connection may be saved as is checked in
+``cloud_agent.application.mcp_connection_inputs``.
+
 **Two rules run through every handler.**
 
 Secrets are write-only. A request may carry a token; no response ever contains
@@ -22,32 +28,35 @@ somebody else made.
 
 from __future__ import annotations
 
-import json
-from collections.abc import Mapping, Sequence
-from contextlib import suppress
-from dataclasses import replace
-from datetime import UTC, datetime
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from datetime import datetime  # noqa: TC003 — Pydantic resolves annotations at runtime.
 from typing import Any
-from urllib.parse import urlencode, urlsplit, urlunsplit
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 # The owner guard lives beside the other agent routes. Imported rather than
 # reimplemented, and deliberately one-directional: this module depends on
 # ``_owner_auth`` and never the reverse, so there is no cycle to reason about.
 from cloud_agent.api._owner_auth import require_agent_owner
-from cloud_agent.api.deps import get_current_user, get_storage
+from cloud_agent.api.deps import get_storage
+from cloud_agent.api.errors import as_http_exception
+from cloud_agent.api.mcp_authorization import router as authorization_router
 from cloud_agent.api.mcp_connections_shared import (
+    _SNAPSHOT_SURFACES,
+    ENV_MCP_PUBLIC_BASE_URL,
     _bad_request,
     _capability_payload,
     _capability_view,
     _conflict,
+    _github_browser_client,
     _McpConnectionsStorage,
     _not_found,
+    _policy,
     _require_store,
 )
+from cloud_agent.api.mcp_invocations import router as invocations_router
 from cloud_agent.api.mcp_thread_bindings import (
     BindingRequest,
     BindingResponse,
@@ -55,60 +64,27 @@ from cloud_agent.api.mcp_thread_bindings import (
     ReplaceBindingsRequest,
     router as thread_bindings_router,
 )
-from cloud_agent.credential_cipher import CredentialCipherError
+from cloud_agent.application import mcp_connection_inputs as inputs
+from cloud_agent.crypto.credential_cipher import CredentialCipherError
+from cloud_agent.domain.errors import Refused, Unavailable
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.mcp import config_import, github_oauth, launch, oauth
-from cloud_agent.mcp.errors import (
-    McpConnectionCreateConflict,
-    McpCredentialWriteRejected,
-)
+from cloud_agent.mcp import config_import, sandbox_servers as sandbox
+from cloud_agent.mcp.errors import McpCredentialWriteRejected
 from cloud_agent.mcp.host import HostError, McpHost, SessionKey
-from cloud_agent.mcp.http_body import IDENTITY_ENCODING_HEADERS
-from cloud_agent.mcp.launch import LaunchPlanError, ManagedLaunchPolicy, build_launch_plan
 from cloud_agent.mcp.models import (
     AuthKind,
-    Capability,
-    CapabilityKind,
     ConnectionErrorKind,
     ConnectionStatus,
     ExecutionLocation,
-    HeaderAuth,
-    InvocationStatus,
-    LaunchSpec,
-    Mount,
     Transport,
 )
-from cloud_agent.mcp.net_policy import (
-    EgressPolicy,
-    EndpointRejected,
-    policy_from_environment,
-    validate_endpoint,
-)
+from cloud_agent.mcp.package_pins import pin_import
 from cloud_agent.mcp.refresh import RefreshRefused, ensure_fresh
-from cloud_agent.mcp.registry import (
-    McpRegistryError,
-    connection_from_row,
-    mcp_cipher,
-    oauth_cipher,
-    resolve_connection,
-)
-from cloud_agent.settings import setting_env
+from cloud_agent.mcp.registry import McpRegistryError, connection_from_row, resolve_connection
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/v1/agent/mcp", tags=["agent-mcp"])
-
-#: Where this deployment is reachable from a browser, for the OAuth callback.
-#: Configured rather than derived from the request: a redirect URI is
-#: registered with the authorization server in advance, so deriving it from
-#: whatever host a request arrived on would produce a different value per
-#: proxy and fail the registration check.
-ENV_MCP_PUBLIC_BASE_URL = "AGENT_MCP_PUBLIC_BASE_URL"
-
-
-def _github_browser_client() -> tuple[str, str] | None:
-    """Read the service's app identity, never a user's access token."""
-    return github_oauth.client_credentials() if _public_base_url() else None
 
 
 def _templates() -> list[dict[str, Any]]:
@@ -120,7 +96,7 @@ def _templates() -> list[dict[str, Any]]:
     if available:
         github["auth_kind"] = AuthKind.OAUTH.value
         github["notes"] = ["Choose the GitHub account and repositories your agents can access."]
-    return templates
+    return [*templates, *(dict(template) for template in sandbox.TEMPLATES)]
 
 
 #: Which template simplifications this deployment offers. Templates are a
@@ -203,42 +179,6 @@ _TEMPLATES: tuple[dict[str, Any], ...] = (
 )
 
 
-def _public_base_url() -> str:
-    """Reuse the configured public API address unless MCP has an explicit override."""
-    explicit = (setting_env(ENV_MCP_PUBLIC_BASE_URL) or "").strip().rstrip("/")
-    if explicit:
-        return explicit
-    # Session sign-in already needs the public API callback, including its
-    # proxy prefix. Reuse that operator-controlled URL, never Host/Forwarded
-    # headers or the web origin (which may live on a different host).
-    callback = (setting_env("AGENT_SESSION_REDIRECT_URI") or "").strip()
-    suffix = "/v1/session/callback"
-    try:
-        parsed = urlsplit(callback)
-        if (
-            parsed.scheme not in {"https", "http"}
-            or not parsed.hostname
-            or parsed.username
-            or parsed.password
-            or parsed.query
-            or parsed.fragment
-            or not parsed.path.endswith(suffix)
-        ):
-            return ""
-        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path[: -len(suffix)], "", ""))
-    except ValueError:
-        return ""
-
-
-def _policy() -> EgressPolicy:
-    """The egress policy for user-added connections.
-
-    Delegates to the shared reader so the relay host dials under exactly the
-    policy this API validates against: two doors, one policy.
-    """
-    return policy_from_environment()
-
-
 # --------------------------------------------------------------------------
 # Request and response models
 # --------------------------------------------------------------------------
@@ -267,7 +207,6 @@ class ConnectionView(BaseModel):
     error_kind: str = ConnectionErrorKind.NONE.value
     error_detail: str | None = None
     account_label: str | None = None
-    connector_id: int | None = None
     has_credential: bool = False
     secret_hint: str | None = None
     expires_at: datetime | None = None
@@ -305,7 +244,6 @@ class CreateConnectionRequest(BaseModel):
     launch: dict[str, Any] | None = None
     auth_kind: str = AuthKind.NONE.value
     template: str | None = None
-    connector_id: int | None = None
     #: Seconds one call to this server may take. Omitted means the relay's
     #: default, which is what every connection had before this was a choice.
     request_timeout_s: float | None = Field(default=None, ge=5, le=900)
@@ -326,8 +264,8 @@ class ImportRequest(BaseModel):
     text: str = Field(min_length=1)
     format_hint: str | None = None
     save: bool = False
-    #: Per-draft overrides, keyed by the draft's label: the run location the
-    #: user chose after seeing what the configuration implied.
+    #: Per-draft locations, keyed by the draft's label, as its preview placed
+    #: it. Only one location fits a draft's shape; any other is refused.
     locations: dict[str, str] = Field(default_factory=dict)
     env_secrets: dict[str, str] = Field(default_factory=dict)
     #: Missing values belong to a server, even when several use the same key.
@@ -362,6 +300,9 @@ class UpdateConnectionRequest(BaseModel):
     auth_kind: str | None = None
     account_label: str | None = None
     request_timeout_s: float | None = Field(default=None, ge=5, le=900)
+    #: New values for a stdio launch's ``secret://NAME`` keys. Write-only; one
+    #: left out or blank keeps its stored value (``launch.edited_secret_env``).
+    env_secrets: dict[str, str] = Field(default_factory=dict)
 
 
 class EnableConnectionRequest(BaseModel):
@@ -399,77 +340,6 @@ class TestResult(BaseModel):
     prompt_count: int = 0
     support: dict[str, Any] = Field(default_factory=dict)
     capabilities: list[dict[str, Any]] = Field(default_factory=list)
-
-
-class AuthorizeRequest(BaseModel):
-    """The client to authorize as, when the server cannot register one for us.
-
-    Optional, and it exists because some servers expect the user to bring a
-    client id: refusing to accept one would leave the browser flow permanently
-    unavailable on exactly the servers that document it as the way in.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    client_id: str | None = Field(default=None, max_length=512)
-    client_secret: str | None = Field(default=None, max_length=512)
-
-
-class AuthorizeResponse(BaseModel):
-    """Where to send the browser, and what the flow is waiting for."""
-
-    authorization_url: str | None = None
-    needs_client_id: bool = False
-    message: str = ""
-    redirect_uri: str | None = None
-
-
-class InvocationView(BaseModel):
-    """One call that needed a decision."""
-
-    id: int
-    job_id: str
-    #: The attempt that raised the call, even when the job has since been retried.
-    attempt_id: int | None = None
-    thread_id: str
-    thread_title: str | None = None
-    connection_id: int
-    connection_label: str | None = None
-    capability_name: str
-    capability_kind: str = CapabilityKind.TOOL.value
-    #: What the server says the capability does, from the catalogue the call
-    #: was held under. ``None`` once a newer discovery has replaced it, so a
-    #: card never explains a call with a description it was not made against.
-    capability_description: str | None = None
-    #: The server's hints (title, read-only, destructive, ...). Untrusted and
-    #: for display only; they never decide authorization.
-    capability_annotations: dict[str, Any] = Field(default_factory=dict)
-    status: str
-    always_allow_status: str | None = None
-    arguments_digest: str
-    arguments: dict[str, Any] | None = None
-    created_at: datetime | None = None
-    expires_at: datetime | None = None
-    decided_at: datetime | None = None
-    result_summary: str | None = None
-    guidance: str = ""
-
-
-class InvocationsResponse(BaseModel):
-    """A page of the owner's waiting calls or scoped history, newest first."""
-
-    invocations: list[InvocationView] = Field(default_factory=list)
-    has_more: bool = False
-    next_before_id: int | None = None
-
-
-class DecisionRequest(BaseModel):
-    """Approve or deny one pending call."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    approve: bool
-    always_allow: bool = False
 
 
 # --------------------------------------------------------------------------
@@ -510,7 +380,6 @@ async def _view(store: _McpConnectionsStorage, row: Mapping[str, Any]) -> Connec
         error_kind=connection.error_kind.value,
         error_detail=connection.error_detail,
         account_label=row.get("account_label"),
-        connector_id=int(row["connector_id"]) if row.get("connector_id") else None,
         # The credential the server is sent. A stored OAuth client secret is
         # not one: until a sign-in completes there is nothing to send.
         has_credential=bool(row.get("access_token_ciphertext")),
@@ -533,15 +402,6 @@ async def _view(store: _McpConnectionsStorage, row: Mapping[str, Any]) -> Connec
         created_at=row.get("created_at"),
         updated_at=row.get("updated_at"),
     )
-
-
-#: Where each capability kind is kept in a stored snapshot, in display order.
-_SNAPSHOT_SURFACES: tuple[tuple[str, CapabilityKind], ...] = (
-    ("tools", CapabilityKind.TOOL),
-    ("resources", CapabilityKind.RESOURCE),
-    ("resource_templates", CapabilityKind.RESOURCE_TEMPLATE),
-    ("prompts", CapabilityKind.PROMPT),
-)
 
 
 # --------------------------------------------------------------------------
@@ -585,43 +445,40 @@ async def create_connection(
 ) -> ConnectionView:
     """Add a connection, validating its address and credentials before saving."""
     job_store = _require_store(store)
-    transport = _parse_transport(body.transport)
-    location = _parse_location(body.location)
-    url, launch_spec = _validate_target(
-        transport=transport, location=location, url=body.url, launch=body.launch
-    )
-    auth_kind, auth_config = _build_auth(body.auth_kind, body.header_name, body.header_scheme)
+    with _answered():
+        transport = inputs.parse_transport(body.transport)
+        location = inputs.parse_location(body.location)
+        url, launch_spec = inputs.validate_target(
+            transport=transport, location=location, url=body.url, launch=body.launch
+        )
+        auth_kind, auth_config = inputs.build_auth(
+            body.auth_kind, body.header_name, body.header_scheme
+        )
+    if refusal := sandbox.refusal(location, auth_kind):
+        raise _bad_request(refusal)
     template = body.template if body.template else None
-    if template is not None and template not in {item["name"] for item in _TEMPLATES}:
+    if template is not None and template not in {
+        t["name"] for t in (*_TEMPLATES, *sandbox.TEMPLATES)
+    }:
         # An unknown template is refused rather than stored as free text: the
         # column means "which preset this came from", and a value that names
         # nothing makes the provenance unreadable.
         raise _bad_request(f"unknown template: {template!r}")
-    if body.connector_id is not None:
-        # A connection may name only its owner's connector: another user's
-        # answers 404, as a missing one does, and nothing is stored.
-        await _require_connector(job_store, connector_id=body.connector_id, user_id=user["user_id"])
-
-    if body.connector_id is not None:
-        if location is not ExecutionLocation.USER_CONNECTOR:
-            raise _bad_request("connector_id is only valid when location is 'user-connector'")
-        connector = await _require_connector(
-            job_store, connector_id=body.connector_id, user_id=user["user_id"]
-        )
-        if str(connector.get("status")) == "revoked":
-            raise _conflict("that connector has been revoked")
 
     # Encrypt before the insert. A missing key used to commit the row and then
     # return 503, and the next attempt inserted another credential-less row.
-    access_token_ciphertext, auth_config_patch = _optional_static_credential(
-        secret=body.secret,
-        header_name=body.header_name,
-        header_scheme=body.header_scheme,
-        fallback_header=str(auth_config.get("header_name") or "Authorization"),
-    )
-    sealed_launch_spec = (
-        _sealed_launch_spec(launch_spec, body.env_secrets) if body.env_secrets else None
-    )
+    with _answered():
+        access_token_ciphertext, auth_config_patch = inputs.optional_static_credential(
+            secret=body.secret,
+            header_name=body.header_name,
+            header_scheme=body.header_scheme,
+            fallback_header=str(auth_config.get("header_name") or "Authorization"),
+        )
+        sealed_launch_spec = (
+            inputs.sealed_launch_spec(launch_spec, body.env_secrets, location=location)
+            if body.env_secrets
+            else None
+        )
 
     try:
         row = await job_store.mcp.create_mcp_connection(
@@ -634,7 +491,6 @@ async def create_connection(
             auth_kind=auth_kind.value,
             auth_config=auth_config,
             template=template,
-            connector_id=body.connector_id,
             account_label=body.account_label,
             request_timeout_s=body.request_timeout_s,
             reuse_pending=not body.secret and not body.env_secrets,
@@ -642,8 +498,6 @@ async def create_connection(
             auth_config_patch=auth_config_patch,
             sealed_launch_spec=sealed_launch_spec,
         )
-    except McpConnectionCreateConflict as exc:
-        raise _conflict(str(exc)) from exc
     except McpCredentialWriteRejected as exc:
         raise _conflict("the credential could not be stored with this connection") from exc
     logger.info(
@@ -674,6 +528,9 @@ async def import_connections(
         result = config_import.parse_import(body.text, format_hint=body.format_hint)
     except config_import.ImportError_ as exc:
         raise _bad_request(str(exc)) from exc
+    result = await pin_import(result)  # a bare package name, at its current release
+    with _answered():
+        result = inputs.without_short_keys(result, body.locations)
 
     preview = [draft.summary() for draft in result.drafts]
     if not body.save:
@@ -685,9 +542,17 @@ async def import_connections(
 
     # Prepare every draft, including encryption, before any insert. A later
     # missing key or rejected credential must not leave the earlier drafts saved.
-    prepared = [
-        _prepare_import_draft(draft, user_id=user["user_id"], body=body) for draft in result.drafts
-    ]
+    with _answered():
+        prepared = [
+            inputs.prepare_import_draft(
+                draft,
+                user_id=user["user_id"],
+                locations=body.locations,
+                env_secrets=body.env_secrets,
+                server_secrets=body.server_secrets,
+            )
+            for draft in result.drafts
+        ]
     try:
         rows = await job_store.mcp.create_mcp_connections(connections=prepared)
     except McpCredentialWriteRejected as exc:
@@ -745,26 +610,27 @@ async def update_connection(
     location = ExecutionLocation(str(existing["location"]))
     url = body.url
     if url is not None:
-        url, _unused = _validate_target(
-            transport=transport,
-            location=location,
-            url=url,
-            launch=None,
-        )
+        with _answered():
+            url, _unused = inputs.validate_target(
+                transport=transport,
+                location=location,
+                url=url,
+                launch=None,
+            )
     launch_spec = None
-    if body.launch is not None:
+    if body.launch is not None or body.env_secrets:
         if location is ExecutionLocation.REMOTE:
             raise _bad_request("a remote connection has no process to launch")
-        # The check create applies, and only the form it renders is stored. A
-        # submitted document is not stored as sent: its ``mounts`` are the
-        # plan's to decide and its ``env_secrets`` are ciphertext only the
-        # secret routes write, so neither may arrive through an edit.
-        _unused_url, launch_spec = _validate_target(
-            transport=transport, location=location, url=None, launch=body.launch
-        )
+        with _answered():
+            launch_spec = inputs.edited_launch_spec(
+                existing, body.launch, body.env_secrets, transport=transport, location=location
+            )
     auth_kind = body.auth_kind
     if auth_kind is not None:
-        auth_kind = _parse_auth_kind(auth_kind).value
+        with _answered():
+            auth_kind = inputs.parse_auth_kind(auth_kind).value
+        if refusal := sandbox.refusal(location, auth_kind):
+            raise _bad_request(refusal)
 
     updated = await job_store.mcp.update_mcp_connection(
         connection_id=connection_id,
@@ -917,6 +783,9 @@ async def _diagnose(
     )
     if loaded_row is None:
         raise _not_found("no such MCP connection")
+    if loaded_row.get("location") == ExecutionLocation.SANDBOX.value:
+        ok, message = await sandbox.checked_in_place(job_store.mcp, loaded_row, record=record)
+        return TestResult(ok=ok, error_kind="none" if ok else "launch_failed", message=message)
     row = loaded_row
 
     async def record_status(
@@ -1010,1135 +879,25 @@ async def _diagnose(
 
 
 # --------------------------------------------------------------------------
-# OAuth
+# Domain refusals
 # --------------------------------------------------------------------------
 
 
-@router.post("/connections/{connection_id}/authorize", response_model=AuthorizeResponse)
-async def authorize_connection(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
-    connection_id: int,
-    body: AuthorizeRequest | None = None,
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _McpConnectionsStorage | None = Depends(get_storage),
-) -> AuthorizeResponse:
-    """Start a browser authorization for an OAuth connection.
-
-    Discovery, registration and the challenge all happen here, so the browser
-    is sent to a URL this service built rather than one a caller supplied.
-    """
-    from cloud_agent.mcp.transports import HttpMetadataFetcher, TransportError
-
-    job_store = _require_store(store)
-    row = await job_store.mcp.get_mcp_connection(
-        connection_id=connection_id, user_id=user["user_id"]
-    )
-    if row is None:
-        raise _not_found("no such MCP connection")
-    if body is not None and body.client_id:
-        # Stored before discovery, so the registration choice below sees it and
-        # the flow it starts is the one this client will complete.
-        secret_ciphertext = None
-        if body.client_secret:
-            try:
-                secret_ciphertext = oauth_cipher().encrypt(body.client_secret)
-            except CredentialCipherError as exc:
-                raise _no_encryption_key() from exc
-        stored = await job_store.mcp.set_mcp_client_registration(
-            connection_id=connection_id,
-            user_id=user["user_id"],
-            client_id=body.client_id.strip(),
-            client_secret_ciphertext=secret_ciphertext,
-        )
-        if not stored:
-            raise _conflict("this connection changed while you were authorizing it")
-        refreshed = await job_store.mcp.get_mcp_connection(
-            connection_id=connection_id, user_id=user["user_id"]
-        )
-        row = refreshed or row
-    connection = connection_from_row(row)
-    if connection.auth.kind is not AuthKind.OAUTH:
-        raise _bad_request("this connection does not use OAuth")
-    if not connection.config.url:
-        raise _bad_request("this connection has no address to authorize against")
-    base_url = _public_base_url()
-    if not base_url:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": {
-                    "type": "server_error",
-                    "message": (
-                        "Server sign-in is unavailable because this deployment's public "
-                        "callback address is not configured. Please contact the administrator."
-                    ),
-                }
-            },
-        )
-
-    policy = _policy()
-    fetcher = HttpMetadataFetcher()
+@contextmanager
+def _answered() -> Iterator[None]:
+    """Answer a connection check's domain refusal as the ``HTTPException`` it maps to."""
     try:
-        resource_metadata, metadata = await oauth.discover_authorization_server(
-            fetcher,
-            resource_url=connection.config.url,
-            policy=policy,
-            preregistered_issuer=connection.auth.oauth.issuer if connection.auth.oauth else None,
-        )
-    except (oauth.OAuthError, TransportError, EndpointRejected) as exc:
-        raise _bad_request(str(exc)) from exc
-
-    settings = row.get("auth_config")
-    configured = settings if isinstance(settings, Mapping) else {}
-    client_id = str(configured.get("client_id") or "") or None
-    github_endpoint = github_oauth.is_endpoint(connection.config.url)
-    managed_client = (
-        _github_browser_client()
-        if github_endpoint
-        and (not client_id or configured.get("managed_github_oauth"))
-        and not (body is not None and body.client_id)
-        else None
-    )
-    try:
-        secret = None
-        if managed_client:
-            # Never send the shared secret to an endpoint supplied by discovery.
-            if (
-                not github_oauth.is_managed(
-                    issuer=metadata.issuer,
-                    token_endpoint=metadata.token_endpoint,
-                    resource=connection.config.url,
-                )
-                or metadata.authorization_endpoint != github_oauth.AUTHORIZATION_ENDPOINT
-            ):
-                raise oauth.OAuthError("GitHub returned unexpected sign-in endpoints.")
-            client_id, secret = managed_client
-        elif configured.get("managed_github_oauth") and not (body is not None and body.client_id):
-            raise _bad_request(
-                "GitHub browser sign-in is unavailable. Ask the service administrator to enable it."
-            )
-        elif row.get("client_secret_ciphertext"):
-            secret = oauth_cipher().decrypt(str(row["client_secret_ciphertext"]))
-        if github_endpoint and not client_id:
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "error": {
-                        "message": "GitHub browser sign-in is not available yet. "
-                        "Use a personal access token or ask the service administrator to enable it."
-                    }
-                },
-            )
-        if github_endpoint and metadata.token_endpoint == github_oauth.TOKEN_ENDPOINT:
-            # GitHub omits this field from metadata (RFC default: Basic), but
-            # documents client_secret in the form body for both app types.
-            metadata = replace(
-                metadata, token_endpoint_auth_methods_supported=("client_secret_post",)
-            )
-        identity = oauth.choose_registration(
-            metadata, preregistered_client_id=client_id, preregistered_client_secret=secret
-        )
-    except oauth.OAuthError as exc:
-        if exc.kind == "client_registration_required":
-            return AuthorizeResponse(
-                needs_client_id=True,
-                message=str(exc),
-                redirect_uri=_callback_url(base_url, connection_id),
-            )
-        raise _bad_request(str(exc)) from exc
-
-    if identity.registration == "dcr":
-        identity = await _register_client(
-            fetcher, metadata, policy=policy, base_url=base_url, connection_id=connection_id
-        )
-
-    scopes = oauth.default_scopes(
-        resource_metadata, metadata, connection.auth.oauth.scopes if connection.auth.oauth else ()
-    )
-    if managed_client:
-        # Avoid requesting every optional toolset scope in GitHub's metadata.
-        scopes = ("repo", "read:org")
-    # The OAuth resource identifier can differ from the MCP transport URL.
-    # Reauthorization may reuse the issuer without fetching resource metadata;
-    # retain a saved resource only while it still describes the current URL.
-    resource = connection.config.url
-    if resource_metadata:
-        resource = resource_metadata.resource
-    elif connection.auth.oauth and connection.auth.oauth.resource:
-        # Editing the URL can leave the previous credential's resource on
-        # the row. Keep the current URL when that saved resource no longer fits.
-        with suppress(oauth.OAuthError):
-            resource = oauth.parse_protected_resource_metadata(
-                {"resource": connection.auth.oauth.resource}, expect=connection.config.url
-            ).resource
-    flow = oauth.OAuthFlow(
-        versions=oauth.FlowVersions(
-            connection_id=str(connection_id),
-            config_revision=connection.config_revision,
-            authorization_epoch=connection.authorization_epoch,
-            oauth_generation=connection.oauth_generation,
-        ),
-        state=oauth.new_state(),
-        pkce=oauth.PkcePair.generate(),
-        client=identity,
-        metadata=metadata,
-        resource=resource,
-        redirect_uri=(
-            oauth.redirect_uri(base_url, "github")
-            if managed_client
-            else _callback_url(base_url, connection_id)
-        ),
-        scopes=scopes,
-    )
-    try:
-        authorization_url = flow.authorization_url()
-    except oauth.OAuthError as exc:
-        raise _bad_request(str(exc)) from exc
-    cipher = oauth_cipher()
-    # The generation is allocated in the store from the value just read. Passing
-    # ``snapshot + 1`` lets two starts both insert a flow for a generation the
-    # row has already left, and lets the later transaction delete the newer one.
-    allocated = await job_store.mcp.create_mcp_oauth_flow(
-        state_hash=oauth.state_hash(flow.state),
-        user_id=user["user_id"],
-        connection_id=connection_id,
-        config_revision=connection.config_revision,
-        authorization_epoch=connection.authorization_epoch,
-        expected_oauth_generation=connection.oauth_generation,
-        code_verifier_ciphertext=cipher.encrypt(flow.pkce.verifier),
-        client_id=identity.client_id,
-        client_secret_ciphertext=(
-            cipher.encrypt(identity.client_secret) if identity.client_secret else None
-        ),
-        client_auth_method=identity.auth_method,
-        registration=identity.registration,
-        issuer=metadata.issuer,
-        resource=flow.resource,
-        redirect_uri=flow.redirect_uri,
-        scopes=list(scopes),
-        authorization_endpoint=metadata.authorization_endpoint,
-        token_endpoint=metadata.token_endpoint,
-        revocation_endpoint=metadata.revocation_endpoint,
-        registration_endpoint=metadata.registration_endpoint,
-        expires_at=datetime.now(UTC) + oauth.FLOW_LIFETIME,
-    )
-    if allocated is None:
-        raise _conflict("this connection changed while you were authorizing it")
-    return AuthorizeResponse(authorization_url=authorization_url)
-
-
-async def _register_client(
-    fetcher: Any,
-    metadata: oauth.AuthorizationServerMetadata,
-    *,
-    policy: EgressPolicy,
-    base_url: str,
-    connection_id: int,
-) -> oauth.ClientIdentity:
-    """Register dynamically, when the server supports nothing better."""
-    from cloud_agent.mcp.transports import TransportError
-
-    if not metadata.registration_endpoint:
-        raise _bad_request("this authorization server has no registration endpoint")
-    body = oauth.registration_request_body(
-        client_name="HybridInference Cloud Agent",
-        # The URI the redirect will actually use, computed the same way, not
-        # the bare path. A server that checks the registered value against the
-        # one in the authorization request -- which the specification requires
-        # it to -- refuses the two that differ, and the mismatch is invisible
-        # until somebody tries to connect.
-        redirect_uris=[_callback_url(base_url, connection_id)],
-        scopes=metadata.scopes_supported,
-    )
-    try:
-        payload = await _post_json(fetcher, metadata.registration_endpoint, body, policy=policy)
-    except TransportError as exc:
-        raise _bad_request(f"client registration failed: {exc}") from exc
-    return oauth.parse_registration_response(payload)
-
-
-async def _post_json(
-    fetcher: Any, url: str, body: Mapping[str, Any], *, policy: EgressPolicy
-) -> Mapping[str, Any]:
-    """POST a JSON body under the same egress policy as everything else.
-
-    Every failure leaves here as a request error the caller can report. A raw
-    ``httpx`` exception or a policy refusal escaping this helper becomes a 500
-    with no diagnosis -- from a URL the *authorization server's* metadata chose,
-    which is the one input in this path the user did not supply.
-    """
-    import httpx
-
-    from cloud_agent.mcp.net_policy import EndpointRejected, check_addresses, validate_endpoint
-    from cloud_agent.mcp.transports import TransportError, pinned_transport, read_bounded
-
-    try:
-        endpoint = validate_endpoint(url, policy)
-        loop_addresses = await _resolve(endpoint.host, endpoint.port)
-        check_addresses(endpoint.host, loop_addresses, policy)
-    except EndpointRejected as exc:
-        raise _bad_request(str(exc)) from exc
-    except OSError as exc:
-        raise _bad_request(f"that address could not be resolved: {exc}") from exc
-    try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(15.0),
-            follow_redirects=False,
-            headers=IDENTITY_ENCODING_HEADERS,
-            transport=pinned_transport(),
-        ) as client:
-            # Streamed, so the size limit is applied while the body arrives
-            # rather than to a body the registration server already chose the
-            # size of. Registration is the one request here whose *response*
-            # contains a client secret.
-            response = await client.send(
-                client.build_request(
-                    "POST",
-                    endpoint.url,
-                    json=dict(body),
-                    headers={"accept": "application/json", **IDENTITY_ENCODING_HEADERS},
-                ),
-                stream=True,
-            )
-            try:
-                status = response.status_code
-                payload = await read_bounded(response)
-            finally:
-                await response.aclose()
-    except (httpx.HTTPError, TransportError) as exc:
-        raise _bad_request(f"the authorization server could not be reached: {exc}") from exc
-    if status >= 400:
-        raise _bad_request(f"the authorization server answered {status} to registration")
-    try:
-        document = json.loads(payload or b"{}")
-    except ValueError as exc:
-        raise _bad_request("the registration response is not JSON") from exc
-    if not isinstance(document, Mapping):
-        raise _bad_request("the registration response is not an object")
-    del fetcher
-    return document
-
-
-async def _resolve(host: str, port: int) -> list[str]:
-    """Resolve a host to its addresses, for the egress check.
-
-    Under the spelling the connection layer dials rather than the one that was
-    typed: ``getaddrinfo`` applies the 2003 IDNA codec, so a unicode label
-    resolves as a different domain from the one httpx connects to.
-    """
-    import asyncio
-
-    from cloud_agent.mcp.net_policy import dial_host
-
-    loop = asyncio.get_running_loop()
-    infos = await loop.getaddrinfo(dial_host(host), port, type=0)
-    return [str(info[4][0]) for info in infos]
-
-
-async def _callback_session_user(request: Request) -> str | None:
-    """The Agent account the returning browser is signed in as, or ``None``.
-
-    Read by the same verifier as every owner route, but answered rather than
-    raised: the callback is a browser navigation, and a 401 body is a dead end
-    where a redirect back to the app can say what to do. The session cookie is
-    ``SameSite=Lax``, so it travels on this top-level GET from the provider.
-    Only the cookie is read: a provider's redirect cannot carry a bearer, and
-    declaring that header would add a parameter to the served contract that no
-    real callback could use.
-    """
-    try:
-        user = await get_current_user(request, authorization=None)
-    except HTTPException:
-        return None
-    return str(user["user_id"])
-
-
-#: Why a callback without the starting account's session was refused. Fixed
-#: text: nothing about the flow, or about who started it, is disclosed.
-_CALLBACK_NEEDS_SESSION = (
-    "sign in to the account that started this authorization, then sign in to the server again"
-)
-
-
-@router.get("/oauth/callback/{provider}", response_model=None)
-async def oauth_callback(  # noqa: PLR0912 complexity baseline, #771
-    provider: str,
-    request: Request,
-    state: str = Query(""),
-    code: str = Query(""),
-    error: str = Query(""),
-    store: _McpConnectionsStorage | None = Depends(get_storage),
-    session_user: str | None = Depends(_callback_session_user),
-) -> Response:
-    """Complete a browser authorization, fenced to the flow that started it.
-
-    The *state* identifies the flow; the Agent session decides who may finish
-    it. A flow is consumed only for the account that started it, before any
-    code is exchanged. Without that, a consent URL started by one user and
-    approved in another person's browser would store that person's provider
-    grant on the first user's connection -- the authorization-code injection
-    RFC 9700 describes, which PKCE does not stop because the platform holds
-    the verifier. The connection is still taken from the flow row, written by
-    an authenticated request, rather than from anything this request claims.
-    """
-    job_store = _require_store(store)
-    if error:
-        message = (
-            "GitHub sign-in was cancelled. You can try again."
-            if provider == "github" and error == "access_denied"
-            else error
-        )
-        return _callback_redirect(provider, ok=False, message=message)
-    if not state or not code:
-        return _callback_redirect(provider, ok=False, message="missing state or code")
-    if session_user is None:
-        return _callback_redirect(provider, ok=False, message=_CALLBACK_NEEDS_SESSION)
-
-    flow = await job_store.mcp.consume_mcp_oauth_flow(
-        state_hash=oauth.state_hash(state), user_id=session_user
-    )
-    if flow is None:
-        # Expired, already used, or started by another account: one answer,
-        # so a state value cannot be probed for whose flow it is.
-        return _callback_redirect(
-            provider,
-            ok=False,
-            message=(
-                "this authorization expired, was already used, or was started by another account"
-            ),
-        )
-    uses_github_client = github_oauth.is_managed(
-        issuer=flow["issuer"],
-        token_endpoint=flow["token_endpoint"],
-        resource=str(flow["resource"]),
-    ) and urlsplit(str(flow["redirect_uri"])).path.endswith("/v1/agent/mcp/oauth/callback/github")
-    managed_github = provider == "github" and uses_github_client
-    if str(flow["connection_id"]) != str(provider) and not managed_github:
-        # A state minted for one connection cannot complete another's flow.
-        return _callback_redirect(
-            provider, ok=False, message="this authorization is not for that connection"
-        )
-    if managed_github:
-        provider = str(flow["connection_id"])
-
-    row = await job_store.mcp.get_mcp_connection(connection_id=int(flow["connection_id"]))
-    if row is None or row.get("deleted_at") is not None:
-        return _callback_redirect(provider, ok=False, message="that connection was removed")
-    for key, message in (
-        ("config_revision", "the connection was reconfigured"),
-        ("authorization_epoch", "the connection was reconnected"),
-        ("oauth_generation", "a newer authorization replaced this one"),
-    ):
-        if int(row.get(key) or 0) != int(flow[key]):
-            # Per-item CAS: each version is compared on its own so the message
-            # names what changed rather than a generic failure.
-            return _callback_redirect(provider, ok=False, message=message)
-
-    cipher = oauth_cipher()
-    try:
-        verifier = cipher.decrypt(str(flow["code_verifier_ciphertext"]))
-    except CredentialCipherError:
-        return _callback_redirect(provider, ok=False, message="this flow could not be read")
-
-    from cloud_agent.mcp.transports import TransportError
-
-    metadata = oauth.AuthorizationServerMetadata(
-        issuer=str(flow["issuer"]),
-        authorization_endpoint=str(flow["authorization_endpoint"]),
-        token_endpoint=str(flow["token_endpoint"]),
-        revocation_endpoint=flow.get("revocation_endpoint"),
-        registration_endpoint=flow.get("registration_endpoint"),
-    )
-    identity = oauth.ClientIdentity(
-        client_id=str(flow["client_id"]),
-        registration=flow.get("registration") or "dcr",
-        client_secret=(
-            cipher.decrypt(str(flow["client_secret_ciphertext"]))
-            if flow.get("client_secret_ciphertext")
-            else None
-        ),
-        auth_method=str(flow["client_auth_method"]),
-    )
-    token_request = oauth.TokenRequest(
-        url=metadata.token_endpoint,
-        data={
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": str(flow["redirect_uri"]),
-            "client_id": identity.client_id,
-            "code_verifier": verifier,
-            "resource": str(flow["resource"]),
-        },
-        client=identity,
-    )
-    try:
-        payload = await _post_form(token_request, policy=_policy())
-        tokens = oauth.parse_token_response(payload)
-    except (TransportError, oauth.OAuthError) as exc:
-        logger.warning("agent_mcp_oauth_exchange_failed", exc_info=True)
-        return _callback_redirect(provider, ok=False, message=str(exc))
-
-    credential_cipher = mcp_cipher()
-    auth_config_patch: dict[str, Any] = {"client_id": identity.client_id}
-    if uses_github_client or (row.get("auth_config") or {}).get("managed_github_oauth"):
-        auth_config_patch["managed_github_oauth"] = uses_github_client
-    written = await job_store.mcp.set_mcp_credential(
-        connection_id=int(flow["connection_id"]),
-        expected_authorization_epoch=int(flow["authorization_epoch"]),
-        access_token_ciphertext=credential_cipher.encrypt(tokens.access_token),
-        refresh_token_ciphertext=(
-            credential_cipher.encrypt(tokens.refresh_token) if tokens.refresh_token else None
-        ),
-        expires_at=tokens.expires_at,
-        scopes=list(tokens.scopes) or list(flow.get("scopes") or []),
-        issuer=metadata.issuer,
-        resource=str(flow["resource"]),
-        # Whether this issuer rotates refresh tokens is not knowable here.
-        # Being handed one at authorization time says nothing about whether the
-        # *next* refresh invalidates it -- RFC 6749 §6 lets a non-rotating
-        # issuer send one, and lets any issuer omit it -- so the fact is
-        # recorded where it can be observed, in ``oauth.apply_refresh``, when a
-        # refresh returns a different token. Claiming rotation now would turn
-        # that ordinary omission into a forced reconnection.
-        refresh_rotates=False,
-        client_auth_method=identity.auth_method,
-        registration=identity.registration,
-        # The client this authorization actually used, written with the
-        # credential it obtained. A dynamic registration is decided while the
-        # browser is being sent away and lives only in the flow row until here,
-        # so without this the connection keeps a token it has no client id to
-        # renew: the first refresh sends an empty one, and the authorization
-        # server refuses a grant it never issued to "nobody".
-        #
-        # Merged into ``auth_config`` inside the fenced write rather than
-        # recorded through ``set_mcp_client_registration``, which is the manual
-        # path: that one bumps the OAuth generation to invalidate a flow already
-        # in flight, and this *is* the flow. Bumping it here would refuse the
-        # write this same call is making.
-        auth_config_patch=auth_config_patch,
-        # The managed app secret remains in encrypted settings, not the user's
-        # connection. Refresh resolves it there after checking GitHub's target.
-        # Otherwise retain the flow's ciphertext under its OAuth key domain.
-        # For a public client it is absent and any earlier secret is left alone:
-        # the authentication method written above is what decides whether one is
-        # sent, so a leftover secret cannot be used by accident.
-        client_secret_ciphertext=(
-            None if uses_github_client else flow.get("client_secret_ciphertext")
-        ),
-        token_endpoint=metadata.token_endpoint,
-        revocation_endpoint=metadata.revocation_endpoint,
-        registration_endpoint=metadata.registration_endpoint,
-        # The previous refresh token is dead -- this is an authorization, so
-        # whatever was there before belonged to a different grant. The one in
-        # this response is not: it is what the connection renews with, and the
-        # store keeps it.
-        clear_refresh=True,
-        reset_status=True,
-        # Re-checked here rather than only before the exchange. The token
-        # request took real time, and a newer flow may have completed inside it:
-        # the epoch would not catch that, because re-authorizing the same
-        # connection is not a change of target.
-        expected_oauth_generation=int(flow["oauth_generation"])
-        if flow.get("oauth_generation") is not None
-        else None,
-        expected_config_revision=int(flow["config_revision"])
-        if flow.get("config_revision") is not None
-        else None,
-    )
-    if not written:
-        return _callback_redirect(
-            provider, ok=False, message="the connection changed during authorization"
-        )
-    logger.info(
-        "agent_mcp_authorized",
-        extra={"event": "agent_mcp_authorized", "connection_id": flow["connection_id"]},
-    )
-    return _callback_redirect(str(flow["connection_id"]), ok=True, message="")
-
-
-async def _post_form(request: oauth.TokenRequest, *, policy: EgressPolicy) -> Mapping[str, Any]:
-    """POST a token request under the egress policy.
-
-    Raises only the caller's own refusal type. A policy refusal, a name that
-    does not resolve, a transport failure or an answer that is not JSON all end
-    as one, because the callback's job is to take the browser back to a page
-    that says what happened -- not to raise a 500 out of a redirect it cannot
-    send.
-    """
-    import httpx
-
-    from cloud_agent.mcp.net_policy import EndpointRejected, check_addresses, validate_endpoint
-    from cloud_agent.mcp.transports import TransportError, pinned_transport, read_bounded
-
-    try:
-        endpoint = validate_endpoint(request.url, policy)
-        check_addresses(endpoint.host, await _resolve(endpoint.host, endpoint.port), policy)
-    except EndpointRejected as exc:
-        raise TransportError(str(exc), kind=exc.kind) from exc
-    except OSError as exc:
-        raise TransportError(f"the token endpoint could not be resolved: {exc}") from exc
-
-    try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(20.0),
-            follow_redirects=False,
-            headers=IDENTITY_ENCODING_HEADERS,
-            transport=pinned_transport(),
-        ) as client:
-            # Streamed for the same reason as everywhere else on this path: a
-            # token response is a body a server chooses the size of, and this
-            # one carries the access and refresh tokens.
-            response = await client.send(
-                client.build_request(
-                    "POST",
-                    endpoint.url,
-                    data=request.form(),
-                    headers={
-                        "Accept": "application/json",
-                        **request.headers(),
-                        **IDENTITY_ENCODING_HEADERS,
-                    },
-                ),
-                stream=True,
-            )
-            try:
-                status = response.status_code
-                payload = await read_bounded(response)
-            finally:
-                await response.aclose()
-    except (httpx.HTTPError, TransportError) as exc:
-        # Normalized here rather than left to escape: this is the second HTTP
-        # client in the OAuth path, and the fetcher above already made this
-        # conversion. A raw transport error would leave the browser at a 500
-        # with no diagnosis, which is a worse version of the failure the caller
-        # already knows how to report.
-        raise TransportError(f"the token endpoint could not be reached: {exc}") from exc
-    if status >= 400:
-        raise TransportError(f"the token endpoint answered {status}", kind="needs_authorization")
-    try:
-        document = json.loads(payload or b"{}")
-    except ValueError as exc:
-        raise TransportError("the token response is not JSON") from exc
-    if not isinstance(document, Mapping):
-        raise TransportError("the token response is not an object")
-    return document
-
-
-def _callback_url(base_url: str, connection_id: int) -> str:
-    """The one redirect URI for a connection, used for register, authorize and redeem.
-
-    Defined once because the three have to agree. A server compares the
-    ``redirect_uri`` in the authorization request against the one registered
-    for the client -- the specification requires it to -- so a registration that
-    used a different string, even a prefix of the right one, fails the flow at
-    the browser with nothing in this service's logs.
-    """
-    return oauth.redirect_uri(base_url, str(connection_id))
-
-
-def _callback_redirect(provider: str, *, ok: bool, message: str) -> Response:
-    """Send the browser back to the app with a result it can display."""
-    # The registered callback belongs to the API; the result belongs to the web
-    # app, whose origin and mount path may differ (for example /agents/api vs /agents).
-    base = (setting_env("AGENT_WEB_BASE_URL") or "").strip().rstrip("/")
-    result = {"mcp_authorized": "1" if ok else "0", "mcp_connection": provider}
-    if message:
-        result["mcp_message"] = message
-    target = f"{base}/integrations?{urlencode(result)}"
-    return RedirectResponse(url=target, status_code=302)
-
-
-# --------------------------------------------------------------------------
-# Invocation decisions
-# --------------------------------------------------------------------------
-
-
-@router.get("/invocations", response_model=InvocationsResponse)
-async def list_invocations(
-    job_id: str | None = Query(default=None),
-    thread_id: str | None = Query(default=None),
-    pending_only: bool = Query(default=False),
-    limit: int = Query(default=50, ge=1, le=100),
-    before_id: int | None = Query(default=None, gt=0, le=2**63 - 1),
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _McpConnectionsStorage | None = Depends(get_storage),
-) -> InvocationsResponse:
-    """Page one job's history, one conversation, or the owner's pending inbox.
-
-    The owner is part of the query, not a check after it. These rows carry the
-    tool call's arguments decrypted for display -- code, documents, whatever the
-    model was about to send -- so a listing that trusts the caller's ``job_id``
-    is a way to read another user's calls by guessing an id. The named job is
-    checked first so a caller learns "not yours" the same way it learns "does
-    not exist": with a 404 that says nothing about which it was.
-    """
-    job_store = _require_store(store)
-    if job_id is None and thread_id is None and not pending_only:
-        raise _bad_request("name a job or a conversation")
-    if job_id is not None:
-        job = await job_store.conversation_queries.get_job(job_id)
-        if (
-            job is None
-            or str(job.get("user_id")) != user["user_id"]
-            or job.get("deleted_at") is not None
-        ):
-            raise _not_found("no such job")
-    statuses = [InvocationStatus.PENDING.value] if pending_only else None
-    rows = await job_store.mcp.list_mcp_invocations(
-        job_id=job_id,
-        thread_id=thread_id,
-        statuses=statuses,
-        user_id=user["user_id"],
-        limit=limit + 1,
-        before_id=before_id,
-    )
-    has_more = len(rows) > limit
-    rows = rows[:limit]
-    # One catalogue read per connection, not per row: a history page is mostly
-    # calls to the same few servers, and a catalogue carries every schema.
-    snapshots: dict[int, Mapping[str, Any] | None] = {}
-    threads: dict[str, Mapping[str, Any] | None] = {}
-    return InvocationsResponse(
-        invocations=[
-            await _invocation_view(job_store, row, user["user_id"], snapshots, threads)
-            for row in rows
-        ],
-        has_more=has_more,
-        next_before_id=int(rows[-1]["id"]) if has_more else None,
-    )
-
-
-@router.post("/invocations/{invocation_id}/decision", response_model=InvocationView)
-async def decide_invocation(
-    invocation_id: int,
-    body: DecisionRequest,
-    user: dict[str, Any] = Depends(require_agent_owner),
-    store: _McpConnectionsStorage | None = Depends(get_storage),
-) -> InvocationView:
-    """Approve or deny one pending call.
-
-    Scoped by owner at the read, and decided conditionally in SQL: an approval
-    that arrives after the call expired does not revive it, and a decision by
-    somebody who does not own the job is refused before anything is written.
-    """
-    job_store = _require_store(store)
-    existing = await job_store.mcp.get_mcp_invocation(invocation_id=invocation_id)
-    if existing is None:
-        raise _not_found("no such MCP call")
-    job = await job_store.conversation_queries.get_job(str(existing["job_id"]))
-    if (
-        job is None
-        or str(job.get("user_id")) != user["user_id"]
-        or job.get("deleted_at") is not None
-    ):
-        raise _not_found("no such MCP call")
-    rule: dict[str, Any] | None = None
-    if body.always_allow:
-        if not body.approve:
-            raise HTTPException(status_code=422, detail="Always allow requires approval")
-        snapshot = await job_store.mcp.get_mcp_capabilities(
-            connection_id=int(existing["connection_id"])
-        )
-        kind = str(existing.get("capability_kind") or "tool")
-        entry = _held_capability(snapshot, existing, kind)
-        if entry is None:
-            raise _conflict("the capability changed; review the current permissions")
-        schema = entry.get("input_schema")
-        capability = Capability(
-            kind=CapabilityKind(kind),
-            name=str(entry["name"]),
-            description=str(entry.get("description") or ""),
-            input_schema=schema if isinstance(schema, Mapping) else None,
-        )
-        rule = {"policy": "allow", "fingerprint": capability.fingerprint()}
-    decision_args: dict[str, Any] = {
-        "invocation_id": invocation_id,
-        "approve": body.approve,
-        "decided_by": user["user_id"],
-    }
-    if rule is not None:
-        decision_args["always_allow_rule"] = rule
-    decided = await job_store.mcp.decide_mcp_invocation(**decision_args)
-    if decided is None:
-        raise _conflict("this call was already decided, or it expired")
-    return await _invocation_view(job_store, decided, user["user_id"])
-
-
-async def _invocation_view(
-    job_store: _McpConnectionsStorage,
-    row: Mapping[str, Any],
-    user_id: str,
-    snapshots: dict[int, Mapping[str, Any] | None] | None = None,
-    threads: dict[str, Mapping[str, Any] | None] | None = None,
-) -> InvocationView:
-    """Render one invocation, including the arguments the owner is approving.
-
-    ``snapshots`` and ``threads`` cache metadata across one bounded page.
-    """
-    from cloud_agent.mcp.host import decode_arguments
-    from cloud_agent.mcp.invocations import recovery_note
-    from cloud_agent.mcp.models import Invocation, InvocationStatus as Status
-
-    arguments: dict[str, Any] | None = None
-    if row.get("arguments_ciphertext"):
-        try:
-            arguments = decode_arguments(
-                mcp_invocation_cipher().decrypt(str(row["arguments_ciphertext"]))
-            )
-        except Exception:
-            arguments = None
-    connection_id = int(row["connection_id"])
-    connection = await job_store.mcp.get_mcp_connection(connection_id=connection_id)
-    if snapshots is None:
-        snapshots = {}
-    if connection_id not in snapshots:
-        snapshots[connection_id] = await job_store.mcp.get_mcp_capabilities(
-            connection_id=connection_id
-        )
-    kind = str(row.get("capability_kind") or CapabilityKind.TOOL.value)
-    capability = _held_capability(snapshots[connection_id], row, kind)
-    thread_id = str(row["thread_id"])
-    if threads is None:
-        threads = {}
-    if thread_id not in threads:
-        threads[thread_id] = await job_store.conversation_queries.get_thread(thread_id)
-    thread = threads[thread_id]
-    thread_title = (
-        str(thread["title"])
-        if thread is not None and str(thread.get("user_id")) == user_id and thread.get("title")
-        else None
-    )
-    status = Status(str(row["status"]))
-    expires_at = row.get("expires_at")
-    # A worker persists expiry asynchronously. Display an elapsed deadline
-    # immediately, without writing during a read or reviving any decision.
-    if isinstance(expires_at, datetime) and status in {Status.PENDING, Status.APPROVED}:
-        deadline = expires_at if expires_at.tzinfo is not None else expires_at.replace(tzinfo=UTC)
-        if deadline <= datetime.now(UTC):
-            status = Status.EXPIRED
-    invocation = Invocation(
-        invocation_id=str(row["id"]),
-        job_id=str(row["job_id"]),
-        attempt_id=str(row.get("attempt_id") or ""),
-        lease_generation=int(row.get("lease_generation") or 0),
-        thread_id=thread_id,
-        connection_id=str(row["connection_id"]),
-        capability_name=str(row["capability_name"]),
-        arguments_digest=str(row["arguments_digest"]),
-        status=status,
-    )
-    return InvocationView(
-        id=int(row["id"]),
-        job_id=str(row["job_id"]),
-        attempt_id=int(row["attempt_id"]) if row.get("attempt_id") is not None else None,
-        thread_id=thread_id,
-        thread_title=thread_title,
-        connection_id=int(row["connection_id"]),
-        connection_label=str(connection["label"]) if connection else None,
-        capability_name=str(row["capability_name"]),
-        capability_kind=kind,
-        capability_description=(
-            str(capability.get("description") or "") if capability is not None else None
-        ),
-        capability_annotations=(
-            dict(capability.get("annotations") or {}) if capability is not None else {}
-        ),
-        status=status.value,
-        always_allow_status=row.get("always_allow_status"),
-        arguments_digest=str(row["arguments_digest"]),
-        arguments=arguments,
-        created_at=row.get("created_at"),
-        expires_at=row.get("expires_at"),
-        decided_at=row.get("decided_at"),
-        result_summary=row.get("result_summary"),
-        guidance=recovery_note(invocation),
-    )
-
-
-def _held_capability(
-    snapshot: Mapping[str, Any] | None, row: Mapping[str, Any], kind: str
-) -> Mapping[str, Any] | None:
-    """The catalogue entry a held call names, if it is still the one it was held under.
-
-    A discovery that changed anything moves the capability revision, and a
-    call held under an older one cannot be dispatched on this approval. Its
-    entry in the newer catalogue may describe something else, so none is
-    returned rather than a description the call was not made against.
-    """
-    if snapshot is None or snapshot.get("capability_revision") != row.get("capability_revision"):
-        return None
-    key = next((key for key, surface in _SNAPSHOT_SURFACES if surface.value == kind), None)
-    if key is None:
-        return None
-    name = str(row["capability_name"])
-    for entry in snapshot.get(key) or []:
-        if isinstance(entry, Mapping) and str(entry.get("name") or "") == name:
-            return entry
-    return None
-
-
-def mcp_invocation_cipher() -> Any:
-    """The cipher a held call's arguments are stored under."""
-    from cloud_agent.mcp.registry import invocation_cipher
-
-    return invocation_cipher()
-
-
-# --------------------------------------------------------------------------
-# Validation helpers
-# --------------------------------------------------------------------------
-
-
-def _parse_transport(value: str) -> Transport:
-    """Read a transport name, refusing one this platform cannot carry."""
-    try:
-        return Transport(value)
-    except ValueError as exc:
-        allowed = ", ".join(item.value for item in Transport)
-        raise _bad_request(f"unknown transport {value!r}; use one of: {allowed}") from exc
-
-
-def _parse_location(value: str) -> ExecutionLocation:
-    """Read an execution location name."""
-    try:
-        return ExecutionLocation(value)
-    except ValueError as exc:
-        allowed = ", ".join(item.value for item in ExecutionLocation)
-        raise _bad_request(f"unknown run location {value!r}; use one of: {allowed}") from exc
-
-
-def _parse_auth_kind(value: str) -> AuthKind:
-    """Read an authentication kind."""
-    try:
-        return AuthKind(value)
-    except ValueError as exc:
-        allowed = ", ".join(item.value for item in AuthKind)
-        raise _bad_request(f"unknown auth kind {value!r}; use one of: {allowed}") from exc
+        yield
+    except (Refused, Unavailable) as exc:
+        raise as_http_exception(exc) from exc
 
 
 def _build_auth(
     auth_kind: str, header_name: str | None, header_scheme: str | None
 ) -> tuple[AuthKind, dict[str, Any]]:
     """Validate an authentication choice and render its non-secret settings."""
-    kind = _parse_auth_kind(auth_kind)
-    if kind is AuthKind.STATIC:
-        name = (header_name or "Authorization").strip()
-        scheme = (
-            header_scheme
-            if header_scheme is not None
-            else ("Bearer" if name.lower() == "authorization" else "")
-        ).strip()
-        # Validated here rather than at dispatch time, so a header the platform
-        # would refuse is reported while the user is still on the form.
-        try:
-            HeaderAuth(header_name=name, scheme=scheme).render("x")
-        except EndpointRejected as exc:
-            raise _bad_request(str(exc)) from exc
-        return kind, {"header_name": name, "scheme": scheme}
-    if kind is AuthKind.OAUTH:
-        return kind, {}
-    return kind, {}
-
-
-def _validate_target(
-    *,
-    transport: Transport,
-    location: ExecutionLocation,
-    url: str | None,
-    launch: Mapping[str, Any] | None,
-    mounts: Sequence[Mount] = (),
-) -> tuple[str | None, dict[str, Any] | None]:
-    """Check a connection's target and return its storable form.
-
-    ``mounts`` are the ones the platform derived and the owner was shown; a
-    submitted launch document's own ``mounts`` are never read.
-    """
-    if location is ExecutionLocation.REMOTE:
-        if transport is Transport.STDIO:
-            raise _bad_request("a remote connection cannot use the stdio transport")
-        if not url:
-            raise _bad_request("a remote connection needs a URL")
-        try:
-            endpoint = validate_endpoint(url, _policy())
-        except EndpointRejected as exc:
-            raise _bad_request(str(exc)) from exc
-        return endpoint.url, None
-
-    if transport is not Transport.STDIO:
-        raise _bad_request("a local process needs the stdio transport")
-    if not launch or not launch.get("command"):
-        raise _bad_request("a stdio connection needs a command")
-    try:
-        spec = LaunchSpec(
-            command=str(launch["command"]),
-            args=tuple(str(arg) for arg in launch.get("args") or ()),
-            env={str(k): str(v) for k, v in (launch.get("env") or {}).items()},
-            cwd=str(launch["cwd"]) if launch.get("cwd") else None,
-            mounts=tuple(mounts),
-        )
-        plan = build_launch_plan(
-            spec, connection_id="draft", location=location, policy=ManagedLaunchPolicy()
-        )
-    except LaunchPlanError as exc:
-        raise _bad_request(str(exc)) from exc
-    rendered: dict[str, Any] = {
-        "command": spec.command,
-        "args": list(spec.args),
-        "env": dict(spec.env),
-        "cwd": spec.cwd,
-        "mounts": [
-            {"source": mount.source, "target": mount.target, "read_only": mount.read_only}
-            for mount in plan.mounts
-        ],
-    }
-    return None, rendered
-
-
-def _static_credential(
-    *,
-    secret: str,
-    header_name: str | None,
-    header_scheme: str | None,
-    fallback_header: str,
-) -> tuple[str, dict[str, Any]]:
-    """Validate and encrypt one static secret. No connection is written."""
-    _kind, config = _build_auth(
-        AuthKind.STATIC.value, header_name or fallback_header, header_scheme
-    )
-    try:
-        HeaderAuth(header_name=config["header_name"], scheme=config["scheme"]).render(secret)
-    except EndpointRejected as exc:
-        raise _bad_request(str(exc)) from exc
-    # Two characters and two more, so a person can tell *which* credential is
-    # stored without the page ever holding one it could be made to render.
-    config["hint"] = f"{secret[:2]}{secret[-2:]}" if len(secret) > 4 else ""
-    try:
-        ciphertext = mcp_cipher().encrypt(secret)
-    except CredentialCipherError as exc:
-        raise _no_encryption_key() from exc
-    return ciphertext, config
-
-
-def _optional_static_credential(
-    *,
-    secret: str | None,
-    header_name: str | None,
-    header_scheme: str | None,
-    fallback_header: str,
-) -> tuple[str | None, dict[str, Any] | None]:
-    """Encrypt a secret when the request carried one."""
-    if not secret:
-        return None, None
-    return _static_credential(
-        secret=secret,
-        header_name=header_name,
-        header_scheme=header_scheme,
-        fallback_header=fallback_header,
-    )
-
-
-def _sealed_launch_spec(
-    launch_spec: Mapping[str, Any] | None, secrets: Mapping[str, str]
-) -> dict[str, Any] | None:
-    """Copy a launch spec with its ``secret://`` values encrypted.
-
-    The reference stays ``secret://NAME``; the value lives as ciphertext under
-    the same name. ``None`` means the spec declares nothing to seal. A missing
-    encryption key is refused here, before a connection row exists.
-    """
-    spec = dict(launch_spec) if isinstance(launch_spec, Mapping) else {}
-    env = {str(key): str(value) for key, value in (spec.get("env") or {}).items()}
-    wanted = launch.declared_secret_names(env, {})
-    if not wanted:
-        return None
-    try:
-        cipher = mcp_cipher()
-    except CredentialCipherError as exc:
-        raise _no_encryption_key() from exc
-    stored = {str(key): str(value) for key, value in (spec.get("env_secrets") or {}).items()}
-    for name in wanted:
-        if name in secrets:
-            stored[name] = cipher.encrypt(secrets[name])
-    spec["env_secrets"] = stored
-    return spec
-
-
-def _import_secrets(draft: config_import.ImportDraft, body: ImportRequest) -> dict[str, str]:
-    """Values an imported draft carries or the caller supplied for it."""
-    secrets = {secret.name: secret.value for secret in draft.secrets if secret.value}
-    supplied = body.server_secrets.get(draft.label, {})
-    for secret in draft.secrets:
-        value = supplied.get(secret.name, body.env_secrets.get(secret.name))
-        if secret.value is None and value is not None:
-            secrets[secret.name] = value
-    return secrets
-
-
-def _prepare_import_draft(
-    draft: config_import.ImportDraft, *, user_id: str, body: ImportRequest
-) -> dict[str, Any]:
-    """One import draft, with credentials encrypted and nothing written yet."""
-    parsed_location = _parse_location(body.locations.get(draft.label, draft.location))
-    launch_spec = None
-    if draft.launch is not None:
-        launch_spec = {
-            "command": draft.launch.command,
-            "args": list(draft.launch.args),
-            "env": dict(draft.launch.env),
-            "cwd": draft.launch.cwd,
-        }
-    # The checks create applies, and only the form they render is stored: the
-    # run location must fit the transport, an address must pass the egress
-    # policy and a command must build a launch plan. The local paths a command
-    # names become a managed worker's mounts under that plan's mount rules.
-    url, launch_spec = _validate_target(
-        transport=draft.transport,
-        location=parsed_location,
-        url=draft.url,
-        launch=launch_spec,
-        mounts=config_import.mounts_for(draft.paths)
-        if parsed_location is ExecutionLocation.MANAGED_WORKER
-        else (),
-    )
-    auth_config: dict[str, Any] = {}
-    if draft.auth_kind is AuthKind.STATIC and draft.secrets:
-        header_name = draft.secrets[0].name
-        auth_config = {
-            "header_name": header_name,
-            "scheme": draft.header_auth.scheme
-            if header_name == draft.header_auth.header_name
-            else "",
-        }
-    secrets = _import_secrets(draft, body)
-    access_token_ciphertext = None
-    auth_config_patch = None
-    sealed_launch_spec = None
-    if secrets and draft.transport is Transport.STDIO:
-        sealed_launch_spec = _sealed_launch_spec(launch_spec, secrets)
-    elif secrets:
-        header_name = str(auth_config.get("header_name") or "Authorization")
-        secret = secrets.get(header_name)
-        if secret is not None:
-            access_token_ciphertext, auth_config_patch = _static_credential(
-                secret=secret,
-                header_name=header_name,
-                header_scheme=str(auth_config.get("scheme") or ""),
-                fallback_header=header_name,
-            )
-    return {
-        "user_id": user_id,
-        "label": draft.label,
-        "transport": draft.transport.value,
-        "location": parsed_location.value,
-        "url": url,
-        "launch_spec": launch_spec,
-        "auth_kind": draft.auth_kind.value,
-        "auth_config": auth_config,
-        "template": None,
-        "reuse_pending": not draft.secrets,
-        "access_token_ciphertext": access_token_ciphertext,
-        "auth_config_patch": auth_config_patch,
-        "sealed_launch_spec": sealed_launch_spec,
-    }
+    with _answered():
+        return inputs.build_auth(auth_kind, header_name, header_scheme)
 
 
 async def _store_static_secret(
@@ -2152,57 +911,16 @@ async def _store_static_secret(
     expected_epoch: int | None = None,
 ) -> bool:
     """Encrypt and store one static credential."""
-    ciphertext, config = _static_credential(
-        secret=secret,
-        header_name=header_name,
-        header_scheme=header_scheme,
-        fallback_header=_header_of(row),
-    )
-    epoch = int(row["authorization_epoch"]) if expected_epoch is None else expected_epoch
-    return await store.mcp.set_mcp_credential(
-        connection_id=int(row["id"]),
-        expected_authorization_epoch=epoch,
-        access_token_ciphertext=ciphertext,
-        auth_config_patch=config,
-        bump_epoch=replaces_identity,
-    )
-
-
-def _header_of(row: Mapping[str, Any]) -> str:
-    """The header name a connection's static credential is injected as."""
-    config = row.get("auth_config")
-    settings = config if isinstance(config, Mapping) else {}
-    return str(settings.get("header_name") or "Authorization")
-
-
-async def _require_connector(
-    store: _McpConnectionsStorage, *, connector_id: int, user_id: str
-) -> dict[str, Any]:
-    """Fetch one of this user's connectors, or refuse."""
-    row = next(
-        (
-            item
-            for item in await store.mcp.list_mcp_connectors(user_id=user_id)
-            if int(item["id"]) == connector_id
-        ),
-        None,
-    )
-    if row is None:
-        raise _not_found("no such connector")
-    return row
-
-
-def _no_encryption_key() -> HTTPException:
-    """The deployment cannot hold a credential at all."""
-    return HTTPException(
-        status_code=503,
-        detail={
-            "error": {
-                "type": "server_error",
-                "message": "this deployment has no MCP encryption key configured",
-            }
-        },
-    )
+    with _answered():
+        return await inputs.store_static_secret(
+            store.mcp,
+            row=row,
+            secret=secret,
+            header_name=header_name,
+            header_scheme=header_scheme,
+            replaces_identity=replaces_identity,
+            expected_epoch=expected_epoch,
+        )
 
 
 __all__ = [
@@ -2214,7 +932,10 @@ __all__ = [
     "router",
 ]
 
-# Copy already-prefixed routes into the compatibility router. This keeps the
-# public router flat, so an application that includes it can bind dependency
-# overrides exactly as it did when every route lived here.
+# Copy already-prefixed routes into the compatibility router, in the order they
+# were declared when every route lived here. This keeps the public router flat,
+# so an application that includes it can bind dependency overrides exactly as
+# it did then.
+router.routes.extend(authorization_router.routes)
+router.routes.extend(invocations_router.routes)
 router.routes.extend(thread_bindings_router.routes)

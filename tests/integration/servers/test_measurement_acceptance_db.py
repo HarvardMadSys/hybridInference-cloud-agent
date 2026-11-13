@@ -51,22 +51,31 @@ import httpx
 import pytest
 import pytest_asyncio
 from tests.support.db import reset_agent_tables
+from tests.support.local_accounts import LOCAL_SECRET, PASSWORD, make_account
 from tests.support.migrations import apply_migrations
 
-from cloud_agent import measurement_writer, operation_measurement, sandbox_manager_routing
-from cloud_agent.api.deps import get_agent_app_credentials, get_gateway_client
+from cloud_agent.accounts.config import ENV_LOCAL_SESSION_SECRET
+from cloud_agent.accounts.session_cookie import LOCAL_SESSION_COOKIE, LOCAL_SESSION_COOKIE_INSECURE
+from cloud_agent.api.deps import get_agent_app_credentials
 from cloud_agent.app import create_app
-from cloud_agent.identity import SESSION_COOKIE, mint_session
-from cloud_agent.operation_measurement import INTERACTION_HEADER
-from cloud_agent.sandbox_manager_client import SandboxManagerError, SandboxManagerStream
+from cloud_agent.measurement import measurement_writer, operation_measurement
+from cloud_agent.measurement.operation_measurement import INTERACTION_HEADER
+from cloud_agent.sandbox_manager import sandbox_manager_routing
+from cloud_agent.sandbox_manager.sandbox_manager_client import (
+    SandboxManagerError,
+    SandboxManagerStream,
+)
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.tokens import SCOPE_FULL, mint_worker_token
-from cloud_agent_host import operation_call, runner as runner_mod
+from cloud_agent_host import operation_call
+from cloud_agent_host.claimed_job import ClaimedJob
+from cloud_agent_host.control_plane_client import ControlPlane
 from cloud_agent_host.measurement_delivery import (
     DELIVERY_DRAIN_S,
     DELIVERY_HANDOFF_DRAIN_S,
 )
-from cloud_agent_host.runner import ClaimedJob, ControlPlane
+from cloud_agent_host.service import measurement_sender
+from cloud_agent_host.turn import turn_stream
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.shared_protocol import (
     NATIVE_FORK_AT_ANCHOR_CAPABILITY,
@@ -87,7 +96,9 @@ _ALLOWED_TEST_DB_PATTERN = "_test_"
 
 #: Every request in this module is made by one real owner and read by one real
 #: administrator, both authenticated the way the deployment authenticates them.
-USER_ID = "user-acceptance"
+#: The owner: a real account, signed in through the real sign-in route.
+USER_ID = "01JACCEPTANCE0000000000000"
+OWNER_EMAIL = "owner@acceptance.example"
 ADMIN = {"Authorization": "Bearer acceptance-admin-token"}
 REPO = "acceptance/repo"
 HOST = "acceptance-host"
@@ -145,12 +156,19 @@ async def _reset(pool: Any) -> None:
         await reset_agent_tables(conn)
 
 
-class _Gateway:
-    """The one Gateway answer the owner guard needs, and nothing else."""
-
-    async def agent_access(self, user_id: str) -> dict[str, Any]:
-        """Admit this owner with the permission the routes require."""
-        return {"user_id": user_id, "allowed": True, "permissions": ["agent.use"]}
+async def _signed_in_owner(store: Storage, base_url: str) -> dict[str, str]:
+    """Create the owner's approved account and sign it in: the cookie its sign-in set."""
+    await make_account(store, OWNER_EMAIL, admission="approved", account_id=USER_ID)
+    async with httpx.AsyncClient(base_url=base_url) as client:
+        response = await client.post(
+            "/v1/auth/login", json={"email": OWNER_EMAIL, "password": PASSWORD}
+        )
+    assert response.status_code == 200, response.text
+    for header in response.headers.get_list("set-cookie"):
+        name, _, rest = header.partition("=")
+        if name in {LOCAL_SESSION_COOKIE, LOCAL_SESSION_COOKIE_INSECURE}:
+            return {name: rest.split(";", 1)[0]}
+    raise AssertionError("sign-in set no account session cookie")
 
 
 class _UnusedClient:
@@ -303,6 +321,7 @@ class _Chain:
     claim: dict[str, Any]
     sandbox: dict[str, Any]
     sink: Any
+    owner_cookies: dict[str, str]
 
     @property
     def job_id(self) -> str:
@@ -325,8 +344,8 @@ class _Chain:
         return int(self.claim["lease_generation"])
 
     def session_cookie(self) -> dict[str, str]:
-        """A real minted owner session, as the browser would present it."""
-        return {SESSION_COOKIE: mint_session(user_id=USER_ID)}
+        """The owner's real account session, as the browser would present it."""
+        return dict(self.owner_cookies)
 
     def worker_token(self) -> str:
         """A real full-scope credential for this attempt, as the runner holds."""
@@ -350,7 +369,6 @@ class _Chain:
             runtime=RUNTIME,
             model=MODEL,
             worker_token=self.worker_token(),
-            sandbox_token="unused-by-measurement-delivery",
             execution_profile=str(self.job["execution_profile"]),
             runtime_version=self.claim.get("runtime_version"),
             thread_sandbox=self.job.get("thread_sandbox"),
@@ -471,8 +489,11 @@ async def _running_chain(
     monkeypatch.setenv("AGENT_DATABASE_URL", _dsn(config))
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "acceptance-control-secret-of-32-bytes")
     monkeypatch.setenv("ADMIN_TOKEN", "acceptance-admin-token")
-    monkeypatch.setenv("AGENT_SESSION_SECRET", "acceptance-session-secret-32-bytes!")
-    monkeypatch.setenv("GATEWAY_ISSUER", "https://gateway.example")
+    monkeypatch.setenv(ENV_LOCAL_SESSION_SECRET, LOCAL_SECRET)
+    monkeypatch.setenv("AGENT_SETTINGS_ENCRYPTION_KEY", "acceptance-settings-key-of-32-bytes!")
+    monkeypatch.setenv(
+        "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "acceptance-credential-key-of-32-bytes"
+    )
     monkeypatch.setenv("AGENT_REPO_ALLOWLIST", REPO)
     monkeypatch.setenv("AGENT_SANDBOX_MANAGER_TOKEN", "acceptance-sandbox-manager-token")
     sink = tmp_path / STARTUP_SINK_NAME
@@ -501,18 +522,18 @@ async def _running_chain(
     operation_measurement.reset()
     # This process remembers which measurements it delivered, and which
     # interactions it minted; a test must not inherit the previous one's.
-    runner_mod.reset_delivery_state()
+    measurement_sender.reset_delivery_state()
 
     sandbox_manager = _SandboxManager()
     monkeypatch.setattr(sandbox_manager_routing, "_client_for", lambda _host: sandbox_manager)
     app = create_app()
-    # Only the two external collaborators are replaced. Storage is deliberately
-    # not overridden: every route below reads and writes the real repository
-    # over the application's own pool.
-    app.dependency_overrides[get_gateway_client] = _Gateway
+    # Only the app credentials are replaced. Storage and the account directory
+    # are deliberately not overridden: every route below reads and writes the
+    # real repositories over the application's own pool.
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     server, task, base_url = await _serve(app)
     store = Storage(pool)
+    owner_cookies = await _signed_in_owner(store, base_url)
     job, claim, sandbox = await _arrange_chain(store)
     chain = _Chain(
         pool=pool,
@@ -523,6 +544,7 @@ async def _running_chain(
         claim=claim,
         sandbox=sandbox,
         sink=sink,
+        owner_cookies=owner_cookies,
     )
     try:
         yield chain
@@ -534,7 +556,7 @@ async def _running_chain(
         await pool.close()
         operation_profiling.reset_cache()
         operation_measurement.reset()
-        runner_mod.reset_delivery_state()
+        measurement_sender.reset_delivery_state()
 
 
 @pytest_asyncio.fixture
@@ -716,7 +738,7 @@ async def test_the_startup_record_is_stored_while_the_turn_is_still_running(chai
     def _run_turn() -> None:
         control = ControlPlane(chain.base_url, job.worker_token)
         control.job_id = job.job_id
-        runner_mod._stream_shared_agent_turn(
+        turn_stream._stream_shared_agent_turn(
             supervisor=supervisor,
             job=job,
             control=control,
@@ -724,7 +746,7 @@ async def test_the_startup_record_is_stored_while_the_turn_is_still_running(chai
             lease_token="acceptance-lease",
             timeout_s=60.0,
             measurement=measurement,
-            on_frozen=lambda frozen: runner_mod._enqueue_delivery(
+            on_frozen=lambda frozen: measurement_sender._enqueue_delivery(
                 frozen,
                 job=job,
                 base_url=chain.base_url,
@@ -793,7 +815,7 @@ async def test_a_failed_startup_is_delivered_within_the_bounded_exit_wait(chain:
     try:
         started = asyncio.get_running_loop().time()
         await asyncio.to_thread(
-            runner_mod._enqueue_delivery,
+            measurement_sender._enqueue_delivery,
             measurement,
             job=chain.claimed_job(),
             base_url=chain.base_url,
@@ -806,7 +828,7 @@ async def test_a_failed_startup_is_delivered_within_the_bounded_exit_wait(chain:
         # says the send outlived it.
         assert waited >= DELIVERY_DRAIN_S * 0.8, "the drain must actually have been waited"
         assert waited <= DELIVERY_DRAIN_S + 1.0, "the exit wait outlived its bound"
-        assert runner_mod._DELIVERY_DRAIN_TIMEOUTS == 1
+        assert measurement_sender._DELIVERY_DRAIN_TIMEOUTS == 1
     finally:
         await transaction.rollback()
         await chain.pool.release(lock)
@@ -1061,13 +1083,13 @@ async def test_profiling_off_collects_nothing_and_writes_nothing(chain_off: _Cha
         "failed": 0,
         "reasons": {},
     }
-    assert not runner_mod._DELIVERED_MEASUREMENT_IDS
-    assert not runner_mod._IN_FLIGHT_DELIVERIES
-    assert not runner_mod._STARTING_DELIVERIES
-    assert not runner_mod._DELIVERY_SIZES
-    assert runner_mod._DELIVERY_PENDING_BYTES == 0
-    assert runner_mod._DELIVERY_DROPPED_COUNT == 0
-    assert runner_mod._DELIVERY_DRAIN_TIMEOUTS == 0
+    assert not measurement_sender._DELIVERED_MEASUREMENT_IDS
+    assert not measurement_sender._IN_FLIGHT_DELIVERIES
+    assert not measurement_sender._STARTING_DELIVERIES
+    assert not measurement_sender._DELIVERY_SIZES
+    assert measurement_sender._DELIVERY_PENDING_BYTES == 0
+    assert measurement_sender._DELIVERY_DROPPED_COUNT == 0
+    assert measurement_sender._DELIVERY_DRAIN_TIMEOUTS == 0
     assert await _measurement_count(chain.pool) == 0
     assert not chain.sink.exists(), "off must not open a sink"
 
@@ -1087,7 +1109,7 @@ async def test_the_admin_reads_back_the_startup_and_the_whole_interaction(chain:
     """
     measurement = _frozen_startup(chain)
     await asyncio.to_thread(
-        runner_mod._enqueue_delivery,
+        measurement_sender._enqueue_delivery,
         measurement,
         job=chain.claimed_job(),
         base_url=chain.base_url,

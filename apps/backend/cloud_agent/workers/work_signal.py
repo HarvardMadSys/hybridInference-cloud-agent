@@ -12,8 +12,8 @@ Then only that host is woken, and every other host keeps waiting instead of
 spending a claim on work it cannot take. An empty one wakes every host.
 
 The token a host passes back is this process's own, so it assumes what the
-lifespan already does: one main API process. Its reaper and publisher run once
-per process, and a second one would renew every grant twice.
+lifespan already does: one main API process. Its reaper and maintenance loops
+run once per process, and a second one would renew every grant twice.
 """
 
 from __future__ import annotations

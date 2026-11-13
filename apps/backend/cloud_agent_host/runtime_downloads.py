@@ -45,6 +45,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from cloud_agent_host.container.sandbox import runtime_bin_dir
 from cloud_agent_host.runtime_images import (
     NAMESPACE_LABEL,
     RUNTIME_LABEL,
@@ -61,7 +62,6 @@ from cloud_agent_host.runtime_images import (
     short_id,
 )
 from cloud_agent_host.runtime_probe import ProbeResult, probe_runtime
-from cloud_agent_host.sandbox import runtime_bin_dir
 from cloud_agent_shared.runtime_catalog import downloadable_runtimes
 from cloud_agent_shared.runtime_downloads import (
     DOWNLOAD_ERROR_MAX_CHARS,
@@ -204,6 +204,27 @@ class RuntimeDownloads:
         self._thread: threading.Thread | None = None
 
     # ── heartbeat side ──────────────────────────────────────────────────
+
+    def set_registry(self, registry: str | None) -> bool:
+        """Adopt the control plane's registry for every download that starts later.
+
+        ``None`` is a control plane that does not manage the registry, so the
+        environment value this host started with stays. ``""`` is the public
+        registry. A download already running finishes from where it started.
+        Returns whether the registry changed.
+        """
+        if registry is None:
+            return False
+        adopted = registry.strip().rstrip("/") or None
+        with self._lock:
+            changed = adopted != self._registry
+            self._registry = adopted
+        return changed
+
+    def registry_report(self) -> dict[str, str]:
+        """The registry the next download uses, as the heartbeat reports it."""
+        with self._lock:
+            return {"runtime_registry_url": self._registry or ""}
 
     def apply(self, targets: object) -> None:
         """Adopt the targets from one heartbeat answer.

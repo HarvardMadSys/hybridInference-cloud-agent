@@ -1,5 +1,7 @@
 export const SETTINGS_PATHS = {
   profile: '/settings/my-settings',
+  account: '/settings/account',
+  models: '/settings/models',
   memory: '/settings/memory',
   shortcuts: '/settings/keyboard-shortcuts',
   usage: '/settings/usage',
@@ -10,6 +12,9 @@ export const SETTINGS_PATHS = {
   teams: '/settings/teams',
   help: '/settings/getting-started',
 } as const;
+
+/** Model connections lived in My Settings under this anchor before they had a page. */
+export const MODEL_CONNECTIONS_ANCHOR = '#settings-connections';
 
 export function isSettingsPath(pathname: string): boolean {
   return (
@@ -33,6 +38,8 @@ export function legacySettingsDestination(search: string, hash: string): string 
     path = SETTINGS_PATHS.memory;
   } else if (hash === '#settings-shortcuts') {
     path = SETTINGS_PATHS.shortcuts;
+  } else if (hash === MODEL_CONNECTIONS_ANCHOR) {
+    path = SETTINGS_PATHS.models;
   } else if (hash === '#settings-environments') {
     path = SETTINGS_PATHS.environments;
   } else if (hash === '#settings-getting-started') {

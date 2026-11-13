@@ -6,6 +6,8 @@ module contains only the intact MCP-facing behavior cases.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 # Imported pytest fixtures are intentionally named by test parameters.
 # ruff: noqa: F811
 from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fixtures
@@ -20,9 +22,8 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fi
     FakeStorage,
     _api_key_secret,
     _build_app,
-    _configured_identity_issuer,
     _create_job,
-    _FakeGateway,
+    _FakeOwners,
     _next_turn,
     _send,
     client,
@@ -30,9 +31,11 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fi
     json,
     pytest,
     store,
-    timedelta,
-    worker,
 )
+from tests.support.owners import connection_claim, on_connection
+
+from cloud_agent.memory import memory_tool
+from cloud_agent.providers import web_search
 
 pytestmark = pytest.mark.asyncio
 
@@ -68,7 +71,7 @@ def _job_body(**overrides: Any) -> dict[str, Any]:
     """A valid submission, with the fields under test overridable."""
     body: dict[str, Any] = {"repo": "owner/name", "task_prompt": "fix it", "model": "glm-5.1"}
     body.update(overrides)
-    return body
+    return on_connection(body)
 
 
 @pytest.mark.parametrize(
@@ -309,6 +312,32 @@ async def test_new_jobs_honor_mcp_resource_and_prompt_only_selections(
         }
 
 
+async def test_a_server_whose_tools_are_not_known_yet_can_be_turned_on_asking_first(
+    client: AsyncClient, store: FakeStorage
+):
+    """A program in the chat's sandbox lists its tools only once a chat started it.
+
+    ``use_defaults`` turns it on before that, every tool asking first; without
+    it, a selection that names nothing is a server switched off.
+    """
+    program = store.connect_mcp(user_id=_OWNER, label="Fetch", template=None, tools=())
+    created = await client.post(
+        "/v1/agent/jobs",
+        json=_job_body(mcp_bindings=[_binding(program["id"], tools={}, use_defaults=True)]),
+    )
+    assert created.status_code == 201, created.text
+    (binding,) = store.mcp_bindings[created.json()["thread_id"]]
+    assert binding["enabled"] is True and binding["selection_pending"] is True
+    assert binding["rules"] == {}
+
+    off = await client.post(
+        "/v1/agent/jobs", json=_job_body(mcp_bindings=[_binding(program["id"], tools={})])
+    )
+    assert off.status_code == 201, off.text
+    (binding,) = store.mcp_bindings[off.json()["thread_id"]]
+    assert binding["enabled"] is False and binding["selection_pending"] is False
+
+
 async def test_naming_a_connection_the_caller_does_not_own_is_refused_at_creation(
     client: AsyncClient, store: FakeStorage
 ):
@@ -545,7 +574,8 @@ async def test_the_claim_hands_the_runner_the_job_s_bindings(
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as runner:
         claimed = await runner.post(
-            "/v1/agent/worker/claim", json={"worker_id": "w-1", "lease_ttl_seconds": 60}
+            "/v1/agent/worker/claim",
+            json=connection_claim({"worker_id": "w-1", "lease_ttl_seconds": 60}),
         )
     assert claimed.status_code == 200
     body = claimed.json()
@@ -553,7 +583,7 @@ async def test_the_claim_hands_the_runner_the_job_s_bindings(
     # from each name, so a dict here would either fail the schema or address a
     # server that does not exist.
     # The platform's memory tools ride the same endpoint, after the connections.
-    assert body["mcp_bindings"] == ["deepwiki", "github", worker.memory_tool.RUNTIME_SERVER_ID]
+    assert body["mcp_bindings"] == ["deepwiki", "github", memory_tool.RUNTIME_SERVER_ID]
     assert "mcp.example.com" not in json.dumps(body)
     assert "wiki.example.com" not in json.dumps(body)
 
@@ -573,16 +603,17 @@ async def test_the_claim_hands_over_the_mcp_credential_too(client: AsyncClient):
     """
     await _create_job(client)
 
-    body = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    body = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
 
     assert body["mcp_token"], "the sandbox was handed no MCP credential"
 
     from cloud_agent.tokens import SCOPE_MCP, parse_worker_token
 
-    # Scoped, and not the same credential as either of the other two.
+    # Scoped, and not the same credential as the runner's.
     assert parse_worker_token(body["mcp_token"])["scope"] == SCOPE_MCP
     assert body["mcp_token"] != body["worker_token"]
-    assert body["mcp_token"] != body["sandbox_token"]
 
 
 @pytest.mark.parametrize("runtime", ["codex", "kilo", "claude-code", "opencode", "pi"])
@@ -605,24 +636,26 @@ async def test_web_search_provider_enables_mcp_without_exposing_keys(
     parallel_key: str,
 ) -> None:
     values = {
-        worker.web_search.PROVIDER_SETTING: selection,
-        worker.web_search.SERPER_API_KEY_SETTING: serper_key,
-        worker.web_search.BRAVE_API_KEY_SETTING: brave_key,
-        worker.web_search.PARALLEL_API_KEY_SETTING: parallel_key,
+        web_search.PROVIDER_SETTING: selection,
+        web_search.SERPER_API_KEY_SETTING: serper_key,
+        web_search.BRAVE_API_KEY_SETTING: brave_key,
+        web_search.PARALLEL_API_KEY_SETTING: parallel_key,
     }
     monkeypatch.setattr(
-        worker.web_search,
+        web_search,
         "text_setting",
         lambda key: values[key],
     )
     created = await client.post("/v1/agent/jobs", json=_job_body(runtime=runtime))
     assert created.status_code == 201, created.text
 
-    body = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    body = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
 
     assert body["mcp_bindings"] == [
-        worker.web_search.RUNTIME_SERVER_ID,
-        worker.memory_tool.RUNTIME_SERVER_ID,
+        web_search.RUNTIME_SERVER_ID,
+        memory_tool.RUNTIME_SERVER_ID,
     ]
     assert body["mcp_token"]
     assert all(
@@ -642,27 +675,9 @@ async def test_the_claim_names_no_mcp_relay_address(client: AsyncClient, monkeyp
     monkeypatch.setenv("AGENT_SANDBOX_MCP_URL", "http://agent-mcp:8000")
     await _create_job(client)
 
-    body = (await client.post("/v1/agent/worker/claim", json={"worker_id": "w1"})).json()
+    body = (
+        await client.post("/v1/agent/worker/claim", json=connection_claim({"worker_id": "w1"}))
+    ).json()
 
     assert "mcp_base_url" not in body
     assert "agent-mcp" not in json.dumps(body)
-
-
-async def test_a_job_created_with_an_alias_stores_the_canonical_id(
-    client: AsyncClient, store: FakeStorage, monkeypatch
-):
-    """**Validated as an alias, stored as an alias — the shape of the bug.**
-
-    The gateway mints a grant against canonical ids. A job that recorded
-    `legacy-name` produced a grant whose `allowed_models` matched nothing, so
-    the job was created successfully and died at its first inference call with
-    a 404 for a model that plainly exists.
-
-    Resolution translates once; everything after it works in canonical ids.
-    """
-    monkeypatch.setitem(_FakeGateway.aliases, "legacy-name", _TEST_MODELS[0])
-
-    await _create_job(client, model="legacy-name")
-
-    (job,) = list(store.jobs.values())
-    assert job["model"] == _TEST_MODELS[0], "the alias was stored instead of the canonical id"

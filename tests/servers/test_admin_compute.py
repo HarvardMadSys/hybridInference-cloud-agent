@@ -20,17 +20,18 @@ from httpx import ASGITransport, AsyncClient
 from cloud_agent.api import admin_compute
 from cloud_agent.application.cloudlab_inventory import CloudLabInventoryUnavailable
 from cloud_agent.application.compute_resources import ComputeCommands
-from cloud_agent.compute_config import ComputeConfiguration
-from cloud_agent.compute_registry import ComputeProviderRegistration, ComputeProviderRegistry
-from cloud_agent.compute_secrets import ComputeSecretStore
 from cloud_agent.domain.cloudlab import DEFAULT_CLOUDLAB_NODE_TYPES
 from cloud_agent.domain.compute import ComputeRefusal
+from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.ports.external.compute_provider import (
     UNCHECKED_CLOUDLAB_HOST_KEY_REF,
     ProviderCapabilities,
 )
 from cloud_agent.ports.external.host_bootstrap import DeploymentProfile
-from cloud_agent.schemas_compute import AutomaticDeploymentSetup, RenewalPolicy
+from cloud_agent.providers.compute import compute_registry
+from cloud_agent.providers.compute.compute_config import ComputeConfiguration
+from cloud_agent.providers.compute.compute_secrets import ComputeSecretStore
+from cloud_agent.schemas.compute import AutomaticDeploymentSetup, RenewalPolicy
 from cloud_agent_shared.egress import network_from_env
 
 ADMIN = {"Authorization": "Bearer test-compute-admin"}
@@ -103,7 +104,7 @@ class MemoryResources:
     async def save_deployment_profile(self, **kwargs):
         profile_id = kwargs.pop("profile_id")
         if profile_id in self.profiles:
-            raise ValueError("deployment_profile_exists")
+            raise StorageConflict(ConflictCode.DEPLOYMENT_PROFILE_EXISTS)
         row = {"id": profile_id, **kwargs, "revision": 1}
         self.profiles[profile_id] = row
         return row
@@ -129,7 +130,7 @@ class MemoryResources:
         expected = kwargs.pop("expected_revision", None)
         old = self.connections.get(connection_id)
         if old and expected != old["revision"]:
-            raise ValueError("revision_conflict")
+            raise StorageConflict(ConflictCode.REVISION_CONFLICT)
         row = {"id": connection_id, **kwargs, "revision": old["revision"] + 1 if old else 1}
         self.connections[connection_id] = row
         return row
@@ -141,7 +142,7 @@ class MemoryResources:
         self, *, expected_revision, policy, profile_snapshots, requested_by
     ):
         if expected_revision != self.autoscaling["policy"]["revision"]:
-            raise ValueError("revision_conflict")
+            raise StorageConflict(ConflictCode.REVISION_CONFLICT)
         revision = expected_revision + 1
         self.reserved_profiles.update(policy["deployment_profiles"])
         self.autoscaling["policy"] = {
@@ -184,7 +185,7 @@ class MemoryResources:
         for old in self.operations.values():
             if old["request_id"] == kwargs["request_id"]:
                 if old["fingerprint"] != kwargs["fingerprint"]:
-                    raise ValueError("idempotency_conflict")
+                    raise StorageConflict(ConflictCode.IDEMPOTENCY_CONFLICT)
                 return old
         row = {
             "id": f"op-{len(self.operations)}",
@@ -218,7 +219,7 @@ class MemoryResources:
     ):
         row = self.allocations[allocation_id]
         if expected_revision != row["revision"]:
-            raise ValueError("revision_conflict")
+            raise StorageConflict(ConflictCode.REVISION_CONFLICT)
         row.update(policy=policy, revision=row["revision"] + 1)
         if management_mode:
             row["management_mode"] = management_mode
@@ -253,28 +254,28 @@ class MemoryResources:
     async def retry_operation(self, operation_id):
         row = self.operations[operation_id]
         if row["state"] not in {"failed", "blocked", "unknown"}:
-            raise ValueError("operation_not_retryable")
+            raise StorageConflict(ConflictCode.OPERATION_NOT_RETRYABLE)
         allocation = self.allocations.get(row.get("allocation_id"))
         if (
             allocation
             and allocation.get("release_committed_at")
             and row["kind"] not in {"retire", "inspect", "discard"}
         ):
-            raise ValueError("operation_not_retryable")
+            raise StorageConflict(ConflictCode.OPERATION_NOT_RETRYABLE)
         if (
             row["kind"] == "acquire"
             and allocation
             and allocation.get("autoscaling_owned")
             and allocation.get("observed_state") in {"terminated", "absent"}
         ):
-            raise ValueError("operation_not_retryable")
+            raise StorageConflict(ConflictCode.OPERATION_NOT_RETRYABLE)
         row["state"] = "pending"
         return row
 
     async def cancel_operation(self, operation_id):
         row = self.operations[operation_id]
         if self.allocations[row["allocation_id"]].get("release_committed_at"):
-            raise ValueError("release_committed")
+            raise StorageConflict(ConflictCode.RELEASE_COMMITTED)
         row["state"] = "cancelled"
         return row
 
@@ -306,9 +307,9 @@ class NoProviderCalls:
 async def compute_api(monkeypatch):
     monkeypatch.setenv("ADMIN_TOKEN", "test-compute-admin")
     repo = MemoryResources()
-    registry = ComputeProviderRegistry(
+    registry = compute_registry.ComputeProviderRegistry(
         [
-            ComputeProviderRegistration(
+            compute_registry.ComputeProviderRegistration(
                 id="cloudlab",
                 label="CloudLab",
                 provider=NoProviderCalls(),
@@ -455,7 +456,7 @@ async def test_missing_runtime_is_unavailable_after_authentication(compute_api):
 async def test_remove_is_available_when_provider_is_unconfigured(compute_api):
     client, _, app = compute_api
     _, operation = await allocation(client)
-    app.state.compute_commands.registry = ComputeProviderRegistry([])
+    app.state.compute_commands.registry = compute_registry.ComputeProviderRegistry([])
     app.state.compute_commands.queries.registry = app.state.compute_commands.registry
 
     response = await client.get("/admin/agent/servers", headers=ADMIN)
@@ -509,7 +510,7 @@ async def test_remove_server_reports_safe_refusals_without_auditing(
     compute_api, monkeypatch, code, status
 ):
     client, repo, _ = compute_api
-    remove = AsyncMock(side_effect=ValueError(code))
+    remove = AsyncMock(side_effect=StorageConflict(ConflictCode(code)))
     monkeypatch.setattr(repo, "remove_allocation", remove, raising=False)
 
     response = await client.request(
@@ -640,15 +641,13 @@ async def test_cloudlab_autoscaling_v1_rejects_rotation_enabled(compute_api):
 
 
 @pytest.mark.asyncio
-async def test_cloudlab_autoscaling_put_is_canonical_revisioned_audited_and_pausable(
-    compute_api,
-):
+async def test_cloudlab_autoscaling_put_is_canonical_revisioned_audited_and_pausable(compute_api):
     client, repo, app = compute_api
     commands = app.state.compute_commands
     cloudlab = commands.registry.get("cloudlab")
-    commands.registry = ComputeProviderRegistry(
+    commands.registry = compute_registry.ComputeProviderRegistry(
         [
-            ComputeProviderRegistration(
+            compute_registry.ComputeProviderRegistration(
                 id=cloudlab.id,
                 label=cloudlab.label,
                 provider=cloudlab.provider,
@@ -785,11 +784,6 @@ def automatic_setup_request() -> dict[str, Any]:
     """Use infrastructure descriptors without including deployment credentials."""
     return {
         "request_id": "automatic-setup-once",
-        "gateway": {
-            "connection_id": "gateway-key",
-            "address": "gateway-input-canary.example.org",
-            "username": "gateway_operator",
-        },
         "control": {
             "connection_id": "control-key",
             "address": "control-input-canary.example.org",
@@ -855,15 +849,10 @@ async def test_automatic_setup_parses_targets_and_audits_only_profile_ids(comput
     parsed = service.create.await_args.args[0]
     assert isinstance(parsed, AutomaticDeploymentSetup)
     assert parsed.request_id == body["request_id"]
-    assert parsed.gateway.connection_id == "gateway-key"
-    assert parsed.gateway.address == body["gateway"]["address"]
-    assert parsed.gateway.username == "gateway_operator"
-    assert parsed.gateway.port == 22
     assert parsed.control.connection_id == "control-key"
     assert parsed.control.address == body["control"]["address"]
     assert parsed.control.username == "control_operator"
     assert parsed.control.port == 22
-    assert parsed.gateway_port == 8080
     assert parsed.slots == 2
     assert parsed.protected_cidrs == ["192.0.2.0/24", "198.51.100.0/24"]
     assert len(repo.audit_rows) == 1
@@ -871,7 +860,6 @@ async def test_automatic_setup_parses_targets_and_audits_only_profile_ids(comput
     assert repo.audit_rows[0]["actor_id"] == "admin-token"
     assert repo.audit_rows[0]["details"] == {"profile_id": "automatic-primary,automatic-spare"}
     for canary in (
-        body["gateway"]["address"],
         body["control"]["address"],
         service.sandbox_manager_token,
         service.private_key,
@@ -1582,7 +1570,7 @@ async def test_automatic_server_setup_preserves_repository_race_refusal(compute_
 
     async def occupied_after_selection(**kwargs):
         assert kwargs["allocation"]["deployment_profile"]["id"] == "kata"
-        raise ValueError("deployment_profile_in_use")
+        raise StorageConflict(ConflictCode.DEPLOYMENT_PROFILE_IN_USE)
 
     monkeypatch.setattr(repo, "create_allocation_operation", occupied_after_selection)
     response = await client.post(
@@ -1978,7 +1966,7 @@ async def test_unresolved_external_result_returns_safe_conflict(compute_api, mon
 
     async def refuse_cancel(operation_id):
         assert operation_id == operation["id"]
-        raise ValueError("external_operation_unresolved")
+        raise StorageConflict(ConflictCode.EXTERNAL_OPERATION_UNRESOLVED)
 
     monkeypatch.setattr(repo, "cancel_operation", refuse_cancel)
     response = await client.post(

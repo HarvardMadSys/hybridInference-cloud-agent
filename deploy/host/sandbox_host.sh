@@ -1,24 +1,21 @@
 #!/usr/bin/env bash
 #
-# Stand up agent-job runners on a machine that is NOT the gateway's.
+# Stand up agent-job runners on a runner host.
 #
-# `agent_runner.sh` assumes the two are colocated: it layers the runner overlay
-# on the main compose file, whose `agent-runner` declares `depends_on: backend`.
-# Point that at a machine with no gateway and it does not fail — it starts one,
-# on a box that was only ever meant to run jobs. This script uses a standalone
-# compose file with no backend in it at all.
-#
-# Three narrow tunnel containers carry model, MCP, and control-plane traffic.
-# Sandboxes run on one routable bridge per group, created by the runner and
-# sandbox manager behind this deployment's host nftables table: public IPv4 on TCP
-# 80/443, the named resolver and the two relays, nothing else. Setup and the
-# agent share that bridge; there is no proxy and no network switch.
+# A standalone compose file with exactly what a runner host needs: the runner,
+# its sandbox manager and two narrow tunnel containers, one for MCP and one for
+# the control-plane API. Sandboxes run on one routable bridge per group,
+# created by the runner and sandbox manager behind this deployment's host
+# nftables table: public IPv4 on TCP 80/443 (which is how a member reaches its
+# owner's model connection), the named resolver and the MCP relay, nothing
+# else. Setup and the agent share that bridge; there is no proxy and no
+# network switch.
 #
 # Usage, from the repository root on the runner host:
 #
 #   deploy/host/sandbox_host.sh up       # build, start the tunnels, sandbox manager and runner
 #   deploy/host/sandbox_host.sh status   # what is running, and the log tails
-#   deploy/host/sandbox_host.sh check    # prove the tunnel reaches the gateway
+#   deploy/host/sandbox_host.sh check    # prove the tunnels and the stack are ready
 #   deploy/host/sandbox_host.sh down     # stop everything this file started
 #
 # `up` in its two halves, for a deployer that has to put something between them
@@ -33,7 +30,6 @@
 #
 #   COMPOSE_PROJECT                this stack's compose project, unique on this machine
 #   AGENT_SANDBOX_IMAGE            image the sandboxes run
-#   AGENT_TUNNEL_*                 inference tunnel destination/key/known_hosts
 #   AGENT_MCP_TUNNEL_*             MCP-only tunnel destination/key/known_hosts
 #   AGENT_CONTROL_PLANE_TUNNEL_*   control API tunnel destination/key/known_hosts
 #   AGENT_SANDBOX_MANAGER_REVERSE_*         the control plane's route back to this sandbox manager
@@ -44,9 +40,9 @@
 # Each tunnel key gets its own account on the far host, one authorized_keys
 # line there, and that account's Match block from
 # deploy/host/sshd-tunnels.conf.example; Admin → Servers → Server setup
-# generates all of it. The inference key needs one forwarded port and no shell:
+# generates all of it. The MCP key needs one forwarded port and no shell:
 #
-#   command="",restrict,port-forwarding,permitopen="127.0.0.1:8080" ssh-ed25519 AAAA... agent-tunnel
+#   command="",restrict,port-forwarding,permitopen="127.0.0.1:8001" ssh-ed25519 AAAA... agent-mcp
 #
 # The control-plane key also names the one reverse listener it may open:
 #
@@ -194,6 +190,16 @@ fi
 # exotic one. A default would be a value somebody forgets to override exactly
 # once.
 COMPOSE_PROJECT="$(env_or_dotenv COMPOSE_PROJECT)"
+# Configuration for the removed Gateway inference relay is refused rather than
+# ignored: a host that still names it expects a tunnel that no longer exists.
+for retired in AGENT_AUTH_MODE AGENT_GATEWAY_URL AGENT_GATEWAY_HOSTNAME \
+  AGENT_TUNNEL_SSH_DESTINATION AGENT_TUNNEL_SSH_PORT AGENT_TUNNEL_SSH_KEY \
+  AGENT_TUNNEL_SSH_KNOWN_HOSTS AGENT_TUNNEL_REMOTE_HOST AGENT_TUNNEL_REMOTE_PORT \
+  AGENT_TUNNEL_LISTEN_PORT; do
+  [[ -z "$(env_or_dotenv "$retired")" ]] \
+    || die "remove $retired from this host's environment and .env: hosts no longer use a Gateway inference relay or an account mode"
+done
+TUNNEL_PREFIXES=(AGENT_MCP_TUNNEL AGENT_CONTROL_PLANE_TUNNEL)
 
 # A function rather than an array, so the check happens when a compose command
 # actually runs. `preflight` and `check` answer questions about this machine and
@@ -205,7 +211,7 @@ compose() {
   # token here, then let the recipe require the canonical credential as before.
   # COMPAT(remove-after=2026-12-31): as env_or_dotenv's; then Compose reads the
   # token from .env itself, and this override goes.
-  local manager_token
+  local manager_token compose_file="$COMPOSE_FILE"
   manager_token="$(env_or_dotenv AGENT_SANDBOX_MANAGER_TOKEN)"
   if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
     case "$1" in
@@ -220,7 +226,7 @@ compose() {
     AGENT_SANDBOX_MANAGER_TOKEN="$manager_token" \
     docker compose \
       -p "$COMPOSE_PROJECT" \
-      -f "$COMPOSE_FILE" \
+      -f "$compose_file" \
       --env-file .env "$@"
   else
     # Compose already receives exported configuration from this process. Do not
@@ -230,7 +236,7 @@ compose() {
     AGENT_SANDBOX_MANAGER_TOKEN="$manager_token" \
     docker compose \
       -p "$COMPOSE_PROJECT" \
-      -f "$COMPOSE_FILE" "$@"
+      -f "$compose_file" "$@"
   fi
 }
 
@@ -245,17 +251,13 @@ case "${SANDBOX_IMAGE_PULL:-false}" in
   true|false) ;;
   *) die "AGENT_SANDBOX_IMAGE_PULL must be true or false" ;;
 esac
-GATEWAY_HOSTNAME="$(env_or_dotenv AGENT_GATEWAY_HOSTNAME)"
-GATEWAY_HOSTNAME="${GATEWAY_HOSTNAME:-agent-gateway}"
-TUNNEL_PORT="$(env_or_dotenv AGENT_TUNNEL_LISTEN_PORT)"
-TUNNEL_PORT="${TUNNEL_PORT:-8080}"
 MCP_HOSTNAME="$(env_or_dotenv AGENT_MCP_HOSTNAME)"
 MCP_HOSTNAME="${MCP_HOSTNAME:-agent-mcp}"
 MCP_TUNNEL_PORT="$(env_or_dotenv AGENT_MCP_TUNNEL_LISTEN_PORT)"
 MCP_TUNNEL_PORT="${MCP_TUNNEL_PORT:-8000}"
 CONTROL_PLANE_HOSTNAME="$(env_or_dotenv AGENT_CONTROL_PLANE_HOSTNAME)"
 CONTROL_PLANE_HOSTNAME="${CONTROL_PLANE_HOSTNAME:-agent-control-plane}"
-# Where the two relays are discovered: a route-less network no sandbox joins.
+# Where the MCP relay is discovered: a route-less network no sandbox joins.
 # Derived from the Compose project, so two stacks on one machine never find
 # each other's relays; an explicit value still wins. The runner creates group
 # bridges through the Docker API, outside Compose, so it must receive the exact
@@ -265,31 +267,13 @@ RELAY_NETWORK="${RELAY_NETWORK:-${COMPOSE_PROJECT:+${COMPOSE_PROJECT}-}agent-rel
 AGENT_RELAY_NETWORK="$RELAY_NETWORK"
 export AGENT_RELAY_NETWORK
 
-# Extra versions the image also carries, comma-separated, so an admin can switch
-# new chats between them from the admin page without a rebuild. The image's
-# default versions are protocol pins shared by the host and control plane, so
-# they change in source together with `SHARED_SANDBOX_RUNTIME_PINS`, not through
-# one host's environment. Empty is the normal case and means the image holds
-# exactly those reviewed defaults.
-#
-# Build time decides the menu; the admin page decides which item is active. The
-# control plane cannot offer a version this image does not contain, so what goes
-# here is the ceiling on what an admin can pick.
-CLAUDE_CODE_EXTRA_VERSIONS="$(env_or_dotenv CLAUDE_CODE_EXTRA_VERSIONS)"
-CODEX_EXTRA_VERSIONS="$(env_or_dotenv CODEX_EXTRA_VERSIONS)"
-PI_EXTRA_VERSIONS="$(env_or_dotenv PI_EXTRA_VERSIONS)"
-OPENCODE_EXTRA_VERSIONS="$(env_or_dotenv OPENCODE_EXTRA_VERSIONS)"
-KILO_EXTRA_VERSIONS="$(env_or_dotenv KILO_EXTRA_VERSIONS)"
-
 require_env() {
   # Named up front, because each of these fails much later and much less
   # legibly: a missing token as a 401 per claim, a missing key as a container
   # that restarts forever, a missing known_hosts as a refusal nobody reads.
-  local missing=() name
+  local missing=() name prefix
   for name in AGENT_SANDBOX_IMAGE \
               AGENT_SANDBOX_MANAGER_TOKEN \
-              AGENT_TUNNEL_SSH_DESTINATION AGENT_TUNNEL_SSH_KEY \
-              AGENT_TUNNEL_SSH_KNOWN_HOSTS \
               AGENT_MCP_TUNNEL_SSH_DESTINATION AGENT_MCP_TUNNEL_SSH_KEY \
               AGENT_MCP_TUNNEL_SSH_KNOWN_HOSTS \
               AGENT_CONTROL_PLANE_TUNNEL_SSH_DESTINATION \
@@ -332,8 +316,8 @@ require_env() {
     fi
   fi
 
-  local prefix key known
-  for prefix in AGENT_TUNNEL AGENT_MCP_TUNNEL AGENT_CONTROL_PLANE_TUNNEL; do
+  local key known
+  for prefix in "${TUNNEL_PREFIXES[@]}"; do
     key="$(env_or_dotenv "${prefix}_SSH_KEY")"
     known="$(env_or_dotenv "${prefix}_SSH_KNOWN_HOSTS")"
     [[ -r "$key" ]] || die "${prefix}_SSH_KEY=$key is not readable on this host"
@@ -389,30 +373,14 @@ validate_retained_config() {
   # protocol unit. A per-host default override used to build successfully and
   # then make every runner omit shared-sandbox-v1, because the control plane
   # quite correctly rejected the mismatched attestation. Fail at configuration
-  # time instead. A staging/rollback version is added to *_EXTRA_VERSIONS and
-  # selected in Admin; a new default changes both source pin locations.
+  # time instead. Another version of an agent is installed at runtime from
+  # Admin -> Settings -> Agent versions; a new default changes both source pin
+  # locations in one reviewed change.
   local default_pin configured_pin
   for default_pin in CLAUDE_CODE_VERSION CODEX_VERSION PI_VERSION OPENCODE_VERSION KILO_VERSION; do
     configured_pin="$(env_or_dotenv "$default_pin")"
     [[ -z "$configured_pin" ]] || die \
-      "$default_pin is a source-level shared protocol pin, not a host override. Remove it and put ${default_pin%_VERSION}_EXTRA_VERSIONS=$configured_pin in this host's configuration, then select that version in Admin; or update the Dockerfile and SHARED_SANDBOX_RUNTIME_PINS together in a reviewed change."
-  done
-
-  # Every menu entry is an exact version. npm reads a partial one such as `2.1`
-  # as a range, so the image would label whatever the build resolved with the
-  # partial string, and a rebuild could put a different binary under the same
-  # label. install-runtimes.sh refuses it as well; this refuses it before the
-  # image build starts.
-  local menu entry
-  local -a entries
-  for menu in CLAUDE_CODE_EXTRA_VERSIONS CODEX_EXTRA_VERSIONS PI_EXTRA_VERSIONS \
-              OPENCODE_EXTRA_VERSIONS KILO_EXTRA_VERSIONS; do
-    [[ -n "${!menu}" ]] || continue
-    IFS=',' read -r -a entries <<<"${!menu}"
-    for entry in "${entries[@]}"; do
-      [[ "$entry" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || die \
-        "$menu entry '$entry' is not an exact version (MAJOR.MINOR.PATCH, optionally -PRERELEASE); a partial version, a range or a dist-tag would make the image's version label describe whatever npm resolved."
-    done
+      "$default_pin is a source-level shared protocol pin, not a host override. Remove it from this host's configuration. To change the default, update the Dockerfile and SHARED_SANDBOX_RUNTIME_PINS together in a reviewed change; to run another version of an agent, update it from Admin -> Settings -> Agent versions."
   done
 
   # One spelling, checked once. The runner normalises this value too, and its
@@ -459,15 +427,12 @@ validate_retained_config() {
     && (( 10#$source_import_max <= 65536 )) \
     || die "AGENT_SOURCE_IMPORT_MAX_MIB must be a whole number of MiB from 1 through 65536 (got '$source_import_max')"
 
-  # Docker DNS returns every container that claims an alias. If two relays use
+  # Docker DNS returns every container that claims an alias. If two tunnels use
   # one name, requests are round-robined to services that listen on different
   # ports: a readiness probe can win the lottery and a real job can lose it.
-  # All three aliases share the runner's internal network, and the first two
-  # also share the sandbox network, so pairwise uniqueness is mandatory.
-  if [[ "$GATEWAY_HOSTNAME" == "$MCP_HOSTNAME" \
-     || "$GATEWAY_HOSTNAME" == "$CONTROL_PLANE_HOSTNAME" \
-     || "$MCP_HOSTNAME" == "$CONTROL_PLANE_HOSTNAME" ]]; then
-    die "AGENT_GATEWAY_HOSTNAME ('$GATEWAY_HOSTNAME'), AGENT_MCP_HOSTNAME ('$MCP_HOSTNAME'), and AGENT_CONTROL_PLANE_HOSTNAME ('$CONTROL_PLANE_HOSTNAME') must be distinct Docker aliases"
+  # Both aliases share the runner's internal network, so they must differ.
+  if [[ "$MCP_HOSTNAME" == "$CONTROL_PLANE_HOSTNAME" ]]; then
+    die "AGENT_MCP_HOSTNAME ('$MCP_HOSTNAME') and AGENT_CONTROL_PLANE_HOSTNAME ('$CONTROL_PLANE_HOSTNAME') must be distinct Docker aliases"
   fi
   # Chat files live in Docker's writable layer. Verify the daemon whose socket
   # the sandbox manager receives is the daemon backed by the configured storage root;
@@ -757,8 +722,32 @@ check_shared_live_stack() {
     [[ -n "$first_id" ]] || first_id="$id"
     (
       attest_rc=0
-      docker exec "$id" python -c \
-        'from cloud_agent_host.runner import _shared_live_host_capabilities as capabilities; from cloud_agent_host.sandbox import build_backend_from_env; backend = build_backend_from_env(); backend.preflight(); print(",".join(capabilities(backend, backend.version_stamp())))' \
+      # A runner image from before the host package split keeps host_capabilities
+      # and sandbox at the package's top level rather than in
+      # cloud_agent_host.service and cloud_agent_host.container, and one from
+      # before the host service split holds the probe in cloud_agent_host.runner;
+      # the fallbacks keep `check` working against both.
+      docker exec "$id" python -c '
+try:
+    from cloud_agent_host.service.host_capabilities import _shared_live_host_capabilities as capabilities
+except ModuleNotFoundError as missing:  # COMPAT(remove-after=2026-12-31): every runner image ships cloud_agent_host.service
+    if missing.name != "cloud_agent_host.service":
+        raise
+    try:
+        from cloud_agent_host.host_capabilities import _shared_live_host_capabilities as capabilities
+    except ModuleNotFoundError as older:  # COMPAT(remove-after=2026-12-31): every runner image ships host_capabilities
+        if older.name != "cloud_agent_host.host_capabilities":
+            raise
+        from cloud_agent_host.runner import _shared_live_host_capabilities as capabilities
+try:
+    from cloud_agent_host.container.sandbox import build_backend_from_env
+except ModuleNotFoundError as missing:  # COMPAT(remove-after=2026-12-31): every runner image ships cloud_agent_host.container
+    if missing.name != "cloud_agent_host.container":
+        raise
+    from cloud_agent_host.sandbox import build_backend_from_env
+backend = build_backend_from_env()
+backend.preflight()
+print(",".join(capabilities(backend, backend.version_stamp())))' \
         >"${ATTEST_DIR}/${id}.capability" 2>"${ATTEST_DIR}/${id}.stderr" || attest_rc=$?
       printf '%s' "${attest_rc}" >"${ATTEST_DIR}/${id}.status"
     ) &
@@ -854,8 +843,8 @@ check_shared_live_stack() {
   [[ "$sandbox_manager_root" == "$expected_root" ]] \
     || die "sandbox manager reports retained DockerRootDir '${sandbox_manager_root:-unset}', expected '$expected_root'"
 
-  # The inference-gateway probe above is a different tunnel. Prove the runner
-  # can also reach the control plane that receives its capability heartbeat.
+  # The MCP relay probe above is a different tunnel. Prove the runner can also
+  # reach the control plane that receives its capability heartbeat.
   # The control-plane deployment performs the authoritative second half: it
   # waits for a fresh database heartbeat and dials this sandbox manager in reverse.
   while ! control_status="$(docker exec "$first_id" python -c \
@@ -1034,7 +1023,6 @@ check_candidate() {
     -e "AGENT_EGRESS_CHAT_NETWORK_POOL=$(env_or_dotenv AGENT_EGRESS_CHAT_NETWORK_POOL)" \
     -e "AGENT_EGRESS_DNS_SERVER=$(env_or_dotenv AGENT_EGRESS_DNS_SERVER)" \
     -e "AGENT_EGRESS_PROTECTED_CIDRS=$(env_or_dotenv AGENT_EGRESS_PROTECTED_CIDRS)" \
-    -e "AGENT_GATEWAY_URL=http://${GATEWAY_HOSTNAME}:${TUNNEL_PORT}" \
     -e "AGENT_SANDBOX_MCP_URL=http://${MCP_HOSTNAME}:${MCP_TUNNEL_PORT}" \
     "$runner_image" python -c 'from cloud_agent_shared.egress import network_from_env; network_from_env()' \
     || die "the sandbox network settings were refused (see the error above); fix AGENT_EGRESS_CHAT_NETWORK_POOL, AGENT_EGRESS_DNS_SERVER or AGENT_EGRESS_PROTECTED_CIDRS before any runner is drained"
@@ -1097,26 +1085,12 @@ cmd_prepare() {
     log "pulling sandbox image (${SANDBOX_IMAGE})"
     docker pull "$SANDBOX_IMAGE"
   elif [[ "${SANDBOX_IMAGE_PULL:-false}" == "true" ]]; then
-    # The published image has the reviewed default menu only; extra versions
-    # need a local build, which this switch exists to avoid.
-    for name in CLAUDE_CODE_EXTRA_VERSIONS CODEX_EXTRA_VERSIONS PI_EXTRA_VERSIONS \
-                OPENCODE_EXTRA_VERSIONS KILO_EXTRA_VERSIONS; do
-      [[ -z "${!name}" ]] || die "${name} needs a local sandbox build; unset AGENT_SANDBOX_IMAGE_PULL"
-    done
     log "pulling the published sandbox image (${SANDBOX_IMAGE})"
     docker pull "$SANDBOX_IMAGE"
   else
-    # Only extra, operator-approved menu entries are passed. The defaults fall
-    # through to the Dockerfile's reviewed pins and are attested as one protocol
-    # unit by both the runner and control plane.
-    local build_args=() name
-    for name in CLAUDE_CODE_EXTRA_VERSIONS CODEX_EXTRA_VERSIONS PI_EXTRA_VERSIONS \
-                OPENCODE_EXTRA_VERSIONS KILO_EXTRA_VERSIONS; do
-      [[ -n "${!name}" ]] || continue
-      log "runtime menu: ${name}=${!name} (adds to the reviewed Dockerfile default)"
-      build_args+=(--build-arg "${name}=${!name}")
-    done
-
+    # No build argument is passed: the image carries exactly the Dockerfile's
+    # reviewed pins, which the runner and control plane attest as one protocol
+    # unit.
     log "building the sandbox image (${SANDBOX_IMAGE})"
     # `--provenance=false` is load-bearing, not tidiness. Buildx attaches a
     # provenance attestation by default and regenerates it on *every* build, so
@@ -1139,11 +1113,7 @@ cmd_prepare() {
     # `docker compose build`; `SOURCE_DATE_EPOCH` and `BUILDKIT_PROVENANCE` were
     # both measured and change nothing. With the flag, two builds of the real
     # runner image, every layer CACHED, return the same id.
-    #
-    # The `+` guard is load-bearing under `set -u`: with no overrides at all,
-    # a bare `"${build_args[@]}"` is an unbound reference on bash before 4.4,
-    # and this script also runs on developer machines.
-    docker build ${build_args[@]+"${build_args[@]}"} --provenance=false \
+    docker build --provenance=false \
       -f deploy/sandbox/Dockerfile.agent-sandbox -t "$SANDBOX_IMAGE" .
   fi
 
@@ -1242,7 +1212,7 @@ cmd_activate() {
   prepare_storage_verdict
   drain_runners_then_sandbox_manager
 
-  log "starting the three purpose-scoped tunnels, sandbox manager, and the runner service"
+  log "starting the deployment's scoped tunnels, sandbox manager, and runner"
   # `--remove-orphans` because a renamed service leaves its old container
   # running otherwise: compose only replaces containers for services the file
   # still declares, so `agent-runner` outliving `runner` would mean two sets of
@@ -1303,21 +1273,14 @@ cmd_check() {
   local fenced=0
   if (( wait_seconds > 0 )); then fenced=1; fi
   validate_retained_config
-  # Ask from the relay network, where group lifecycle finds the two relays it
-  # attaches to every group bridge: reaching the gateway from this host's shell
-  # proves nothing about the tunnel a sandbox will be handed. The group bridge
+  # Ask from the relay network, where group lifecycle finds the MCP relay it
+  # attaches to every group bridge: reaching it from this host's shell proves
+  # nothing about the tunnel a sandbox will be handed. The group bridge
   # itself, with this deployment's host rules around it, is proved per group by
-  # the guest check that runs before any repository code.
+  # the guest check that runs before any repository code. Probe it before
+  # publishing the exact-SHA readiness marker.
   local network="$RELAY_NETWORK"
-  local url="http://${GATEWAY_HOSTNAME}:${TUNNEL_PORT}/health"
-  log "probing ${url} from the ${network} network"
-  probe_sandbox_relay "$network" "$url" "inference gateway" "$deadline" \
-    "Check 'docker logs' for the gateway-tunnel container: an SSH connection that cannot authenticate or bind its forward restarts." "gateway-tunnel"
-
-  # MCP is a second deliberately narrow destination on the same relay
-  # network. A healthy model tunnel does not prove this separate SSH key,
-  # listener, alias, or forward. Probe it before publishing the exact-SHA
-  # readiness marker.
+  local url
   url="http://${MCP_HOSTNAME}:${MCP_TUNNEL_PORT}/healthz"
   log "probing ${url} from the ${network} network"
   probe_sandbox_relay "$network" "$url" "MCP-only relay" "$deadline" \
@@ -1329,9 +1292,8 @@ cmd_check() {
 cmd_status() {
   compose ps
   printf '\n'
-  compose logs --tail 20 \
-    gateway-tunnel mcp-tunnel control-plane-tunnel \
-    sandbox-manager runner
+  local services=(mcp-tunnel control-plane-tunnel sandbox-manager runner)
+  compose logs --tail 20 "${services[@]}"
 }
 
 cmd_down() {

@@ -19,7 +19,7 @@ from cloud_agent.schemas.messages import (
 AgentSessionState = Literal[
     "running", "queued", "idle", "needs_review", "done", "failed", "cancelled"
 ]
-AgentSessionDeleteBlockReason = Literal["fork_in_progress", "publication_pending"]
+AgentSessionDeleteBlockReason = Literal["fork_in_progress"]
 
 
 class AgentSessionResponse(BaseModel):
@@ -228,20 +228,6 @@ class AgentThreadPinResponse(BaseModel):
     thread_id: str
     pinned: bool
     pinned_at: str | None = None
-
-
-class AgentThreadPublicationResponse(BaseModel):
-    """The workspace snapshot an owner's publication request opened or found."""
-
-    thread_id: str
-    snapshot_id: int
-    state: Literal["pending", "capturing", "captured", "publishing"]
-    requested: bool = Field(
-        description=(
-            "True when this request opened the snapshot; false when a publication "
-            "of the workspace was already on its way and is returned instead."
-        )
-    )
 
 
 class AgentThreadResponse(BaseModel):

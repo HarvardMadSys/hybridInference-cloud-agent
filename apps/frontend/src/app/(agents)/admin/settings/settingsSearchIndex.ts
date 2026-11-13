@@ -2,7 +2,17 @@ import type { HostSettingDefinition } from '@/lib/api/admin';
 import type { AgentAdminSettings } from '@/lib/api/adminSettings';
 
 import { agentName } from './AgentVersions';
-import { applicationCategory, applicationSettingGroup } from './settingsOrganization';
+import {
+  HOSTED_CATEGORIES,
+  applicationCategory,
+  applicationCategoryTab,
+  applicationSettingGroup,
+} from './settingsOrganization';
+import {
+  GOVERNING_SEARCH_KEYWORDS,
+  inactiveSettingGovernor,
+  settingReader,
+} from './settingsVisibility';
 
 export interface SettingsSearchItem {
   id: string;
@@ -142,26 +152,34 @@ export function buildSettingsSearchItems({
   hostDefinitions,
   runtimes,
   archiveAvailable,
+  isSettingVisible = (key) => inactiveSettingGovernor(key, settingReader(snapshot, {})) === null,
 }: {
   snapshot: AgentAdminSettings | null;
   hostDefinitions: HostSettingDefinition[];
   runtimes: string[];
   archiveAvailable: boolean;
+  /** Whether an application setting applies now (with unsaved drafts); others are not offered. */
+  isSettingVisible?: (key: string) => boolean;
 }): SettingsSearchItem[] {
   return [
-    ...(snapshot?.definitions ?? []).map((definition) => {
+    ...(snapshot?.definitions ?? []).flatMap((definition) => {
+      if (!isSettingVisible(definition.key)) return [];
       const category = applicationCategory(definition);
-      const tab =
-        category === 'Sandbox archives' ? 'sandbox' : `application-${encodeURIComponent(category)}`;
+      const tab = applicationCategoryTab(category);
       return {
         id: `application:${definition.key}`,
         label: definition.label,
         description: definition.description,
-        section: category === 'Sandbox archives' ? 'Sandbox' : category,
+        section: HOSTED_CATEGORIES.get(category)?.section ?? category,
         tab,
         targetId: `application-setting-${definition.key}`,
         applicationKey: definition.key,
-        keywords: [definition.key, definition.category, applicationSettingGroup(definition)],
+        keywords: [
+          definition.key,
+          definition.category,
+          applicationSettingGroup(definition),
+          ...(GOVERNING_SEARCH_KEYWORDS.get(definition.key) ?? []),
+        ],
       };
     }),
     ...hostDefinitions.map((definition) => ({

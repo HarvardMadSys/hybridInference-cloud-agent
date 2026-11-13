@@ -112,7 +112,6 @@ export type AgentEvent =
       attemptNo?: number;
       sourceEventId?: number;
     }
-  | { kind: 'usage'; text: string; attemptNo?: number; sourceEventId?: number }
   /** A message the owner sent into the running turn, where it arrived. */
   | { kind: 'user_message'; text: string; attemptNo?: number; sourceEventId?: number };
 
@@ -144,6 +143,9 @@ export interface AgentHistoryTurn {
   events: AgentEvent[];
   /** How this turn came to exist and what it reported. Absent on older rows. */
   goalTurn?: GoalTurn;
+  /** When the turn ran, which places the images its tools saved under it. */
+  startedAt?: string | null;
+  finishedAt?: string | null;
 }
 
 export interface DiffLine {
@@ -347,7 +349,7 @@ export interface AgentJob {
   runtime: string;
   runtimeVersion?: string;
   model: string;
-  /** The owner's connection `model` runs on; undefined is the Gateway. */
+  /** The owner's connection `model` runs on. */
   modelConnectionId?: string;
   /**
    * How hard this turn asked the model to think. Undefined is Auto — nobody
@@ -356,12 +358,7 @@ export interface AgentJob {
   reasoningEffort?: string;
   /** Set when the model is served on our own hardware, e.g. "H200". */
   modelLocal?: string;
-  spentUsd: number;
-  // False when the deployment has no billing ledger, so the UI can say
-  // "unknown" instead of implying the job cost nothing.
-  hasLedger?: boolean;
   elapsedLabel?: string;
-  timeoutLabel: string;
   sandbox: string;
   attempts: AgentAttempt[];
   /** Server supports fetching a single attempt's resource detail. */
@@ -391,7 +388,6 @@ export interface AgentJob {
   diffFileDetails?: AgentDiffFile[];
   diffStat?: { add: number; del: number };
   gates: AgentGate[];
-  usage: { tokensIn: string; tokensOut: string; cachePct: number; turns: number | null };
   /** Attempt continuity telemetry; `replay` can occur only on historical rows. */
   continuityMode?: 'hot' | 'warm_native' | 'cold_native' | 'replay';
   /** Canonical user-facing context state; independent of process-id reuse. */
@@ -402,25 +398,14 @@ export interface AgentJob {
   workspaceShared?: boolean;
   nativeState?: 'new' | 'ready' | 'fork_preparing' | 'lost';
   nativeForkAvailable?: boolean;
-  workspacePublicationState?:
-    | 'pending'
-    | 'capturing'
-    | 'captured'
-    | 'publishing'
-    | 'published'
-    | 'failed';
-  /** The newest publication found nothing to publish and opened no PR. */
-  workspacePublicationUnchanged?: boolean;
-  /** The pull request the conversation's workspace was last published to. */
+  /** The newest pull request this conversation's agent opened. */
   workspacePrUrl?: string;
-  /** The workspace holds turns not yet published, or its last publication failed. */
-  workspaceUnpublishedChanges?: boolean;
   workspaceEpoch?: number;
   /** Wall time of the turn's newest attempt (legacy/default view). */
   durationMs?: number;
   /** Host-measured consumption for the newest attempt (legacy/default view). */
   resources?: TurnResources;
-  /** e.g. "draft PR #1044" once published. */
+  /** e.g. "draft PR #1044" once the agent opened one. */
   prLabel?: string;
   prUrl?: string;
   threadId?: string;

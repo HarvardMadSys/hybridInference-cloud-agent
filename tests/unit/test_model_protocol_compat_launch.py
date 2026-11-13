@@ -22,7 +22,8 @@ from types import SimpleNamespace
 import pytest
 
 from cloud_agent_host.claimed_job import ClaimedJob, claim_secret_values
-from cloud_agent_host.compat_helper import (
+from cloud_agent_host.container.exact_container import ProvenContainers
+from cloud_agent_host.member_setup.compat_helper import (
     HELPER_PATH,
     LAUNCHER,
     compat_token_env,
@@ -44,6 +45,7 @@ from cloud_agent_host.runtimes import (
     RuntimeConnectionUnsupportedError,
     connection_base_url,
 )
+from cloud_agent_host.runtimes.codex.adapter import NATIVE_LAUNCHER
 from cloud_agent_shared.model_connections import ModelConnectionAccess
 from cloud_agent_shared.protocol_compat import ORIGIN_PLACEHOLDER, TOKEN_PLACEHOLDER
 from cloud_agent_shared.secret_redaction import SecretRedactor
@@ -70,11 +72,15 @@ def test_translated_codex_runs_behind_the_helper_with_only_a_token():
     argv, env = CodexRuntime().prepare_live(
         workdir="/workspace",
         model="chat-model",
-        gateway_base_url=ResponsesViaChatUrl(_URL),
+        model_base_url=ResponsesViaChatUrl(_URL),
         credential=_KEY,
         session_state_dir="/state/codex",
     )
-    assert argv[: len(LAUNCHER)] == list(LAUNCHER) and argv[len(LAUNCHER)] == "codex"
+    assert argv[: len(LAUNCHER) + len(NATIVE_LAUNCHER) + 1] == [
+        *LAUNCHER,
+        *NATIVE_LAUNCHER,
+        "codex",
+    ]
     joined = " ".join(argv)
     assert _KEY not in joined and TOKEN_PLACEHOLDER not in joined
     assert f'base_url="{ORIGIN_PLACEHOLDER}/v1"' in joined
@@ -93,10 +99,11 @@ def test_direct_codex_is_unchanged_by_translation():
     argv, env = CodexRuntime().prepare_live(
         workdir="/workspace",
         model="gpt-5.1-codex",
-        gateway_base_url=ExactBaseUrl("https://api.example.com/v1"),
+        model_base_url=ExactBaseUrl("https://api.example.com/v1"),
         credential=_KEY,
     )
-    assert argv[0] == "codex" and "web_search" not in " ".join(argv)
+    assert argv[: len(NATIVE_LAUNCHER) + 1] == [*NATIVE_LAUNCHER, "codex"]
+    assert "web_search" not in " ".join(argv)
     assert env["CODEX_API_KEY"] == _KEY
     assert not any(name.startswith("AGENT_COMPAT_") for name in env)
 
@@ -105,7 +112,7 @@ def test_translated_claude_code_keeps_its_model_slot_behind_the_launcher():
     argv, env = ClaudeCodeRuntime().prepare_live(
         workdir="/workspace",
         model="",
-        gateway_base_url=MessagesViaChatUrl(_URL),
+        model_base_url=MessagesViaChatUrl(_URL),
         credential=_KEY,
         config_dir="/state/claude",
     )
@@ -128,7 +135,7 @@ def test_direct_claude_code_on_messages_is_unchanged():
     argv, env = ClaudeCodeRuntime().prepare_live(
         workdir="/workspace",
         model="",
-        gateway_base_url=MessagesBaseUrl("https://api.anthropic.example/v1"),
+        model_base_url=MessagesBaseUrl("https://api.anthropic.example/v1"),
         credential=_KEY,
     )
     assert argv[0] == "claude" and "--disallowedTools" not in argv
@@ -139,17 +146,17 @@ def test_direct_claude_code_on_messages_is_unchanged():
 @pytest.mark.parametrize("url", [ResponsesViaChatUrl(_URL), MessagesViaChatUrl(_URL)])
 def test_no_chat_runtime_accepts_a_translated_url(runtime, url):
     with pytest.raises(RuntimeConnectionUnsupportedError):
-        runtime.prepare_live(workdir="/w", model="m", gateway_base_url=url, credential=_KEY)
+        runtime.prepare_live(workdir="/w", model="m", model_base_url=url, credential=_KEY)
 
 
 def test_codex_and_claude_refuse_each_others_translation():
     with pytest.raises(RuntimeConnectionUnsupportedError):
         CodexRuntime().prepare_live(
-            workdir="/w", model="m", gateway_base_url=MessagesViaChatUrl(_URL), credential=_KEY
+            workdir="/w", model="m", model_base_url=MessagesViaChatUrl(_URL), credential=_KEY
         )
     with pytest.raises(RuntimeConnectionUnsupportedError):
         ClaudeCodeRuntime().prepare_live(
-            workdir="/w", model="", gateway_base_url=ResponsesViaChatUrl(_URL), credential=_KEY
+            workdir="/w", model="", model_base_url=ResponsesViaChatUrl(_URL), credential=_KEY
         )
 
 
@@ -178,7 +185,6 @@ def test_the_claim_masks_this_members_token_with_the_key():
             "runtime": "codex",
             "model": "chat-model",
             "worker_token": "w",
-            "sandbox_token": "",
             "model_connection": access.model_dump(),
         }
     )
@@ -222,7 +228,6 @@ def test_the_launch_fields_carry_the_client_protocol_and_token_only_when_transla
 
 
 def test_the_sandbox_manager_carries_the_plan_into_the_member_identity(monkeypatch):
-    monkeypatch.setenv("AGENT_GATEWAY_URL", "http://10.0.0.1:8080")
     body = SharedResidentLaunchConfig(
         runtime_id="codex",
         model="chat-model",
@@ -247,7 +252,7 @@ def test_the_sandbox_manager_carries_the_plan_into_the_member_identity(monkeypat
     # A token the process does not hold (a rotated platform key, say) restarts
     # it, so a live process never emits a token this turn does not mask.
     assert not transport.compatible_with(replace(launch, inference_local_token="d" * 64))
-    with pytest.raises(ValueError, match="translated launch"):
+    with pytest.raises(ValueError, match="owner's model connection"):
         replace(launch, inference_source="", inference_base_url="", inference_protocol="")
     with pytest.raises(ValueError, match="token"):
         replace(launch, inference_local_token="")
@@ -266,19 +271,25 @@ def test_the_helper_archive_is_deterministic_and_runs_on_the_image_interpreter(t
     assert "cloud_agent_host/protocol_translator.py" in names
     assert "cloud_agent_shared/protocol_compat/LICENSE.hybridinference" in names
     assert "cloud_agent_shared/protocol_compat/NOTICE.md" in names
-    # Of the host package only the translator, which imports nothing of it.
+    # Of the host package only the translator and the passthrough.
     assert [n for n in names if n.startswith("cloud_agent_host/")] == [
         "cloud_agent_host/__init__.py",
+        "cloud_agent_host/model_passthrough.py",
         "cloud_agent_host/protocol_translator.py",
     ]
+    assert "cloud_agent_shared/request_prefix.py" in names
+    archived = {
+        name.removesuffix(".py").removesuffix("/__init__").replace("/", ".")
+        for name in names
+        if name.endswith(".py")
+    }
     archive_zip = zipfile.ZipFile(io.BytesIO(archive))
     for name in names:
         if name.endswith(".py") and name != "__main__.py":
             for module in _imported(archive_zip.read(name), name):
                 top = module.split(".")[0]
-                assert top in sys.stdlib_module_names or module.startswith(
-                    "cloud_agent_shared.protocol_compat"
-                ), (name, module)
+                # The standard library, or a module the archive itself holds.
+                assert top in sys.stdlib_module_names or module in archived, (name, module)
     assert HELPER_PATH == "/usr/local/libexec/model-protocol-translator.pyz"
     path = tmp_path / "helper.pyz"
     path.write_bytes(archive)
@@ -301,16 +312,32 @@ def _imported(source: bytes, name: str) -> list[str]:
 
 
 class _Manager:
-    """Just the calls ``install_trusted_file`` makes."""
+    """Just the calls ``install_once`` and ``install_trusted_file`` make."""
 
     def __init__(self, probe_ok: bool) -> None:
         self.probe_ok = probe_ok
         self.copied: list[bytes] = []
         self.commands: list[list[str]] = []
         self.backend = SimpleNamespace(docker_binary="docker")
+        self._proven = ProvenContainers()
+        self.proven = SimpleNamespace(container_id="container-1")
 
-    def _require(self, spec):
+    @property
+    def exact(self):
+        """The stand-in is its own identity gate."""
+        return self
+
+    def require(self, spec):
         return SimpleNamespace(container_id="container-1")
+
+    def proven_container(self, spec):
+        return self.proven
+
+    def holds_helper(self, proven, key):
+        return self._proven.holds_helper(proven, key)
+
+    def note_helper(self, proven, key):
+        self._proven.note_helper(proven, key)
 
     def exec_capture(self, spec, argv, **kwargs):
         self.commands.append(argv)
@@ -318,7 +345,7 @@ class _Manager:
         ok = self.probe_ok or "mv" in argv[2]
         return SimpleNamespace(returncode=0 if ok else 1)
 
-    def _run_bytes(self, argv, *, timeout, input_bytes):
+    def run_bytes(self, argv, *, timeout, input_bytes):
         self.copied.append(input_bytes)
         return SimpleNamespace(returncode=0)
 
@@ -335,3 +362,50 @@ def test_a_retained_container_gets_this_hosts_helper_only_when_it_differs():
     probe, activate = stale.commands
     assert HELPER_PATH in probe and "0:0:444" not in probe
     assert activate[-2] == HELPER_PATH and activate[-1] == "444"
+
+
+@pytest.mark.parametrize("effort", ["minimal", "max"])
+def test_a_translated_codex_tells_its_helper_the_turns_level(effort):
+    argv, env = CodexRuntime().prepare_live(
+        workdir="/workspace",
+        model="chat-model",
+        model_base_url=ResponsesViaChatUrl(_URL),
+        credential=_KEY,
+        reasoning_effort=effort,
+    )
+    # The CLI is told too (its own Responses field, which the helper replaces).
+    assert f'model_reasoning_effort="{effort}"' in " ".join(argv)
+    assert env["AGENT_COMPAT_REASONING_EFFORT"] == effort
+
+
+def test_an_auto_translated_launch_is_what_it_was_before_levels():
+    _, env = CodexRuntime().prepare_live(
+        workdir="/workspace",
+        model="chat-model",
+        model_base_url=ResponsesViaChatUrl(_URL),
+        credential=_KEY,
+    )
+    assert "AGENT_COMPAT_REASONING_EFFORT" not in env
+
+
+def test_a_direct_launch_never_names_a_helper_level():
+    _, env = CodexRuntime().prepare_live(
+        workdir="/workspace",
+        model="gpt-5.1-codex",
+        model_base_url=ExactBaseUrl("https://api.example.com/v1"),
+        credential=_KEY,
+        reasoning_effort="high",
+    )
+    assert not any(name.startswith("AGENT_COMPAT_") for name in env)
+
+
+def test_the_helper_is_looked_for_once_per_container():
+    """A direct plan starts behind it too, so a container's later launches skip the probe."""
+    spec = SimpleNamespace(container_name="sandbox-1")
+    manager = _Manager(probe_ok=True)
+    install_compat_helper(manager, spec)
+    install_compat_helper(manager, spec)
+    assert len(manager.commands) == 1
+    manager.proven = SimpleNamespace(container_id="container-2")
+    install_compat_helper(manager, spec)
+    assert len(manager.commands) == 2

@@ -16,8 +16,8 @@ from tests.unit.test_agent_runner_worktree import _assert_ended, _child_started,
 from tests.unit.test_runner_host_settings import _JOB
 from tests.unit.test_runner_source_prefetch import Source, _prefetch_threads, _run_turn
 
-from cloud_agent_host import runner
-from cloud_agent_host.host_runtime import LAUNCH_STARTED, LaunchResult, TurnPool
+from cloud_agent_host.service.host_runtime import LAUNCH_STARTED, LaunchResult, TurnPool
+from cloud_agent_host.turn import source_preparation
 from cloud_agent_shared.git import source_archive, source_cancellation
 from cloud_agent_shared.git.source_cancellation import SourcePreparationCancelled
 
@@ -44,21 +44,18 @@ def test_archive_cancellation_stops_before_the_next_entry_or_chunk(tmp_path, mon
 
         monkeypatch.setattr(source_archive, "_entries", entries)
     elif stage == "metadata":
-        # The builder stats each walked path with os.lstat. Whichever of the
-        # two top-level entries the directory lists first is cancelled after;
-        # a stat of the other one is the violation, in either listing order.
         lstat = source_archive.os.lstat
-        first: list[pathlib.Path] = []
+        entries = {root / ".git", root / "payload"}
 
+        # Cancelled at whichever entry is statted first: directory order is
+        # filesystem-dependent. The string-path builder now uses os.lstat;
+        # any further metadata read after cancellation is still a violation.
         def metadata(path, *args, **kwargs):
             result = lstat(path, *args, **kwargs)
-            entry = pathlib.Path(os.fsdecode(path))
-            if entry.parent == root and entry.name in {".git", "payload"}:
-                if not first:
-                    first.append(entry)
-                    stop.set()
-                elif entry != first[0]:
+            if pathlib.Path(os.fsdecode(path)) in entries:
+                if stop.is_set():
                     consumed.append("statted after cancellation")
+                stop.set()
             return result
 
         monkeypatch.setattr(source_archive.os, "lstat", metadata)
@@ -165,12 +162,12 @@ def test_discard_between_prefetch_stages_never_starts_the_next_one(monkeypatch, 
         step("lockfiles", stop)
         return {}
 
-    monkeypatch.setattr(runner, "prepare_worktree", clone)
-    monkeypatch.setattr(runner, "checkout_output_branch", branch)
-    monkeypatch.setattr(runner, "tracked_lockfiles", lockfiles)
+    monkeypatch.setattr(source_preparation, "prepare_worktree", clone)
+    monkeypatch.setattr(source_preparation, "checkout_output_branch", branch)
+    monkeypatch.setattr(source_preparation, "tracked_lockfiles", lockfiles)
     archive = Mock(side_effect=AssertionError("discard must precede archive construction"))
-    monkeypatch.setattr(runner, "build_source_archive", archive)
-    source = runner._SourcePrefetch(_JOB, uid=1000, gid=1000, max_bytes=1 << 20)
+    monkeypatch.setattr(source_preparation, "build_source_archive", archive)
+    source = source_preparation.GitSourcePrefetch(_JOB, uid=1000, gid=1000, max_bytes=1 << 20)
     assert started.wait(5)
 
     source.discard()
@@ -201,11 +198,11 @@ def test_post_fetch_git_cancellation_kills_descendants(tmp_path, monkeypatch, st
     try:
         with pytest.raises(SourcePreparationCancelled):
             if stage == "branch":
-                runner.checkout_output_branch(str(tmp_path), "test", stop=stop)
+                source_preparation.checkout_output_branch(str(tmp_path), "test", stop=stop)
             elif stage == "lockfiles":
-                runner.tracked_lockfiles(str(tmp_path), stop=stop)
+                source_preparation.tracked_lockfiles(str(tmp_path), stop=stop)
             else:
-                runner.prepare_temporary_worktree(workdir=str(tmp_path), stop=stop)
+                source_preparation.prepare_temporary_worktree(workdir=str(tmp_path), stop=stop)
     finally:
         canceller.join(timeout=5)
     assert time.monotonic() - started < 5
@@ -215,7 +212,7 @@ def test_post_fetch_git_cancellation_kills_descendants(tmp_path, monkeypatch, st
 
 def _archive_failure_child():
     """Real turn cleanup + archive copying, with slow local I/O and a failed broker."""
-    from cloud_agent_host.session_supervisor_client import SessionSupervisorError
+    from cloud_agent_host.sandbox_manager_client import SandboxManagerError
 
     monkeypatch = pytest.MonkeyPatch()
     copying = threading.Event()
@@ -244,7 +241,7 @@ def _archive_failure_child():
 
     def refuse_broker():
         assert copying.wait(5)
-        raise SessionSupervisorError(503, "broker unavailable")
+        raise SandboxManagerError(503, "broker unavailable")
 
     monkeypatch.setattr(source_archive.tarfile, "copyfileobj", slow_copy)
     source = RealArchiveSource()

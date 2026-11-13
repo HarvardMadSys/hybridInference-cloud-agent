@@ -24,7 +24,7 @@ from tests.servers.test_mcp_relay_host import (
     store as store,
 )
 
-from cloud_agent.api import mcp_relay
+from cloud_agent.api import _mcp_relay_callers, mcp_relay
 
 pytestmark = pytest.mark.asyncio
 approval_client = approval_fixtures.client
@@ -63,14 +63,14 @@ async def test_resident_approval_rechecks_the_residency(
 async def test_residency_is_rechecked_after_oauth_refresh(client, store, host, monkeypatch):
     refreshing = asyncio.Event()
     proceed = asyncio.Event()
-    original = mcp_relay.ensure_fresh
+    original = _mcp_relay_callers.ensure_fresh
 
     async def held_refresh(*args, **kwargs):
         refreshing.set()
         await proceed.wait()
         return await original(*args, **kwargs)
 
-    monkeypatch.setattr(mcp_relay, "ensure_fresh", held_refresh)
+    monkeypatch.setattr(_mcp_relay_callers, "ensure_fresh", held_refresh)
     task = asyncio.create_task(
         client.post(
             _HOST_URL,

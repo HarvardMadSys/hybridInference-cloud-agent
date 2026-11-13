@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.host_pool import hash_secret, new_enroll_token
-from cloud_agent.sandbox_manager_routing import retire_sandbox_manager_hosts
+from cloud_agent.domain.host_pool import hash_secret, new_enroll_token
+from cloud_agent.sandbox_manager.sandbox_manager_routing import retire_sandbox_manager_hosts
 from cloud_agent_shared.runtime_catalog import downloadable_runtimes
 
 if TYPE_CHECKING:
@@ -80,8 +80,9 @@ class HostCommands:
                 )
             else:
                 how = (
-                    "A version has to be built into the sandbox image before it can be "
-                    "selected — add it to that host's *_EXTRA_VERSIONS and redeploy."
+                    "This agent runs only the version pinned in the sandbox image: "
+                    "change that pin in a reviewed change to the Dockerfile and "
+                    "SHARED_SANDBOX_RUNTIME_PINS together, then redeploy."
                 )
             raise HostCommandError(404, f"No host in the pool offers {runtime} {version!r}. {how}")
         return previous

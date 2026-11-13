@@ -14,7 +14,7 @@ from tests.unit.test_host_pool_api import (  # noqa: F401 - the shared pytest fi
     client,
 )
 
-from cloud_agent_host.runtime_settings import SandboxArchiveRuntimeSettings
+from cloud_agent_host.service.runtime_settings import SandboxArchiveRuntimeSettings
 
 
 @pytest.mark.parametrize("capable", [True, False])

@@ -4,13 +4,19 @@ import Link from 'next/link';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { conversationHref } from '@/lib/api/adminConversations';
-import { getAdminSandbox, type AdminSandboxDetail } from '@/lib/api/adminSandboxes';
+import {
+  getAdminSandbox,
+  type AdminSandbox,
+  type AdminSandboxDetail,
+} from '@/lib/api/adminSandboxes';
 import { getErrorMessage } from '@/lib/utils/errors';
 
 import { accessDenied, BUTTON, dateTime, ErrorNotice } from '../runs/shared';
 
 import {
   applySandboxAction,
+  discardConfirmation,
+  discardHint,
   REVIEW_FRESHNESS_MS,
   sandboxActionBlocked,
   sandboxActionState,
@@ -18,6 +24,13 @@ import {
 } from './sandboxActions';
 
 const REFRESH_MS = 30_000;
+
+/** What a deleted sandbox leaves: its chat history, and its S3 archive unless it was discarded. */
+function deletedRemains(sandbox: AdminSandbox): string {
+  return sandbox.deletion_discard
+    ? 'Chat history remains available. It was deleted without an S3 archive.'
+    : 'Its S3 archive and chat history remain available.';
+}
 
 export function SandboxManagement({
   sandboxId,
@@ -104,12 +117,14 @@ export function SandboxManagement({
     stopBlocked,
     inventoryBlocked,
     deleteBlocked,
+    discardBlocked,
     controlsBlocked,
     forceDelete,
     staleInventoryEntry,
     deletionComplete,
     deletionRetryExhausted,
   } = actionState;
+  const discardText = discardHint(sandbox, deleteBlocked, discardBlocked);
 
   async function applyAction(kind: SandboxAction) {
     const blocked = sandboxActionBlocked(kind, actionState);
@@ -125,12 +140,13 @@ export function SandboxManagement({
       return;
     if (kind === 'delete' || kind === 'discard') {
       const sessions = `${sandbox.member_count} ${sandbox.member_count === 1 ? 'session' : 'sessions'}`;
+      const stoppedDiscard = `Permanently delete the stopped sandbox shared by ${sessions} without uploading it to S3? Workspace files and native session history on the host will be destroyed and cannot be restored. Live native resume will no longer be available. Chat history remains.`;
       const confirmation = deletionRetryExhausted
         ? `Resume the existing deletion request for sandbox ${sandbox.id}, shared by ${sessions}? Its original archive/discard choice and any verified archive receipt will be retained.`
         : kind === 'discard'
           ? sandbox.state === 'running'
             ? `Verify the exact retained container shared by ${sessions} is stopped or dead, and idle, then delete it without an S3 archive? The server refuses if that exact container is still running or has activity; this action does not stop a running container. Workspace files and native session history on the host will be destroyed and will not be uploaded. Live native resume will no longer be available. Chat history remains.`
-            : `Permanently delete the stopped sandbox shared by ${sessions} without uploading it to S3? Workspace files and native session history on the host will be destroyed and cannot be restored. Live native resume will no longer be available. Chat history remains.`
+            : discardConfirmation(sandbox, sessions, stoppedDiscard)
           : sandbox.state === 'running'
             ? `Verify the exact retained container shared by ${sessions} is stopped or dead, and idle, then permanently delete it? ` +
               'The server refuses if that exact container is still running or has activity; this action does not stop a running container. ' +
@@ -144,7 +160,7 @@ export function SandboxManagement({
       kind === 'archive' &&
       !window.confirm(
         deletionComplete
-          ? 'Remove this deleted sandbox from the admin inventory? Its S3 archive and chat history remain available. ' +
+          ? `Remove this deleted sandbox from the admin inventory? ${deletedRemains(sandbox)} ` +
               'You can restore its inventory entry using Include removed.'
           : staleInventoryEntry
             ? `Remove the stale sandbox entry shared by ${sandbox.member_count} ${sandbox.member_count === 1 ? 'session' : 'sessions'} from the admin inventory? ` +
@@ -251,7 +267,7 @@ export function SandboxManagement({
             <p role="status" className="mt-2 text-sm text-gray-700 dark:text-gray-200">
               Removed from the admin inventory.{' '}
               {deletionComplete
-                ? 'Its S3 archive and chat history remain available.'
+                ? deletedRemains(sandbox)
                 : sandbox.state !== 'stopped'
                   ? 'Any retained container and workspace files are unchanged. Chat history and recorded native state remain.'
                   : 'Workspace files, native sessions, and chat history are retained.'}
@@ -415,7 +431,7 @@ export function SandboxManagement({
                   (sandbox.archived_at
                     ? 'Makes this sandbox visible in the admin inventory again.'
                     : deletionComplete
-                      ? 'Hides this deleted sandbox. Its S3 archive and chat history remain available.'
+                      ? `Hides this deleted sandbox. ${deletedRemains(sandbox)}`
                       : staleInventoryEntry
                         ? 'Removes only the offline host’s inventory entry. Retained containers and files are not deleted; chat history and recorded native state remain. If the host reports it running or new work resumes, the entry returns.'
                         : 'Hides this stopped sandbox. Workspace files, native sessions, and chat history are retained.')}
@@ -452,16 +468,13 @@ export function SandboxManagement({
             <button
               type="button"
               className={`${BUTTON} text-red-700 dark:text-red-400`}
-              disabled={busy || loading || deleteBlocked !== null || deletionRetryExhausted}
+              disabled={busy || loading || discardBlocked !== null || deletionRetryExhausted}
               onClick={() => void applyAction('discard')}
             >
               {pendingAction === 'discard' ? 'Requesting deletion…' : 'Delete without archive'}
             </button>
-            {!controlsBlocked && deleteBlocked === null && (
-              <p className="text-xs text-gray-500 dark:text-gray-400">
-                Removes the retained container without uploading workspace files or native session
-                history. The host copy cannot be restored.
-              </p>
+            {!controlsBlocked && discardText !== null && (
+              <p className="text-xs text-gray-500 dark:text-gray-400">{discardText}</p>
             )}
           </div>
         </>

@@ -72,7 +72,7 @@ function renderSettings(locale: 'en' | 'zh-CN' = 'en', connections = [connection
     configured: true,
     enabled: true,
     checks_per_hour: 20,
-    max_models: 8,
+    max_models: 16,
     connections,
   });
   return render(
@@ -155,20 +155,20 @@ describe('a new connection', () => {
   });
 
   it('stops offering picks at the model limit and never adds every listed model', async () => {
-    const listed = Array.from({ length: 12 }, (_, index) => `model-${index}`);
+    const listed = Array.from({ length: 20 }, (_, index) => `model-${index}`);
     vi.mocked(api.discoverModels).mockResolvedValue(listed);
     await openNew();
     type('Base URL', URL);
     type('API key', KEY);
     fireEvent.click(screen.getByRole('button', { name: LOAD }));
-    await screen.findByText(/Your provider lists 12/);
+    await screen.findByText(/Your provider lists 20/);
     expect(screen.queryByRole('list', { name: 'Models to save' })).not.toBeInTheDocument();
-    for (const model of listed.slice(0, 8)) {
+    for (const model of listed.slice(0, 16)) {
       fireEvent.click(screen.getByRole('button', { name: `Add ${model}` }));
     }
-    expect(screen.getByRole('list', { name: 'Models to save' }).children).toHaveLength(8);
-    expect(screen.getByRole('button', { name: 'Add model-8' })).toBeDisabled();
-    expect(screen.getByText('Up to 8 models per connection.')).toBeVisible();
+    expect(screen.getByRole('list', { name: 'Models to save' }).children).toHaveLength(16);
+    expect(screen.getByRole('button', { name: 'Add model-16' })).toBeDisabled();
+    expect(screen.getByText('Up to 16 models per connection.')).toBeVisible();
   });
 
   it('explains when every listed model is added and still allows manual entry', async () => {

@@ -50,7 +50,7 @@ def test_every_host_docker_build_input_is_available_at_the_source_root() -> None
     content = members(hb.build(REPO_ROOT))
     for dockerfile in (
         "deploy/host/Dockerfile.agent-runner",
-        "deploy/host/Dockerfile.agent-gateway-tunnel",
+        "deploy/host/Dockerfile.agent-ssh-tunnel",
         "deploy/sandbox/Dockerfile.agent-sandbox",
     ):
         lines = content[dockerfile].decode().replace("\\\n", " ").splitlines()
@@ -204,10 +204,11 @@ def test_manual_build_with_unknown_revision_has_no_selectable_release(
 
 def test_control_build_and_discovery_both_name_the_deployed_revision() -> None:
     compose = yaml.safe_load((REPO_ROOT / "deploy/control-plane/docker-compose.yml").read_text())
+    # `keys` builds the one image the others run.
+    keys = compose["services"]["keys"]
+    assert keys["build"]["args"]["SOURCE_COMMIT"] == "${AGENT_DEPLOYMENT_SHA:-unknown}"
     for service in ("migrate", "control-plane", "mcp-relay"):
-        assert compose["services"][service]["build"]["args"]["SOURCE_COMMIT"] == (
-            "${AGENT_DEPLOYMENT_SHA:-unknown}"
-        )
+        assert compose["services"][service]["image"] == keys["image"]
     assert compose["services"]["control-plane"]["labels"]["io.hybridinference.deployment.sha"] == (
         "${AGENT_DEPLOYMENT_SHA:?exact commit this control plane serves}"
     )

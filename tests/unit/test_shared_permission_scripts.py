@@ -19,15 +19,15 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cloud_agent_host.chat_sandbox import (
+from cloud_agent_host.container.chat_sandbox import (
     CHAT_STATE_DIR,
     CHAT_WORKDIR,
     MEMBER_UID_BASE,
-    SHARED_WORKSPACE_PERMISSIONS_SCRIPT,
     ChatSandboxManager,
     ChatSandboxSpec,
 )
-from cloud_agent_host.sandbox import ContainerBackend
+from cloud_agent_host.container.chat_sandbox_workspace import SHARED_WORKSPACE_PERMISSIONS_SCRIPT
+from cloud_agent_host.container.sandbox import ContainerBackend
 
 if TYPE_CHECKING:
     from pathlib import Path

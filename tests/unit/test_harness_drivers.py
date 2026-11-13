@@ -6,9 +6,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud_agent_host.drivers import CLAUDE_TOOL_MARKS, LaunchContext, TurnResult, get_driver
+from cloud_agent_host.drivers import LaunchContext, TurnResult
+from cloud_agent_host.observe.tool_windows import hook_settings
 from cloud_agent_host.runtimes import registered_runtimes
-from cloud_agent_host.tool_windows import hook_settings
+from cloud_agent_host.runtimes.claude.session import CLAUDE_TOOL_MARKS
+from cloud_agent_host.runtimes.live import get_driver
 
 
 def test_the_result_contract_is_unrepresentable_to_break():
@@ -47,7 +49,7 @@ def test_claude_live_transport_installs_passive_hooks_in_retained_state():
     updates: list[dict] = []
     context = LaunchContext(
         workdir="/workspace",
-        gateway_base_url="http://gateway/v1",
+        model_base_url="http://gateway/v1",
         credential="resident-grant",
         provides_isolation=True,
         state_dir="/agent-state",

@@ -19,13 +19,12 @@ import {
 import {
   PUSH_BATCH_MS,
   PUSH_FALLBACK_POLL_MS,
-  receiveHint,
   receiveJobChange,
   receiveThreadChange,
   resetAgentPush,
   setAgentPushLive,
 } from './agentPush';
-import { buildTrajectorySteps, turnContextFromJobs } from './trajectorySteps';
+import { buildTrajectorySteps, turnContextFromJobs } from './trajectory/trajectorySteps';
 import { STREAM_RETRY_MAX_MS, STREAM_RETRY_MIN_MS, useAgentJob } from './useAgentJobs';
 import { AgentReadProvider } from './AgentReadProvider';
 
@@ -1538,21 +1537,6 @@ describe('useAgentJob with the owner change stream', () => {
       await act(async () => vi.advanceTimersByTimeAsync(STREAM_RETRY_MAX_MS));
       expect(streamAgentJob).toHaveBeenCalledTimes(1);
     });
-  });
-
-  it('reads its turn again when the workspace publication moves', async () => {
-    vi.useFakeTimers();
-    serve(settled);
-    renderHook(() => useAgentJob(settled.id));
-    await act(async () => {});
-
-    await act(async () => {
-      receiveHint('publication', 'live-thread');
-      await vi.advanceTimersByTimeAsync(PUSH_BATCH_MS);
-    });
-
-    expect(getAgentJob).toHaveBeenCalledTimes(2);
-    expect(getAgentJobThread).toHaveBeenCalledTimes(1);
   });
 
   it('ignores what changed in other conversations', async () => {

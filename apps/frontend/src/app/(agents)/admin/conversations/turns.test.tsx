@@ -53,7 +53,7 @@ vi.mock('@/components/providers/AuthProvider', async () => {
   const actual = await vi.importActual<typeof import('@/components/providers/AuthProvider')>(
     '@/components/providers/AuthProvider',
   );
-  return { hasAgentPermission: actual.hasAgentPermission };
+  return { ...actual };
 });
 vi.mock('next/navigation', () => ({
   useParams: () => ({}),

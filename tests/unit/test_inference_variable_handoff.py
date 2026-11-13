@@ -10,21 +10,30 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from tests.support.member_loopback import HELPER_IN_PLACE
+from tests.support.owners import launch_connection
 
-from cloud_agent.sandbox_manager_client import SandboxManagerClient, SandboxManagerError
-from cloud_agent_host.chat_sandbox import (
-    MEMBER_REAPER_TARGET,
+from cloud_agent.sandbox_manager.sandbox_manager_client import (
+    SandboxManagerClient as ControlPlaneClient,
+    SandboxManagerError as ControlPlaneError,
+)
+from cloud_agent_host.container.chat_sandbox import (
     MEMBER_TMPFS_ROOT,
     MEMBER_UID_BASE,
     ChatSandboxManager,
     ChatSandboxSpec,
+)
+from cloud_agent_host.container.chat_sandbox_members import (
+    MEMBER_REAPER_TARGET,
     member_inference_env_path,
 )
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
-from cloud_agent_host.session_supervisor_client import (
-    SessionSupervisorClient,
-    SessionSupervisorError,
+from cloud_agent_host.sandbox_browser import LAUNCHER
+from cloud_agent_host.sandbox_manager_client import (
+    SandboxManagerClient,
+    SandboxManagerError,
 )
+from cloud_agent_host.sandbox_mcp import GATEWAY
 from cloud_agent_shared.environment import (
     INFERENCE_NAMES,
     BoundEnvironment,
@@ -141,10 +150,14 @@ def _launch_context(environment: BoundEnvironment | None):
     manager = SimpleNamespace(
         backend=SimpleNamespace(gid=10001, base_env=lambda: {}),
         reap_member_processes=lambda spec, **kwargs: None,
+        # The sandbox's shared browser service, started before every CLI.
+        exec_capture=lambda spec, argv, **kwargs: subprocess.CompletedProcess(argv, 0, b"", b""),
         write_member_inference_env=lambda spec, script, **kwargs: events.append(
             ("write", script, kwargs)
         ),
         spawn=spawn,
+        await_member_launch=lambda spec, **kwargs: None,
+        exact=HELPER_IN_PLACE,
     )
     spec = ChatSandboxSpec(
         thread_id="athr_owner",
@@ -160,10 +173,10 @@ def _launch_context(environment: BoundEnvironment | None):
         native_session_id=None,
         model="model",
         reasoning_effort=None,
-        gateway_base_url="http://gateway",
         credential="grant",
         slot_id=2,
         environment=environment,
+        **launch_connection("claude-code"),
     )
     context = ResidentTransportFactory(manager)._launch_context(spec, launch, credential="grant")
     return context, events
@@ -240,6 +253,8 @@ def test_a_launch_without_them_leaves_no_earlier_credentials_in_the_slot(tmp_pat
     reaper.write_text("")
 
     def exec_capture(spec, argv, *, input_bytes=None, **kwargs):
+        if argv[0] in (LAUNCHER, GATEWAY):  # the browser service, sandbox MCP: not this test's
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
         # The member tmpfs, here a directory: run the container command locally.
         # A member's preparation reaches its one exec as input, and the reap
         # itself is the reaper's own tests' to exercise.
@@ -253,6 +268,8 @@ def test_a_launch_without_them_leaves_no_earlier_credentials_in_the_slot(tmp_pat
         ensure_member_process_reaper=lambda spec: None,
         backend=SimpleNamespace(gid=10001, base_env=lambda: {}),
         spawn=lambda spec, argv, **kwargs: object(),
+        await_member_launch=lambda spec, **kwargs: None,
+        exact=HELPER_IN_PLACE,
     )
     manager.reap_member_processes = partial(ChatSandboxManager.reap_member_processes, manager)
     manager.write_member_inference_env = partial(
@@ -275,10 +292,10 @@ def test_a_launch_without_them_leaves_no_earlier_credentials_in_the_slot(tmp_pat
             native_session_id=None,
             model="model",
             reasoning_effort=None,
-            gateway_base_url="http://gateway",
             credential="grant",
             slot_id=1,
             environment=environment,
+            **launch_connection("codex"),
         )
         context = ResidentTransportFactory(manager)._launch_context(
             spec, resident, credential="grant"
@@ -310,12 +327,12 @@ async def test_an_older_broker_receives_no_inference_credential(capabilities, ac
         return httpx.Response(200, json={"id": "term"})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        broker = SandboxManagerClient("http://broker", "credential", client=client)
+        broker = ControlPlaneClient("http://broker", "credential", client=client)
         call = broker.create_terminal("workspace", rows=24, cols=80, environment=_bound(_OWNER_KEY))
         if accepted:
             await call
         else:
-            with pytest.raises(SandboxManagerError, match="upgraded"):
+            with pytest.raises(ControlPlaneError, match="upgraded"):
                 await call
     assert [request.url.path == "/health" for request in requests] == (
         [True, False] if accepted else [True]
@@ -323,7 +340,7 @@ async def test_an_older_broker_receives_no_inference_credential(capabilities, ac
 
 
 def test_the_runner_refuses_an_older_supervisor_before_sending_values():
-    client = SessionSupervisorClient("http://sandbox_manager", "sandbox-manager-secret")
+    client = SandboxManagerClient("http://sandbox_manager", "sandbox-manager-secret")
     requests = []
 
     def respond(request):
@@ -331,7 +348,7 @@ def test_the_runner_refuses_an_older_supervisor_before_sending_values():
         return httpx.Response(200, json={"capabilities": ["environment-v1"]})
 
     client._client = httpx.Client(transport=httpx.MockTransport(respond))
-    with pytest.raises(SessionSupervisorError, match="does not support"):
+    with pytest.raises(SandboxManagerError, match="does not support"):
         client.prepare_environment("athr_owner", _bound(_OWNER_KEY))
     assert [request.url.path for request in requests] == ["/health"]
 
@@ -361,21 +378,21 @@ async def test_preparation_negotiates_inference_and_snapshot_capabilities_indepe
 
     if client_kind == "control-plane":
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-            broker = SandboxManagerClient("http://broker", "credential", client=client)
+            broker = ControlPlaneClient("http://broker", "credential", client=client)
             if inference_capable:
                 await broker.prepare_environment("workspace", bound)
             else:
-                with pytest.raises(SandboxManagerError, match="upgraded"):
+                with pytest.raises(ControlPlaneError, match="upgraded"):
                     await broker.prepare_environment("workspace", bound)
     else:
-        supervisor = SessionSupervisorClient("http://broker", "credential")
+        supervisor = SandboxManagerClient("http://broker", "credential")
         supervisor._client.close()
         with httpx.Client(transport=httpx.MockTransport(respond)) as client:
             supervisor._client = client
             if inference_capable:
                 supervisor.prepare_environment("workspace", bound)
             else:
-                with pytest.raises(SessionSupervisorError, match="does not support"):
+                with pytest.raises(SandboxManagerError, match="does not support"):
                     supervisor.prepare_environment("workspace", bound)
 
     if not inference_capable:

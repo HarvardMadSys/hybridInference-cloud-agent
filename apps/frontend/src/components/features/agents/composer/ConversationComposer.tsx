@@ -1,0 +1,166 @@
+'use client';
+import type { Ref, TextareaHTMLAttributes } from 'react';
+import { useApplePlatform } from '@/components/features/settings/keyboardShortcutPreferences';
+import { chordAriaLabel } from '@/lib/keyboardShortcuts';
+import { isComposerSubmit } from './composerKeys';
+import { effortOverride } from './effort';
+import { modelOverride, type ModelChoice } from './modelSource';
+
+/** The model, source and effort a follow-up inherits; a null or absent source cannot run. */
+export interface InheritedModel {
+  model: string;
+  modelConnectionId?: string | null;
+  reasoningEffort?: string;
+}
+
+/**
+ * What differs from `parent`, the turn the message inherits from when a field
+ * is omitted. The model is compared with its source: the same model name on
+ * another source is a change, and is sent as one (see `modelOverride`). The
+ * level is inherited too, so Auto under a parent that chose one is sent as
+ * `"auto"` (see `effortOverride`); `effort` is `''` for Auto.
+ */
+export function composerOverrides(parent: InheritedModel, choice: ModelChoice, effort: string) {
+  return {
+    ...modelOverride(parent, choice),
+    ...effortOverride(parent.reasoningEffort, effort),
+  };
+}
+export function ComposerTextarea({
+  onKeyDown,
+  textareaRef,
+  className,
+  ...props
+}: TextareaHTMLAttributes<HTMLTextAreaElement> & {
+  /**
+   * The box itself.
+   *
+   * A named prop rather than a forwarded `ref`: a slash command *writes into*
+   * this box rather than opening anything, and clicking the menu row moves
+   * focus to the row — so the composer that chose the command needs the
+   * element back to put the caret where the next character goes.
+   */
+  textareaRef?: Ref<HTMLTextAreaElement>;
+}) {
+  return (
+    <textarea
+      {...props}
+      ref={textareaRef}
+      className={`${className ?? ''} [@media(pointer:coarse)]:text-base`}
+      onKeyDown={(event) => {
+        // A caller's handler runs first and has the last word: the command menu
+        // consumes the keys it owns — including the Enter that would otherwise
+        // submit the form — and says so by preventing the default.
+        onKeyDown?.(event);
+        if (event.defaultPrevented) return;
+        if (!isComposerSubmit(event)) return;
+        event.preventDefault();
+        event.currentTarget.form?.requestSubmit();
+      }}
+    />
+  );
+}
+export function ComposerSendButton({
+  label,
+  title,
+  busy,
+  disabled,
+}: {
+  label: string;
+  title: string;
+  busy: boolean;
+  disabled: boolean;
+}) {
+  return (
+    <button
+      type="submit"
+      disabled={disabled}
+      className="ui-icon-button ui-button-primary ml-auto rounded-xl"
+      aria-busy={busy || undefined}
+      aria-label={label}
+      title={title}
+    >
+      {busy ? (
+        <span
+          aria-hidden="true"
+          className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-accent-foreground/40 border-t-accent-foreground motion-reduce:animate-none"
+        />
+      ) : (
+        <svg
+          aria-hidden="true"
+          className="h-4 w-4"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          strokeWidth={2}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M12 19V5m0 0-6 6m6-6 6 6" />
+        </svg>
+      )}
+    </button>
+  );
+}
+
+/** Visible send modes; the parent offers steering only when this draft can use it. */
+export function ComposerMessageActions({
+  label,
+  title,
+  busy,
+  disabled,
+  steerLabel,
+  steerTitle,
+  onSteer,
+}: {
+  label: string;
+  title: string;
+  busy: boolean;
+  disabled: boolean;
+  steerLabel?: string;
+  steerTitle?: string;
+  onSteer?: () => void;
+}) {
+  const apple = useApplePlatform();
+  return (
+    <div className="ml-auto flex shrink-0 items-center gap-1.5">
+      {onSteer && steerLabel ? (
+        <button
+          type="button"
+          onClick={onSteer}
+          disabled={disabled || busy}
+          aria-keyshortcuts={chordAriaLabel('Enter', apple)}
+          title={steerTitle}
+          className="ui-button ui-button-secondary min-h-8 rounded-full border-border px-3 py-1 text-xs [@media(pointer:coarse)]:min-h-11"
+        >
+          {steerLabel}
+        </button>
+      ) : null}
+      {/* A round arrow; its name is the action it takes (Send or Queue). */}
+      <button
+        type="submit"
+        disabled={disabled || busy}
+        aria-label={label}
+        aria-busy={busy || undefined}
+        title={title}
+        className="ui-focus-ring ui-button-primary inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
+      >
+        {busy ? (
+          <span
+            aria-hidden="true"
+            className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-accent-foreground/40 border-t-accent-foreground motion-reduce:animate-none"
+          />
+        ) : (
+          <svg
+            aria-hidden="true"
+            className="h-4 w-4"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 19V5m0 0-6 6m6-6 6 6" />
+          </svg>
+        )}
+      </button>
+    </div>
+  );
+}

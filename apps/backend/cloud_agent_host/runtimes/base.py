@@ -5,16 +5,21 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 from cloud_agent_shared.model_connections import ANTHROPIC_MESSAGES, RESPONSES
 from cloud_agent_shared.protocol_compat import (
     ENV_CLIENT,
     ENV_MODEL,
+    ENV_REASONING_EFFORT,
     ENV_UPSTREAM_KEY,
     ENV_UPSTREAM_URL,
     ORIGIN_PLACEHOLDER,
+    PASSTHROUGH,
     TOKEN_PLACEHOLDER,
+    passthrough_authority,
 )
+from cloud_agent_shared.sandbox_mcp import SANDBOX_MCP_SERVER_NAME, SANDBOX_MCP_URL
 
 from .events import RAW, NormalizedEvent
 
@@ -61,6 +66,16 @@ class ExactBaseUrl(str):
     """
 
     __slots__ = ()
+    #: The CLI reaches this URL through its member's request meter
+    #: (``meter_launch``), at the address ``metered_cli_url`` gives it.
+    metered = False
+
+
+class MeteredBaseUrl(ExactBaseUrl):
+    """An OpenAI-style connection's URL, reached through the member's request meter."""
+
+    __slots__ = ()
+    metered = True
 
 
 class MessagesBaseUrl(ExactBaseUrl):
@@ -73,6 +88,13 @@ class MessagesBaseUrl(ExactBaseUrl):
     """
 
     __slots__ = ()
+
+
+class MeteredMessagesBaseUrl(MessagesBaseUrl):
+    """An Anthropic Messages connection's URL, reached through the member's request meter."""
+
+    __slots__ = ()
+    metered = True
 
 
 class TranslatedBaseUrl(ExactBaseUrl):
@@ -109,14 +131,60 @@ class RuntimeConnectionUnsupportedError(RuntimeError):
 COMPAT_LAUNCHER = ("/usr/bin/python3", "-I", "/usr/local/libexec/model-protocol-translator.pyz")
 
 
-def connection_base_url(base_url: str, protocol: str, client_protocol: str = "") -> ExactBaseUrl:
-    """The launch-context form of an owner connection's URL, typed by its plan."""
+#: Provider hosts a CLI treats as its vendor's own, deciding features from the
+#: host name it is pointed at: Claude Code turns MCP tool search off by default
+#: for any other host. A direct plan to one is not metered, so the CLI never
+#: sees another host and does the same as it would without the meter.
+FIRST_PARTY_HOSTS: dict[str, frozenset[str]] = {
+    "claude-code": frozenset({"api.anthropic.com"}),
+}
+
+
+def meters_direct_plan(runtime_id: str, base_url: str) -> bool:
+    """Whether a direct plan's CLI runs behind its member's request meter."""
+    host = (urlsplit(base_url).hostname or "").lower()
+    return host not in FIRST_PARTY_HOSTS.get(runtime_id, frozenset())
+
+
+def connection_base_url(
+    base_url: str, protocol: str, client_protocol: str = "", *, metered: bool = False
+) -> ExactBaseUrl:
+    """The launch-context form of an owner connection's URL, typed by its plan.
+
+    ``metered`` puts a direct plan's CLI behind its member's request meter; a
+    translated plan's helper measures its requests anyway.
+    """
     if client_protocol and client_protocol != protocol:
         translated = {RESPONSES: ResponsesViaChatUrl, ANTHROPIC_MESSAGES: MessagesViaChatUrl}
         return translated[client_protocol](base_url)
     if protocol == ANTHROPIC_MESSAGES:
-        return MessagesBaseUrl(base_url)
-    return ExactBaseUrl(base_url)
+        return MeteredMessagesBaseUrl(base_url) if metered else MessagesBaseUrl(base_url)
+    return MeteredBaseUrl(base_url) if metered else ExactBaseUrl(base_url)
+
+
+def metered_cli_url(url: str) -> str:
+    """Where a metered CLI is told ``url`` is: its member's meter, then the authority and path.
+
+    ``https://api.example.com/v1`` becomes ``<origin>/api.example.com/v1``; the
+    launcher writes the meter's loopback origin over the placeholder, and the
+    meter forwards what follows the authority to ``https://api.example.com``.
+    """
+    parts = urlsplit(url)
+    authority = passthrough_authority(parts.hostname or "", parts.port)
+    return f"{ORIGIN_PLACEHOLDER}/{authority}{parts.path}"
+
+
+def meter_launch(
+    argv: list[str], env: dict[str, str], url: str
+) -> tuple[list[str], dict[str, str]]:
+    """A direct plan's CLI launch behind its member's request meter, in passthrough.
+
+    The launcher is told the upstream's origin and nothing else: the CLI keeps
+    its own key and sends it itself (``cloud_agent_host.model_passthrough``).
+    """
+    parts = urlsplit(url)
+    origin = f"https://{passthrough_authority(parts.hostname or '', parts.port)}"
+    return [*COMPAT_LAUNCHER, *argv], {**env, ENV_CLIENT: PASSTHROUGH, ENV_UPSTREAM_URL: origin}
 
 
 def compat_launch(
@@ -126,21 +194,41 @@ def compat_launch(
     credential: str,
     *,
     model: str,
+    reasoning_effort: str | None = None,
 ) -> tuple[list[str], dict[str, str]]:
     """The CLI's launch behind the member's compatibility helper.
 
     The argv gains the launcher in front; the upstream's URL and key travel in
     the environment the launcher consumes and removes before it becomes the
     CLI (``cloud_agent_host.protocol_translator``). ``model`` locks the helper to one model;
-    empty takes the CLI's own ``--model`` argument.
+    empty takes the CLI's own ``--model`` argument. ``reasoning_effort`` is
+    the turn's level, which the helper sends upstream; ``None`` (Auto) adds
+    nothing, so an Auto launch is what it was before levels were offered.
     """
-    return [*COMPAT_LAUNCHER, *argv], {
-        **env,
-        ENV_CLIENT: url.client_protocol,
-        ENV_UPSTREAM_URL: str(url),
-        ENV_UPSTREAM_KEY: credential,
-        ENV_MODEL: model,
-    }
+    return [*COMPAT_LAUNCHER, *argv], compat_effort_env(
+        {
+            **env,
+            ENV_CLIENT: url.client_protocol,
+            ENV_UPSTREAM_URL: str(url),
+            ENV_UPSTREAM_KEY: credential,
+            ENV_MODEL: model,
+        },
+        reasoning_effort,
+    )
+
+
+def compat_effort_env(env: dict[str, str], reasoning_effort: str | None) -> dict[str, str]:
+    """``env`` with the helper told the turn's level, when it is a translated launch.
+
+    A direct launch, or Auto, is returned unchanged; a level already there is
+    replaced, so a launch template built at Auto can be bound to its turn's.
+    """
+    if ENV_CLIENT not in env:
+        return env
+    bound = {key: value for key, value in env.items() if key != ENV_REASONING_EFFORT}
+    if reasoning_effort:
+        bound[ENV_REASONING_EFFORT] = reasoning_effort
+    return bound
 
 
 def compat_cli_credential(credential: str) -> str:
@@ -178,7 +266,7 @@ def openai_base_url(base_url: str) -> str:
             "this agent is not run through the protocol compatibility helper"
         )
     if isinstance(base_url, ExactBaseUrl):
-        return str(base_url)
+        return metered_cli_url(base_url) if base_url.metered else str(base_url)
     return base_url.rstrip("/").removesuffix("/v1") + "/v1"
 
 
@@ -239,11 +327,11 @@ class RuntimeMCPConfig:
     alias from.
 
     **A separate address and a separate credential from inference.** MCP is
-    served by the cloud agent's own relay, model calls by the FreeInference
-    gateway, and the two credentials are not interchangeable: a leaked MCP
-    token buys no inference, a leaked inference grant buys no tools. Carrying
-    them in one field, as this did while the gateway proxied MCP, would make
-    that separation impossible to express.
+    served by the cloud agent's own relay, model calls by the owner's model
+    provider, and the two credentials are not interchangeable: a leaked MCP
+    token buys no inference, a leaked provider key buys no tools. Carrying
+    them in one field, as this did while an inference gateway proxied MCP,
+    would make that separation impossible to express.
 
     Still no endpoint or header for the *upstream*: each alias is a name one
     conversation gave one connection, the relay resolves it against that job's
@@ -261,6 +349,10 @@ class RuntimeMCPConfig:
     base_url: str = ""
     #: The ``mcp``-scoped token. Never the inference credential.
     credential: str = ""
+    #: Whether the run also reaches the sandbox's MCP gateway, as the server
+    #: ``sandbox`` (cloud_agent_shared.sandbox_mcp). The gateway checks the
+    #: same credential, so every dialect's one header serves both servers.
+    sandbox: bool = False
 
 
 EMPTY_RUNTIME_MCP_CONFIG = RuntimeMCPConfig()
@@ -324,7 +416,7 @@ class AgentRuntime:
         return []
 
     @staticmethod
-    def relay_urls(config: RuntimeMCPConfig, *, gateway_base_url: str) -> dict[str, str]:
+    def relay_urls(config: RuntimeMCPConfig, *, model_base_url: str) -> dict[str, str]:
         """Resolve one run's MCP configuration into the sandbox-local relay URL.
 
         The agent is told this service's fixed MCP-only relay URL, and nothing
@@ -372,11 +464,14 @@ class AgentRuntime:
                 "MCP was requested but no relay credential was minted for this run"
             )
         base = config.base_url.rstrip("/").removesuffix("/v1")
-        return {MERGED_MCP_SERVER_NAME: f"{base}/v1/agent/mcp"}
+        endpoints = {MERGED_MCP_SERVER_NAME: f"{base}/v1/agent/mcp"}
+        if config.sandbox:
+            endpoints[SANDBOX_MCP_SERVER_NAME] = SANDBOX_MCP_URL
+        return endpoints
 
     @classmethod
     def _mcp_endpoints(
-        cls, config: RuntimeMCPConfig, *, gateway_base_url: str
+        cls, config: RuntimeMCPConfig, *, model_base_url: str
     ) -> dict[str, dict[str, Any]]:
         """The relay endpoint in Claude Code's own dialect and header syntax.
 
@@ -397,7 +492,7 @@ class AgentRuntime:
                 "timeout": 1560000,
                 "headers": {"Authorization": f"Bearer ${{{MCP_TOKEN_ENV}}}"},
             }
-            for server_id, url in cls.relay_urls(config, gateway_base_url=gateway_base_url).items()
+            for server_id, url in cls.relay_urls(config, model_base_url=model_base_url).items()
         }
 
     def parse_event(self, line: str) -> NormalizedEvent | None:
@@ -419,7 +514,7 @@ class AgentRuntime:
         self,
         config: RuntimeMCPConfig,
         *,
-        gateway_base_url: str,
+        model_base_url: str,
         env: dict[str, str],
     ) -> None:
         """Carry the relay endpoints into the run, or refuse to.
@@ -431,14 +526,14 @@ class AgentRuntime:
         with no MCP at all, so there is no override that supplies endpoints
         without a verified suppression.
         """
-        del gateway_base_url, env
+        del model_base_url, env
         self._require_empty_mcp_config(config)
 
     def _wrapper_mcp_env(
         self,
         config: RuntimeMCPConfig,
         *,
-        gateway_base_url: str,
+        model_base_url: str,
         env: dict[str, str],
     ) -> None:
         """Publish the relay endpoint for an image-shipped wrapper to merge.
@@ -448,7 +543,7 @@ class AgentRuntime:
         for itself on the turns where it is absent, which is the shape the
         suppression exists to prevent.
         """
-        endpoints = self.relay_urls(config, gateway_base_url=gateway_base_url)
+        endpoints = self.relay_urls(config, model_base_url=model_base_url)
         env[MCP_SERVERS_ENV] = json.dumps(endpoints, sort_keys=True)
         # The wrapper's config references this name; it has to resolve, to the
         # token or to the empty string when the run has no servers. Setting it
@@ -457,19 +552,19 @@ class AgentRuntime:
         env[MCP_TOKEN_ENV] = config.credential
 
     @staticmethod
-    def _wrapper_env(gateway_base_url: str, credential: str) -> dict[str, str]:
+    def _wrapper_env(model_base_url: str, credential: str) -> dict[str, str]:
         """The gateway and credential an image-shipped wrapper configures its CLI from.
 
         Both the OpenAI and the Anthropic spelling, and the MCP tool timeout.
         An owner connection speaks only the OpenAI one, so it gets only that.
         """
-        if isinstance(gateway_base_url, ExactBaseUrl):
+        if isinstance(model_base_url, ExactBaseUrl):
             return {
-                "OPENAI_BASE_URL": openai_base_url(gateway_base_url),
+                "OPENAI_BASE_URL": openai_base_url(model_base_url),
                 "OPENAI_API_KEY": credential,
                 "MCP_TOOL_TIMEOUT": "1560000",
             }
-        base = gateway_base_url.rstrip("/").removesuffix("/v1")
+        base = model_base_url.rstrip("/").removesuffix("/v1")
         return {
             "OPENAI_BASE_URL": f"{base}/v1",
             "OPENAI_API_KEY": credential,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -12,17 +12,38 @@ from cloud_agent.schemas.mcp import (
     McpConnectionSummary,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
 from cloud_agent.skills.models import SkillLimits
-from cloud_agent.source_control_runtime import (
+from cloud_agent.source_control.source_control_runtime import (
     LoadStatus,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
 from cloud_agent_shared.environment import environment_limits
 
 
+class ModelEffortOffer(BaseModel):
+    """Which reasoning levels one agent may run one connection model at.
+
+    ``status`` is what the model's provider declared for the API this agent's
+    plan calls: ``supported`` (``levels`` are the declared ones this agent's
+    CLI can send, weakest first), ``unsupported`` (the provider declares none,
+    or none this agent can send) or ``unknown`` (nothing the provider said
+    settles it). Auto -- no level -- is always available and is not listed.
+    """
+
+    status: Literal["supported", "unsupported", "unknown"]
+    levels: list[str] = Field(default_factory=list)
+    #: Why, for ``unknown`` or an agent that cannot send a declared level:
+    #: ``not_read``, ``listing_unavailable``, ``not_listed``, ``not_declared``,
+    #: ``conflicting_declarations`` or ``agent_cannot_express``.
+    reason: str = ""
+    #: Which declaration it came from: ``anthropic_models_api``,
+    #: ``models_listing_reasoning`` or ``models_listing_effort``; empty when none.
+    source: str = ""
+
+
 class ModelConnectionOption(BaseModel):
     """One of the owner's enabled model connections, as the composer offers it.
 
-    Everything needed to offer its models beside the Gateway's, and which
-    agents can run each one now; nothing about its key or its APIs.
+    Everything needed to offer its models, and which agents can run each one
+    now; nothing about its key or its APIs.
     """
 
     id: str
@@ -33,6 +54,9 @@ class ModelConnectionOption(BaseModel):
     #: it: exactly what the execution gates accept. A model missing here is not
     #: verified, or no agent can use it.
     model_runtimes: dict[str, list[str]] = Field(default_factory=dict)
+    #: For each model in ``model_runtimes``, per agent: the reasoning levels a
+    #: task may choose besides Auto, and whether the provider declared them.
+    model_efforts: dict[str, dict[str, ModelEffortOffer]] = Field(default_factory=dict)
 
 
 class AgentConfigResponse(BaseModel):
@@ -57,11 +81,11 @@ class AgentConfigResponse(BaseModel):
         default_factory=list,
         description="Runtime ids that support plugins installed at sandbox initialization.",
     )
-    models: list[str] = Field(
-        default_factory=list,
+    model_connection_required: bool = Field(
+        default=False,
         description=(
-            "Model ids an agent job can actually call for this user — the same "
-            "predicate the create endpoint enforces, not the /v1/models list."
+            "True while none of this owner's enabled model connections has a model "
+            "verified for any Agent: nothing can run until one is set up."
         ),
     )
     runtime_reasoning_efforts: dict[str, list[str]] = Field(
@@ -71,15 +95,6 @@ class AgentConfigResponse(BaseModel):
             "runtime absent here cannot express one at all."
         ),
     )
-    model_reasoning_efforts: dict[str, list[str]] = Field(
-        default_factory=dict,
-        description=(
-            "Effort levels each model accepts, from the gateway's registry. The "
-            "composer offers the intersection with the chosen runtime's, and no "
-            "control at all when that is empty — which is also what it shows "
-            "against a gateway too old to answer this."
-        ),
-    )
     mcp_connections: list[McpConnectionSummary] = Field(
         default_factory=list,
         description="MCP servers this deployment offers. Empty means none are configured.",
@@ -87,20 +102,16 @@ class AgentConfigResponse(BaseModel):
     default_model: str | None = Field(
         default=None,
         description=(
-            "The model a new task should start on, first available of: this "
-            "owner's pin in My Settings, the model their newest turn used, the "
-            "deployment default. Always one of `models`, so a retired model is "
-            "never pre-selected. Null means none of the three resolves, or the "
-            "catalog was unreadable — the composer then leaves its model "
-            "control empty and asks, rather than choosing one for the owner."
+            "The model a new task should start on: the one this owner's newest turn "
+            "used, while its connection is enabled and still lists it. Null means "
+            "the composer leaves its model control empty and asks."
         ),
     )
     model_connections: list[ModelConnectionOption] = Field(
         default_factory=list,
         description=(
-            "This owner's enabled model connections. A model chosen from one is "
-            "submitted with its `model_connection_id`; the same id may also be a "
-            "Gateway model, which is a different choice."
+            "This owner's enabled model connections, the only inference source. A "
+            "model chosen from one is submitted with its `model_connection_id`."
         ),
     )
     model_connections_enabled: bool = Field(
@@ -110,9 +121,7 @@ class AgentConfigResponse(BaseModel):
     default_model_connection_id: str | None = Field(
         default=None,
         description=(
-            "The source of `default_model`: the owner connection it last ran on, "
-            "or null for the Gateway. When set, `default_model` is one of that "
-            "connection's models, not necessarily one of `models`."
+            "The connection `default_model` last ran on; set exactly when `default_model` is."
         ),
     )
     mcp_runtimes: list[str] = Field(

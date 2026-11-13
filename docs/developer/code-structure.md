@@ -12,9 +12,9 @@ apps/
     cloud_agent/          Control plane and its HTTP APIs
     cloud_agent_host/     Host execution and retained sandbox management
     cloud_agent_shared/   Contracts and algorithms shipped in both images
+    migrations/           Agent-owned database schema, managed by Alembic
+    openapi.json          The committed snapshot of this service's OpenAPI
   frontend/              Next.js browser UI and backend-for-frontend routes
-gateway_contracts/       Gateway HTTP contracts and control-plane OpenAPI
-migrations/              Agent-owned database schema, managed by Alembic
 deploy/                  Image builds and deployment entry points
 scripts/                 Development, qualification, and release tooling
 tests/                   Backend behavior, integration, and boundary checks
@@ -23,8 +23,27 @@ docs/                    Maintained guides and dated design evidence
 
 The control plane and host are independently deployed implementations. Neither
 imports the other. Shared code provides the facts and contracts they agree on;
-it imports neither implementation. Gateway integration uses HTTP contracts.
-The agent database and Gateway database remain separate.
+it imports neither implementation. Accounts, admission and usage live in the
+agent database; model calls go from the sandbox to the owner's provider.
+
+## Vocabulary
+
+The code and the wire keep their historical names; documentation and new code
+use the terms in the first column. A job is one turn of a conversation, not the
+user's whole task.
+
+| Term | In code and on the wire | Meaning |
+|---|---|---|
+| Conversation | thread, `thread_id` | One user session, made of turns; a chat or task in the UI |
+| Turn | job, `job_id`, `turn_no` | One user message and the agent's work on it; every turn after the first names its `parent_job_id` |
+| Attempt | `attempt_id`, `attempt_no`, `lease_generation` | One execution of a turn on one host; it carries the lease fence |
+| Sandbox group | `agent_sandboxes`, `sandbox_id`, `sandbox_generation` | One retained container and its workspace |
+| Member | membership, member | One conversation in a group, with its own native session and CLI process |
+| Activation, residency, process | `activation_generation`, `residency_generation`, `process_generation` | A member's three layers: its activation in the container, the residency that lets one live CLI process serve later turns, and that process. A stale generation is refused at its layer |
+| Placeholder credential | `amr.` (MCP), `agh.` (GitHub) | A bearer that names one residency. Only its relay accepts it, and the relay resolves the fence again on every request |
+
+Never name a new field a bare `generation`: say what it counts, as in
+`sandbox_generation` or `residency_generation`.
 
 ## Follow a control-plane request
 
@@ -71,8 +90,17 @@ do not own service startup or shutdown.
 The storage assembly exposes capabilities such as `store.host_pool` and
 `store.pending_messages`. Callers type against the capabilities they use. They
 do not import Postgres repositories or reach through the assembly to its pool.
-Application flows may use the existing FastAPI exception contracts; moving
-files does not imply those interfaces have become framework-independent.
+Outside `storage/`, the assembly is the only storage module a caller imports.
+A port imports only `domain/`, `schemas/`, `cloud_agent_shared`, other ports and
+libraries, because its caller and its implementation both depend on whatever it
+names: a type a new port needs moves to `domain/` or `schemas/` first.
+Do not add a port that only repeats its repository's methods: the assembly then
+names the repository class, and each caller declares the narrow Protocol it
+uses, as `api/config.py` does for model preferences.
+Application flows do not raise HTTP errors: they raise the domain errors
+`Refused` and `Unavailable` (`domain/errors.py`), and `api/errors.py` maps them
+to the same status, headers and body. A test refuses `HTTPException` in
+`application/`.
 
 MCP session ownership lives in `mcp/runtime.py`: lazy host construction,
 fenced session reaping, maintenance, and closing. Both the relay's handlers
@@ -103,45 +131,108 @@ wire changes require the contract update described in the developer guide.
 
 ## Follow a host execution
 
-`runner.py` owns claims, attempt leases, turn execution, heartbeats, and draining.
-`claimed_job.py` defines claim payloads and lease errors;
-`control_plane_client.py` owns attempt-scoped worker HTTP calls, request
-deadlines, and event replay. The runner explicitly re-exports their existing
-public names and keeps client construction at its orchestration boundary. The
+The host package groups its modules by concern. Paths below are relative to
+`cloud_agent_host/`; a module named without a directory sits at its top level.
+
+| Package | Owns |
+|---|---|
+| `service/` | The long-lived host service: enrollment, heartbeats, the claim loop, draining, what the host advertises, and starting each turn's child |
+| `turn/` | One claimed turn in its child process: reservation, source preparation, the attempt's stages, and the stream it relays |
+| `container/` | The Docker/Kata boundary: retained chat containers, their models and markers, and the exact-container identity gate |
+| `network/` | The sandbox network: this deployment's host rules, per-group bridges, and the workloads that depend on them |
+| `supervisor/` | The shared-session supervisor: one group's lifecycle, registration and reconciliation, its members and their native sessions |
+| `archive/` | Sandbox archives, restorable checkpoints, and verified deletion of stopped sandboxes |
+| `observe/` | The guest observer, member execution windows, tool windows, and Docker resource samples |
+| `member_setup/` | What the trusted host installs into a member before its CLI starts: plugins, MCP helpers, runtimes, trusted files |
+| `launch/`, `runtimes/`, `manager_api/` | Launch facets, the Agent CLI adapters, and the Sandbox Manager's HTTP layer |
+
+The top level keeps the process entry points (`runner.py`, `sandbox_manager.py`,
+`candidate_check.py`, and the `host_capacity` and `storage_attestation`
+commands deployment runs inside a runner) and the modules several packages
+share, such as `claimed_job.py`, `control_plane_client.py`, `drivers.py`,
+`resident_transport.py` and `session_lifecycle.py`.
+
+`runner.py` is the command line. The host service in `service/host_service.py`
+enrolls the host, heartbeats, claims turns up to its limit, and drains on
+SIGTERM; `service/host_capabilities.py` holds what it advertises and the proof
+each claim carries. Each claimed turn runs in a child process
+(`turn/turn_child.py`) that preflights, answers the handover, and then runs the
+attempt under the lease `service/attempt_lease.py` renews:
+`turn/group_reservation.py` checks and reserves its sandbox group,
+`turn/shared_live_attempt.py` runs it as a sequence of stages, and
+`turn/turn_stream.py` relays the admitted turn. `turn/source_preparation.py` is
+the trusted Git work on a chat's source outside the sandbox. `claimed_job.py`
+defines claim payloads and lease errors; `control_plane_client.py` owns
+attempt-scoped worker HTTP calls, request deadlines, and event replay. The
 client queues a turn's events on the ordered sender in `event_sender.py`, which
 uploads them in batches.
 
-`chat_sandbox_models.py` holds retained-container specs, inspection/status
-values, ownership labels, and identity bounds. Group bridges, relay membership,
-Kata guest route synchronization, and network proof/release live in the composed
-`chat_sandbox_network.py` component. It consumes a narrow container protocol;
-exact container identity, bounded exec, and fail-stop operations stay with the
-manager. Existing manager network entry points delegate to that owner. Network
-snapshots remain scoped to one operation, and operational log names are stable.
-`chat_sandbox.py` manages retained groups and their members; `sandbox.py` owns the container/process
-boundary. The Sandbox Manager and session supervisor coordinate native
-sessions and workspace operations. The supervisor's metadata lock protects
-in-memory ownership only. Stop, orphan recovery, and archive deletion reserve
-one group's lifecycle before Docker or marker I/O, then revalidate its group,
-member, container, and lifecycle identities before accepting the result. Other
-groups remain available; failed checks release their temporary reservation,
-while durable archive and native-flush barriers remain in force. Public sandbox model imports through
+`container/chat_sandbox_models.py` holds retained-container specs,
+inspection/status values, ownership labels, and identity bounds. Group bridges,
+relay membership, Kata guest route synchronization, and network proof/release
+live in the composed `network/chat_sandbox_network.py` component. It consumes a
+narrow container protocol; exact container identity, bounded exec, and
+fail-stop operations stay with the manager. Existing manager network entry
+points delegate to that owner. Network snapshots remain scoped to one
+operation, and operational log names are stable.
+`container/chat_sandbox.py` manages retained groups and their members. Its
+`ChatSandboxManager` is assembled from mixins, one module per concern:
+container creation (`chat_sandbox_create.py`), member execs and processes
+(`chat_sandbox_members.py`), workspace and home files
+(`chat_sandbox_workspace.py`), the guest observer (`chat_sandbox_observation.py`)
+and archive markers (`chat_sandbox_markers.py`); terminals and the retained
+backend are in `chat_sandbox_terminal.py` and `retained_backend.py`. A test pins
+the manager's method set. The in-guest network check is
+`network/guest_network_check.py`, and the retained-container inventory the
+capacity report reads is `observe/sandbox_inventory.py`.
+`container/sandbox.py` owns the container/process boundary. The Sandbox Manager
+and session supervisor coordinate native sessions and workspace operations. The
+supervisor's metadata lock protects in-memory ownership only. Stop, orphan
+recovery, and archive deletion reserve one group's lifecycle before Docker or
+marker I/O, then revalidate its group, member, container, and lifecycle
+identities before accepting the result. Other groups remain available; failed
+checks release their temporary reservation, while durable archive and
+native-flush barriers remain in force. Public sandbox model imports through
 `chat_sandbox` continue to work.
 
-The runtime adapters are a package under `cloud_agent_host/runtimes/`:
+A group's lifecycle is one value, `GroupLifecycleState`
+(`supervisor/group_lifecycle_state.py`): which start, stop, exclusive workspace
+operation and lifecycle check hold it, each with its holder, the barriers
+still owed (a final archive, an orphan finalization), and the run's fence
+label. Only that module's transitions change it, and a test refuses any other
+assignment. `supervisor/group_lifecycle.py` is the admission table that decides
+what may run now. The [design](../agents/specs/2026-11-05-group-lifecycle-state.zh-CN.md)
+records which combinations are reachable and the invariants the tests check.
+
+The runtime adapters are a package under `cloud_agent_host/runtimes/`, with one
+package per CLI:
 
 | Module | Responsibility |
 |---|---|
 | `base.py` | Adapter contracts, capabilities, MCP configuration, and runtime errors |
 | `events.py` | Normalized event vocabulary and bounded payload helpers |
 | `preview.py` | Partial-reply preview batching |
-| `claude.py`, `codex.py`, `pi.py` | One CLI's live launch; Claude's and pi's event parsing |
-| `http_bridge.py` | The live launch OpenCode and Kilo share, behind the HTTP bridge |
-| `opencode.py`, `kilo.py` | One CLI's name, wrapper binary and catalog entry |
+| `member_launch.py` | The steps one CLI adds to a member's launch, with a CLI-free default |
+| `claude/` | Claude Code: its launch and event parsing (`adapter`), live session (`session`), background tasks (`background`), plugins (`plugins`), and member config, launch steps and native Fork (`member`) |
+| `codex/` | Codex: its app-server launch (`adapter`), notification readings (`app_server`), live session (`session`), MCP relay policy (`mcp`), plugins (`plugins`), and member home, launch steps and Fork recovery (`member`) |
+| `pi/` | pi: its launch and event parsing (`adapter`), live session with its native Fork (`session`), and launch steps (`member`) |
+| `http_bridge/` | OpenCode and Kilo: the launch they share (`adapter`), each CLI's name, wrapper binary and catalog entry (`opencode`, `kilo`), the bridge's records and live session (`parts`, `session`), Kilo's MCP runtime (`kilo_mcp`), and member home, launch steps and server locks (`member`) |
 | `registry.py` | Adapter lookup and construction |
+| `live.py` | Each CLI's live session class, the driver that opens it, and its launch steps |
+
+`drivers.py` keeps the generic Driver, Session and Turn contract and the base
+classes the sessions share. `resident_transport.py` opens member processes and
+journals native Forks. It does not branch on the CLI to launch one: each
+CLI's `member` module defines that CLI's launch steps (its member config or
+private home, trusted helpers, plugin installer, where platform instructions
+go, and Claude's commit attribution), and the factory calls them. Native Fork
+still branches on the CLI there. `member_setup/member_homes.py` holds the private provider homes that Codex, OpenCode
+and Kilo members use.
 
 Existing callers use `cloud_agent_host.runtimes`; the package explicitly
-exports its public API. Runtime discovery facts live in the immutable
+exports its public API, which is the dialect layer. Sessions, `live` and the
+`member` modules build on `drivers.py`, which imports that API, so callers
+import them by module name. Runtime discovery facts live in the immutable
 `cloud_agent_shared/runtime_catalog.py`, so the control plane advertises runtime
 IDs, MCP support, and reasoning efforts without loading host adapters. Runtime
 version pins remain in `cloud_agent_shared/shared_protocol.py` and image files.
@@ -176,6 +267,22 @@ streams. Shared create/Fork idempotency response handling stays private to that
 package. Keep endpoint paths, retries, credentials, cursor handling, and
 notifications with their owning operation.
 
+Inside `components/features/agents/`, each concern has its own folder:
+
+| Folder | Responsibility |
+|---|---|
+| `adapt/` | The Job and Thread API-shape adapters, and the event, diff, resource and job-state readers they share |
+| `conversation/` | Transcript, turns, tool activity, turn navigation and the side chat |
+| `composer/` | Message input, the new-task composer, model and repository pickers, queued messages |
+| `sidebar/` | Conversation list, folders, search, archive and getting started |
+| `workspace/` | Workspace files and tabs, terminals, recorded diffs, temporary workspaces |
+| `trajectory/` | Trajectory view, step inspector, and the protocol and step projections |
+
+Feature areas such as `context/`, `environment/`, `goal/`, `mcp/` and `skills/`
+follow the same rule. The top level keeps what several folders share:
+`types.ts`, the job and conversation records, the read and push providers, and
+the job page. Tests sit next to the module they test.
+
 `components/features/agents/JobDetail.tsx` composes the job page. Its extracted
 implementation lives under `job-detail/`:
 
@@ -184,7 +291,7 @@ implementation lives under `job-detail/`:
 | `JobDetailHeader` | Page header and conversation actions |
 | `JobTranscript` | Transcript projection and navigation |
 | `JobComposer`, `useJobComposerSettings` | Message input and composer settings |
-| `RunOutcome`, `GitPanel` | Outcome, publication, and Git interaction |
+| `RunOutcome`, `GitPanel` | Outcome, pull request, and Git interaction |
 | `JobDetailSidePanels`, `LazyPanels` | Workspace/inspector rendering and lazy loading |
 | `useJobDetailPanels` | Panel selection, focus, resizing, and retained panel state |
 | `useJobConversation` | Turn navigation, transcript scrolling, and reading position |

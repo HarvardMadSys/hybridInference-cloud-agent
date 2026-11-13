@@ -10,17 +10,15 @@
 # One dedicated account per relay, used by nothing else. sshd applies these
 # rules per account, so two relays sharing one would share the wider policy:
 #
-#   cloud-agent-inference  gateway machine        -L to the inference port
 #   cloud-agent-mcp        control-plane machine  -L to the MCP-only listener
 #   cloud-agent-control    control-plane machine  -L to the main API, and one
 #                                                 -R for the sandbox manager route back
 #
 # Each account's ~/.ssh/authorized_keys holds exactly one line. `port-forwarding`
 # re-enables remote as well as local forwarding after `restrict`, and
-# `permitopen` limits only the local destination. The two relay accounts are
-# refused remote forwarding by their blocks below:
+# `permitopen` limits only the local destination. The MCP relay account is
+# refused remote forwarding by its block below:
 #
-#   command="",restrict,port-forwarding,permitopen="127.0.0.1:8080" ssh-ed25519 AAAA... inference
 #   command="",restrict,port-forwarding,permitopen="127.0.0.1:8001" ssh-ed25519 AAAA... mcp
 #
 # The control key also names its single reverse listener: the control-plane
@@ -42,26 +40,6 @@
 # On the control-plane machine, also let the reverse ports answer only on that
 # Docker bridge interface. Linux accepts a packet for any local address on any
 # interface, so the bind address alone does not keep LAN neighbours out.
-
-# Inference relay: one local forward to the gateway's inference listener.
-Match User cloud-agent-inference
-    AllowTcpForwarding local
-    DisableForwarding no
-    AllowStreamLocalForwarding no
-    PermitOpen 127.0.0.1:8080
-    PermitListen none
-    GatewayPorts no
-    PasswordAuthentication no
-    KbdInteractiveAuthentication no
-    PubkeyAuthentication yes
-    AuthenticationMethods publickey
-    AuthorizedKeysFile .ssh/authorized_keys
-    ForceCommand /usr/sbin/nologin
-    AllowAgentForwarding no
-    X11Forwarding no
-    PermitTTY no
-    PermitUserRC no
-    PermitTunnel no
 
 # MCP relay: one local forward to the MCP-only listener, never the main API.
 Match User cloud-agent-mcp

@@ -42,7 +42,6 @@ function renderSettings(conversations: number) {
   vi.mocked(getAgentConfig).mockResolvedValue({
     repos: [],
     runtimes: ['claude-code'],
-    models: ['model-a'],
     github_connected: false,
     github_install_url: '/agents/integrations',
   });
@@ -108,7 +107,7 @@ describe('getting started on the Setting page', () => {
 
     const help = await screen.findByRole('button', { name: 'What is getting started?' });
     expect(help).toHaveAccessibleDescription(
-      'Takes you from connecting GitHub to your first task.',
+      'Takes you from connecting a model to your first task.',
     );
     expect(help).toHaveAttribute('aria-expanded', 'false');
     fireEvent.click(help);

@@ -53,6 +53,11 @@ vi.mock('next/navigation', () => ({
   useSearchParams: () => new URLSearchParams(window.location.search),
 }));
 
+// Without access an account waits for approval in its own panel.
+vi.mock('@/components/features/auth/WaitlistPanel', () => ({
+  WaitlistPanel: () => <section data-testid="waitlist-panel" />,
+}));
+
 vi.mock('@/components/features/auth/ProtectedRoute', () => ({
   ProtectedRoute: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }));
@@ -95,12 +100,11 @@ vi.mock('@/components/providers/AuthProvider', async () => {
 vi.mock('@/components/providers/SiteConfigProvider', () => ({
   useSiteConfig: () => ({
     branding: { appName: 'FreeInference', orgName: '', orgUrl: '', statusUrl },
-    features: { rag: false },
   }),
 }));
 
 // The menu has its own tests; here it only matters where it is rendered.
-vi.mock('@/components/features/agents/AccountMenu', () => ({
+vi.mock('@/components/features/agents/sidebar/AccountMenu', () => ({
   AccountMenu: ({ variant }: { variant: string }) => (
     <button type="button" data-testid={`account-menu-${variant}`}>
       Account menu
@@ -108,7 +112,7 @@ vi.mock('@/components/features/agents/AccountMenu', () => ({
   ),
 }));
 
-vi.mock('@/components/features/agents/AgentsSidebar', () => ({
+vi.mock('@/components/features/agents/sidebar/AgentsSidebar', () => ({
   AgentsSidebar: ({
     collapsed,
     headerAction,
@@ -200,6 +204,42 @@ describe('AgentsLayout sidebar collapse', () => {
     expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
     expect(toggle()).toHaveAccessibleName('Expand task list');
   });
+
+  it.each(['0', '1'])(
+    'folds the task list away on every Admin visit and keeps the task app preference %s',
+    (preference) => {
+      localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, preference);
+      const page = (route: string) => {
+        pathname = route;
+        return (
+          <AgentsLayout>
+            <p>page</p>
+          </AgentsLayout>
+        );
+      };
+      const view = render(page('/admin/hosts'));
+
+      expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+      expect(toggle()).toHaveAccessibleName('Expand task list');
+
+      // Opened on one admin page, it stays open on the next one...
+      fireEvent.click(toggle());
+      expect(screen.getByTestId('sidebar-stub')).toBeInTheDocument();
+      view.rerender(page('/admin/accounts'));
+      expect(screen.getByTestId('sidebar-stub')).toBeInTheDocument();
+      expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBe(preference);
+
+      // ...the task app keeps its own choice...
+      view.rerender(page('/job-1'));
+      if (preference === '0') expect(screen.getByTestId('sidebar-stub')).toBeInTheDocument();
+      else expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+
+      // ...and the next visit to Admin starts folded again.
+      view.rerender(page('/admin/hosts'));
+      expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+      expect(localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY)).toBe(preference);
+    },
+  );
 
   it.each([
     ['MacIntel', { metaKey: true }, { ctrlKey: true }],
@@ -831,6 +871,7 @@ describe('AgentsLayout permissions', () => {
       );
       expect(screen.queryByText('private workspace')).not.toBeInTheDocument();
       expect(screen.queryByTestId('sidebar-stub')).not.toBeInTheDocument();
+      expect(screen.getByTestId('waitlist-panel')).toBeInTheDocument();
     },
   );
 });

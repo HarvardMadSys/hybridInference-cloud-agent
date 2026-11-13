@@ -5,41 +5,38 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import toast from 'react-hot-toast';
 import { JobComposer } from './job-detail/JobComposer';
 import { JobDetailHeader } from './job-detail/JobDetailHeader';
+import { JobDetailProviders } from './job-detail/JobDetailProviders';
 import { JobDetailSidePanels } from './job-detail/JobDetailSidePanels';
 import { JobTranscript } from './job-detail/JobTranscript';
-import { hasPublishableWorkspaceChanges } from './job-detail/RunOutcome';
-import { TrajectoryView } from './job-detail/LazyPanels';
+import { ContextView, TrajectoryView } from './job-detail/LazyPanels';
 import { inheritedFrom, useJobComposerSettings } from './job-detail/useJobComposerSettings';
 import { useJobConversation } from './job-detail/useJobConversation';
 import { useJobDetailPanels, type SubagentTarget } from './job-detail/useJobDetailPanels';
 import { useJobRunActions } from './job-detail/useJobRunActions';
 import { useT } from '@/components/providers';
-import { WorkspaceLinkProvider } from '@/components/ui/Markdown';
-import { basePath } from '@/config/env';
-import { publishAgentThread } from '@/lib/api/agents';
 import { submitThreadMessage, type ThreadMessageResultApi } from '@/lib/api/pendingMessages';
 import { APIError } from '@/lib/utils/errors';
 
 import type { AgentJobApi, AgentJobEventApi, AgentThreadEventApi } from '@/lib/api/agents';
 import type { SelectedSkillApi } from '@/lib/api/skills';
-import { ActivityWindow } from './ActivityWindow';
-import { ownedBySubagent, subagentDisplayEvents } from './adapt';
-import { SubagentLinks, type SubagentOfCall } from './ChatMessages';
-import { composerOverrides } from './ConversationComposer';
-import { FloatingActivityWindow } from './FloatingActivityWindow';
-import { LedgerUsage, useLedgerUsage } from './LedgerUsage';
-import { notDeliveredText } from './PendingMessageQueue';
-import { SubagentConversation } from './SubagentConversation';
-import { BackToBottom, TurnRail } from './TurnNavigator';
+import { ActivityWindow } from './conversation/ActivityWindow';
+import { ownedBySubagent, subagentDisplayEvents } from './adapt/events';
+import { SubagentLinks, type SubagentOfCall } from './conversation/ChatMessages';
+import { composerOverrides } from './composer/ConversationComposer';
+import { FloatingActivityWindow } from './conversation/FloatingActivityWindow';
+import { LedgerUsage, useLedgerUsage } from './conversation/LedgerUsage';
+import { notDeliveredText } from './composer/PendingMessageQueue';
+import { SubagentConversation } from './conversation/SubagentConversation';
+import { BackToBottom, TurnRail } from './conversation/TurnNavigator';
 import {
   hasActivityOverview,
   subagentStartedBy,
   turnActivityOverview,
   type OverviewSubagent,
-} from './activityOverview';
+} from './conversation/activityOverview';
 import { useAttachments } from './attachments/useAttachments';
-import { codeReviewPrompt } from './codeReview';
-import { composerCommandMatches } from './composerCommands';
+import { codeReviewPrompt } from './conversation/codeReview';
+import { composerCommandMatches } from './composer/composerCommands';
 import { hasLostContext, isActiveConversationState, isBusyJob, latestJob } from './conversationJob';
 import { useFirstRun } from './firstRun';
 import { isGoalRevisionConflict, writeGoal } from './goal/goalApi';
@@ -47,13 +44,12 @@ import { hasLiveWork } from './goal/liveWork';
 import { GOAL_COMMAND_PREFIX, type GoalCommandControls } from './goal/useGoalCommand';
 import { useThreadComposerMcp } from './mcp/useThreadComposerMcp';
 import { useThreadComposerSsh } from './ssh/useComposerSsh';
-import { createRecordedOutputsSelector } from './recordedTurnOutputs';
-import { useTranscriptPresentation } from './transcriptPresentation';
+import { createRecordedOutputsSelector } from './conversation/recordedTurnOutputs';
+import { useTranscriptPresentation } from './conversation/transcriptPresentation';
 import type { AgentJob } from './types';
-import { isActiveWorkspacePublicationState } from './useAgentJobs';
-import { useComposerDraftStore } from './useComposerDraft';
-import { usePendingMessages } from './usePendingMessages';
-import { watchPullRequestPrompt, watchPullRequestRequestId } from './watchPullRequest';
+import { useComposerDraftStore } from './composer/useComposerDraft';
+import { usePendingMessages } from './composer/usePendingMessages';
+import { watchPullRequestPrompt, watchPullRequestRequestId } from './conversation/watchPullRequest';
 
 export {
   INSPECTOR_WIDTH_STORAGE_KEY,
@@ -114,7 +110,6 @@ export function JobDetail({
     setTrajectoryQuery,
     trajectorySteps,
     layoutContainerRef,
-    openWorkspaceFile,
     selectStep,
     openRun,
   } = panels;
@@ -184,11 +179,9 @@ export function JobDetail({
       ? t('attach.mcpUnsupported', { runtime: job.runtime })
       : undefined;
   const [submitting, setSubmitting] = useState(false);
-  const [rewriting, setRewriting] = useState(false);
   const sendRequestedRef = useRef(false);
   const watchPrRequestedRef = useRef(false);
   const [watchPrAcceptedJobId, setWatchPrAcceptedJobId] = useState<string | null>(null);
-  const [publishRequested, setPublishRequested] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const runActions = useJobRunActions({ job, userId, onReload, onError: setActionError });
   const { stopping, forking, stop, forkFrom, canForkWorkspace, canForkCurrent, canReview } =
@@ -198,7 +191,7 @@ export function JobDetail({
   // refused rather than silently overwritten.
   const currentGoal = job.goal ?? null;
   // The first turn of the owner's first conversation explains itself as it
-  // goes, and says where its draft PR is when it has one.
+  // goes, and says where its pull request is when it has one.
   const { onlyThreadId } = useFirstRun();
   const firstRun = (job.turnNo ?? 1) === 1 && onlyThreadId === threadId;
   useEffect(() => setAttemptNo(liveAttempt), [liveAttempt]);
@@ -327,7 +320,6 @@ export function JobDetail({
   async function sendDraft(command: GoalCommand): Promise<ThreadMessageResultApi | null> {
     if (
       sendRequestedRef.current ||
-      rewriting ||
       watchPrRequestedRef.current ||
       contextLost ||
       isArchived ||
@@ -406,9 +398,7 @@ export function JobDetail({
     setInspector(null);
   }
   const selectedAttemptIsCurrent = attemptNo === 0 || attemptNo === liveAttempt;
-  const usageFooter = selectedAttemptIsCurrent ? (
-    <LedgerUsage job={job} usage={usage} />
-  ) : undefined;
+  const usageFooter = selectedAttemptIsCurrent ? <LedgerUsage usage={usage} /> : undefined;
 
   const conversation = useJobConversation({ job, panels, attemptNo, liveAttempt, setAttemptNo });
   const {
@@ -563,7 +553,7 @@ export function JobDetail({
       // scroll:false and a stable JobDetail key. Native history updates Next's
       // usePathname without replacing the page, preserving the conversation
       // while useAgentJob loads the next turn. Reload and Back keep real URLs.
-      window.history.pushState(null, '', `${basePath}/${encodeURIComponent(jobId)}`);
+      window.history.pushState(null, '', `/${encodeURIComponent(jobId)}`);
       // The reader asked for this turn, so following its output is what they
       // asked for — the one place besides "back to bottom" that resumes it.
       scroll.followLatest();
@@ -581,11 +571,6 @@ export function JobDetail({
     },
   });
   const watchPrPrompt = watchPullRequestPrompt(job);
-  // These live fields describe the entire conversation/workspace. Other
-  // thread rows can retain older pending/running values after it settles.
-  const publicationState =
-    job.workspacePublicationState ?? latestQuestionTurn?.workspace_publication_state;
-  const publicationPending = Boolean(publicationState && publicationState !== 'published');
   const conversationBusy =
     job.conversationState !== undefined
       ? isActiveConversationState(job.conversationState)
@@ -595,16 +580,13 @@ export function JobDetail({
   const canWatchPr = Boolean(
     userId &&
     (job.prUrl ?? job.workspacePrUrl) &&
-    !job.workspaceUnpublishedChanges &&
     isSuccessful &&
     !isActive &&
     !isArchived &&
     !contextLost &&
     !submitting &&
-    !rewriting &&
     !mcp.saving &&
     !ssh.saving &&
-    !publicationPending &&
     watchPrAcceptedJobId !== job.id &&
     queue.loaded &&
     queue.latestJobId &&
@@ -613,37 +595,6 @@ export function JobDetail({
     !queue.resuming &&
     !conversationBusy,
   );
-
-  // The platform publishes only when the owner asks: Create PR, then Update PR.
-  // The newest turn offers it once the workspace has Git changes and nothing
-  // runs there; a request already on its way shows as the publication state.
-  const canPublish = Boolean(
-    userId &&
-    hasPublishableWorkspaceChanges(job) &&
-    !parentTurn &&
-    !isActive &&
-    !contextLost &&
-    !publishRequested &&
-    !isActiveWorkspacePublicationState(publicationState) &&
-    !conversationBusy,
-  );
-
-  // A request stays closed until the page reads the publication it started.
-  useEffect(() => setPublishRequested(false), [publicationState, job.id]);
-
-  async function publish() {
-    if (!canPublish) return;
-    setPublishRequested(true);
-    setActionError(null);
-    try {
-      await publishAgentThread(threadId);
-      onReload?.();
-    } catch (cause: unknown) {
-      if (!composerMounted.current) return;
-      setPublishRequested(false);
-      setActionError(cause instanceof Error ? cause.message : t('publish.sendFailed'));
-    }
-  }
 
   async function watchPr() {
     const latestJobId = queue.latestJobId;
@@ -658,7 +609,7 @@ export function JobDetail({
       // selections belong to the owner's next message and stay in place.
       // The server replays this receipt under the thread lock, including for
       // another tab viewing a different turn of the same conversation. Fresh
-      // requests refuse atomically if its queue or published boundary changes.
+      // requests refuse atomically if its queue changes.
       const result = await submitThreadMessage(
         threadId,
         { prompt: watchPrPrompt, require_idle: true, expected_latest_job_id: latestJobId },
@@ -740,12 +691,12 @@ export function JobDetail({
                 inspector is not holding instead of a reading column. */}
             <div
               className={`flex w-full flex-1 flex-col pb-4 pt-4 ${
-                tab === 'trajectory'
-                  ? 'px-4'
-                  : `mx-auto max-w-4xl ${showRail ? 'pl-4 pr-10' : 'px-4'}`
+                tab !== 'chat' ? 'px-4' : `mx-auto max-w-4xl ${showRail ? 'pl-4 pr-10' : 'px-4'}`
               }`}
             >
-              {tab === 'trajectory' ? (
+              {tab === 'context' ? (
+                <ContextView job={job} onOpenPoint={panels.openContextPoint} onOpenTurn={openRun} />
+              ) : tab === 'trajectory' ? (
                 <div className="flex-1">
                   <TrajectoryView
                     events={events}
@@ -757,14 +708,7 @@ export function JobDetail({
                     subagentFilter={
                       openSubagent && subagent ? JSON.stringify([subagent.jobId, subagent.key]) : ''
                     }
-                    onSubagentFilterChange={(value) => {
-                      if (!value) {
-                        setSubagent(null);
-                        return;
-                      }
-                      const [jobId, key] = JSON.parse(value) as [string, string];
-                      setSubagent({ jobId, key });
-                    }}
+                    onSubagentFilterChange={panels.setSubagentFilter}
                     selectedKey={inspector?.kind === 'step' ? inspector.stepKey : null}
                     onSelectStep={selectStep}
                     onOpenRun={openRun}
@@ -804,7 +748,6 @@ export function JobDetail({
                     recordedOutputs={recordedOutputs}
                     onReview={canReview ? openReview : undefined}
                     onWatchPr={canWatchPr ? () => void watchPr() : undefined}
-                    onPublish={canPublish ? () => void publish() : undefined}
                   />
                 </SubagentLinks.Provider>
               )}
@@ -828,16 +771,15 @@ export function JobDetail({
                 setChosenSkills={setChosenSkills}
                 mcpBlockedReason={mcpBlockedReason}
                 submitting={submitting}
-                rewriting={rewriting}
                 readingFiles={readingFiles}
                 setReadingFiles={setReadingFiles}
-                setRewriting={setRewriting}
                 actionError={actionError}
                 setActionError={setActionError}
                 submitFollowUp={submitFollowUp}
                 steerNow={steerNow}
                 insertGoalCommand={insertGoalCommand}
                 onReload={onReload}
+                todo={{ overview: activityOverview, open: activityVisible, toggle: toggleActivity }}
                 hidden={showingSubagent}
               />
             </div>
@@ -935,5 +877,5 @@ export function JobDetail({
       </div>
     </section>
   );
-  return <WorkspaceLinkProvider onOpenFile={openWorkspaceFile}>{content}</WorkspaceLinkProvider>;
+  return <JobDetailProviders panels={panels}>{content}</JobDetailProviders>;
 }

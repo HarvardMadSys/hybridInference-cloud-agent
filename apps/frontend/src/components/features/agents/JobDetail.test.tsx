@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { offering, TEST_CONNECTION } from '@/test/connectionConfig';
 import '@testing-library/jest-dom/vitest';
 
 import {
@@ -38,11 +39,9 @@ import {
   setAgentGoal,
   resumeAgentGoal,
   resizeAgentTerminal,
-  refreshAgentJobUsage,
   restoreAgentJob,
   renameAgentJob,
   pinAgentJob,
-  publishAgentThread,
   unpinAgentJob,
   streamAgentTerminal,
   writeAgentTerminalInput,
@@ -76,9 +75,6 @@ import { useKeyboardShortcuts } from '@/components/features/settings/keyboardSho
 import { DEFAULT_KEYBOARD_SHORTCUTS } from '@/lib/keyboardShortcuts';
 import { onPlatform } from '@/lib/platformTestSupport';
 import { listThreadQuestions } from '@/lib/api/questions';
-import { rewritePrompt } from '@/lib/api/promptRewrite';
-
-vi.mock('@/lib/api/promptRewrite', () => ({ rewritePrompt: vi.fn() }));
 
 vi.mock('@/lib/api/questions', () => ({
   listThreadQuestions: vi
@@ -87,16 +83,16 @@ vi.mock('@/lib/api/questions', () => ({
   answerThreadQuestion: vi.fn(),
 }));
 
-import { installSideChatLocks } from './sideChatTestSupport';
+import { installSideChatLocks } from './conversation/sideChatTestSupport';
 import { FirstRunProvider } from './firstRun';
 import { receiveHint } from './agentPush';
-import { sideChatKeys } from './sideChatStorage';
+import { sideChatKeys } from './conversation/sideChatStorage';
 import { JobDetail, WORKSPACE_WIDTH_STORAGE_KEY } from './JobDetail';
-import { IDLE_QUEUE_POLL_MS } from './usePendingMessages';
-import { watchPullRequestPrompt } from './watchPullRequest';
+import { IDLE_QUEUE_POLL_MS } from './composer/usePendingMessages';
+import { watchPullRequestPrompt } from './conversation/watchPullRequest';
 import type { AgentJob } from './types';
-import { toDisplayEvent } from './adapt';
-import { projectProtocolEvents } from './trajectoryProtocol';
+import { toDisplayEvent } from './adapt/events';
+import { projectProtocolEvents } from './trajectory/trajectoryProtocol';
 
 const renderingWork = vi.hoisted(() => ({
   trajectory: vi.fn(),
@@ -105,8 +101,8 @@ const renderingWork = vi.hoisted(() => ({
   storedTurn: vi.fn(),
 }));
 
-vi.mock('./ChatMessages', async (importOriginal) => {
-  const original = await importOriginal<typeof import('./ChatMessages')>();
+vi.mock('./conversation/ChatMessages', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./conversation/ChatMessages')>();
   return {
     ...original,
     HistoryTurn: (props: Parameters<typeof original.HistoryTurn>[0]) => {
@@ -116,8 +112,8 @@ vi.mock('./ChatMessages', async (importOriginal) => {
   };
 });
 
-vi.mock('./trajectorySteps', async (importOriginal) => {
-  const original = await importOriginal<typeof import('./trajectorySteps')>();
+vi.mock('./trajectory/trajectorySteps', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./trajectory/trajectorySteps')>();
   return {
     ...original,
     buildTrajectorySteps: (...args: Parameters<typeof original.buildTrajectorySteps>) => {
@@ -127,8 +123,8 @@ vi.mock('./trajectorySteps', async (importOriginal) => {
   };
 });
 
-vi.mock('./conversationTurnNavigation', async (importOriginal) => {
-  const original = await importOriginal<typeof import('./conversationTurnNavigation')>();
+vi.mock(import('./conversation/conversationTurnNavigation'), async (importOriginal) => {
+  const original = await importOriginal();
   return {
     ...original,
     describeHistoryTurns: (...args: Parameters<typeof original.describeHistoryTurns>) => {
@@ -214,11 +210,9 @@ vi.mock('@/lib/api/agents', () => ({
   listAgentConversations: vi.fn(),
   listAgentTerminals: vi.fn(),
   resizeAgentTerminal: vi.fn(),
-  refreshAgentJobUsage: vi.fn(),
   restoreAgentJob: vi.fn(),
   renameAgentJob: vi.fn(),
   pinAgentJob: vi.fn(),
-  publishAgentThread: vi.fn(),
   unpinAgentJob: vi.fn(),
   pauseAgentGoal: vi.fn(),
   setAgentGoal: vi.fn(),
@@ -233,7 +227,7 @@ const AGENT_CONFIG = {
   environment_limits: {},
   repos: ['owner/repository'],
   runtimes: ['claude-code'],
-  models: ['qwen-test', 'glm-test'],
+  ...offering(['qwen-test', 'glm-test']),
   github_connected: true,
   github_install_url: null,
 };
@@ -250,9 +244,7 @@ function makeJob(overrides: Partial<AgentJob> = {}): AgentJob {
     branch: 'agent/ajob_1',
     runtime: 'claude-code',
     model: 'qwen-test',
-    spentUsd: 0.1,
-    hasLedger: true,
-    timeoutLabel: '',
+    modelConnectionId: TEST_CONNECTION,
     sandbox: 'container',
     attempts: [{ no: 1, status: 'live' }],
     currentAttemptNo: 1,
@@ -278,7 +270,6 @@ function makeJob(overrides: Partial<AgentJob> = {}): AgentJob {
     ],
     diffStat: { add: 1, del: 0 },
     gates: [],
-    usage: { tokensIn: '1.2k', tokensOut: '80', cachePct: 0, turns: 2 },
     ...overrides,
   };
 }
@@ -296,15 +287,12 @@ function laterTurn(overrides: Partial<AgentJobApi> = {}): AgentJobApi {
     metadata: null,
     created_at: null,
     updated_at: null,
-    spent_usd: null,
-    tokens_in: null,
-    tokens_out: null,
-    model_calls: null,
     turn_no: 2,
     state: 'succeeded',
     task_prompt: 'Later',
     runtime: 'claude-code',
     model: 'qwen-test',
+    model_connection_id: TEST_CONNECTION,
     ...overrides,
   };
 }
@@ -332,6 +320,7 @@ function sideChatFixture() {
     task_prompt: 'Main',
     runtime: 'codex',
     model: 'qwen-test',
+    model_connection_id: TEST_CONNECTION,
     repo: 'owner/repository',
     current_attempt_id: null,
   } as AgentJobApi;
@@ -385,45 +374,13 @@ function sideChatFixture() {
 }
 
 function measuredUsage(): AgentJobUsageApi {
-  const totals = {
-    calls: 2,
-    tokens_in: 1200,
-    tokens_out: 80,
-    cache_read: null,
-    cache_write: null,
-    reasoning: null,
-    spent_usd: null,
-  };
   return {
-    ledger: {
-      status: 'available',
-      source: 'gateway_api_logs',
-      attribution: 'grant_time_window',
-      finalized: false,
-      totals,
-      unknown_rows: null,
-      estimated_calls: 0,
-      queried_at: null,
-      missing_attempts: 0,
-      attempts: [
-        {
-          attempt_id: 1,
-          attempt_no: 1,
-          status: 'available',
-          reason: null,
-          totals,
-          unknown_rows: null,
-          estimated_calls: 0,
-          queried_at: null,
-          windows: [],
-        },
-      ],
-    },
     runtime: {
       source: 'runtime',
-      input_tokens: null,
-      output_tokens: null,
+      input_tokens: 1200,
+      output_tokens: 80,
       cache_read_tokens: null,
+      normalized_input_tokens: 1200,
     },
   };
 }
@@ -438,32 +395,7 @@ const HISTORY = [
     createdAt: null,
   },
 ];
-
 describe('JobDetail', () => {
-  it('uses a rewritten follow-up only after the owner sends it', async () => {
-    vi.mocked(rewritePrompt).mockResolvedValue({
-      kind: 'prompt',
-      prompt: 'Add regression coverage for CSV exports, including empty records.',
-    });
-    render(<JobDetail job={makeJob({ state: 'done' })} />);
-    const box = screen.getByRole('textbox', { name: 'Add a follow-up' });
-    fireEvent.change(box, { target: { value: 'Add tests' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Rewrite prompt' }));
-    await waitFor(() =>
-      expect(box).toHaveValue('Add regression coverage for CSV exports, including empty records.'),
-    );
-    expect(submitThreadMessage).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
-    await waitFor(() =>
-      expect(submitThreadMessage).toHaveBeenCalledWith(
-        'ajob_1',
-        expect.objectContaining({
-          prompt: 'Add regression coverage for CSV exports, including empty records.',
-        }),
-      ),
-    );
-  });
-
   it('opens the latest live question while an older completed turn is being viewed', async () => {
     const job = makeJob({
       state: 'done',
@@ -622,9 +554,7 @@ describe('JobDetail', () => {
 
     const review = screen.getByRole('button', { name: 'Review' });
     expect(review).toBeEnabled();
-    expect(review.parentElement).toContainElement(
-      screen.getByRole('link', { name: 'Open draft PR' }),
-    );
+    expect(review.parentElement).toContainElement(screen.getByRole('link', { name: 'Open PR' }));
     fireEvent.click(review);
 
     const tab = await screen.findByRole('tab', { name: 'Review' });
@@ -642,7 +572,9 @@ describe('JobDetail', () => {
     expect(body.prompt).toContain(reviewed.baseSha);
     expect(body.prompt).toContain(reviewed.branch);
     expect(body.prompt).toContain(prUrl);
-    expect(body.prompt).toMatch(/no Git remote, GitHub CLI, or GitHub credentials/);
+    expect(body.prompt).toMatch(/Review with local Git/);
+    expect(body.prompt).toMatch(/Do not fetch the pull request from GitHub/);
+    expect(body.prompt).not.toMatch(/no Git remote|GitHub credentials/);
     expect(body.prompt).toContain(`git diff ${reviewed.baseSha}`);
     expect(body.prompt).not.toContain(later.base_sha);
     expect(body.skill_ids).toEqual([]);
@@ -734,308 +666,18 @@ describe('JobDetail', () => {
   });
 
   it.each([
-    ['archived', { archivedAt: '2026-09-10T00:00:00Z' }, 'tabs-owner'],
-    ['lost', { nativeState: 'lost' }, 'tabs-owner'],
-    ['not forkable', { nativeForkAvailable: false }, 'tabs-owner'],
-    ['signed out', {}, undefined],
-  ] as const)('disables code review when the source is %s', (_reason, overrides, userId) => {
-    render(
-      <JobDetail
-        job={makeJob({
-          state: 'done',
-          threadId: 'tabs-main-thread',
-          sandboxId: 'tabs-group',
-          workspaceShared: true,
-          nativeState: 'ready',
-          nativeForkAvailable: true,
-          prUrl: 'https://github.com/owner/repository/pull/7',
-          ...overrides,
-        })}
-        userId={userId}
-      />,
-    );
-    const review = screen.getByRole('button', { name: 'Review' });
-    expect(review).toBeDisabled();
-    fireEvent.click(review);
-    expect(forkAgentJob).not.toHaveBeenCalled();
-    expect(submitThreadMessage).not.toHaveBeenCalled();
-  });
-
-  it('watches the published PR in the same thread and follows the resulting turn', async () => {
-    const prUrl = 'https://github.com/owner/repository/pull/7';
-    vi.mocked(submitThreadMessage).mockResolvedValue({
-      pending: null,
-      job: { id: 'ajob_watch' },
-    } as never);
-    window.history.pushState(null, '', '/ajob_1');
-    render(
-      <JobDetail
-        job={makeJob({
-          state: 'done',
-          threadId: 'original-thread',
-          workspacePublicationState: 'published',
-          prUrl,
-        })}
-        userId="alice"
-      />,
-    );
-
-    const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
-    await waitFor(() => expect(watch).toBeEnabled());
-    expect(watch.parentElement).toContainElement(
-      screen.getByRole('link', { name: 'Open draft PR' }),
-    );
-    fireEvent.click(watch);
-
-    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(1));
-    const [threadId, body, options] = vi.mocked(submitThreadMessage).mock.calls[0];
-    expect(threadId).toBe('original-thread');
-    expect(body).toEqual({
-      prompt: expect.any(String),
-      require_idle: true,
-      expected_latest_job_id: 'ajob_1',
-    });
-    expect(options).toEqual({ requestId: 'watch-pr:v2:original-thread:ajob_1' });
-    expect(body.prompt).toContain(prUrl);
-    expect(body.prompt).toContain('owner/repository');
-    expect(body.prompt).toContain('agent/ajob_1');
-    expect(body.prompt).toMatch(/checks|tests/i);
-    expect(body.prompt).toMatch(/reviews|approvals/i);
-    expect(body.prompt).toMatch(/latest.*head|head.*latest/i);
-    expect(body.prompt).toMatch(/merge/i);
-    expect(forkAgentJob).not.toHaveBeenCalled();
-    await waitFor(() => expect(window.location.pathname).toBe('/ajob_watch'));
-    expect(navigation.push).not.toHaveBeenCalled();
-    expect(watch).toBeDisabled();
-    fireEvent.click(watch);
-    expect(submitThreadMessage).toHaveBeenCalledTimes(1);
-  });
-
-  it('watches from the Git PR action, prevents duplicate sends and applies a queued result', async () => {
-    const prUrl = 'https://github.com/owner/repository/pull/7';
-    let finishSend!: (value: Awaited<ReturnType<typeof submitThreadMessage>>) => void;
-    vi.mocked(submitThreadMessage).mockReturnValue(
-      new Promise((resolve) => {
-        finishSend = resolve;
-      }),
-    );
-    window.history.pushState(null, '', '/ajob_1');
-    render(
-      <JobDetail
-        job={makeJob({ state: 'done', threadId: 'original-thread', prUrl })}
-        userId="alice"
-      />,
-    );
-    openWorkspace();
-    const git = screen.getByLabelText('Git workspace');
-    fireEvent.click(within(git).getByRole('tab', { name: 'review' }));
-    const watch = within(git).getByRole('button', { name: 'Watch PR and merge' });
-    await waitFor(() => expect(watch).toBeEnabled());
-    expect(watch.parentElement).toContainElement(
-      within(git).getByRole('link', { name: 'Open pull request' }),
-    );
-    fireEvent.click(watch);
-    expect(watch).toBeDisabled();
-    for (const button of screen.getAllByRole('button', { name: 'Watch PR and merge' })) {
-      expect(button).toBeDisabled();
-      fireEvent.click(button);
-    }
-    expect(submitThreadMessage).toHaveBeenCalledTimes(1);
-    expect(submitThreadMessage).toHaveBeenCalledWith(
-      'original-thread',
-      {
-        prompt: expect.stringContaining(prUrl),
-        require_idle: true,
-        expected_latest_job_id: 'ajob_1',
-      },
-      { requestId: 'watch-pr:v2:original-thread:ajob_1' },
-    );
-    const prompt = vi.mocked(submitThreadMessage).mock.calls[0][1].prompt;
-    await act(async () =>
-      finishSend({
-        pending: {
-          id: 'apmsg_watch',
-          thread_id: 'original-thread',
-          position: 1,
-          state: 'queued',
-          revision: 1,
-          prompt,
-        },
-        job: null,
-      }),
-    );
-
-    const queue = await screen.findByRole('region', { name: 'Queued messages' });
-    expect(within(queue).getByTitle(prompt, { normalizer: (value) => value })).toBeInTheDocument();
-    expect(within(queue).getByText('1 pending')).toBeInTheDocument();
-    expect(window.location.pathname).toBe('/ajob_1');
-    expect(navigation.push).not.toHaveBeenCalled();
-    expect(forkAgentJob).not.toHaveBeenCalled();
-    expect(watch).toBeDisabled();
-    fireEvent.click(watch);
-    expect(submitThreadMessage).toHaveBeenCalledTimes(1);
-  });
-
-  it('uses live idle and published state over stale thread rows and re-enables watching after a turn change', async () => {
-    const job = makeJob({
-      state: 'done',
-      threadId: 'original-thread',
-      conversationState: 'idle',
-      workspacePublicationState: 'published',
-      prUrl: 'https://github.com/owner/repository/pull/7',
-    });
-    const threadJobs = [
-      {
-        id: 'ajob_stale',
-        thread_id: 'original-thread',
-        turn_no: 2,
-        state: 'running',
-        conversation_state: 'running',
-        workspace_publication_state: 'pending',
-        runtime: 'claude-code',
-        model: 'qwen-test',
-      } as AgentJobApi,
-    ];
-    vi.mocked(submitThreadMessage).mockResolvedValue({
-      pending: null,
-      job: { id: 'ajob_watch' },
-    } as never);
-    window.history.pushState(null, '', '/ajob_1');
-    const { rerender } = render(<JobDetail job={job} userId="alice" threadJobs={threadJobs} />);
-
-    const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
-    await waitFor(() => expect(watch).toBeEnabled());
-    fireEvent.click(watch);
-    await waitFor(() => expect(window.location.pathname).toBe('/ajob_watch'));
-    expect(watch).toBeDisabled();
-
-    rerender(
-      <JobDetail
-        job={{ ...job, id: 'ajob_watch', turnNo: 3 }}
-        userId="alice"
-        threadJobs={threadJobs}
-      />,
-    );
-    expect(screen.getByRole('button', { name: 'Watch PR and merge' })).toBeEnabled();
-    rerender(<JobDetail job={job} userId="alice" threadJobs={threadJobs} />);
-    const originalWatch = screen.getByRole('button', { name: 'Watch PR and merge' });
-    expect(originalWatch).toBeEnabled();
-    fireEvent.click(originalWatch);
-    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(2));
-  });
-
-  it('reuses the queue latest turn across historical mounts without epochs and uses a new key after the latest turn changes', async () => {
-    const job = makeJob({
-      state: 'done',
-      threadId: 'original-thread',
-      conversationState: 'idle',
-      workspacePublicationState: 'published',
-      prUrl: 'https://github.com/owner/repository/pull/7',
-    });
-    let latestJobId = 'ajob_latest';
-    vi.mocked(getThreadQueue).mockImplementation(async (threadId) =>
-      emptyQueue(threadId, latestJobId),
-    );
-    const existingReceipt = { pending: null, job: { id: 'ajob_watch_shared' } } as never;
-    vi.mocked(submitThreadMessage)
-      .mockResolvedValueOnce(existingReceipt)
-      .mockResolvedValueOnce(existingReceipt)
-      .mockResolvedValueOnce({ pending: null, job: { id: 'ajob_watch_next' } } as never);
-    const first = render(<JobDetail job={job} userId="alice" />);
-    const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
-    await waitFor(() => expect(watch).toBeEnabled());
-    fireEvent.click(watch);
-    await waitFor(() => expect(window.location.pathname).toBe('/ajob_watch_shared'));
-    const firstRequestId = vi.mocked(submitThreadMessage).mock.calls[0][2]?.requestId;
-    expect(firstRequestId).toBe('watch-pr:v2:original-thread:ajob_latest');
-    expect(vi.mocked(submitThreadMessage).mock.calls[0][1]).toMatchObject({
-      require_idle: true,
-      expected_latest_job_id: 'ajob_latest',
-    });
-    first.unmount();
-
-    window.history.pushState(null, '', '/ajob_older');
-    const second = render(
-      <JobDetail job={{ ...job, id: 'ajob_older', turnNo: 2 }} userId="alice" />,
-    );
-    const historicalWatch = screen.getByRole('button', { name: 'Watch PR and merge' });
-    await waitFor(() => expect(historicalWatch).toBeEnabled());
-    fireEvent.click(historicalWatch);
-    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(window.location.pathname).toBe('/ajob_watch_shared'));
-    const [, historicalBody, historicalOptions] = vi.mocked(submitThreadMessage).mock.calls[1];
-    expect(historicalOptions?.requestId).toBe(firstRequestId);
-    expect(historicalBody).toEqual(vi.mocked(submitThreadMessage).mock.calls[0][1]);
-
-    latestJobId = 'ajob_published_next';
-    second.rerender(
-      <JobDetail job={{ ...job, id: 'ajob_published_next', turnNo: 3 }} userId="alice" />,
-    );
-    const priorReads = vi.mocked(getThreadQueue).mock.calls.length;
-    receiveHint('queue', 'original-thread');
-    await waitFor(() =>
-      expect(vi.mocked(getThreadQueue).mock.calls.length).toBeGreaterThan(priorReads),
-    );
-    const nextWatch = screen.getByRole('button', { name: 'Watch PR and merge' });
-    await waitFor(() => expect(nextWatch).toBeEnabled());
-    fireEvent.click(nextWatch);
-    await waitFor(() => expect(submitThreadMessage).toHaveBeenCalledTimes(3));
-    await waitFor(() => expect(window.location.pathname).toBe('/ajob_watch_next'));
-    const nextRequestId = vi.mocked(submitThreadMessage).mock.calls[2][2]?.requestId;
-    expect(nextRequestId).toBe('watch-pr:v2:original-thread:ajob_published_next');
-    expect(nextRequestId).not.toBe(firstRequestId);
-    expect(vi.mocked(submitThreadMessage).mock.calls[2][1]).toMatchObject({
-      require_idle: true,
-      expected_latest_job_id: 'ajob_published_next',
-    });
-  });
-
-  it.each([
-    ['archived', { archivedAt: '2026-09-10T00:00:00Z' }, 'alice', undefined, undefined],
-    ['lost native context', { nativeState: 'lost' }, 'alice', undefined, undefined],
-    ['lost attempt context', { contextStatus: 'lost' }, 'alice', undefined, undefined],
-    ['signed out', {}, undefined, undefined, undefined],
-    ['queued', { state: 'queued' }, 'alice', undefined, undefined],
-    ['running', { state: 'running' }, 'alice', undefined, undefined],
-    ['a later queued turn', {}, 'alice', 'queued', undefined],
-    ['a later running turn', {}, 'alice', 'running', undefined],
-    [
-      'pending publication',
-      { workspacePublicationState: 'pending' },
-      'alice',
-      undefined,
-      undefined,
-    ],
-    [
-      'capturing publication',
-      { workspacePublicationState: 'capturing' },
-      'alice',
-      undefined,
-      undefined,
-    ],
-    [
-      'captured publication',
-      { workspacePublicationState: 'captured' },
-      'alice',
-      undefined,
-      undefined,
-    ],
-    [
-      'publishing changes',
-      { workspacePublicationState: 'publishing' },
-      'alice',
-      undefined,
-      undefined,
-    ],
-    ['failed publication', { workspacePublicationState: 'failed' }, 'alice', undefined, undefined],
-    ['a later pending publication', {}, 'alice', 'succeeded', 'pending'],
-    ['a later capturing publication', {}, 'alice', 'succeeded', 'capturing'],
-    ['a later captured publication', {}, 'alice', 'succeeded', 'captured'],
-    ['a later publishing turn', {}, 'alice', 'succeeded', 'publishing'],
-    ['a later failed publication', {}, 'alice', 'succeeded', 'failed'],
+    ['archived', { archivedAt: '2026-09-10T00:00:00Z' }, 'alice', undefined],
+    ['lost native context', { nativeState: 'lost' }, 'alice', undefined],
+    ['lost attempt context', { contextStatus: 'lost' }, 'alice', undefined],
+    ['signed out', {}, undefined, undefined],
+    ['queued', { state: 'queued' }, 'alice', undefined],
+    ['running', { state: 'running' }, 'alice', undefined],
+    ['a later queued turn', {}, 'alice', 'queued'],
+    ['a later running turn', {}, 'alice', 'running'],
+    ['a later publishing turn', {}, 'alice', 'publishing'],
   ] as const)(
     'disables PR watching when the conversation is %s',
-    async (_reason, overrides, userId, latestState, latestPublicationState) => {
+    async (_reason, overrides, userId, latestState) => {
       const threadJobs: AgentJobApi[] = [];
       if (latestState) {
         threadJobs.push({
@@ -1045,7 +687,7 @@ describe('JobDetail', () => {
           state: latestState,
           runtime: 'claude-code',
           model: 'qwen-test',
-          workspace_publication_state: latestPublicationState,
+          model_connection_id: TEST_CONNECTION,
         } as AgentJobApi);
       }
       render(
@@ -1455,6 +1097,7 @@ describe('JobDetail', () => {
       expect(submitThreadMessage).toHaveBeenLastCalledWith('original-thread', {
         prompt: 'Use this spec next',
         model: 'glm-test',
+        model_connection_id: TEST_CONNECTION,
         skill_ids: [],
         attachment_ids: [42],
       }),
@@ -1593,6 +1236,7 @@ describe('JobDetail', () => {
       task_prompt: 'Main',
       runtime: 'codex',
       model: 'qwen-test',
+      model_connection_id: TEST_CONNECTION,
       repo: 'owner/repository',
       current_attempt_id: null,
     } as AgentJobApi;
@@ -1759,7 +1403,6 @@ describe('JobDetail', () => {
     // predates it. The bar's own file covers what it renders when present.
     vi.mocked(getAgentThreadStats).mockReset().mockResolvedValue(null);
     vi.mocked(getAgentJobUsage).mockReset().mockResolvedValue(null);
-    vi.mocked(refreshAgentJobUsage).mockReset().mockResolvedValue(null);
     vi.mocked(createAgentTerminal).mockReset();
     vi.mocked(deleteAgentTerminal).mockReset();
     vi.mocked(listAgentTerminals).mockReset().mockResolvedValue([]);
@@ -1790,15 +1433,12 @@ describe('JobDetail', () => {
             metadata: null,
             created_at: null,
             updated_at: null,
-            spent_usd: null,
-            tokens_in: null,
-            tokens_out: null,
-            model_calls: null,
             turn_no: 2,
             state: 'queued',
             task_prompt: 'Later',
             runtime: 'claude-code',
             model: 'qwen-test',
+            model_connection_id: TEST_CONNECTION,
             skills: [],
           },
         ]}
@@ -1870,6 +1510,7 @@ describe('JobDetail', () => {
       expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
         prompt: 'Back to the first model',
         model: 'qwen-test',
+        model_connection_id: TEST_CONNECTION,
       }),
     );
   });
@@ -1894,6 +1535,7 @@ describe('JobDetail', () => {
           state: 'done',
           threadId: 'thread-models',
           model: 'glm-test',
+          modelConnectionId: TEST_CONNECTION,
         })}
       />,
     );
@@ -2113,7 +1755,7 @@ describe('JobDetail', () => {
       expect.objectContaining({ name: path, type: 'image/png', size: image.size }),
     );
     expect(path).toMatch(/^pasted-image-[a-f0-9-]+\.png$/);
-    expect(screen.getByText(path!)).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: path! })).toBeInTheDocument();
     expect(box).toHaveValue('Use this screenshot');
     expect(screen.getByRole('button', { name: 'Queue' })).toBeDisabled();
     fireEvent.keyDown(box, { key: 'Enter' });
@@ -3011,12 +2653,13 @@ describe('JobDetail', () => {
       expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
         prompt: 'Now try it on the other model',
         model: 'glm-test',
+        model_connection_id: TEST_CONNECTION,
       }),
     );
   });
 
   it('keeps the running model selectable after the deployment stops offering it', async () => {
-    vi.mocked(getAgentConfig).mockResolvedValue({ ...AGENT_CONFIG, models: ['glm-test'] });
+    vi.mocked(getAgentConfig).mockResolvedValue({ ...AGENT_CONFIG, ...offering(['glm-test']) });
     render(<JobDetail job={makeJob()} />);
 
     // Otherwise the control would show the deployment's first model while the
@@ -3113,7 +2756,7 @@ describe('JobDetail', () => {
       />,
     );
     expect(screen.getByRole('button', { name: 'View changes' })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Open draft PR' })).toHaveAttribute('href', prUrl);
+    expect(screen.getByRole('link', { name: 'Open PR' })).toHaveAttribute('href', prUrl);
     fireEvent.click(screen.getByRole('button', { name: 'View changes' }));
     expect(screen.queryByRole('dialog', { name: 'Run details' })).not.toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Job workspace' })).toBeInTheDocument();
@@ -3144,7 +2787,7 @@ describe('JobDetail', () => {
     );
   }
 
-  it('says where an owner’s first draft PR is, and that replies update it', async () => {
+  it('says where an owner’s first pull request is, and that the agent can push more to it', async () => {
     vi.mocked(listAgentConversations).mockResolvedValue({
       conversations: [ownedConversation('ajob_1')],
       next_cursor: null,
@@ -3153,15 +2796,13 @@ describe('JobDetail', () => {
 
     inApp(makeJob({ state: 'done', prUrl }));
 
-    expect(await screen.findByText('Your first draft PR is ready')).toBeInTheDocument();
-    expect(screen.getByText(/Reply below, then Update PR/)).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Open draft PR' })).toHaveAttribute('href', prUrl);
+    expect(await screen.findByText('Your first pull request is ready')).toBeInTheDocument();
+    expect(screen.getByText(/ask the agent to push them to the PR/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open PR' })).toHaveAttribute('href', prUrl);
     // Its milestones say what they mean, this once.
     expect(screen.getByRole('button', { name: 'Review' })).toBeInTheDocument();
     const watch = screen.getByRole('button', { name: 'Watch PR and merge' });
-    expect(watch.parentElement).toContainElement(
-      screen.getByRole('link', { name: 'Open draft PR' }),
-    );
+    expect(watch.parentElement).toContainElement(screen.getByRole('link', { name: 'Open PR' }));
     expect(screen.getByText(/keeps going if you close this page/)).toBeInTheDocument();
   });
 
@@ -3174,8 +2815,8 @@ describe('JobDetail', () => {
     inApp(makeJob({ state: 'done', prUrl: 'https://github.com/owner/repository/pull/7' }));
 
     await waitFor(() => expect(listAgentConversations).toHaveBeenCalled());
-    expect(screen.getByRole('link', { name: 'Open draft PR' })).toBeInTheDocument();
-    expect(screen.queryByText('Your first draft PR is ready')).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open PR' })).toBeInTheDocument();
+    expect(screen.queryByText('Your first pull request is ready')).not.toBeInTheDocument();
     expect(screen.queryByText(/keeps going if you close this page/)).not.toBeInTheDocument();
   });
 
@@ -3190,8 +2831,8 @@ describe('JobDetail', () => {
     );
 
     await waitFor(() => expect(listAgentConversations).toHaveBeenCalled());
-    expect(screen.getByRole('link', { name: 'Open draft PR' })).toBeInTheDocument();
-    expect(screen.queryByText('Your first draft PR is ready')).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open PR' })).toBeInTheDocument();
+    expect(screen.queryByText('Your first pull request is ready')).not.toBeInTheDocument();
   });
 
   it('keeps the empty workspace free of change and absent-PR placeholders', () => {
@@ -3200,7 +2841,6 @@ describe('JobDetail', () => {
       workspaceDiffAvailable: true,
       diffFiles: [],
       diffStat: undefined,
-      workspaceUnpublishedChanges: true,
     });
     render(<JobDetail job={job} userId="user-1" />);
     expect(screen.queryByRole('button', { name: 'View changes' })).not.toBeInTheDocument();
@@ -3221,7 +2861,7 @@ describe('JobDetail', () => {
       />,
     );
     const workspace = screen.getByRole('region', { name: 'Task progress' });
-    expect(within(workspace).getByRole('link', { name: 'Open draft PR' })).toHaveAttribute(
+    expect(within(workspace).getByRole('link', { name: 'Open PR' })).toHaveAttribute(
       'href',
       'https://github.com/owner/repository/pull/7',
     );
@@ -3230,124 +2870,38 @@ describe('JobDetail', () => {
     ).not.toBeInTheDocument();
   });
 
-  it.each([
-    ['publishing', 'Publishing changes…'],
-    ['failed', 'Could not publish changes. Try again.'],
-  ] as const)('preserves a %s publication status without a diff', (state, message) => {
-    render(
-      <JobDetail
-        job={makeJob({
-          state: 'done',
-          workspaceDiffAvailable: true,
-          diffFiles: [],
-          workspacePublicationState: state,
-        })}
-      />,
-    );
-    const workspace = screen.getByRole('region', { name: 'Task progress' });
-    expect(within(workspace).getByText(message)).toBeVisible();
-    expect(
-      within(workspace).queryByRole('button', { name: 'View changes' }),
-    ).not.toBeInTheDocument();
-  });
-
-  it('offers Create PR on a finished turn and publishes only when its owner asks', async () => {
-    vi.mocked(publishAgentThread).mockResolvedValue({
-      thread_id: 'thread_publish',
-      snapshot_id: 1,
-      state: 'pending',
-      requested: true,
-    });
-    const onReload = vi.fn();
-    render(
-      <JobDetail
-        job={makeJob({
-          state: 'done',
-          threadId: 'thread_publish',
-          workspaceUnpublishedChanges: true,
-        })}
-        userId="user-1"
-        onReload={onReload}
-      />,
-    );
-    const workspace = screen.getByRole('region', { name: 'Task progress' });
-    expect(within(workspace).getByText('Changes not in the PR yet.')).toBeVisible();
-    expect(
-      within(workspace).queryByRole('link', { name: 'Open draft PR' }),
-    ).not.toBeInTheDocument();
-    expect(publishAgentThread).not.toHaveBeenCalled();
-
-    fireEvent.click(within(workspace).getByRole('button', { name: 'Create PR' }));
-
-    await waitFor(() => expect(publishAgentThread).toHaveBeenCalledWith('thread_publish'));
-    await waitFor(() => expect(onReload).toHaveBeenCalledOnce());
-  });
-
-  it('updates the workspace’s existing PR from a later turn', () => {
+  it('shows the workspace’s newest PR on a later turn and offers watching it', async () => {
     const prUrl = 'https://github.com/owner/repository/pull/9';
     render(
       <JobDetail
-        job={makeJob({ state: 'done', workspacePrUrl: prUrl, workspaceUnpublishedChanges: true })}
+        job={makeJob({ state: 'done', threadId: 'original-thread', workspacePrUrl: prUrl })}
         userId="user-1"
       />,
     );
     const workspace = screen.getByRole('region', { name: 'Task progress' });
-    expect(within(workspace).getByRole('button', { name: 'Update PR' })).toBeEnabled();
-    expect(within(workspace).getByRole('link', { name: 'Open draft PR' })).toHaveAttribute(
-      'href',
-      prUrl,
+    expect(within(workspace).getByRole('link', { name: 'Open PR' })).toHaveAttribute('href', prUrl);
+    // Changes the PR does not hold yet are the agent's to push, not a reason
+    // to refuse watching.
+    expect(within(workspace).getByRole('button', { name: 'View changes' })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(within(workspace).getByRole('button', { name: 'Watch PR and merge' })).toBeEnabled(),
     );
-    // The PR is behind the workspace, so watching it would watch old changes.
-    expect(within(workspace).getByRole('button', { name: 'Watch PR and merge' })).toBeDisabled();
   });
 
-  it('shows a publication on its way instead of asking for another', () => {
-    render(
-      <JobDetail
-        job={makeJob({ state: 'done', workspacePublicationState: 'capturing' })}
-        userId="user-1"
-      />,
-    );
+  it('leaves opening a pull request to the agent', () => {
+    const { rerender } = render(<JobDetail job={makeJob({ state: 'done' })} userId="user-1" />);
     const workspace = screen.getByRole('region', { name: 'Task progress' });
-    expect(within(workspace).getByRole('button', { name: 'Create PR' })).toBeDisabled();
-    expect(within(workspace).getByText('Publishing changes…')).toBeVisible();
-  });
-
-  it('says when a publication found nothing to publish', () => {
-    render(
-      <JobDetail
-        job={makeJob({
-          state: 'done',
-          workspacePublicationState: 'published',
-          workspacePublicationUnchanged: true,
-        })}
-        userId="user-1"
-      />,
-    );
-    const workspace = screen.getByRole('region', { name: 'Task progress' });
-    expect(within(workspace).getByText('No changes to publish.')).toBeVisible();
-  });
-
-  it('shows why a publication request was refused', async () => {
-    vi.mocked(publishAgentThread).mockRejectedValue(
-      new APIError('workspace_busy', 'The workspace is busy. Try again in a moment.', 409),
-    );
-    render(<JobDetail job={makeJob({ state: 'done' })} userId="user-1" />);
-    const workspace = screen.getByRole('region', { name: 'Task progress' });
-
-    fireEvent.click(within(workspace).getByRole('button', { name: 'Create PR' }));
-
-    expect(await screen.findByText('The workspace is busy. Try again in a moment.')).toBeVisible();
-    expect(within(workspace).getByRole('button', { name: 'Create PR' })).toBeEnabled();
-  });
-
-  it('offers no publication for a running turn or a temporary workspace', () => {
-    const { rerender } = render(<JobDetail job={makeJob({ state: 'running' })} userId="user-1" />);
-    expect(screen.queryByRole('button', { name: 'Create PR' })).not.toBeInTheDocument();
+    expect(within(workspace).getByRole('button', { name: 'View changes' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^(Create|Update) PR$/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Open PR' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Watch PR and merge' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/publish/i)).not.toBeInTheDocument();
+    rerender(<JobDetail job={makeJob({ state: 'running' })} userId="user-1" />);
+    expect(screen.queryByRole('button', { name: /^(Create|Update) PR$/ })).not.toBeInTheDocument();
     rerender(
       <JobDetail job={makeJob({ state: 'done', repo: TEMPORARY_WORKSPACE })} userId="user-1" />,
     );
-    expect(screen.queryByRole('button', { name: 'Create PR' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^(Create|Update) PR$/ })).not.toBeInTheDocument();
   });
 
   it('requires a new chat only when context loss is confirmed', () => {
@@ -3417,22 +2971,21 @@ describe('JobDetail', () => {
     render(<JobDetail job={makeJob({ state: 'failed', events: [], stateNote: undefined })} />);
     expect(screen.getByText(/No failure details were recorded/)).toBeInTheDocument();
     expect(screen.getByText(/send a follow-up to try again/)).toBeInTheDocument();
-    expect(await screen.findByLabelText('Run usage')).toHaveTextContent('2 model calls');
+    expect(await screen.findByLabelText('Run usage')).toHaveTextContent('80 output tokens');
     expect(screen.getAllByRole('region', { name: 'Usage' })).toHaveLength(1);
   });
 
-  it('moves usage to the newest assistant reply without restarting accounting requests', async () => {
+  it('moves usage to the newest assistant reply without reading it again', async () => {
     const data = measuredUsage();
     vi.mocked(getAgentJobUsage).mockResolvedValue(data);
-    vi.mocked(refreshAgentJobUsage).mockResolvedValue(data);
     const job = makeJob({
       threadMessages: HISTORY,
       events: [{ kind: 'message', text: 'Inspecting the source.', attemptNo: 1 }],
     });
     const { rerender } = render(<JobDetail job={job} />);
-    await waitFor(() => expect(refreshAgentJobUsage).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(getAgentJobUsage).toHaveBeenCalledTimes(1));
     const firstReply = screen.getByText('Inspecting the source.').closest<HTMLElement>('.group')!;
-    expect(within(firstReply).getByLabelText('Run usage')).toHaveTextContent('2 model calls');
+    expect(within(firstReply).getByLabelText('Run usage')).toHaveTextContent('80 output tokens');
     const historyReply = screen.getByText('Earlier answer').closest<HTMLElement>('.group')!;
     expect(within(historyReply).queryByLabelText('Run usage')).not.toBeInTheDocument();
 
@@ -3447,11 +3000,10 @@ describe('JobDetail', () => {
       );
     });
     const latestReply = screen.getByText('The fix is ready.').closest<HTMLElement>('.group')!;
-    expect(within(latestReply).getByLabelText('Run usage')).toHaveTextContent('2 model calls');
+    expect(within(latestReply).getByLabelText('Run usage')).toHaveTextContent('80 output tokens');
     expect(within(firstReply).queryByLabelText('Run usage')).not.toBeInTheDocument();
     expect(screen.getAllByRole('region', { name: 'Usage' })).toHaveLength(1);
     expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
-    expect(refreshAgentJobUsage).toHaveBeenCalledTimes(1);
   });
 
   it('attaches usage to the current durable reply when event history is unavailable', async () => {
@@ -3477,7 +3029,7 @@ describe('JobDetail', () => {
     await screen.findByLabelText('Run usage');
     const currentReply = screen.getByText('Current answer').closest<HTMLElement>('.group')!;
     const historyReply = screen.getByText('Earlier answer').closest<HTMLElement>('.group')!;
-    expect(within(currentReply).getByLabelText('Run usage')).toHaveTextContent('2 model calls');
+    expect(within(currentReply).getByLabelText('Run usage')).toHaveTextContent('80 output tokens');
     expect(within(historyReply).queryByLabelText('Run usage')).not.toBeInTheDocument();
     expect(screen.getAllByRole('region', { name: 'Usage' })).toHaveLength(1);
   });
@@ -3500,7 +3052,7 @@ describe('JobDetail', () => {
         })}
       />,
     );
-    expect(await screen.findByLabelText('Run usage')).toHaveTextContent('2 model calls');
+    expect(await screen.findByLabelText('Run usage')).toHaveTextContent('80 output tokens');
     const history = screen.getByText('Execution history (2)').closest('details');
     expect(history).not.toHaveAttribute('open');
     expect(screen.getByText('Final answer')).toBeVisible();
@@ -3519,51 +3071,10 @@ describe('JobDetail', () => {
     await waitFor(() => expect(screen.getByText('Final answer')).toBeVisible());
     expect(history).not.toHaveAttribute('open');
     expect(screen.queryByText(/Viewing execution 1/)).not.toBeInTheDocument();
-    expect(screen.getByLabelText('Run usage')).toHaveTextContent('2 model calls');
+    expect(screen.getByLabelText('Run usage')).toHaveTextContent('80 output tokens');
     expect(getAgentJobUsage).toHaveBeenCalledTimes(1);
-    expect(refreshAgentJobUsage).not.toHaveBeenCalled();
     expect(cancelAgentJob).not.toHaveBeenCalled();
     expect(submitThreadMessage).not.toHaveBeenCalled();
-  });
-
-  it.each([null, 0])('preserves an absent or zero Gateway model-call count (%s)', async (turns) => {
-    const measuredTotals = {
-      calls: turns ?? 0,
-      tokens_in: null,
-      tokens_out: null,
-      cache_read: null,
-      cache_write: null,
-      reasoning: null,
-      spent_usd: null,
-    };
-    vi.mocked(getAgentJobUsage).mockResolvedValue({
-      ledger: {
-        status: turns === null ? 'unavailable' : 'available',
-        source: 'gateway_api_logs',
-        attribution: 'grant_time_window',
-        finalized: false,
-        totals: turns === null ? null : measuredTotals,
-        unknown_rows: null,
-        estimated_calls: 0,
-        queried_at: null,
-        missing_attempts: 0,
-        attempts: [],
-      },
-      runtime: {
-        source: 'runtime',
-        input_tokens: null,
-        output_tokens: null,
-        cache_read_tokens: null,
-      },
-    } satisfies AgentJobUsageApi);
-    const job = makeJob();
-    render(<JobDetail job={{ ...job, usage: { ...job.usage, turns: 999 } }} />);
-    await waitFor(() => expect(screen.queryByText('Loading usage…')).not.toBeInTheDocument());
-    const usage = screen.getByRole('region', { name: 'Usage' });
-    expect(
-      within(usage).getByText(turns === null ? 'Usage temporarily unavailable.' : '0 model calls'),
-    ).toBeInTheDocument();
-    expect(within(usage).queryByText(/999/)).not.toBeInTheDocument();
   });
 
   describe('the transcript tool inspector', () => {
@@ -6103,128 +5614,6 @@ describe('JobDetail', () => {
   });
 });
 
-describe('JobDetail reasoning effort', () => {
-  const THINKING_CONFIG = {
-    ...AGENT_CONFIG,
-    runtime_reasoning_efforts: { 'claude-code': ['low', 'medium', 'high', 'xhigh', 'max'] },
-    // Read as a yes/no, not as a vocabulary: the offered levels are the
-    // platform's four.
-    model_reasoning_efforts: { 'qwen-test': ['low', 'high', 'max'] },
-  };
-
-  beforeEach(() => {
-    navigation.push.mockReset();
-    vi.mocked(submitThreadMessage).mockReset();
-    vi.mocked(getAgentConfig).mockReset();
-    vi.mocked(getAgentConfig).mockResolvedValue(THINKING_CONFIG);
-    vi.mocked(submitThreadMessage).mockResolvedValue({
-      pending: null,
-      job: { id: 'ajob_child' },
-    } as never);
-  });
-
-  afterEach(() => cleanup());
-
-  it('offers the platform levels for the turn it would run', async () => {
-    render(<JobDetail job={makeJob()} />);
-
-    const picker = await screen.findByLabelText('Reasoning for this turn');
-    fireEvent.click(picker);
-    const offered = screen.getAllByRole('option').map((o) => o.textContent);
-    expect(offered).toEqual(['low', 'medium', 'high', 'max']);
-  });
-
-  it('leads with the inherited level, and the deepest when nothing was inherited', async () => {
-    const { unmount } = render(<JobDetail job={makeJob({ reasoningEffort: 'low' })} />);
-    expect(await screen.findByLabelText('Reasoning for this turn')).toHaveValue('low');
-    unmount();
-
-    render(<JobDetail job={makeJob()} />);
-    expect(await screen.findByLabelText('Reasoning for this turn')).toHaveValue('max');
-  });
-
-  it('shows and inherits the latest turn’s level when following up from an older URL', async () => {
-    render(
-      <JobDetail
-        job={makeJob({ state: 'done', reasoningEffort: 'low' })}
-        threadJobs={[laterTurn({ reasoning_effort: 'high' })]}
-      />,
-    );
-
-    expect(await screen.findByLabelText('Reasoning for this turn')).toHaveValue('high');
-    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'again' } });
-    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
-    await waitFor(() =>
-      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', { prompt: 'again' }),
-    );
-  });
-
-  it('inherits silently when untouched, and sends an actual change', async () => {
-    const { unmount } = render(<JobDetail job={makeJob({ reasoningEffort: 'high' })} />);
-
-    // Untouched: the field is absent, which the backend reads as "inherit".
-    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'again' } });
-    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
-    await waitFor(() =>
-      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', { prompt: 'again' }),
-    );
-    unmount();
-
-    vi.mocked(submitThreadMessage).mockClear();
-    render(<JobDetail job={makeJob({ reasoningEffort: 'high' })} />);
-    fireEvent.click(await screen.findByLabelText('Reasoning for this turn'));
-    fireEvent.click(screen.getByRole('option', { name: 'low' }));
-    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'easy one' } });
-    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
-
-    await waitFor(() =>
-      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
-        prompt: 'easy one',
-        reasoning_effort: 'low',
-      }),
-    );
-  });
-
-  it('sends the shown level on a thread that carried none', async () => {
-    // The control cannot render blank, so a thread with no stored level shows
-    // the deepest on offer — and what is shown is what is sent.
-    render(<JobDetail job={makeJob()} />);
-    await screen.findByLabelText('Reasoning for this turn');
-
-    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'go' } });
-    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
-
-    await waitFor(() =>
-      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
-        prompt: 'go',
-        reasoning_effort: 'max',
-      }),
-    );
-  });
-
-  it('drops a level the switched-to model does not offer', async () => {
-    render(<JobDetail job={makeJob({ reasoningEffort: 'high' })} />);
-
-    // glm-test takes no effort, so the control disappears and the inherited
-    // level must not ride along to a model that would refuse it.
-    fireEvent.click(await screen.findByLabelText('Model for this turn'));
-    fireEvent.click(screen.getByRole('option', { name: 'glm-test' }));
-    await waitFor(() =>
-      expect(screen.queryByLabelText('Reasoning for this turn')).not.toBeInTheDocument(),
-    );
-
-    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'switch' } });
-    fireEvent.click(screen.getByRole('button', { name: /^(Send|Queue)$/ }));
-
-    await waitFor(() =>
-      expect(submitThreadMessage).toHaveBeenCalledWith('ajob_1', {
-        prompt: 'switch',
-        model: 'glm-test',
-      }),
-    );
-  });
-});
-
 describe('the trajectory tab', () => {
   beforeEach(() => {
     vi.mocked(getAgentConfig).mockReset().mockResolvedValue(AGENT_CONFIG);
@@ -6236,7 +5625,6 @@ describe('the trajectory tab', () => {
       commits: [],
     });
     vi.mocked(getAgentJobUsage).mockReset().mockResolvedValue(null);
-    vi.mocked(refreshAgentJobUsage).mockReset().mockResolvedValue(null);
     vi.mocked(getAgentThreadStats).mockReset().mockResolvedValue(null);
     vi.mocked(getAgentAttemptTelemetry).mockReset().mockResolvedValue({
       attempt_id: 1,

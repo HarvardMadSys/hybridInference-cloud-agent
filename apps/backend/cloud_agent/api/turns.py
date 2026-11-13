@@ -10,16 +10,15 @@ queue, where the owner can still edit or delete it, and the queue sends it when
 the turn in front of it has ended — see `application.pending_messages`. The
 routes that edit, delete and continue that queue live here too.
 
-Fork's own orchestration is not here: `application.session_fork` drives a
-PREPARING operation to MATERIALIZED, so its failure branches are reachable
-without an HTTP request. What stays is the anchor validation, the store's
-`prepare_session_fork`, the finalize and the response — and
-`SESSION_FORK_COORDINATOR_LEASE_S`, which bounds that flow, moved with it.
+Fork's own orchestration is not here: `application.session_fork` holds the
+anchor's eligibility rules, the store's `prepare_session_fork` and its
+refusals, the PREPARING-to-MATERIALIZED saga and the finalize, so its failure
+branches are reachable without an HTTP request. What stays is resolving the
+owner's job, mapping the retaining host's own failure, and the response.
 """
 
 from __future__ import annotations
 
-import secrets
 from typing import TYPE_CHECKING, Any, Protocol
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
@@ -33,13 +32,13 @@ from cloud_agent.api._job_views import (
 from cloud_agent.api._owner_auth import _owned_job, require_agent_owner
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
-    get_gateway_client,
-    get_grant_client,
     get_job_event_signal,
+    get_owner_directory,
     get_source_control,
     get_storage,
     require_store,
 )
+from cloud_agent.api.workspace_errors import _sandbox_manager_http_error
 from cloud_agent.application import send_now as send_now_delivery
 from cloud_agent.application.follow_ups import (
     prepare_follow_up,
@@ -52,13 +51,13 @@ from cloud_agent.application.pending_messages import (
     settle_queue,
     settle_queue_when_possible,
 )
-from cloud_agent.application.session_fork import materialize_session_fork
-from cloud_agent.domain.execution import RUNNING, SUCCEEDED, TERMINAL_STATES
+from cloud_agent.application.session_fork import ForkHostFailed, fork_settled_turn
+from cloud_agent.domain.execution import RUNNING, TERMINAL_STATES
 from cloud_agent.domain.pending_messages import PreparedHead, SettleOutcome
 from cloud_agent.domain.requests import request_fingerprint
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.sandbox_manager_client import SandboxManagerError
-from cloud_agent.sandbox_manager_routing import sandbox_manager_for_attempt
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_routing import sandbox_manager_for_attempt
 from cloud_agent.schemas import (
     AgentJobResponse,
     AgentPendingMessageSendNow,
@@ -70,7 +69,7 @@ from cloud_agent.schemas import (
     AgentThreadQuestionsResponse,
     AgentThreadQueueResponse,
 )
-from cloud_agent.source_control_runtime import (
+from cloud_agent.source_control.source_control_runtime import (
     SourceControlRuntime,  # noqa: TC001 — FastAPI resolves it.
 )
 from cloud_agent.workers.job_event_signal import (  # noqa: TC001 — FastAPI resolves it.
@@ -78,11 +77,11 @@ from cloud_agent.workers.job_event_signal import (  # noqa: TC001 — FastAPI re
 )
 
 if TYPE_CHECKING:
+    from cloud_agent.domain.errors import Refused
     from cloud_agent.ports import (
         AttachmentRepository,
         ConversationCommands,
         ConversationQueries,
-        GrantRepository,
         HostPoolRepository,
         ModelConnectionRepository,
         PendingMessageRepository,
@@ -112,7 +111,6 @@ class _TurnsStorage(Protocol):
     attachments: AttachmentRepository
     conversation_commands: ConversationCommands
     conversation_queries: ConversationQueries
-    grants: GrantRepository
     host_pool: HostPoolRepository
     model_connections: ModelConnectionRepository
     pending_messages: PendingMessageRepository
@@ -153,7 +151,7 @@ def _no_such_message_error() -> HTTPException:
     )
 
 
-def _message_refused(result: dict[str, Any]) -> HTTPException:
+def _message_refused(result: dict[str, Any]) -> HTTPException | Refused:
     """The owner-facing refusal for a queue write the store turned down."""
     error = result.get("error")
     if error == "not_found":
@@ -172,21 +170,7 @@ def _message_refused(result: dict[str, Any]) -> HTTPException:
                     "type": "conversation_changed",
                     "message": (
                         "A chat sharing this workspace changed or is still busy. Wait for "
-                        "all chats' messages and workspace publication to finish, then "
-                        "refresh and try again."
-                    ),
-                }
-            },
-        )
-    if error == "unpublished_changes":
-        return HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "unpublished_changes",
-                    "message": (
-                        "This workspace has changes that are not in its pull request. "
-                        "Update the pull request, then try again."
+                        "all chats' messages to finish, then refresh and try again."
                     ),
                 }
             },
@@ -380,14 +364,14 @@ async def _settle(
     job_store: _TurnsStorage,
     *,
     thread_id: str,
-    gateway: Any,
+    owners: Any,
     app_credentials: Any | None,
     prepared: PreparedHead | None = None,
 ) -> SettleOutcome:
     """Settle after an owner's queue change; a failure leaves it for the sweep.
 
-    The change itself has committed. A settlement that cannot finish — the
-    gateway not answering a model check, say — must not turn it into a 500 the
+    The change itself has committed. A settlement that cannot finish — GitHub
+    not answering a repository check, say — must not turn it into a 500 the
     owner would retry; the next settlement, at the latest the periodic sweep,
     does the rest.
     """
@@ -395,7 +379,7 @@ async def _settle(
         return await settle_queue(
             job_store,
             thread_id=thread_id,
-            gateway=gateway,
+            owners=owners,
             app_credentials=app_credentials,
             prepared=prepared,
         )
@@ -412,7 +396,7 @@ async def _settle_without_app(
     job_store: _TurnsStorage,
     *,
     thread_id: str,
-    gateway: Any,
+    owners: Any,
     source_control: SourceControlRuntime | None,
 ) -> SettleOutcome:
     """Settle after a queue change that must not wait for the GitHub App.
@@ -427,7 +411,7 @@ async def _settle_without_app(
         return await settle_queue_when_possible(
             job_store,
             thread_id=thread_id,
-            gateway=gateway,
+            owners=owners,
             github_app=None if source_control is None else source_control.github,
         )
     except Exception:
@@ -449,7 +433,7 @@ async def submit_thread_message(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _TurnsStorage | None = Depends(get_storage),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
-    gateway: Any = Depends(get_gateway_client),
+    owners: Any = Depends(get_owner_directory),
 ) -> AgentThreadMessageResult:
     """Send a message: the next turn now if nothing is running, otherwise queued.
 
@@ -468,9 +452,8 @@ async def submit_thread_message(
 
     ``require_idle`` binds a fresh action to ``expected_latest_job_id`` and
     refuses it with ``conversation_changed`` if any chat sharing the workspace
-    has a live turn or waiting message, a Fork is active, or a publication is
-    unfinished at the locked write, and with ``unpublished_changes`` if a turn
-    settled since the workspace was last published. An accepted idle-only
+    has a live turn or waiting message or a Fork is active at the locked write.
+    An accepted idle-only
     action creates its turn in that same transaction without entering the
     pending queue.
     """
@@ -517,7 +500,6 @@ async def submit_thread_message(
         reasoning_effort=body.reasoning_effort,
         store=job_store,
         app_credentials=app_credentials,
-        gateway=gateway,
     )
     submitted = await job_store.pending_messages.submit_message(
         thread_id=thread_id,
@@ -562,10 +544,10 @@ async def submit_thread_message(
     outcome = await _settle(
         job_store,
         thread_id=thread_id,
-        gateway=gateway,
+        owners=owners,
         app_credentials=app_credentials,
         # The check this request already made, so an idle conversation does
-        # not ask the gateway twice for the same message.
+        # not check the same message twice.
         prepared=prepared_head(message, parent_job_id=str(latest["id"]), resolved=prepared),
     )
     return await _queue_result(
@@ -616,7 +598,7 @@ async def edit_thread_message(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _TurnsStorage | None = Depends(get_storage),
     source_control: SourceControlRuntime | None = Depends(get_source_control),
-    gateway: Any = Depends(get_gateway_client),
+    owners: Any = Depends(get_owner_directory),
 ) -> AgentThreadMessageResult:
     """Change a waiting message, at the revision the caller read.
 
@@ -652,7 +634,6 @@ async def edit_thread_message(
             # Strict: without the App the repository check would see only the
             # allowlist (issue #47), so this answers 503 while it is unavailable.
             app_credentials=get_agent_app_credentials(source_control),
-            gateway=gateway,
         )
         if changes.get("model"):
             changes["model"] = prepared.model
@@ -666,7 +647,7 @@ async def edit_thread_message(
     if result.get("error") is not None:
         raise _message_refused(result)
     outcome = await _settle_without_app(
-        job_store, thread_id=thread_id, gateway=gateway, source_control=source_control
+        job_store, thread_id=thread_id, owners=owners, source_control=source_control
     )
     return await _queue_result(
         job_store, thread_id=thread_id, user=user, outcome=outcome, message_id=message_id
@@ -683,7 +664,7 @@ async def delete_thread_message(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _TurnsStorage | None = Depends(get_storage),
     source_control: SourceControlRuntime | None = Depends(get_source_control),
-    gateway: Any = Depends(get_gateway_client),
+    owners: Any = Depends(get_owner_directory),
 ) -> AgentThreadMessageResult:
     """Withdraw a waiting message, at the revision the caller read.
 
@@ -701,12 +682,12 @@ async def delete_thread_message(
     # The message may have been what stopped the line; what was behind it can
     # go now, or once the App is back if it cannot be loaded at the moment.
     outcome = await _settle_without_app(
-        job_store, thread_id=thread_id, gateway=gateway, source_control=source_control
+        job_store, thread_id=thread_id, owners=owners, source_control=source_control
     )
     return await _queue_result(job_store, thread_id=thread_id, user=user, outcome=outcome)
 
 
-def _send_now_refused(result: dict[str, Any]) -> HTTPException:
+def _send_now_refused(result: dict[str, Any]) -> HTTPException | Refused:
     """The owner-facing refusal for a message that cannot be sent into the turn now."""
     error = result.get("error")
     if error == "not_running":
@@ -779,7 +760,7 @@ async def _hand_over_once_claimed(
     thread_id: str,
     job_id: str,
     message: dict[str, Any],
-    gateway: Any,
+    owners: Any,
     app_credentials: Any | None,
     signal: JobEventSignal | None = None,
 ) -> None:
@@ -795,7 +776,7 @@ async def _hand_over_once_claimed(
             await _settle(
                 job_store,
                 thread_id=thread_id,
-                gateway=gateway,
+                owners=owners,
                 app_credentials=app_credentials,
             )
     except Exception:
@@ -816,7 +797,7 @@ async def send_pending_message_now(
     body: AgentPendingMessageSendNow,
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _TurnsStorage | None = Depends(get_storage),
-    gateway: Any = Depends(get_gateway_client),
+    owners: Any = Depends(get_owner_directory),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
     signal: JobEventSignal | None = Depends(get_job_event_signal),
 ) -> AgentThreadMessageResult:
@@ -844,7 +825,7 @@ async def send_pending_message_now(
     )
     if began.get("idle"):
         outcome = await _settle(
-            job_store, thread_id=thread_id, gateway=gateway, app_credentials=app_credentials
+            job_store, thread_id=thread_id, owners=owners, app_credentials=app_credentials
         )
         return await _queue_result(
             job_store, thread_id=thread_id, user=user, outcome=outcome, message_id=message_id
@@ -859,7 +840,7 @@ async def send_pending_message_now(
                 thread_id=thread_id,
                 job_id=str(began["job_id"]),
                 message=message,
-                gateway=gateway,
+                owners=owners,
                 app_credentials=app_credentials,
                 signal=signal,
             )
@@ -900,7 +881,7 @@ async def send_pending_message_now(
         await _settle(
             job_store,
             thread_id=thread_id,
-            gateway=gateway,
+            owners=owners,
             app_credentials=app_credentials,
         )
         if handoff.requeued
@@ -919,7 +900,7 @@ async def resume_thread_queue(
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _TurnsStorage | None = Depends(get_storage),
     app_credentials: Any | None = Depends(get_agent_app_credentials),
-    gateway: Any = Depends(get_gateway_client),
+    owners: Any = Depends(get_owner_directory),
 ) -> AgentThreadMessageResult:
     """Continue a paused queue from its first message.
 
@@ -942,7 +923,7 @@ async def resume_thread_queue(
         extra={"event": "agent_pending_queue_resumed", "thread_id": thread_id},
     )
     outcome = await _settle(
-        job_store, thread_id=thread_id, gateway=gateway, app_credentials=app_credentials
+        job_store, thread_id=thread_id, owners=owners, app_credentials=app_credentials
     )
     return await _queue_result(job_store, thread_id=thread_id, user=user, outcome=outcome)
 
@@ -953,181 +934,18 @@ async def fork_agent_job(
     idempotency_key: str | None = Header(None, alias="Idempotency-Key", max_length=256),
     user: dict[str, Any] = Depends(require_agent_owner),
     store: _TurnsStorage | None = Depends(get_storage),
-    grants: Any = Depends(get_grant_client),
 ) -> AgentJobResponse:
     """Fork one settled native session into the same shared Docker workspace."""
     job_store = _require_store(store)
     job = await _owned_job(job_store.conversation_queries, job_id, user)
-    not_settled = HTTPException(
-        status_code=409,
-        detail={
-            "error": {
-                "type": "not_settled",
-                "message": "This turn is still active; wait for it to settle before forking it.",
-            }
-        },
-    )
-    if job["state"] not in TERMINAL_STATES:
-        raise not_settled
-    if job["state"] != SUCCEEDED:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "anchor_not_settled",
-                    "message": "Only a successfully settled turn can be used as a Fork anchor.",
-                }
-            },
-        )
-    if job.get("thread_sandbox") is None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "native_context_unavailable",
-                    "message": "This historical chat has no shared native-session sandbox.",
-                }
-            },
-        )
-
-    sandbox = job.get("thread_sandbox") or {}
-    if sandbox.get("shared_live") is not True:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "native_fork_unavailable",
-                    "message": (
-                        "This historical retained chat predates shared native-session "
-                        "forks. Start a new chat to use same-workspace Fork."
-                    ),
-                }
-            },
-        )
-
-    operation = await job_store.session_fork.prepare_session_fork(
-        source_job_id=job_id,
-        user_id=user["user_id"],
-        idempotency_key=idempotency_key or f"generated:{secrets.token_urlsafe(24)}",
-    )
-    if operation is None:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": {"type": "not_found", "message": f"No such agent job: {job_id}"}},
-        )
-    error = operation.get("error")
-    if error:
-        error_contract = {
-            "session_archived": (
-                "session_archived",
-                "This conversation is archived. Restore it before creating a side chat.",
-            ),
-            "idempotency_conflict": (
-                "idempotency_conflict",
-                "This Idempotency-Key was already used for a different fork source.",
-            ),
-            "not_settled": (
-                "not_settled",
-                "This turn is still active; stop the run before forking it.",
-            ),
-            "anchor_not_settled": (
-                "historical_snapshot_unavailable",
-                "Native Fork requires a successfully completed assistant turn.",
-            ),
-            "not_shared_live": (
-                "native_fork_unavailable",
-                "This chat does not use a shared-native sandbox.",
-            ),
-            "native_fork_unavailable": (
-                "native_fork_unavailable",
-                "This retained sandbox version cannot fork from a historical turn.",
-            ),
-            "sandbox_not_ready": (
-                "native_context_unavailable",
-                "This chat's retained native context is not safe to fork.",
-            ),
-            "host_removed": (
-                "native_context_unavailable",
-                "This chat's sandbox is on a server that has been removed.",
-            ),
-            "source_busy": (
-                "sandbox_busy",
-                "This chat is currently running a turn; retry after it settles.",
-            ),
-            "fork_in_progress": (
-                "fork_in_progress",
-                "Another native fork is already being prepared from this chat.",
-            ),
-            "resident_capacity_exhausted": (
-                "resident_capacity_exhausted",
-                "This shared sandbox has no free resident Agent CLI slot.",
-            ),
-            "native_context_unavailable": (
-                "native_context_unavailable",
-                "This chat has no settled native session to fork.",
-            ),
-            "runtime_mismatch": (
-                "native_fork_unavailable",
-                "The retained runtime no longer matches this chat.",
-            ),
-        }
-        error_type, message = error_contract.get(
-            str(error),
-            ("native_fork_unavailable", "The retained native session cannot be forked now."),
-        )
-        raise HTTPException(
-            status_code=409,
-            detail={"error": {"type": error_type, "message": message}},
-        )
-
-    operation_id = str(operation["id"])
-
-    if operation["state"] == "failed":
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "native_fork_failed",
-                    "message": str(
-                        operation.get("last_error") or "Native Fork could not complete."
-                    ),
-                }
-            },
-        )
-
-    if operation["state"] == "preparing":
-        # Resolve the host only for the state that still needs a native
-        # mutation.  READY and MATERIALIZED are durable control-plane states:
-        # a retry after a lost HTTP response must return/finalize the same
-        # child even when the retaining host has since become unreachable.
-        await materialize_session_fork(
-            operation,
+    try:
+        forked = await fork_settled_turn(
+            job_store,
+            job,
             job_id=job_id,
-            job_store=job_store,
-            grants=grants,
+            user_id=user["user_id"],
+            idempotency_key=idempotency_key,
         )
-
-    forked = await job_store.session_fork.finalize_session_fork(operation_id=operation_id)
-    if forked is None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": {
-                    "type": "native_fork_fence_changed",
-                    "message": "The source chat changed before native Fork finalization.",
-                }
-            },
-        )
-    logger.info(
-        "agent_job_forked",
-        extra={
-            "event": "agent_job_forked",
-            "job_id": forked["id"],
-            "thread_id": forked.get("thread_id"),
-            "source_job_id": job_id,
-            "sandbox_clone": False,
-            "workspace_shared": True,
-            "fork_operation_id": operation_id,
-        },
-    )
+    except ForkHostFailed as exc:
+        raise _sandbox_manager_http_error(exc.failure) from exc.failure
     return _job_response(forked)

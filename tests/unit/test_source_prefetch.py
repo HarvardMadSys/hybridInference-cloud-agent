@@ -23,12 +23,13 @@ from unittest.mock import Mock
 import pytest
 from tests.unit.test_runner_host_settings import _JOB, _stamp
 
-from cloud_agent_host import runner as runner_mod
-from cloud_agent_host.chat_sandbox import CHAT_WORKDIR
-from cloud_agent_host.runner import WorktreeError
+from cloud_agent_host import control_plane_client
+from cloud_agent_host.container.chat_sandbox import CHAT_WORKDIR
+from cloud_agent_host.container.sandbox import ContainerBackend
 from cloud_agent_host.runtimes import get_runtime
-from cloud_agent_host.sandbox import ContainerBackend
-from cloud_agent_host.source_prefetch import SourcePrefetch
+from cloud_agent_host.turn import group_reservation, shared_live_attempt, source_preparation
+from cloud_agent_host.turn.source_prefetch import SourcePrefetch
+from cloud_agent_host.turn.source_preparation import WorktreeError
 from cloud_agent_shared.environment import BoundEnvironment
 from cloud_agent_shared.environment_snapshots import (
     EnvironmentSnapshotRef,
@@ -204,11 +205,15 @@ def _script_runner_steps(monkeypatch, archive: _Archive) -> list[str]:
         workdirs.append(workdir)
         return _BASE
 
-    monkeypatch.setattr(runner_mod, "prepare_worktree", clone)
-    monkeypatch.setattr(runner_mod, "checkout_output_branch", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(runner_mod, "tracked_lockfiles", lambda *_args, **_kwargs: _LOCKFILES)
+    monkeypatch.setattr(source_preparation, "prepare_worktree", clone)
     monkeypatch.setattr(
-        runner_mod,
+        source_preparation, "checkout_output_branch", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        source_preparation, "tracked_lockfiles", lambda *_args, **_kwargs: _LOCKFILES
+    )
+    monkeypatch.setattr(
+        source_preparation,
         "build_source_archive",
         lambda _source, out, *, stop, **_kwargs: archive.build(out, stop),
     )
@@ -218,11 +223,11 @@ def _script_runner_steps(monkeypatch, archive: _Archive) -> list[str]:
 def test_a_snapshot_offer_is_chosen_while_the_archive_is_still_being_built(monkeypatch):
     archive = _Archive()
     _script_runner_steps(monkeypatch, archive)
-    prefetch = runner_mod._prefetch_retained_source(
+    prefetch = source_preparation._prefetch_retained_source(
         job=_OFFERED_JOB, uid=1000, gid=1000, max_bytes=1 << 20
     )
 
-    chosen = runner_mod._choose_environment_snapshot(
+    chosen = source_preparation._choose_environment_snapshot(
         _OFFERED_JOB, SimpleNamespace(sandbox_image_digest=_IMAGE), prefetch, new_group=True
     )
 
@@ -238,7 +243,7 @@ def test_a_new_group_offered_a_snapshot_starts_while_its_archive_is_built(monkey
     workdirs = _script_runner_steps(monkeypatch, archive)
     backend = ContainerBackend(image="img")
     monkeypatch.setattr(
-        backend, "version_stamp", lambda: {**_stamp(), "sandbox_image_digest": _IMAGE}
+        backend, "version_stamp", lambda **_: {**_stamp(), "sandbox_image_digest": _IMAGE}
     )
     imported: list[tuple[str, bytes]] = []
     manager = Mock()
@@ -249,10 +254,12 @@ def test_a_new_group_offered_a_snapshot_starts_while_its_archive_is_built(monkey
     retained = Mock()
     retained.sandbox_metadata.return_value = {}
     retained.has_binary.return_value = True
-    monkeypatch.setattr(runner_mod, "ChatSandboxManager", lambda _backend: manager)
-    monkeypatch.setattr(runner_mod, "RetainedChatBackend", lambda *_args, **_kwargs: retained)
-    monkeypatch.setattr(runner_mod, "runtime_version_unavailable", lambda *_args: None)
-    control = Mock(spec=runner_mod.ControlPlane)
+    monkeypatch.setattr(group_reservation, "ChatSandboxManager", lambda _backend: manager)
+    monkeypatch.setattr(
+        shared_live_attempt, "RetainedChatBackend", lambda *_args, **_kwargs: retained
+    )
+    monkeypatch.setattr(shared_live_attempt, "runtime_version_unavailable", lambda *_args: None)
+    control = Mock(spec=control_plane_client.ControlPlane)
     control.mark_chat_sandbox_running.return_value = {}
     control.reserve_chat_sandbox.side_effect = lambda seed: {
         **seed,
@@ -289,22 +296,21 @@ def test_a_new_group_offered_a_snapshot_starts_while_its_archive_is_built(monkey
         "process_generation": 1,
     }
     supervisor.settle_shared.return_value = {"native_session_id": "native-1"}
-    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda: supervisor)
+    monkeypatch.setattr(shared_live_attempt, "sandbox_manager_from_env", lambda: supervisor)
     monkeypatch.setattr(
-        runner_mod, "_stream_shared_agent_turn", lambda **_kwargs: (0, "", [], None, None)
+        shared_live_attempt, "_stream_shared_agent_turn", lambda **_kwargs: (0, "", [], None, None)
     )
     monkeypatch.setenv("AGENT_SHARED_RESIDENT_CAPACITY", "8")
     monkeypatch.setenv("AGENT_CHAT_IDLE_TIMEOUT_S", "1800")
     finish = Mock()
 
-    result = runner_mod._run_shared_live_attempt(
+    result = shared_live_attempt._run_shared_live_attempt(
         runtime=get_runtime("claude-code"),
         job=_OFFERED_JOB,
         control=control,
         heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
-        gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=finish,
         host_settings={"source_import_max_mib": 64},

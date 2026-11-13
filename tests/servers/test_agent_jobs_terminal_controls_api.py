@@ -19,14 +19,13 @@ from tests.servers.test_agent_jobs_api import (  # noqa: F401 - shared pytest fi
     _api_key_secret,
     _attach_shared_workspace,
     _build_app,
-    _configured_identity_issuer,
     _create_job,
     _TerminalSessionSandboxManager,
     store,
 )
 
-from cloud_agent import sandbox_manager_routing
 from cloud_agent.api import workspace as agent_workspace
+from cloud_agent.sandbox_manager import sandbox_manager_routing
 
 pytestmark = pytest.mark.asyncio
 
@@ -194,7 +193,7 @@ async def test_a_keystroke_registers_a_chat_its_restarted_manager_forgot_and_is_
     the chat's manifest again, and is sent once more: its answer is the one a
     keystroke got when each registered first. The next keystroke goes direct.
     """
-    from cloud_agent.sandbox_manager_client import SandboxManagerError
+    from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 
     sandbox_manager = _TerminalSessionSandboxManager()
     registered = _registering(sandbox_manager)
@@ -231,7 +230,7 @@ async def test_a_keystroke_to_a_workspace_its_manager_still_lacks_is_a_conflict(
     store: FakeStorage, monkeypatch
 ):
     """Registered again and still unknown there, the chat has no live terminal workspace."""
-    from cloud_agent.sandbox_manager_client import SandboxManagerError
+    from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 
     sandbox_manager = _TerminalSessionSandboxManager()
     _registering(sandbox_manager)

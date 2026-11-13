@@ -25,13 +25,11 @@ from tests.integration.storage.test_agent_job_store import (
     pool as pool,
     store as store,
 )
-from tests.integration.storage.test_push_usage_and_workers import _ledger_row
 from tests.integration.storage.test_schema_upgrade import _db_config
 
 from cloud_agent.storage._sql import event_batches
-from cloud_agent.workers.background_wake import CHANNEL as BACKGROUND
 from cloud_agent.workers.job_event_signal import CHANNEL as JOB_EVENTS
-from cloud_agent.workers.owner_change_signal import CHANNEL as OWNER_CHANGES
+from cloud_agent.workers.owner_change_signal import CHANNEL as OWNER
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -120,7 +118,7 @@ async def test_a_batch_is_stored_in_order_in_one_transaction(store, pool):
 
 async def test_question_change_notifies_only_for_the_current_live_attempt(store, pool):
     job, fence = await _claimed(store)
-    heard = await _listen(OWNER_CHANGES)
+    heard = await _listen(OWNER)
     try:
         assert not await store.attempt_commands.notify_question_change(
             job_id=job["id"],
@@ -145,7 +143,7 @@ async def test_question_change_for_deleted_thread_is_a_noop_not_lease_loss(store
         "UPDATE agent_threads SET deleted_at = clock_timestamp() WHERE id = $1",
         job["thread_id"],
     )
-    heard = await _listen(OWNER_CHANGES)
+    heard = await _listen(OWNER)
     try:
         assert await store.attempt_commands.notify_question_change(job_id=job["id"], **fence)
         assert await heard.until_quiet(pool) == []
@@ -205,9 +203,8 @@ async def test_a_batch_sent_again_whole_stores_nothing_twice(store, pool):
 
 
 async def test_a_batchs_side_effects_run_in_its_order(store, pool):
-    """Terminal readiness follows each phase in turn; usage asks for one ledger read."""
-    _job, fence = await _claimed(store)
-    ledger_id = await _ledger_row(pool, fence["attempt_id"])
+    """Terminal readiness follows each phase in turn; usage tells the owner once."""
+    job, fence = await _claimed(store)
     usage = {"input_tokens": 3, "output_tokens": 1}
 
     async def terminal_ready() -> bool:
@@ -216,9 +213,14 @@ async def test_a_batchs_side_effects_run_in_its_order(store, pool):
                 "SELECT terminal_ready FROM agent_attempts WHERE id = $1", fence["attempt_id"]
             )
 
-    background = await _listen(BACKGROUND)
+    owner = await _listen(OWNER)
+
+    async def usage_hints() -> list[str]:
+        heard = [json.loads(payload) for payload in await owner.until_quiet(pool)]
+        return [item["id"] for item in heard if item["kind"] == "usage"]
+
     try:
-        await background.until_quiet(pool)
+        await owner.until_quiet(pool)
         await store.attempt_commands.append_events(
             **fence,
             events=[
@@ -228,14 +230,8 @@ async def test_a_batchs_side_effects_run_in_its_order(store, pool):
                 ("message", {"text": "two", "usage": usage}, 4),
             ],
         )
-        assert await background.until_quiet(pool) == ["ledger"]
+        assert await usage_hints() == [job["id"]]
         assert await terminal_ready() is True
-        async with pool.acquire() as conn:
-            scheduled = await conn.fetchval(
-                "SELECT next_refresh_at <= NOW() FROM agent_attempt_ledger WHERE id = $1",
-                ledger_id,
-            )
-        assert scheduled is True
 
         await store.attempt_commands.append_events(
             **fence,
@@ -244,10 +240,10 @@ async def test_a_batchs_side_effects_run_in_its_order(store, pool):
                 ("lifecycle", {"phase": "workspace_finalizing"}, 6),
             ],
         )
-        assert await background.until_quiet(pool) == [], "no usage, no read"
+        assert await usage_hints() == [], "no usage, no hint"
         assert await terminal_ready() is False
     finally:
-        await background.connection.close()
+        await owner.connection.close()
 
 
 async def test_a_batch_without_its_lease_stores_none_of_it(store, pool):

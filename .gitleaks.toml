@@ -47,12 +47,13 @@ regexes = [
 ]
 
 [[allowlists]]
-description = "Fixed fake provider keys used only by model-connection wire and launch tests."
+description = "Fixed fake provider keys used only by model-connection wire, launch and request-meter tests."
 targetRules = ["generic-api-key"]
 regexTarget = "secret"
 regexes = [
   '''^fixture-anthropic-key-0123456789$''',
   '''^sk-owner-secret-0123456789$''',
+  '''^sk-owner-key-0123456789$''',
   '''^sk-fixture-owner-key-0123456789$''',
   '''^sk-fixture-replacement-0000$''',
 ]

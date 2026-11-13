@@ -18,12 +18,10 @@ from tests.integration.storage.test_agent_job_store import (  # noqa: F401
 from tests.support.follow_ups import append_follow_up
 
 from cloud_agent.application.model_connections import (
-    MAX_SCAN_KEYS,
-    ScanMaterialOverflow,
     bind_residency_access,
     connection_access,
-    known_connection_secrets,
     model_connection_cipher,
+    model_connection_scan_cipher,
     new_connection_id,
 )
 from cloud_agent.domain.model_connections import ModelConnectionConflict
@@ -230,7 +228,9 @@ async def test_turns_carry_their_source_through_follow_ups(pool, store):
 
     async with pool.acquire() as conn:
         await conn.execute("UPDATE agent_jobs SET state = 'cancelled' WHERE id = $1", gateway["id"])
-    # Back onto the connection: the Gateway turn's effort does not come along.
+    # Back onto the connection: the level is inherited like the model. Whether
+    # the connection's model offers it is ``require_usable``'s to refuse,
+    # before this insert; the store neither drops nor replaces it.
     back = await append_follow_up(
         pool,
         parent_job_id=gateway["id"],
@@ -240,7 +240,19 @@ async def test_turns_carry_their_source_through_follow_ups(pool, store):
         model_connection_id=connection["id"],
     )
     assert back["model_connection_id"] == connection["id"]
-    assert back["reasoning_effort"] is None
+    assert back["reasoning_effort"] == "high"
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE agent_jobs SET state = 'cancelled' WHERE id = $1", back["id"])
+    # ``"auto"`` on a follow-up clears it.
+    auto = await append_follow_up(
+        pool,
+        parent_job_id=back["id"],
+        user_id="user-1",
+        prompt="at the default",
+        reset_reasoning_effort=True,
+    )
+    assert auto["model_connection_id"] == connection["id"]
+    assert auto["reasoning_effort"] is None
 
     preference = await store.model_preferences.get_model_preference("user-1")
     assert preference.last_model == "gpt-4.1"
@@ -484,6 +496,17 @@ async def _bind(store, row: dict, job: dict, generation: int) -> bool:
     )
 
 
+async def _scan_copies(store, sandbox_id: str) -> set[str]:
+    """The scan-only copies of the keys a group was handed, decrypted."""
+    cipher = model_connection_scan_cipher()
+    return {
+        cipher.decrypt(ciphertext)
+        for ciphertext in await store.model_connections.scan_key_ciphertexts(
+            sandbox_id=sandbox_id, limit=10
+        )
+    }
+
+
 async def test_a_groups_scan_holds_only_the_keys_its_own_members_were_handed(store, monkeypatch):
     """Two connections, two groups of one owner: neither scan sees the other's key."""
     monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", _CIPHER_SECRET)
@@ -496,11 +519,11 @@ async def test_a_groups_scan_holds_only_the_keys_its_own_members_were_handed(sto
     assert await _bind(store, first, job_a, group_a["residency_generation"])
     assert await _bind(store, second, job_b, group_b["residency_generation"])
 
-    in_a = await known_connection_secrets(store.model_connections, sandbox_id=group_a["sandbox_id"])
-    in_b = await known_connection_secrets(store.model_connections, sandbox_id=group_b["sandbox_id"])
-    assert set(in_a.values()) == {"key-for-group-a-1111"}
-    assert set(in_b.values()) == {"key-for-group-b-2222"}
-    assert "key-never-used-3333" not in {*in_a.values(), *in_b.values()}
+    in_a = await _scan_copies(store, group_a["sandbox_id"])
+    in_b = await _scan_copies(store, group_b["sandbox_id"])
+    assert in_a == {"key-for-group-a-1111"}
+    assert in_b == {"key-for-group-b-2222"}
+    assert "key-never-used-3333" not in in_a | in_b
     assert unused["id"] not in {first["id"], second["id"]}
 
 
@@ -533,33 +556,13 @@ async def test_a_key_a_group_used_stays_in_its_scan_after_rotation_or_deletion(
             user_id="user-1", connection_id=row["id"]
         )
 
-    scanned = await known_connection_secrets(
-        store.model_connections, sandbox_id=group["sandbox_id"]
-    )
-    assert set(scanned.values()) == {"first-key-aaaa", "second-key-bbbb"}
+    assert await _scan_copies(store, group["sandbox_id"]) == {"first-key-aaaa", "second-key-bbbb"}
     if then == "delete":
         # The scan copies never stand in for the execution key.
         tombstone = await store.model_connections.get_model_connection(
             user_id="user-1", connection_id=row["id"]
         )
         assert tombstone["api_key_ciphertext"] is None
-
-
-async def test_a_group_handed_more_keys_than_a_scan_covers_is_not_scanned_partly(
-    pool, store, monkeypatch
-):
-    monkeypatch.setenv("AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", _CIPHER_SECRET)
-    row = await _keyed_connection(store, name="A", key="key-a")
-    _job, _attempt, group = await _reserve_shared_chat(store)
-    async with pool.acquire() as conn:
-        await conn.executemany(
-            "INSERT INTO agent_model_connection_scan_keys "
-            "(sandbox_id, connection_id, credential_revision, thread_id, key_ciphertext) "
-            "VALUES ($1, $2, $3, 'athr_x', 'unreadable-on-purpose')",
-            [(group["sandbox_id"], row["id"], revision) for revision in range(MAX_SCAN_KEYS + 1)],
-        )
-    with pytest.raises(ScanMaterialOverflow):
-        await known_connection_secrets(store.model_connections, sandbox_id=group["sandbox_id"])
 
 
 async def test_an_expired_residency_cannot_be_bound(pool, store):

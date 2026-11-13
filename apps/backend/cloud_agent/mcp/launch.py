@@ -1,40 +1,31 @@
-"""Starting a stdio server in a managed worker, reproducibly and without a shell.
+"""Deciding whether a stdio server may start, reproducibly and without a shell.
 
-Two things make a managed stdio server different from the same configuration on
-somebody's laptop.
+A stdio server runs in the task's sandbox, next to the agent, behind the
+sandbox's MCP gateway (cloud_agent_shared.sandbox_mcp). Two rules make what
+runs there the program its owner saw.
 
-**Nothing resolves at run time that can be resolved at install time.** ``npx
-some-server`` downloads whatever ``latest`` means today, in the environment
-that holds a credential, and produces a different program every week. So a
-launch plan is split in two: an *install* step that fixes an exact package
-version, and a *run* step that starts it from what was installed. The installed
-artifact is what runs, and a version change is a connection edit -- which is
-why the plan carries the resolved version rather than looking it up again.
+**Nothing resolves at run time that could change under the owner.** ``npx
+some-server`` downloads whatever ``latest`` means today and produces a
+different program every week. So a launch names one exact release of one
+package, and a version change is a connection edit.
 
 **No shell, anywhere.** ``argv`` is executed directly. That is not a hardening
 measure on top of escaping; it is the removal of the thing that needs escaping.
-The remaining risk is the program itself, which is why the user's package is
-never treated as trusted code: it runs in a worker that holds one connection's
-secrets, no host socket, no control-plane credentials, and only the mounts the
-owner approved.
 
 The module is pure: it decides what would run, and refuses what it cannot
-express safely. Executing the plan belongs to the worker, not here.
+express safely. The gateway starts it.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 import shlex
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import Any
 
-if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
-
-from cloud_agent.mcp.models import ExecutionLocation, LaunchSpec, Mount
+from cloud_agent.mcp.models import ExecutionLocation, LaunchSpec
+from cloud_agent_shared.sandbox_mcp import SANDBOX_MCP_COMMANDS
 
 #: Interpreters whose argument vector is ``<runner> <package> [args...]`` and
 #: whose package therefore has to be pinned.
@@ -69,59 +60,37 @@ SHELL_COMMANDS: frozenset[str] = frozenset(
     }
 )
 
-#: Interpreters a *managed* worker is willing to start. A user connector is not
-#: bounded by this list -- it runs on the user's own machine, under their own
-#: policy -- but the platform's shared worker is, because there the command is
-#: a program the platform runs beside other connections.
-MANAGED_ALLOWED_COMMANDS: frozenset[str] = frozenset(
-    {
-        "npx",
-        "node",
-        "uvx",
-        "uv",
-        "python",
-        "python3",
-        "deno",
-        "bun",
-        "docker",
-        "pipx",
-    }
-)
+#: Bounds on one launch, whatever it starts.
+MAX_ENV_ENTRIES = 64
+MAX_ARGV_BYTES = 8192
 
 #: A package reference: ``name``, ``@scope/name``, ``name@1.2.3``,
 #: ``name==1.2.3``, ``name>=1,<2``. Compared as text; the installer decides
 #: what it means, and this only decides whether a version is present at all.
 _PINNED_NPM = re.compile(r"^(?P<name>(?:@[^/@]+/)?[^@/][^@]*)@(?P<version>[^@]+)$")
-_PINNED_PYPI = re.compile(r"^(?P<name>[A-Za-z0-9._-]+)\s*(?:==|>=|~=)\s*(?P<version>.+)$")
+#: ``name[extra,...]`` is one package with optional parts: ``browser-use[cli]==0.7.10``.
+_PINNED_PYPI = re.compile(
+    r"^(?P<name>[A-Za-z0-9._-]+(?:\[[A-Za-z0-9._,-]+\])?)\s*(?:==|>=|~=)\s*(?P<version>.+)$"
+)
+#: An exact release: what a sandbox server must name, since the sandbox installs
+#: it at run time. ``latest``, ``^1.2`` or ``>=1`` would change under the user.
+_EXACT_VERSION = re.compile(
+    r"^(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){1,3}(?:[-+.][0-9A-Za-z.-]+)?$"
+)
+
+
+def is_exact_release(version: str) -> bool:
+    """Whether ``version`` names one release, as a sandbox server's package must."""
+    return _EXACT_VERSION.match(version) is not None
 
 
 class LaunchPlanError(ValueError):
-    """Raised when a launch spec cannot be expressed as a managed plan."""
+    """Raised when a launch spec cannot be expressed as a plan."""
 
     def __init__(self, message: str, *, kind: str = "launch_failed") -> None:
         """Record the diagnosis kind alongside the message."""
         super().__init__(message)
         self.kind = kind
-
-
-@dataclass(frozen=True)
-class ManagedLaunchPolicy:
-    """What a deployment's managed worker is willing to run."""
-
-    allowed_commands: frozenset[str] = MANAGED_ALLOWED_COMMANDS
-    #: The environment a package is installed in, separate from the one that
-    #: holds business secrets. The worker mounts it read-only at run time.
-    install_root: str = "/opt/mcp-installs"
-    #: Where a worker may be told to place an approved mount.
-    mount_root: str = "/workspace/mcp"
-    #: Whether the worker may reach the network at all while a server runs.
-    #: ``package-install-only`` is the default: the install step needs the
-    #: registry, the running server is expected to talk to its own service over
-    #: the relay rather than directly.
-    network: Literal["none", "package-install-only", "egress"] = "package-install-only"
-    max_mounts: int = 8
-    max_env_entries: int = 64
-    max_argv_bytes: int = 8192
 
 
 @dataclass(frozen=True)
@@ -134,7 +103,7 @@ class InstallStep:
     version: str
 
     def as_dict(self) -> dict[str, object]:
-        """Render for the install record and for the confirmation screen."""
+        """Render for the plan."""
         return {
             "argv": list(self.argv),
             "ecosystem": self.ecosystem,
@@ -145,33 +114,20 @@ class InstallStep:
 
 @dataclass(frozen=True)
 class LaunchPlan:
-    """What a managed worker is told: install once, then run this argv."""
+    """What the sandbox's gateway is told: this pinned package, run as this argv."""
 
     connection_id: str
     run_argv: tuple[str, ...]
-    install: InstallStep | None = None
+    install: InstallStep
     env: Mapping[str, str] = field(default_factory=dict)
-    mounts: tuple[Mount, ...] = ()
-    cwd: str | None = None
-    network: str = "package-install-only"
-    #: Stable digest over everything that would make a different program run.
-    #: The worker compares it before reusing an installed tree.
-    plan_digest: str = ""
 
     def as_dict(self) -> dict[str, object]:
         """Render the plan, with no secret values in it."""
         return {
             "connection_id": self.connection_id,
             "run_argv": list(self.run_argv),
-            "install": self.install.as_dict() if self.install else None,
+            "install": self.install.as_dict(),
             "env_names": sorted(self.env),
-            "mounts": [
-                {"source": mount.source, "target": mount.target, "read_only": mount.read_only}
-                for mount in self.mounts
-            ],
-            "cwd": self.cwd,
-            "network": self.network,
-            "plan_digest": self.plan_digest,
         }
 
 
@@ -229,16 +185,12 @@ def build_launch_plan(
     *,
     connection_id: str,
     location: ExecutionLocation,
-    policy: ManagedLaunchPolicy | None = None,
 ) -> LaunchPlan:
-    """Turn a validated launch spec into an install-and-run plan.
+    """Turn a validated launch spec into the plan the sandbox's gateway runs.
 
-    Only ``managed-worker`` plans are built here. A ``user-connector`` server
-    runs under the user's own policy on their own machine, so the platform
-    records the spec and sends it to the connector rather than deciding how it
-    starts; a connector plan still gets the same no-shell shape.
+    A stdio server runs only in the sandbox, so it is checked against the rules
+    that gateway runs by (:func:`_check_sandbox`).
     """
-    resolved = policy or ManagedLaunchPolicy()
     if location is ExecutionLocation.REMOTE:
         raise LaunchPlanError("a remote connection has no process to launch")
 
@@ -249,56 +201,47 @@ def build_launch_plan(
             "cannot be reinterpreted"
         )
     argv = spec.argv()
-    encoded = len(shlex.join(argv).encode())
-    if encoded > resolved.max_argv_bytes:
-        raise LaunchPlanError("this launch command is longer than a worker will accept")
-    if len(spec.env) > resolved.max_env_entries:
+    if len(shlex.join(argv).encode()) > MAX_ARGV_BYTES:
+        raise LaunchPlanError("this launch command is longer than the sandbox will accept")
+    if len(spec.env) > MAX_ENV_ENTRIES:
         raise LaunchPlanError("this launch command sets more environment variables than allowed")
-
-    if location is ExecutionLocation.MANAGED_WORKER:
-        if _command_name(command) not in resolved.allowed_commands:
-            allowed = ", ".join(sorted(resolved.allowed_commands))
-            raise LaunchPlanError(
-                f"a managed worker will not start {command!r}. Allowed: {allowed}. "
-                "Run this server on a user connector instead."
-            )
-        mounts = _check_mounts(spec.mounts, resolved)
-    else:
-        mounts = spec.mounts
-
-    install = _install_for(spec, argv)
-    digest = _plan_digest(argv, install, spec.env, mounts, resolved)
+    install = _check_sandbox(spec, argv)
     return LaunchPlan(
-        connection_id=connection_id,
-        run_argv=argv,
-        install=install,
-        env=dict(spec.env),
-        mounts=mounts,
-        cwd=spec.cwd,
-        network=resolved.network,
-        plan_digest=digest,
+        connection_id=connection_id, run_argv=argv, install=install, env=dict(spec.env)
     )
 
 
-def _check_mounts(mounts: Sequence[Mount], policy: ManagedLaunchPolicy) -> tuple[Mount, ...]:
-    """Refuse mounts a managed worker will not honour."""
-    if len(mounts) > policy.max_mounts:
-        raise LaunchPlanError(f"a managed worker accepts at most {policy.max_mounts} mounts")
-    checked: list[Mount] = []
-    for mount in mounts:
-        if not mount.source.startswith("/"):
-            raise LaunchPlanError(
-                f"mount source {mount.source!r} must be an absolute path on the runner"
-            )
-        if ".." in mount.target.split("/"):
-            raise LaunchPlanError("a mount target cannot escape the worker's mount root")
-        if not mount.target.startswith(policy.mount_root.rstrip("/") + "/"):
-            raise LaunchPlanError(
-                f"a managed worker only mounts under {policy.mount_root}; "
-                f"{mount.target!r} is outside it"
-            )
-        checked.append(mount)
-    return tuple(checked)
+def _check_sandbox(spec: LaunchSpec, argv: tuple[str, ...]) -> InstallStep:
+    """Refuse what a sandbox server may not be (cloud_agent_shared.sandbox_mcp).
+
+    It runs next to repository code, behind the sandbox's MCP gateway, which
+    starts only a package runner with one exactly pinned package. So: ``npx``
+    or ``uvx`` by name, an exact version, and no mounts or working directory (it
+    already has the workspace). It may use credentials, as the agent's own
+    commands use the owner's environment: ``secret://NAME`` values sealed with
+    the connection, and ``${NAME}`` filled from the chat's environment.
+    """
+    if spec.command not in SANDBOX_MCP_COMMANDS:
+        raise LaunchPlanError(
+            f"a sandbox server starts with npx or uvx and one pinned package, not {spec.command!r}"
+        )
+    if spec.mounts or spec.cwd:
+        raise LaunchPlanError("a sandbox server runs in the workspace; it takes no mounts or cwd")
+    install = _install_for(spec, argv)
+    if install is None:  # pragma: no cover - npx and uvx are package runners
+        raise LaunchPlanError("a sandbox server needs a package to run")
+    if not is_exact_release(install.version):
+        raise LaunchPlanError(
+            f"pin {install.package!r} to an exact release (for example "
+            f"{install.package}@1.2.3), not {install.version!r}",
+            kind="unpinned_package",
+        )
+    reference = next(arg for arg in argv[1:] if not arg.startswith("-"))
+    if install.ecosystem == "pypi" and "==" not in reference:
+        raise LaunchPlanError(
+            f"pin {install.package!r} with == to an exact release", kind="unpinned_package"
+        )
+    return install
 
 
 def _install_for(spec: LaunchSpec, argv: tuple[str, ...]) -> InstallStep | None:
@@ -319,11 +262,12 @@ def _install_for(spec: LaunchSpec, argv: tuple[str, ...]) -> InstallStep | None:
     if version is None:
         # Deliberately a refusal rather than a resolution: resolving here would
         # mean the install step and the run step could disagree, and the whole
-        # point of the split is that the version is decided once, by the user.
+        # point of the split is that the version is decided once, when it is
+        # saved. An import pins a bare name before it gets here (package_pins).
         raise LaunchPlanError(
             f"pin {package!r} to an exact version. A server that installs "
             f"{package!r} unpinned runs whatever the registry publishes next, in a "
-            "worker that holds your credential.",
+            "sandbox that holds your credentials.",
             kind="unpinned_package",
         )
     return InstallStep(
@@ -332,63 +276,6 @@ def _install_for(spec: LaunchSpec, argv: tuple[str, ...]) -> InstallStep | None:
         package=package,
         version=version,
     )
-
-
-def _plan_digest(
-    argv: tuple[str, ...],
-    install: InstallStep | None,
-    env: Mapping[str, str],
-    mounts: Sequence[Mount],
-    policy: ManagedLaunchPolicy,
-) -> str:
-    """A stable digest over everything that changes what would run.
-
-    Secret *values* are excluded, and their names are not: the digest is what
-    decides whether an installed tree may be reused, and a rotated credential
-    must not force a reinstall while a changed variable name must.
-    """
-    payload = json.dumps(
-        {
-            "argv": list(argv),
-            "install": install.as_dict() if install else None,
-            "env": sorted(env),
-            "mounts": [[mount.source, mount.target, mount.read_only] for mount in mounts],
-            "network": policy.network,
-            "install_root": policy.install_root,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(payload.encode()).hexdigest()
-
-
-def resolve_env(
-    env: Mapping[str, str],
-    secrets: Mapping[str, str],
-) -> dict[str, str]:
-    """Resolve ``secret://NAME`` references into the worker's environment.
-
-    Only the names this connection declared are resolvable. A spec that
-    references a secret it did not declare is refused rather than left empty,
-    because an empty credential produces an authentication failure that reads
-    like the user's mistake.
-    """
-    resolved: dict[str, str] = {}
-    for name, value in env.items():
-        if value.startswith("secret://"):
-            key = value[len("secret://") :]
-            if key not in secrets:
-                raise LaunchPlanError(
-                    f"this server needs a value for {key!r} that the connection does not have"
-                )
-            resolved[name] = secrets[key]
-        elif "${" in value:
-            raise LaunchPlanError(
-                f"{name} still contains an unresolved reference; provide its value when saving"
-            )
-        else:
-            resolved[name] = value
-    return resolved
 
 
 def declared_secret_names(env: Mapping[str, str], headers: Mapping[str, str]) -> list[str]:
@@ -403,16 +290,85 @@ def declared_secret_names(env: Mapping[str, str], headers: Mapping[str, str]) ->
     return sorted(names)
 
 
+def _program(spec: Mapping[str, Any]) -> tuple[str, ...]:
+    """What an edit must leave alone for a program to keep its keys.
+
+    The whole argv, except the release of a package runner's package: a new
+    release of the same package is the same program. Every other argument
+    stays part of it, because a runner's options and the arguments after the
+    package can change what runs (``npx --package pkg@1 --call 'node x.js'``
+    installs ``pkg`` but runs ``x.js``).
+    """
+    command = str(spec.get("command") or "")
+    args = tuple(str(arg) for arg in spec.get("args") or ())
+    if _ecosystem(command) is not None:
+        # The package is found as _install_for finds it.
+        index = next((i for i, arg in enumerate(args) if not arg.startswith("-")), None)
+        if index is not None:
+            try:
+                package = split_package_reference(args[index])[0]
+            except LaunchPlanError:
+                pass
+            else:
+                return (command, *args[:index], package, *args[index + 1 :])
+    return (command, *args)
+
+
+def edited_secret_env(
+    row: Mapping[str, Any], rendered: Mapping[str, Any] | None, keys: Mapping[str, str]
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """The launch an edit stores, with the keys it keeps, and the keys the edit sets.
+
+    A program's keys are its ``secret://NAME`` values, stored sealed under
+    ``env_secrets`` in the connection's ``launch_spec``. ``rendered`` is the
+    submitted launch as validated, or ``None`` when the edit changes only keys
+    and the stored launch stays. Either way no sealed value comes from the
+    request: each name the launch references keeps its stored ciphertext
+    unless ``keys`` sets it, and a blank value sets nothing, as every
+    write-only editor treats one. A name the launch no longer references is
+    removed with the reference. The keys set are returned for the caller to
+    judge and seal; a stored key is not judged again. Stored keys stay only
+    with the same program (:func:`_program`): an edit that runs another one
+    is refused until it sends them again.
+    """
+    stored = row.get("launch_spec")
+    stored = stored if isinstance(stored, Mapping) else {}
+    if rendered is None and not stored.get("command"):
+        raise LaunchPlanError("a stdio connection needs a command")
+    source = stored if rendered is None else rendered
+    edited = {key: value for key, value in source.items() if key != "env_secrets"}
+    env = {str(key): str(value) for key, value in (edited.get("env") or {}).items()}
+    wanted = declared_secret_names(env, {})
+    sealed = stored.get("env_secrets")
+    sealed = sealed if isinstance(sealed, Mapping) else {}
+    setting = {name: keys[name] for name in wanted if keys.get(name)}
+    kept = {name: str(sealed[name]) for name in wanted if name in sealed and name not in setting}
+    if kept and rendered is not None and _program(rendered) != _program(stored):
+        # A key was given to one program; another one (a different package or
+        # command) could send it anywhere the sandbox reaches. As a remote
+        # connection's credential is dropped with its address, it is not
+        # passed on, and the edit says so instead of storing a launch whose
+        # key the claim would later refuse.
+        raise LaunchPlanError(
+            "this edit runs a different program, so it is not given the stored keys; "
+            "send them again: " + ", ".join(sorted(kept))
+        )
+    if kept:
+        edited["env_secrets"] = kept
+    return edited, setting
+
+
 __all__ = [
-    "MANAGED_ALLOWED_COMMANDS",
+    "MAX_ARGV_BYTES",
+    "MAX_ENV_ENTRIES",
     "PACKAGE_RUNNERS",
     "SHELL_COMMANDS",
     "InstallStep",
     "LaunchPlan",
     "LaunchPlanError",
-    "ManagedLaunchPolicy",
     "build_launch_plan",
     "declared_secret_names",
-    "resolve_env",
+    "edited_secret_env",
+    "is_exact_release",
     "split_package_reference",
 ]

@@ -49,12 +49,12 @@ from cloud_agent.ports.external.compute_provider import (
 )
 from cloud_agent.ports.external.host_bootstrap import BootstrapIntent, DeploymentProfile
 from cloud_agent.providers.compute.host_bootstrap import SshHostBootstrap
-from cloud_agent_host.chat_sandbox import ChatSandboxManager
-from cloud_agent_host.chat_sandbox_models import ChatSandboxSpec
+from cloud_agent_host.container.chat_sandbox import ChatSandboxManager
+from cloud_agent_host.container.chat_sandbox_models import ChatSandboxSpec
+from cloud_agent_host.container.sandbox import ContainerBackend, SandboxError
+from cloud_agent_host.member_setup.tree_copy import staged_tree
 from cloud_agent_host.runtime_downloads import RuntimeDownloads
 from cloud_agent_host.runtime_images import NAMESPACE_LABEL, WORK_LABEL
-from cloud_agent_host.sandbox import ContainerBackend, SandboxError
-from cloud_agent_host.tree_copy import staged_tree
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -117,7 +117,7 @@ def _probe_labels(namespace: str) -> list[str]:
         created.append(command)
         return subprocess.CompletedProcess(command, 1, "", "captured")
 
-    manager._run = refuse  # type: ignore[method-assign]
+    manager.exact.run = refuse  # type: ignore[method-assign]
     with pytest.raises(SandboxError):
         manager._probe_guest_observer_once()
     (create,) = [command for command in created if command[1:2] == ["create"]]
@@ -174,8 +174,8 @@ def _copy_source_labels(namespace: str) -> list[str]:
         created.append(command)
         return subprocess.CompletedProcess(command, 1, "", "captured")
 
-    manager._run = refuse  # type: ignore[method-assign]
-    manager._require = lambda spec: None  # type: ignore[method-assign,assignment,return-value]
+    manager.exact.run = refuse  # type: ignore[method-assign]
+    manager.exact.require = lambda spec: None  # type: ignore[method-assign,assignment,return-value]
     spec = ChatSandboxSpec(
         thread_id="athr_owner", sandbox_id="asbx_owner", generation=1, runtime_id="claude-code"
     )

@@ -11,15 +11,21 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
+from tests.support.owners import connection_access, residency_connection
 
-from cloud_agent_host import runner as runner_mod
-from cloud_agent_host.chat_sandbox import CHAT_UPLOADS_DIR, ChatSandboxManager
-from cloud_agent_host.host_runtime import LAUNCH_STARTED, LaunchResult, encode_turn
-from cloud_agent_host.runner import ClaimedJob
+from cloud_agent_host import control_plane_client, github_relay_env
+from cloud_agent_host.claimed_job import ClaimedJob
+from cloud_agent_host.container import chat_sandbox
+from cloud_agent_host.container.chat_sandbox import CHAT_UPLOADS_DIR, ChatSandboxManager
+from cloud_agent_host.container.sandbox import ContainerBackend, ProcessBackend
 from cloud_agent_host.runtimes import get_runtime
-from cloud_agent_host.sandbox import ContainerBackend, ProcessBackend
+from cloud_agent_host.service import host_capabilities, host_service, local_settings, turn_launch
+from cloud_agent_host.service.host_runtime import LAUNCH_STARTED, LaunchResult, encode_turn
+from cloud_agent_host.turn import group_reservation, shared_live_attempt, turn_child
+from cloud_agent_shared import shared_protocol
 
 _JOB = ClaimedJob(
+    model_connection=connection_access("claude-code"),
     job_id="ajob_1",
     attempt_id=7,
     attempt_no=1,
@@ -29,9 +35,8 @@ _JOB = ClaimedJob(
     runtime="claude-code",
     model="model",
     worker_token="ajt.a.b",
-    sandbox_token="grant",
     thread_id="athr_1",
-    runtime_version=runner_mod.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
+    runtime_version=shared_protocol.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
 )
 
 _PAYLOAD = {
@@ -44,12 +49,18 @@ _PAYLOAD = {
     "runtime": "claude-code",
     "model": "m",
     "worker_token": "ajt.a.b",
-    "sandbox_token": "grant",
+    "model_connection": {
+        "connection_id": _JOB.model_connection.connection_id,
+        "revision": _JOB.model_connection.revision,
+        "base_url": _JOB.model_connection.base_url,
+        "protocol": _JOB.model_connection.protocol,
+        "api_key": _JOB.model_connection.api_key,
+    },
 }
 
 
 def test_the_spawn_payload_keeps_the_settings_the_turn_runs_with():
-    handed = runner_mod._child_turn_payload(
+    handed = turn_launch.child_turn_payload(
         {
             "job_id": "ajob_1",
             "_worker_id": "parent-only",
@@ -68,14 +79,14 @@ def test_a_turn_is_handed_the_settings_as_of_its_handover():
             seen.append(handed)
             return LaunchResult(LAUNCH_STARTED, None)
 
-    runner_mod._hand_over_turn(
+    host_service._hand_over_turn(
         dict(_PAYLOAD),
         turns=_Turns(),
         base_url="http://control",
         worker_id="runner-a-1",
         host_settings={"agent_timeout_s": 900.0},
     )
-    runner_mod._hand_over_turn(
+    host_service._hand_over_turn(
         dict(_PAYLOAD), turns=_Turns(), base_url="http://control", worker_id="runner-a-2"
     )
 
@@ -88,15 +99,14 @@ def _serve(monkeypatch, payload: dict[str, Any]) -> dict[str, Any]:
     read_fd, write_fd = os.pipe()
     monkeypatch.setattr("sys.stdin", io.StringIO(encode_turn(payload).decode()))
     backend = ProcessBackend(acknowledged_unsafe=True)
-    monkeypatch.setattr(runner_mod, "build_backend_from_env", lambda: backend)
+    monkeypatch.setattr(turn_child, "build_backend_from_env", lambda: backend)
     ran: list[dict[str, Any]] = []
-    monkeypatch.setattr(runner_mod, "run_turn", lambda *_a, **kwargs: ran.append(kwargs) or 0)
+    monkeypatch.setattr(turn_child, "run_turn", lambda *_a, **kwargs: ran.append(kwargs) or 0)
     try:
         assert (
-            runner_mod._serve_turn(
+            turn_child._serve_turn(
                 handover_fd=write_fd,
                 base_url="http://control",
-                gateway_url="http://gateway",
                 worker_id="runner-a",
                 lease_ttl=120.0,
                 agent_timeout_s=3600.0,
@@ -146,18 +156,23 @@ def test_a_turn_handed_no_settings_runs_with_the_hosts_own(monkeypatch):
     assert kwargs["host_settings"] == {}
 
 
-def _stamp() -> dict[str, Any]:
+def _stamp(**_: object) -> dict[str, Any]:
     return {
         "sandbox_image_digest": "sha256:shared-image",
-        "runtime_versions": dict(runner_mod.SHARED_SANDBOX_RUNTIME_PINS),
+        "runtime_versions": dict(shared_protocol.SHARED_SANDBOX_RUNTIME_PINS),
         "runtime_versions_available": {
-            key: [value] for key, value in runner_mod.SHARED_SANDBOX_RUNTIME_PINS.items()
+            key: [value] for key, value in shared_protocol.SHARED_SANDBOX_RUNTIME_PINS.items()
         },
-        "helper_versions": dict(runner_mod.SHARED_SANDBOX_HELPER_PINS),
+        "helper_versions": dict(shared_protocol.SHARED_SANDBOX_HELPER_PINS),
     }
 
 
-def test_claimed_github_write_token_reaches_only_the_resident_launch(monkeypatch):
+def test_github_reaches_the_resident_launch_from_its_residency_not_its_claim(monkeypatch):
+    """The relay placeholder and the owner's identity come with the residency.
+
+    A claim from an older control plane that still carries a sandbox write
+    token has it ignored: no token GitHub accepts reaches a member.
+    """
     claim = ClaimedJob.from_response(
         {
             **_PAYLOAD,
@@ -170,13 +185,24 @@ def test_claimed_github_write_token_reaches_only_the_resident_launch(monkeypatch
 
     assert run.result == 0
     assert run.launches
-    assert all(launch.github_token == "sandbox-write-token" for launch in run.launches)
     assert all(launch.github_repo == claim.repo for launch in run.launches)
-    assert "sandbox-write-token" not in repr(claim)
-    assert (
-        ClaimedJob.from_response({**_PAYLOAD, "clone_token": "host-clone-token"}).github_token
-        is None
-    )
+    # The probe names none; a live process keeps the one its residency gave it.
+    assert all(not launch.github_credential for launch in run.launches)
+    assert "sandbox-write-token" not in repr(run.launches)
+
+    residency = {
+        "github_credential": "agh.residency.signature",
+        "git_author_name": "octo",
+        "git_author_email": "7+octo@users.noreply.github.com",
+        "git_coauthor": "FreeInference <9+freeinference[bot]@users.noreply.github.com>",
+    }
+    assert github_relay_env.residency_github_launch(claim.repo, residency) == residency
+    # Without a repository there is nothing for the relay to act on, but the
+    # owner still authors the commits.
+    assert github_relay_env.residency_github_launch(None, residency) == {
+        **residency,
+        "github_credential": "",
+    }
 
 
 def _run_new_chat(
@@ -187,6 +213,9 @@ def _run_new_chat(
     reservation_change: dict[str, Any] | None = None,
     reservation_omits_disk: bool = False,
     initial_archive_status: dict[str, object] | None = None,
+    container_action: str | None = None,
+    initial_archive: dict[str, object] | None = None,
+    fails_after_acquire: bool = False,
 ) -> SimpleNamespace:
     """Drive a first turn of a new chat to its settlement, with collaborators mocked."""
     backend = ContainerBackend(image="img")
@@ -195,19 +224,31 @@ def _run_new_chat(
     retained.sandbox_metadata.return_value = {}
     retained.has_binary.return_value = True
     manager = Mock()
-    monkeypatch.setattr(runner_mod, "ChatSandboxManager", lambda _backend: manager)
-    monkeypatch.setattr(runner_mod, "RetainedChatBackend", lambda *_args, **_kwargs: retained)
-    monkeypatch.setattr(runner_mod, "_resident_base_ready", lambda *_args: True)
-    monkeypatch.setattr(runner_mod, "runtime_version_unavailable", lambda *_args: None)
+    monkeypatch.setattr(group_reservation, "ChatSandboxManager", lambda _backend: manager)
+    monkeypatch.setattr(
+        shared_live_attempt, "RetainedChatBackend", lambda *_args, **_kwargs: retained
+    )
+    monkeypatch.setattr(shared_live_attempt, "_resident_base_ready", lambda *_args: True)
+    monkeypatch.setattr(shared_live_attempt, "runtime_version_unavailable", lambda *_args: None)
     checkouts: list[dict[str, Any]] = []
     prepared = SimpleNamespace(import_into=lambda *_args, **_kwargs: "b" * 40, discard=lambda: None)
     monkeypatch.setattr(
-        runner_mod,
+        shared_live_attempt,
         "_prefetch_retained_source",
         lambda **kwargs: checkouts.append(kwargs) or prepared,
     )
-    control = Mock(spec=runner_mod.ControlPlane)
+    control = Mock(spec=control_plane_client.ControlPlane)
     control.mark_chat_sandbox_running.return_value = {}
+    control.establish_shared_residency.return_value = {
+        "credential": _JOB.model_connection.api_key,
+        "generation": 1,
+        "model": job.model,
+        "github_credential": "agh.residency.signature",
+        "git_author_name": "octo",
+        "git_author_email": "7+octo@users.noreply.github.com",
+        "git_coauthor": "",
+        **residency_connection("claude-code"),
+    }
     if job.thread_attachment_count:
         control.list_attachments.return_value = [
             {"id": 17, "path": "replacement.txt", "size_bytes": len(b"replacement")}
@@ -235,6 +276,7 @@ def _run_new_chat(
         "activation_generation": 3,
         "context_status": "new",
         "resident_state": "live",
+        **({} if container_action is None else {"container_action": container_action}),
     }
     supervisor.initial_archive_status.return_value = (
         {
@@ -245,7 +287,7 @@ def _run_new_chat(
         if initial_archive_status is None
         else initial_archive_status
     )
-    supervisor.capture_initial_archive.return_value = {
+    supervisor.capture_initial_archive.return_value = initial_archive or {
         "enabled": False,
         "stored": False,
     }
@@ -254,29 +296,28 @@ def _run_new_chat(
         "process_generation": 1,
     }
     supervisor.settle_shared.return_value = {"native_session_id": "native-new"}
-    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda: supervisor)
+    monkeypatch.setattr(shared_live_attempt, "sandbox_manager_from_env", lambda: supervisor)
     monkeypatch.setattr(
-        runner_mod, "_stream_shared_agent_turn", lambda **_kwargs: (0, "", [], None, None)
+        shared_live_attempt, "_stream_shared_agent_turn", lambda **_kwargs: (0, "", [], None, None)
     )
     monkeypatch.setenv("AGENT_SHARED_RESIDENT_CAPACITY", "8")
     monkeypatch.setenv("AGENT_CHAT_IDLE_TIMEOUT_S", "1800")
 
     finish = Mock()
-    result = runner_mod._run_shared_live_attempt(
+    result = shared_live_attempt._run_shared_live_attempt(
         runtime=get_runtime("claude-code"),
         job=replace(job),
         control=control,
         heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
-        gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=finish,
         host_settings=host_settings,
     )
     reserved = control.reserve_chat_sandbox.call_args.args[0]
     if result != 0:
-        assert not supervisor.acquire_shared.called
+        assert supervisor.acquire_shared.called is fails_after_acquire
         assert not control.settle_chat_sandbox.called
         return SimpleNamespace(
             result=result,
@@ -338,6 +379,92 @@ def test_recovered_initial_archive_imports_a_replacement_jobs_new_uploads(monkey
     assert run.finish.call_args.kwargs["base_sha"] == recovered_base
 
 
+def _initial_archive_events(run: SimpleNamespace) -> list[dict[str, Any]]:
+    return [
+        call.args[0].payload
+        for call in run.control.append_event.call_args_list
+        if call.args[0].payload.get("phase") == "initial_archive"
+    ]
+
+
+def test_a_container_this_acquire_created_skips_the_marker_probe(monkeypatch):
+    """A new container holds no marker of its own, so there is nothing to resolve."""
+    run = _run_new_chat(monkeypatch, None, container_action="create")
+
+    assert run.result == 0
+    run.supervisor.initial_archive_status.assert_not_called()
+    # The capture still happens, and is where a carried or foreign marker is handled.
+    assert run.supervisor.capture_initial_archive.call_args.kwargs["defer_upload"] is True
+
+
+@pytest.mark.parametrize("container_action", ["start", "reuse", "unknown", None])
+def test_a_container_that_may_hold_a_marker_is_probed_first(monkeypatch, container_action):
+    """Only ``create`` proves the container new; anything else, or no answer, probes."""
+    run = _run_new_chat(monkeypatch, None, container_action=container_action)
+
+    assert run.result == 0
+    run.supervisor.initial_archive_status.assert_called_once()
+
+
+def test_a_pending_initial_upload_admits_the_prompt(monkeypatch):
+    """The bundle is durable on the host; S3 follows in the background."""
+    run = _run_new_chat(
+        monkeypatch,
+        None,
+        container_action="create",
+        initial_archive={
+            "enabled": True,
+            "stored": False,
+            "upload": "pending",
+            "size_bytes": 10,
+            "sha256": "a" * 64,
+        },
+    )
+
+    assert run.result == 0
+    assert run.supervisor.ensure_shared_resident.called
+    assert _initial_archive_events(run) == [
+        {"phase": "initial_archive", "enabled": True, "stored": False, "upload": "pending"}
+    ]
+
+
+def test_an_older_sandbox_managers_stored_receipt_is_still_accepted(monkeypatch):
+    run = _run_new_chat(
+        monkeypatch,
+        None,
+        container_action="create",
+        initial_archive={"enabled": True, "stored": True},
+    )
+
+    assert run.result == 0
+    assert _initial_archive_events(run) == [
+        {"phase": "initial_archive", "enabled": True, "stored": True}
+    ]
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        {"enabled": True, "stored": False},
+        {"enabled": True, "stored": False, "upload": "failed"},
+        {"enabled": False, "stored": False, "upload": "pending"},
+    ],
+)
+def test_an_initial_receipt_that_is_neither_stored_nor_pending_stops_the_turn(monkeypatch, receipt):
+    run = _run_new_chat(
+        monkeypatch,
+        None,
+        container_action="create",
+        initial_archive=receipt,
+        fails_after_acquire=True,
+    )
+
+    assert run.result != 0
+    assert "invalid initial archive receipt" in str(run.failure)
+    run.supervisor.ensure_shared_resident.assert_not_called()
+    assert _initial_archive_events(run) == []
+
+
 def test_new_sandbox_resource_settings_reach_the_docker_limits(monkeypatch):
     run = _run_new_chat(
         monkeypatch,
@@ -387,7 +514,7 @@ def test_a_new_untrusted_sandbox_without_a_disk_quota_starts_with_a_warning(
     assert run.result == 0
     assert run.reserved["disk_limit_mib"] == 0
     (warning,) = _quota_warnings(caplog)
-    assert warning.getMessage() == runner_mod.UNTRUSTED_DISK_QUOTA_RECOMMENDED
+    assert warning.getMessage() == group_reservation.UNTRUSTED_DISK_QUOTA_RECOMMENDED
     assert warning.job_id == _JOB.job_id  # type: ignore[attr-defined]
 
 
@@ -422,7 +549,7 @@ def test_an_existing_untrusted_sandbox_without_a_quota_is_not_warned_about(monke
         "cpu_limit": "3.5",
     }
     job = replace(_JOB, execution_profile="untrusted-kata-v1", thread_sandbox=existing)
-    existing["container_name"] = runner_mod.ChatSandboxSpec(
+    existing["container_name"] = chat_sandbox.ChatSandboxSpec(
         thread_id=job.thread_id,
         sandbox_id="asbx_existing",
         generation=1,
@@ -439,14 +566,13 @@ def test_an_existing_untrusted_sandbox_without_a_quota_is_not_warned_about(monke
     finish = Mock()
 
     with caplog.at_level(logging.WARNING):
-        runner_mod._run_shared_live_attempt(
+        shared_live_attempt._run_shared_live_attempt(
             runtime=get_runtime("claude-code"),
             job=job,
             control=control,
             heart=SimpleNamespace(),
             backend=backend,
             host="host-a",
-            gateway_base_url="http://gateway",
             agent_timeout_s=30,
             finish_attempt=finish,
             host_settings={"sandbox_disk_mib": 0},
@@ -474,7 +600,7 @@ def test_a_claim_attests_the_disk_quota_a_new_group_would_get(
     else:
         monkeypatch.setenv("AGENT_SANDBOX_DISK_MIB", environment)
 
-    stamp = runner_mod._claim_attestation(
+    stamp = host_capabilities.claim_attestation(
         ProcessBackend(acknowledged_unsafe=True), host_settings=settings
     )
 
@@ -519,7 +645,7 @@ def test_container_resources_bootstrap_from_the_hosts_environment(monkeypatch):
     monkeypatch.setenv("AGENT_SANDBOX_MEMORY_MIB", "12288")
     monkeypatch.setenv("AGENT_SANDBOX_DISK_MIB", "40960")
 
-    local = runner_mod._runner_local_settings(3600)
+    local = local_settings._runner_local_settings(3600)
     run = _run_new_chat(monkeypatch, None)
 
     assert local["sandbox_cpu_millicores"] == 3500
@@ -583,7 +709,7 @@ def test_an_existing_sandbox_keeps_the_capacity_and_resources_it_was_created_wit
     control.reserve_chat_sandbox.side_effect = RuntimeError("stop after the reservation request")
     finish = Mock()
     job = replace(_JOB, thread_sandbox=existing)
-    existing["container_name"] = runner_mod.ChatSandboxSpec(
+    existing["container_name"] = chat_sandbox.ChatSandboxSpec(
         thread_id=job.thread_id,
         sandbox_id="asbx_existing",
         generation=1,
@@ -594,14 +720,13 @@ def test_an_existing_sandbox_keeps_the_capacity_and_resources_it_was_created_wit
         resident_slot_capacity=4,
     ).container_name
 
-    runner_mod._run_shared_live_attempt(
+    shared_live_attempt._run_shared_live_attempt(
         runtime=get_runtime("claude-code"),
         job=job,
         control=control,
         heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
-        gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=finish,
         host_settings=settings,
@@ -686,25 +811,24 @@ def test_a_turn_with_tools_on_a_host_without_a_relay_says_the_site_is_misconfigu
     stamp = Mock(side_effect=_stamp)
     monkeypatch.setattr(backend, "version_stamp", stamp)
     supervisors = Mock()
-    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", supervisors)
-    control = Mock(spec=runner_mod.ControlPlane)
+    monkeypatch.setattr(shared_live_attempt, "sandbox_manager_from_env", supervisors)
+    control = Mock(spec=control_plane_client.ControlPlane)
     finish = Mock()
 
-    result = runner_mod._run_shared_live_attempt(
+    result = shared_live_attempt._run_shared_live_attempt(
         runtime=get_runtime("claude-code"),
         job=replace(_JOB, mcp_bindings=["deepwiki", ":platform:memory"]),
         control=control,
         heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
-        gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=finish,
     )
 
     assert result == 2
-    finish.assert_called_once_with("failed", runner_mod.SITE_MISCONFIGURED_MCP)
-    assert runner_mod.SITE_MISCONFIGURED_MCP.startswith("Site misconfigured:")
+    finish.assert_called_once_with("failed", group_reservation.SITE_MISCONFIGURED_MCP)
+    assert group_reservation.SITE_MISCONFIGURED_MCP.startswith("Site misconfigured:")
     assert not stamp.called
     assert not control.reserve_chat_sandbox.called
     assert not supervisors.called

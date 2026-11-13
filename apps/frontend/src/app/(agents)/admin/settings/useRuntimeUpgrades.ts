@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import type { RuntimeUpgradeItem } from '@/lib/api/adminRuntimeUpgrades';
+import type { RuntimeUpgradeItem, RuntimeUpgrades } from '@/lib/api/adminRuntimeUpgrades';
 import { getRuntimeUpgrades, requestRuntimeUpgrade } from '@/lib/api/adminRuntimeUpgrades';
 import { APIError, getErrorMessage } from '@/lib/utils/errors';
 
@@ -26,6 +26,7 @@ export function useRuntimeUpgrades({
   onUpdated: () => void;
 }) {
   const [items, setItems] = useState<RuntimeUpgradeItem[] | null>(null);
+  const [waitingOn, setWaitingOn] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const request = useRef<AbortController | null>(null);
@@ -37,7 +38,7 @@ export function useRuntimeUpgrades({
     callbacks.current = { onAccessDenied, onUpdated };
   });
 
-  const adopt = useCallback((next: RuntimeUpgradeItem[]) => {
+  const adopt = useCallback(({ runtimes: next, registry_waiting_on }: RuntimeUpgrades) => {
     let finished = false;
     for (const item of next) {
       const state = item.upgrade?.state ?? '';
@@ -46,6 +47,7 @@ export function useRuntimeUpgrades({
       states.current.set(item.runtime, state);
     }
     setItems(next);
+    setWaitingOn(registry_waiting_on ?? []);
     setError(null);
     if (finished) callbacks.current.onUpdated();
   }, []);
@@ -66,7 +68,7 @@ export function useRuntimeUpgrades({
     try {
       const next = await getRuntimeUpgrades(controller.signal);
       if (!mounted.current || controller.signal.aborted || current !== sequence.current) return;
-      adopt(next.runtimes);
+      adopt(next);
     } catch (cause) {
       if (!mounted.current || controller.signal.aborted || current !== sequence.current) return;
       fail(cause);
@@ -109,7 +111,7 @@ export function useRuntimeUpgrades({
       sequence.current += 1;
       try {
         const next = await requestRuntimeUpgrade(runtime, version);
-        if (mounted.current) adopt(next.runtimes);
+        if (mounted.current) adopt(next);
       } catch (cause) {
         if (mounted.current) fail(cause);
       } finally {
@@ -119,5 +121,5 @@ export function useRuntimeUpgrades({
     [adopt, fail],
   );
 
-  return { items, error, busy, update, reload: load };
+  return { items, waitingOn, error, busy, update, reload: load };
 }

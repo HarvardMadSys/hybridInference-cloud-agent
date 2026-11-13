@@ -12,12 +12,16 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
 
+from tests.support.owners import connection_access
 from tests.support.ssh_keys import host_key, private_key
 
-from cloud_agent_host import runner as runner_mod
-from cloud_agent_host.runner import ClaimedJob, ControlPlane
+from cloud_agent_host import claimed_job
+from cloud_agent_host.claimed_job import ClaimedJob
+from cloud_agent_host.container.sandbox import ContainerBackend
+from cloud_agent_host.control_plane_client import ControlPlane
 from cloud_agent_host.runtimes import get_runtime
-from cloud_agent_host.sandbox import ContainerBackend
+from cloud_agent_host.turn import group_reservation, shared_live_attempt
+from cloud_agent_shared import shared_protocol
 from cloud_agent_shared.ssh_access import SshAccess, SshMemberAccess, SshServerAccess
 
 _KEY = private_key()
@@ -43,6 +47,7 @@ _ACCESS = SshAccess(
     ],
 )
 _JOB = ClaimedJob(
+    model_connection=connection_access("claude-code"),
     job_id="ajob_1",
     attempt_id=7,
     attempt_no=1,
@@ -52,20 +57,19 @@ _JOB = ClaimedJob(
     runtime="claude-code",
     model="model",
     worker_token="ajt.a.b",
-    sandbox_token="grant",
     thread_id="athr_1",
-    runtime_version=runner_mod.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
+    runtime_version=shared_protocol.SHARED_SANDBOX_RUNTIME_PINS["claude-code"],
 )
 
 
-def _stamp() -> dict[str, Any]:
+def _stamp(**_: object) -> dict[str, Any]:
     return {
         "sandbox_image_digest": "sha256:shared-image",
-        "runtime_versions": dict(runner_mod.SHARED_SANDBOX_RUNTIME_PINS),
+        "runtime_versions": dict(shared_protocol.SHARED_SANDBOX_RUNTIME_PINS),
         "runtime_versions_available": {
-            key: [value] for key, value in runner_mod.SHARED_SANDBOX_RUNTIME_PINS.items()
+            key: [value] for key, value in shared_protocol.SHARED_SANDBOX_RUNTIME_PINS.items()
         },
-        "helper_versions": dict(runner_mod.SHARED_SANDBOX_HELPER_PINS),
+        "helper_versions": dict(shared_protocol.SHARED_SANDBOX_HELPER_PINS),
     }
 
 
@@ -75,12 +79,16 @@ def _run(monkeypatch, job: ClaimedJob) -> Mock:
     retained = Mock()
     retained.sandbox_metadata.return_value = {}
     retained.has_binary.return_value = True
-    monkeypatch.setattr(runner_mod, "ChatSandboxManager", lambda _backend: Mock())
-    monkeypatch.setattr(runner_mod, "RetainedChatBackend", lambda *_args, **_kwargs: retained)
-    monkeypatch.setattr(runner_mod, "_resident_base_ready", lambda *_args: True)
+    monkeypatch.setattr(group_reservation, "ChatSandboxManager", lambda _backend: Mock())
+    monkeypatch.setattr(
+        shared_live_attempt, "RetainedChatBackend", lambda *_args, **_kwargs: retained
+    )
+    monkeypatch.setattr(shared_live_attempt, "_resident_base_ready", lambda *_args: True)
     prepared = SimpleNamespace(import_into=lambda *_args, **_kwargs: "b" * 40, discard=lambda: None)
-    monkeypatch.setattr(runner_mod, "_prefetch_retained_source", lambda **_kwargs: prepared)
-    monkeypatch.setattr(runner_mod, "runtime_version_unavailable", lambda *_args: None)
+    monkeypatch.setattr(
+        shared_live_attempt, "_prefetch_retained_source", lambda **_kwargs: prepared
+    )
+    monkeypatch.setattr(shared_live_attempt, "runtime_version_unavailable", lambda *_args: None)
     control = Mock(spec=ControlPlane)
     control.reserve_chat_sandbox.side_effect = lambda seed: {
         **seed,
@@ -110,18 +118,17 @@ def _run(monkeypatch, job: ClaimedJob) -> Mock:
     }
     supervisor.settle_shared.return_value = {"native_session_id": "native-new"}
     supervisor.sync_ssh_access.return_value = {"newest": True, "revision": 5}
-    monkeypatch.setattr(runner_mod, "_session_supervisor_from_env", lambda: supervisor)
+    monkeypatch.setattr(shared_live_attempt, "sandbox_manager_from_env", lambda: supervisor)
     monkeypatch.setattr(
-        runner_mod, "_stream_shared_agent_turn", lambda **_kwargs: (0, "", [], None, None)
+        shared_live_attempt, "_stream_shared_agent_turn", lambda **_kwargs: (0, "", [], None, None)
     )
-    runner_mod._run_shared_live_attempt(
+    shared_live_attempt._run_shared_live_attempt(
         runtime=get_runtime("claude-code"),
         job=job,
         control=control,
         heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
         backend=backend,
         host="host-a",
-        gateway_base_url="http://gateway",
         agent_timeout_s=30,
         finish_attempt=Mock(),
     )
@@ -148,9 +155,9 @@ def test_a_chat_without_ssh_servers_costs_no_call(monkeypatch) -> None:
 
 
 def test_the_keys_are_masked_in_everything_the_runner_reports() -> None:
-    values = runner_mod._claim_secret_values(replace(_JOB, ssh_access=_ACCESS))
-    assert values == {"ssh-key:gpu": _KEY}
-    assert runner_mod._claim_secret_values(_JOB) == {}
+    values = claimed_job.claim_secret_values(replace(_JOB, ssh_access=_ACCESS))
+    assert values["ssh-key:gpu"] == _KEY
+    assert "ssh-key:gpu" not in claimed_job.claim_secret_values(_JOB)
 
 
 def test_the_runner_tells_the_sandbox_manager_its_turn_is_starting() -> None:
@@ -158,7 +165,7 @@ def test_the_runner_tells_the_sandbox_manager_its_turn_is_starting() -> None:
 
     import httpx
 
-    from cloud_agent_host.session_supervisor_client import SessionSupervisorClient
+    from cloud_agent_host.sandbox_manager_client import SandboxManagerClient
 
     sent: list[dict[str, Any]] = []
 
@@ -166,7 +173,7 @@ def test_the_runner_tells_the_sandbox_manager_its_turn_is_starting() -> None:
         sent.append(json.loads(request.content))
         return httpx.Response(200, json={"newest": True, "revision": 5, "running": True})
 
-    client = SessionSupervisorClient("http://sandbox_manager", "secret")
+    client = SandboxManagerClient("http://sandbox_manager", "secret")
     client._client.close()
     client._client = httpx.Client(transport=httpx.MockTransport(answer))
 

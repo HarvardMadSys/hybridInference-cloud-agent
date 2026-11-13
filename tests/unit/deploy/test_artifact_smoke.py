@@ -14,7 +14,8 @@ import re
 from pathlib import Path
 
 import pytest
-from deploy.release import artifact_catalog, release_manifest as rm, smoke
+import yaml
+from deploy.release import artifact_catalog, artifact_compose, release_manifest as rm, smoke
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SANDBOX_DOCKERFILE = REPO_ROOT / "deploy/sandbox/Dockerfile.agent-sandbox"
@@ -32,7 +33,7 @@ def test_every_role_a_release_carries_has_a_start_check() -> None:
 
 
 def test_web_is_checked_once_per_variant() -> None:
-    assert smoke.ROLES["web"].variants == ("root", "agents")
+    assert smoke.ROLES["web"].variants == ("root",)
     assert set(smoke.ROLES["web"].variants) == {
         entry.variant for entry in artifact_catalog.artifacts() if entry.role == "web"
     }
@@ -96,7 +97,7 @@ def matching_labels(**overrides: str) -> dict[str, str]:
         ),
         "org.opencontainers.image.revision": COMMIT,
         "io.hybridinference.artifact.role": "web",
-        "io.hybridinference.artifact.base_path": "/agents",
+        "io.hybridinference.artifact.base_path": "",
     }
     labels.update(overrides)
     return labels
@@ -106,7 +107,7 @@ def test_the_identity_labels_are_what_the_release_will_be_checked_against(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(smoke, "image_labels", lambda image: matching_labels())
-    evidence = smoke.verify_identity("image", "web", "agents", COMMIT)
+    evidence = smoke.verify_identity("image", "web", "root", COMMIT)
     assert any("revision" in line for line in evidence)
     assert any("base path" in line for line in evidence)
 
@@ -115,25 +116,24 @@ def test_the_identity_labels_are_what_the_release_will_be_checked_against(
     ("role", "variant", "revision", "labels"),
     [
         ("control", None, COMMIT, matching_labels()),
-        ("web", "root", COMMIT, matching_labels()),
-        ("web", "agents", "b" * 40, matching_labels()),
+        ("web", "root", "b" * 40, matching_labels()),
         (
             "web",
-            "agents",
+            "root",
             COMMIT,
             matching_labels(**{"org.opencontainers.image.revision": "unknown"}),
         ),
         (
             "web",
-            "agents",
+            "root",
             COMMIT,
             matching_labels(**{"io.hybridinference.artifact.role": "runner"}),
         ),
         (
             "web",
-            "agents",
+            "root",
             COMMIT,
-            matching_labels(**{"io.hybridinference.artifact.base_path": ""}),
+            matching_labels(**{"io.hybridinference.artifact.base_path": "/agents"}),
         ),
     ],
 )
@@ -257,3 +257,58 @@ def test_the_control_check_stops_containers_before_it_removes_the_network(
         "stop:smoke-control-pg-1",
         "network.remove",
     ], lifelines
+
+
+def test_the_control_check_migrates_the_postgres_a_deployment_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stack's pinned image, not a second, floating name for it.
+
+    The check used to start `postgres:16-alpine`, which migrated whatever minor
+    version that tag meant on the day of the run.
+    """
+    started: dict[str, str] = {}
+
+    class FakeNetwork:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def create(self) -> None: ...
+
+        def remove(self) -> None: ...
+
+    class FakeContainer:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        @classmethod
+        def for_run(cls, kind: str, run: str) -> FakeContainer:
+            return cls(f"smoke-{kind}-{run}")
+
+        def start(self, image: str, **kwargs: object) -> None:
+            started[self.name] = image
+
+        def wait(self, timeout: int = 0) -> None: ...
+
+        def exit_code(self) -> int:
+            return 0
+
+        def logs(self) -> str:
+            return "database system is ready to accept connections"
+
+        def url(self, port: int, path: str = "/") -> str:
+            return f"http://127.0.0.1:1234{path}"
+
+        def stop(self) -> None: ...
+
+    monkeypatch.setattr(smoke, "Network", FakeNetwork)
+    monkeypatch.setattr(smoke, "Container", FakeContainer)
+    monkeypatch.setattr(smoke, "wait_for_http", lambda url, **kwargs: (200, ""))
+    monkeypatch.setattr(smoke, "_control_environment", lambda dsn: {})
+
+    assert smoke.verify_control("control:ci-1", suffix="1", keep=True)
+
+    stack = yaml.safe_load((REPO_ROOT / "deploy/control-plane/docker-compose.yml").read_text())
+    pinned = stack["services"]["postgres"]["image"]
+    assert artifact_compose.is_pinned(pinned), pinned
+    assert started["smoke-control-pg-1"] == pinned

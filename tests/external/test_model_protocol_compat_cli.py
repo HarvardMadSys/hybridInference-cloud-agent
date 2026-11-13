@@ -45,7 +45,7 @@ from tests.support.compat_cli import (
 )
 
 from cloud_agent.application.model_connections import model_connection_cipher, translator_token
-from cloud_agent_host.compat_helper import helper_archive
+from cloud_agent_host.member_setup.compat_helper import helper_archive
 from cloud_agent_host.runtimes import (
     ClaudeCodeRuntime,
     CodexRuntime,
@@ -53,6 +53,7 @@ from cloud_agent_host.runtimes import (
     ResponsesViaChatUrl,
 )
 from cloud_agent_host.runtimes.base import COMPAT_LAUNCHER
+from cloud_agent_host.runtimes.codex.adapter import NATIVE_LAUNCHER
 from cloud_agent_shared.protocol_compat import ENV_TOKEN
 
 pytestmark = pytest.mark.external
@@ -122,7 +123,12 @@ def _launch(
     argv: list[str], env: dict[str, str], binary: str, tmp_path: Path, port: int, home: Path
 ) -> subprocess.Popen[str]:
     assert argv[: len(COMPAT_LAUNCHER)] == list(COMPAT_LAUNCHER)
-    cli = [binary, *argv[len(COMPAT_LAUNCHER) + 1 :]]
+    cli_argv = argv[len(COMPAT_LAUNCHER) :]
+    if cli_argv[: len(NATIVE_LAUNCHER)] == list(NATIVE_LAUNCHER):
+        # Codex's native launch reads the image's install, which a pinned
+        # prefix is not; the binary named here is the one it would run.
+        cli_argv = cli_argv[len(NATIVE_LAUNCHER) :]
+    cli = [binary, *cli_argv[1:]]
     zipapp = tmp_path / "model-protocol-translator.pyz"
     zipapp.write_bytes(helper_archive())
     wrapper = write_wrapper(tmp_path)
@@ -225,7 +231,7 @@ def test_pinned_codex_app_server_runs_a_tool_on_a_chat_upstream(tmp_path: Path) 
     argv, env = CodexRuntime().prepare_live(
         workdir=str(tmp_path / "work"),
         model=_MODEL,
-        gateway_base_url=ResponsesViaChatUrl(_UPSTREAM),
+        model_base_url=ResponsesViaChatUrl(_UPSTREAM),
         credential=_KEY,
         session_state_dir=str(codex_home),
     )
@@ -308,7 +314,7 @@ def test_pinned_claude_code_runs_a_tool_on_a_chat_upstream(tmp_path: Path) -> No
     argv, env = runtime.prepare_live(
         workdir=str(tmp_path / "work"),
         model="",
-        gateway_base_url=MessagesViaChatUrl(_UPSTREAM),
+        model_base_url=MessagesViaChatUrl(_UPSTREAM),
         credential=_KEY,
         config_dir=str(config),
     )
@@ -355,7 +361,7 @@ def test_pinned_codex_runs_a_namespaced_tool_under_its_own_name(tmp_path: Path) 
     argv, env = CodexRuntime().prepare_live(
         workdir=str(tmp_path / "work"),
         model=_MODEL,
-        gateway_base_url=ResponsesViaChatUrl(_UPSTREAM),
+        model_base_url=ResponsesViaChatUrl(_UPSTREAM),
         credential=_KEY,
         session_state_dir=str(codex_home),
     )

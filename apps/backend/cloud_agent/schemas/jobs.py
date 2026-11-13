@@ -10,19 +10,20 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from cloud_agent.attachments.models import (
     AttachmentRef,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
-from cloud_agent.entitlement import REPO_PATTERN
-from cloud_agent.execution_profiles import ExecutionProfile
-from cloud_agent.github_app import is_ref_name
-from cloud_agent.goals.models import (  # noqa: TC001 — Pydantic resolves annotations at runtime.
-    GoalInput,
-    GoalRoundKind,
-    GoalView,
-)
-from cloud_agent.goals.report import (  # noqa: TC001 — Pydantic resolves annotations at runtime.
+from cloud_agent.domain.execution_profiles import ExecutionProfile
+from cloud_agent.domain.goals import (  # noqa: TC001 — Pydantic resolves annotations at runtime.
     GoalReportOutcome,
     GoalReportParse,
 )
+from cloud_agent.domain.source_control import REPO_PATTERN, is_ref_name
+from cloud_agent.goals.models import (  # noqa: TC001 — Pydantic resolves annotations at runtime.
+    GoalRoundKind,
+    GoalView,
+)
 from cloud_agent.schemas._prompts import _visible_prompt
+from cloud_agent.schemas.goals import (  # noqa: TC001 — Pydantic resolves annotations at runtime.
+    GoalInput,
+)
 from cloud_agent.schemas.mcp import (  # noqa: TC001 — Pydantic resolves annotations at runtime.
     McpBindingInput,
     McpBindingSummary,
@@ -41,15 +42,14 @@ from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, SandboxPlugin
 # picked is kept alongside it in `metadata` under a reserved key, which the API
 # strips back out on the way to the client. Reserved means the creation path
 # drops any caller-supplied copy: it is a fact the server resolved, and the
-# publisher targets the PR at it, so a caller must not be able to forge one.
+# conversation shows it as the branch its work started from, so a caller
+# must not be able to forge one.
 BASE_REF_METADATA_KEY = "_agent_base_ref"
 
-#: Reserved metadata mark for jobs the on-call service door created. Stamped by
-#: the platform after caller metadata so a body cannot un-mark itself, and read
-#: by anything that wants to tell an on-call analysis from an owner's thread
-#: (the web UI, spend reports). Reserved in the same sense as the base ref: the
-#: creation path drops a caller-supplied copy, so an owner's job cannot claim
-#: to be one the platform dispatched.
+#: Reserved metadata mark for jobs the retired on-call service door created,
+#: which archived jobs still carry. Reserved in the same sense as the base ref:
+#: the creation path drops a caller-supplied copy, so an owner's job cannot
+#: claim to be one the platform dispatched.
 ONCALL_METADATA_KEY = "oncall"
 
 #: What a follow-up sends to clear an inherited effort. A plain null cannot
@@ -99,10 +99,10 @@ class AgentJobCreate(BaseModel):
         pattern=REPO_PATTERN,
         max_length=140,
         # Still required: a client that leaves the field out is refused rather
-        # than handed a workspace whose work nothing will publish.
+        # than handed a workspace with no repository to push to.
         description=(
             "Target repository, e.g. 'owner/name'. An explicit null starts a temporary "
-            "workspace: the sandbox starts empty, and nothing it does is published."
+            "workspace: the sandbox starts empty and has no repository to push to."
         ),
     )
     # The same bounds and blank check a message to the conversation has: this
@@ -114,18 +114,15 @@ class AgentJobCreate(BaseModel):
     model: str = Field(
         ...,
         max_length=255,
-        description=(
-            "Model id the runtime should use: a Gateway model, or one listed on "
-            "`model_connection_id` when that is set."
-        ),
+        description="Model id the runtime should use, one listed on `model_connection_id`.",
     )
     model_connection_id: str | None = Field(
         None,
         pattern=MODEL_CONNECTION_ID_PATTERN,
         description=(
-            "The owner's own model connection the model runs on. Null is the Gateway. "
-            "Together with `model` this names the source unambiguously: the same id "
-            "may exist on the Gateway and on several connections."
+            "The owner's own model connection the model runs on. A task without one "
+            "is refused with `model_connection_required`. Together with `model` this "
+            "names the source unambiguously: the same id may exist on several connections."
         ),
     )
     reasoning_effort: str | None = Field(
@@ -156,17 +153,15 @@ class AgentJobCreate(BaseModel):
         max_length=255,
         description=(
             "Branch to work from. Resolved to a commit at creation and stored as "
-            "base_sha — a branch moves, and the publisher applies onto a pinned commit. "
-            "The draft PR targets this branch; jobs that name none target the "
-            "deployment default."
+            "base_sha, because a branch moves and the conversation works from one "
+            "commit. Jobs that name none start from the repository's default branch."
         ),
     )
     base_sha: str | None = Field(
         None,
-        # A bare commit hash, enforced here as well as in the publisher: git
-        # reads a leading `-` as an option even where an operand is expected,
-        # so an unconstrained ref would be an argument injection into the
-        # trusted process that holds the repository credential.
+        # A bare commit hash: git reads a leading `-` as an option even where
+        # an operand is expected, so an unconstrained ref would be an argument
+        # injection into the trusted runner that holds the clone token.
         pattern=r"^[0-9a-fA-F]{7,64}$",
         description="Commit SHA to work from.",
     )
@@ -314,7 +309,8 @@ class AgentJobResponse(BaseModel):
     title_source: str | None = None
     runtime: str
     model: str
-    #: Null is the Gateway; otherwise the owner's model connection this turn runs on.
+    #: The owner's model connection this turn runs on; null only on a turn from
+    #: before connections were the only source, which runs on nothing.
     model_connection_id: str | None = None
     execution_profile: ExecutionProfile = ExecutionProfile.TRUSTED_V1
     #: Null means Auto, which is also what every turn created before this
@@ -328,8 +324,9 @@ class AgentJobResponse(BaseModel):
     conversation_state: Literal["queued", "running", "idle", "failed"] | None = None
     cancel_requested: bool = False
     current_attempt_id: int | None = None
-    published_pr_url: str | None = None
-    published_commit_sha: str | None = None
+    published_pr_url: str | None = Field(
+        None, description="The pull request this turn's agent opened, if it opened one."
+    )
     detail: str | None = None
     # Raised by one each time the row changes. A tab that also receives this
     # row from the owner's change stream keeps whichever revision is higher;
@@ -372,13 +369,6 @@ class AgentJobResponse(BaseModel):
     updated_at: str | None = None
     pinned_at: str | None = None
     archived_at: str | None = None
-    # Read from the billing ledger, never from anything the agent reports
-    # about itself. Attribution only: there is no per-task cap to compare it
-    # against, and the account's daily quota is what actually governs spend.
-    spent_usd: float | None = None
-    tokens_in: int | None = None
-    tokens_out: int | None = None
-    model_calls: int | None = None
     # Attempt continuity telemetry. Current retained follow-ups report hot or
     # warm-native; a first NEW turn has no continuity rung, while cold/replay
     # remain readable for historical rows.
@@ -413,29 +403,10 @@ class AgentJobResponse(BaseModel):
             "host that holds the conversation can steer its runtime."
         ),
     )
-    workspace_publication_state: (
-        Literal["pending", "capturing", "captured", "publishing", "published", "failed"] | None
-    ) = None
-    workspace_publication_unchanged: bool = Field(
-        False,
-        description=(
-            "Whether the workspace's newest publication found nothing to publish, "
-            "so it opened no pull request."
-        ),
-    )
     workspace_pr_url: str | None = Field(
         None,
         description=(
-            "The pull request the workspace was last published to. Present once the "
-            "owner has published; POST /threads/{thread_id}/publish updates it."
-        ),
-    )
-    workspace_unpublished_changes: bool = Field(
-        False,
-        description=(
-            "Whether the workspace holds turns its owner has not published, or its "
-            "last publication failed. The platform publishes only on "
-            "POST /threads/{thread_id}/publish."
+            "The newest pull request this conversation's agent opened through the GitHub relay."
         ),
     )
     workspace_epoch: int | None = None

@@ -33,17 +33,10 @@ from cloud_agent.api.deps import (
     log_admin_action,
     verify_admin_access,
 )
+from cloud_agent.api.errors import typed_error
 from cloud_agent.application.host_commands import HostCommandError, HostCommands, SandboxPlacement
-from cloud_agent.capacity_protocol import (
-    DEFAULT_HISTORY_RANGE,
-    HISTORY_RANGES,
-    AgentHostCapacityHistoryResponse,
-    admin_capacity_view,
-    history_point_grid,
-    resolve_history_range,
-)
-from cloud_agent.execution_profiles import KATA_RUNTIME, default_execution_profile
-from cloud_agent.host_pool import (
+from cloud_agent.domain.execution_profiles import KATA_RUNTIME, default_execution_profile
+from cloud_agent.domain.host_pool import (
     HOST_DRAINING,
     HOST_ONLINE,
 )
@@ -61,6 +54,14 @@ from cloud_agent.schemas import (
     SetRuntimeVersionRequest,
     SetSandboxArchiveSettingsRequest,
     host_setting_definitions,
+)
+from cloud_agent.schemas.capacity_protocol import (
+    DEFAULT_HISTORY_RANGE,
+    HISTORY_RANGES,
+    AgentHostCapacityHistoryResponse,
+    admin_capacity_view,
+    history_point_grid,
+    resolve_history_range,
 )
 from cloud_agent_shared.host_settings import admin_values, reported_values
 from cloud_agent_shared.sandbox_archive_settings import (
@@ -118,10 +119,7 @@ async def _apply(command: Awaitable[_Result]) -> _Result:
         return await command
     except HostCommandError as exc:
         if exc.code is not None:
-            raise HTTPException(
-                status_code=exc.status,
-                detail={"error": {"type": exc.code, "message": str(exc)}},
-            ) from None
+            raise typed_error(exc.status, exc.code, str(exc)) from None
         raise HTTPException(status_code=exc.status, detail=str(exc)) from None
 
 
@@ -744,8 +742,8 @@ async def remove_agent_runner_host(
         False,
         description=(
             "Remove a host that is still running attempts. Their leases expire "
-            "at once, so the removed machine can no longer heartbeat, renew "
-            "grants, establish residencies or call tools for them; the next "
+            "at once, so the removed machine can no longer heartbeat, "
+            "establish residencies or call tools for them; the next "
             "reaper pass requeues them or, for an indeterminate retained-chat "
             "activation, marks the chat LOST instead of replaying it."
         ),
@@ -788,7 +786,7 @@ async def remove_agent_runner_host(
     attempt and residency leases in the same transaction. The attempts' worker
     tokens name no host, so a lease left to run would be one the removed
     machine could keep renewing. Lease fencing then rejects every later write
-    from it, and the reaper supersedes the attempts and revokes their grants
+    from it, and the reaper supersedes the attempts and lapses their residencies
     on its next pass. A retained activation is not replayed because the
     platform cannot know whether its prompt ran, so that chat is marked LOST.
 

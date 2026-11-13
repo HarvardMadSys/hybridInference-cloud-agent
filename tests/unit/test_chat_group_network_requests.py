@@ -19,20 +19,18 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from tests.unit.test_chat_group_network import _NAMESPACE, FakeDocker, FakeGuard, _config
 
-from cloud_agent_host.chat_sandbox import (
-    _GUEST_NETWORK_CHECK,
+from cloud_agent_host.container.chat_sandbox import (
     CHAT_NAMESPACE_LABEL,
     CHAT_SANDBOX_LABEL,
     ChatSandboxManager,
     ChatSandboxSpec,
 )
+from cloud_agent_host.container.sandbox import KATA_RUNTIME, ContainerBackend, ProcessBackend
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
-from cloud_agent_host.sandbox import KATA_RUNTIME, ContainerBackend, ProcessBackend
+from cloud_agent_host.network.guest_network_check import _GUEST_NETWORK_CHECK
 from cloud_agent_host.sandbox_manager import create_app
-from cloud_agent_host.shared_session_supervisor import (
-    SharedChatSessionSupervisor,
-    SharedMemberManifest,
-)
+from cloud_agent_host.supervisor.shared_session_state import SharedMemberManifest
+from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 
 
 class _KataExecDocker(FakeDocker):
@@ -75,7 +73,7 @@ def _hot_kata_workspace(monkeypatch, *, stopped_groups: int = 0):
     backend._network_guard = FakeGuard()  # type: ignore[assignment]
     manager = ChatSandboxManager(backend)
     docker = _KataExecDocker(config)
-    monkeypatch.setattr(manager, "_run", docker)
+    monkeypatch.setattr(manager.exact, "run", docker)
     run, popen = subprocess.run, subprocess.Popen
 
     def exec_run(argv, **kwargs):
@@ -100,7 +98,9 @@ def _hot_kata_workspace(monkeypatch, *, stopped_groups: int = 0):
 
     monkeypatch.setattr(subprocess, "run", exec_run)
     monkeypatch.setattr(subprocess, "Popen", exec_popen)
-    monkeypatch.setattr(EnvironmentPreparation, "status", lambda *_args: {"ready": True})
+    # Ready for the running boot, which this Docker model starts without a StartedAt.
+    ready = {"ready": True, "container_id": "sandbox-container", "boot_id": ""}
+    monkeypatch.setattr(EnvironmentPreparation, "status", lambda *_args: ready)
 
     spec = ChatSandboxSpec(
         thread_id="athr_01",
@@ -173,10 +173,12 @@ def _hot_kata_workspace(monkeypatch, *, stopped_groups: int = 0):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("kind", "processes"),
-    [("files", 12), ("git", 13), ("terminal", 13), ("environment", 12)],
+    ("kind", "processes", "proved"),
+    [("files", 12, 1), ("git", 13, 1), ("terminal", 13, 1), ("environment", 1, 0)],
 )
-async def test_a_workspace_request_proves_a_hot_group_network_once(monkeypatch, kind, processes):
+async def test_a_workspace_request_proves_a_hot_group_network_once(
+    monkeypatch, kind, processes, proved
+):
     """Admission proves the bridge, and nothing on the way to the work proves it again.
 
     A request used to prove it two or three times: the start its admission
@@ -185,7 +187,8 @@ async def test_a_workspace_request_proves_a_hot_group_network_once(monkeypatch, 
     view, 27 for a terminal and 26 for a ready environment. One proof made it
     14, 14, 14 and 13; entering the proven container by id, with no inspection
     before each bounded exec, makes it 12, 13, 13 and 12. A spawn still
-    inspects first.
+    inspects first. A ready environment runs nothing in the guest, so it is
+    answered on one inspection of its boot, with no proof at all.
     """
     app, docker, proofs = _hot_kata_workspace(monkeypatch)
     headers = {"X-Agent-Workspace-Token": "secret"}
@@ -213,9 +216,9 @@ async def test_a_workspace_request_proves_a_hot_group_network_once(monkeypatch, 
             )
 
     assert response.status_code == 200, response.text
-    assert len(proofs) == 1
+    assert len(proofs) == proved
     guest_syncs = [argv for argv in measured if argv[1] == "exec" and "--privileged" in argv]
-    assert len(guest_syncs) == 1, "the guest's relay names are written once"
+    assert len(guest_syncs) == proved, "the guest's relay names are written once"
     assert len(measured) == processes
 
 

@@ -13,16 +13,19 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from cloud_agent_host import runner as runner_mod
-from cloud_agent_host.runner import (
+from cloud_agent_host.claimed_job import ClaimedJob
+from cloud_agent_host.service.local_settings import source_import_max_bytes
+from cloud_agent_host.turn import source_preparation
+from cloud_agent_host.turn.source_preparation import (
+    GitSourcePrefetch,
     WorktreeError,
     _assert_no_credential_on_disk,
     _auth_env,
     _import_retained_base,
     checkout_output_branch,
+    pin_base_branch,
     prepare_worktree,
     repo_clone_base_url,
-    source_import_max_bytes,
 )
 from cloud_agent_shared.git.source_archive import DEFAULT_MAX_SOURCE_ARCHIVE_BYTES
 
@@ -106,7 +109,7 @@ def remote(tmp_path: Path) -> tuple[str, str, str, str]:
     return f"file://{tmp_path / 'remotes'}", "owner/name", first, head
 
 
-def test_initial_chat_checkout_is_populated_and_has_no_push_remote(tmp_path: Path, remote):
+def test_initial_chat_checkout_records_origin_without_a_credential(tmp_path: Path, remote):
     base, repo, _first, head = remote
     workdir = tmp_path / "job"
     workdir.mkdir()
@@ -115,7 +118,9 @@ def test_initial_chat_checkout_is_populated_and_has_no_push_remote(tmp_path: Pat
 
     assert resolved == head
     assert (workdir / "hello.py").read_text() == "def hello():\n    return 1\n"
-    assert _git("remote", cwd=workdir).strip() == ""
+    # origin is the plain URL: what a push buys is the GitHub relay's to decide.
+    assert _git("remote", cwd=workdir).strip() == "origin"
+    assert _git("remote", "get-url", "origin", cwd=workdir).strip() == f"{base}/{repo}.git"
 
 
 def test_a_pinned_commit_is_the_one_streamed_into_the_container(tmp_path: Path, remote):
@@ -129,6 +134,137 @@ def test_a_pinned_commit_is_the_one_streamed_into_the_container(tmp_path: Path, 
     assert resolved == first
     assert (workdir / "hello.py").exists()
     assert not (workdir / "second.txt").exists()
+
+
+def test_a_new_checkout_keeps_the_parent_and_pins_the_base_branch(
+    tmp_path: Path, remote, monkeypatch
+):
+    """A review diffs the pinned commit locally; it does not fetch ``main``."""
+    base, repo, first, head = remote
+    monkeypatch.setattr(source_preparation, "repo_clone_base_url", lambda **_kwargs: base)
+    job = ClaimedJob(
+        job_id="ajob_1",
+        thread_id="athr_example",
+        attempt_id=1,
+        attempt_no=1,
+        repo=repo,
+        base_sha=head,
+        task_prompt="review",
+        runtime="claude-code",
+        model="m",
+        worker_token="w",
+        base_ref="dev",
+    )
+    workdir = tmp_path / "job"
+    workdir.mkdir()
+    prefetch = GitSourcePrefetch.__new__(GitSourcePrefetch)
+    prefetch._job = job
+    prefetch._max_bytes = 1 << 20
+
+    resolved = prefetch._check_out(str(workdir), threading.Event())
+
+    assert resolved == head
+    assert _git("rev-parse", "HEAD^1", cwd=workdir).strip() == first
+    assert _git("rev-parse", "refs/heads/dev", cwd=workdir).strip() == head
+    assert _git("branch", "--show-current", cwd=workdir).strip() == "agent/athr_example"
+
+
+class _FixtureHead:
+    """Claim the fixture's tip. ``None`` is a real claim with no sha."""
+
+
+def _checkout(
+    remote: tuple[str, str, str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    base_ref: str | None,
+    base_sha: str | _FixtureHead | None = _FixtureHead(),
+) -> Path:
+    base, repo, _first, head = remote
+    monkeypatch.setattr(source_preparation, "repo_clone_base_url", lambda **_kwargs: base)
+    job = ClaimedJob(
+        job_id="ajob_1",
+        thread_id="athr_example",
+        attempt_id=1,
+        attempt_no=1,
+        repo=repo,
+        base_sha=head if isinstance(base_sha, _FixtureHead) else base_sha,
+        task_prompt="review",
+        runtime="claude-code",
+        model="m",
+        worker_token="w",
+        base_ref=base_ref,
+    )
+    workdir = tmp_path / "job"
+    workdir.mkdir()
+    prefetch = GitSourcePrefetch.__new__(GitSourcePrefetch)
+    prefetch._job = job
+    prefetch._max_bytes = 1 << 20
+    prefetch._check_out(str(workdir), threading.Event())
+    return workdir
+
+
+def test_a_base_name_that_collides_with_the_workspace_branch_is_not_pinned(
+    tmp_path: Path, remote, monkeypatch
+):
+    """``refs/heads/agent`` would stop ``git checkout -B agent/<thread>``."""
+    workdir = _checkout(remote, tmp_path, monkeypatch, base_ref="agent")
+
+    assert _git("branch", "--show-current", cwd=workdir).strip() == "agent/athr_example"
+    refs = _git("for-each-ref", "--format=%(refname)", "refs/heads", cwd=workdir)
+    assert refs.split() == ["refs/heads/agent/athr_example"]
+
+
+def test_a_base_name_under_the_workspace_branch_is_not_pinned(tmp_path: Path, remote, monkeypatch):
+    workdir = _checkout(remote, tmp_path, monkeypatch, base_ref="agent/athr_example/extra")
+
+    assert _git("branch", "--show-current", cwd=workdir).strip() == "agent/athr_example"
+    refs = _git("for-each-ref", "--format=%(refname)", "refs/heads", cwd=workdir)
+    assert refs.split() == ["refs/heads/agent/athr_example"]
+
+
+def test_a_named_base_without_a_pinned_commit_is_not_labeled(tmp_path: Path, remote, monkeypatch):
+    """No claim sha means the fetch is the default branch, not ``release``."""
+    workdir = _checkout(remote, tmp_path, monkeypatch, base_sha=None, base_ref="release")
+
+    refs = _git("for-each-ref", "--format=%(refname)", "refs/heads", cwd=workdir)
+    assert "refs/heads/release" not in refs.split()
+    assert _git("branch", "--show-current", cwd=workdir).strip() == "agent/athr_example"
+
+
+def test_an_unusable_base_name_is_left_unpinned(tmp_path: Path, remote):
+    base, repo, _first, head = remote
+    workdir = tmp_path / "job"
+    workdir.mkdir()
+    resolved = prepare_worktree(workdir=str(workdir), repo=repo, base_sha=head, remote_base=base)
+    pin_base_branch(str(workdir), "--upload-pack=/bin/sh", resolved)
+    pin_base_branch(str(workdir), "HEAD", resolved)
+    pin_base_branch(str(workdir), None, resolved)
+
+    assert _git("for-each-ref", "--format=%(refname)", "refs/heads", cwd=workdir).strip() == ""
+
+
+def test_the_claim_keeps_the_conversations_base_branch():
+    body = {
+        "job_id": "ajob_1",
+        "thread_id": "athr_1",
+        "attempt_id": 1,
+        "attempt_no": 1,
+        "repo": "owner/name",
+        "base_sha": "a" * 40,
+        "task_prompt": "review",
+        "runtime": "claude-code",
+        "model": "m",
+        "worker_token": "w",
+        "metadata": {"_agent_base_ref": "  release/x  ", "ticket": "ABC"},
+    }
+
+    assert ClaimedJob.from_response(body).base_ref == "release/x"
+    assert ClaimedJob.from_response({**body, "metadata": {}}).base_ref is None
+    forged = {**body, "metadata": {"_agent_base_ref": "dev\n"}}
+    assert ClaimedJob.from_response(forged).base_ref is None
+    assert ClaimedJob.from_response(body | {"metadata": None}).base_ref is None
 
 
 def test_checkout_uses_the_publishers_output_branch(tmp_path: Path, remote):
@@ -301,15 +437,20 @@ def _child_started(child_pid: Path) -> bool:
 
 
 def _still_running(pid: int) -> bool:
-    """Whether ``pid`` exists and is not a zombie.
+    """Whether ``pid`` exists and has not exited.
 
     Read in one step: the process can exit between an existence check and the
-    read, and a status file that vanished means it ended.
+    read, and a status file that vanished means it ended. A zombie (``Z``) has
+    exited, and so has a process its parent is reaping (``X``): the kernel
+    shows that state for a moment before the status file goes, and reading
+    ``X`` as running failed this check about once in 30 runs on a busy host.
     """
     try:
-        return "\tZ" not in pathlib.Path(f"/proc/{pid}/status").read_text()
+        status = pathlib.Path(f"/proc/{pid}/status").read_text()
     except (FileNotFoundError, ProcessLookupError):
         return False
+    state = next((line.split()[1] for line in status.splitlines() if line.startswith("State:")), "")
+    return state not in {"", "Z", "X"}
 
 
 def _assert_ended(child_pid: Path) -> None:
@@ -325,14 +466,14 @@ def test_a_clone_over_the_limit_is_stopped_with_everything_it_started(tmp_path: 
     child_pid = _slow_git(tmp_path, monkeypatch)
     # Over the limit as soon as the child that writes exists.
     monkeypatch.setattr(
-        runner_mod,
+        source_preparation,
         "_checkout_bytes",
         lambda _workdir: 1 << 40 if _child_started(child_pid) else 0,
     )
     started = time.monotonic()
 
     with pytest.raises(WorktreeError, match="retained import size limit"):
-        runner_mod._run_git_within(["fetch"], cwd=str(tmp_path), max_bytes=1 << 20)
+        source_preparation._run_git_within(["fetch"], cwd=str(tmp_path), max_bytes=1 << 20)
 
     assert time.monotonic() - started < 20, "git's own child kept the clone running"
     _assert_ended(child_pid)
@@ -358,7 +499,9 @@ def test_a_clone_nobody_will_use_is_stopped_when_asked(tmp_path: Path, monkeypat
     started = time.monotonic()
 
     with pytest.raises(WorktreeError, match="abandoned"):
-        runner_mod._run_git_within(["fetch"], cwd=str(tmp_path), max_bytes=1 << 20, stop=stop)
+        source_preparation._run_git_within(
+            ["fetch"], cwd=str(tmp_path), max_bytes=1 << 20, stop=stop
+        )
 
     assert time.monotonic() - started < 20, "the clone ran on after it was abandoned"
     _assert_ended(child_pid)
@@ -387,8 +530,8 @@ def test_a_missing_follow_up_base_ships_only_what_it_adds_to_a_held_parent(
             bundle.seek(0)
             imported.update(bundle=payload, commit=commit)
 
-    monkeypatch.setattr(runner_mod, "repo_clone_base_url", lambda **_: base)
-    monkeypatch.setattr(runner_mod, "_sandbox_has_commit", has_commit)
+    monkeypatch.setattr(source_preparation, "repo_clone_base_url", lambda **_: base)
+    monkeypatch.setattr(source_preparation, "_sandbox_has_commit", has_commit)
     job = SimpleNamespace(repo=repo, base_sha=head, clone_token=None)
 
     resolved = _import_retained_base(job=job, manager=Manager(), spec=None, backend=None)

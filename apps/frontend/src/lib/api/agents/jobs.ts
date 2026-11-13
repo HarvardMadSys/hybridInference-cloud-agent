@@ -48,7 +48,7 @@ export interface AgentJobApi {
   task_prompt: string;
   runtime: string;
   model: string;
-  /** The owner's connection this turn runs on; null or absent is the Gateway. */
+  /** The owner's connection this turn runs on. */
   model_connection_id?: string | null;
   /** How hard the model was asked to think. Null is Auto — nobody chose. */
   reasoning_effort?: string | null;
@@ -62,8 +62,8 @@ export interface AgentJobApi {
   conversation_state?: 'queued' | 'running' | 'idle' | 'failed' | null;
   cancel_requested: boolean;
   current_attempt_id: number | null;
+  /** The pull request the agent opened during this turn, if any. */
   published_pr_url: string | null;
-  published_commit_sha?: string | null;
   detail: string | null;
   /** Raised by one on every change to this turn's row (absent on older servers). */
   revision?: number;
@@ -74,12 +74,6 @@ export interface AgentJobApi {
   updated_at: string | null;
   pinned_at?: string | null;
   archived_at?: string | null;
-  // Read server-side from the billing ledger, never from the agent's own
-  // report. Null means "no ledger configured", which is not the same as zero.
-  spent_usd: number | null;
-  tokens_in: number | null;
-  tokens_out: number | null;
-  model_calls: number | null;
   /** Attempt whose continuity and resource telemetry is attached below. */
   telemetry_attempt_id?: number | null;
   /** Which continuity rung this turn ran on. Null on turns that predate it. */
@@ -95,20 +89,8 @@ export interface AgentJobApi {
   native_fork_available?: boolean;
   /** Whether a waiting message can be sent into this job's turn while it runs. */
   mid_turn_input_supported?: boolean;
-  workspace_publication_state?:
-    | 'pending'
-    | 'capturing'
-    | 'captured'
-    | 'publishing'
-    | 'published'
-    | 'failed'
-    | null;
-  /** The newest publication found nothing to publish and opened no PR. */
-  workspace_publication_unchanged?: boolean;
-  /** The pull request the workspace was last published to. */
+  /** The newest pull request this conversation's agent opened. */
   workspace_pr_url?: string | null;
-  /** Turns the owner has not published, or a last publication that failed. */
-  workspace_unpublished_changes?: boolean;
   workspace_epoch?: number | null;
   duration_ms?: number | null;
   /**
@@ -132,7 +114,8 @@ export interface AgentJobApi {
  *
  * A capability the map does not name is denied, and the control plane derives
  * `enabled` from whether anything is left non-denied — so an empty map binds
- * the server switched off rather than fully open.
+ * the server switched off rather than fully open, unless `use_defaults` asks
+ * for every tool to ask first.
  */
 export interface McpBindingInputApi {
   connection_id: number;
@@ -141,6 +124,8 @@ export interface McpBindingInputApi {
   tools?: Record<string, 'deny' | 'confirm' | 'allow'>;
   resources?: Record<string, 'deny' | 'confirm' | 'allow'>;
   prompts?: Record<string, 'deny' | 'confirm' | 'allow'>;
+  /** On before its tools are known: every tool it lists asks first. */
+  use_defaults?: boolean;
 }
 
 export interface AgentPluginInputApi {
@@ -170,7 +155,7 @@ export interface CreateAgentJobRequest {
   repo: string | null;
   task_prompt: string;
   model: string;
-  /** The owner's connection `model` is listed on; omitted is the Gateway. */
+  /** The owner's connection `model` is listed on. */
   model_connection_id?: string;
   runtime?: string;
   /** Omitted is Auto: the runtime and model decide for themselves. */
@@ -219,28 +204,6 @@ export async function cancelAgentJob(
   const resp = await fetchWithAuth(API_BASE, `/v1/agent/jobs/${encodeURIComponent(jobId)}/cancel`, {
     method: 'POST',
   });
-  return jsonOrThrow(resp);
-}
-
-/** The workspace snapshot a publication request opened, or the one already on its way. */
-export interface AgentThreadPublicationApi {
-  thread_id: string;
-  snapshot_id: number;
-  state: 'pending' | 'capturing' | 'captured' | 'publishing';
-  /** False when a publication of the workspace was already on its way. */
-  requested: boolean;
-}
-
-/**
- * Push the conversation's workspace to its branch and open or update its
- * draft PR. The platform never publishes on its own; this is the owner asking.
- */
-export async function publishAgentThread(threadId: string): Promise<AgentThreadPublicationApi> {
-  const resp = await fetchWithAuth(
-    API_BASE,
-    `/v1/agent/threads/${encodeURIComponent(threadId)}/publish`,
-    { method: 'POST' },
-  );
   return jsonOrThrow(resp);
 }
 

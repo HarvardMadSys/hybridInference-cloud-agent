@@ -1,0 +1,352 @@
+[
+  {
+    "action": "agent.local_account.approve",
+    "category": "accounts",
+    "kind": "change"
+  },
+  {
+    "action": "agent.local_account.reject",
+    "category": "accounts",
+    "kind": "change"
+  },
+  {
+    "action": "agent.local_account.revoke",
+    "category": "accounts",
+    "kind": "change"
+  },
+  {
+    "action": "agent.local_account.suspend",
+    "category": "accounts",
+    "kind": "change"
+  },
+  {
+    "action": "agent.local_account.restore",
+    "category": "accounts",
+    "kind": "change"
+  },
+  {
+    "action": "agent.local_account.grant_admin",
+    "category": "accounts",
+    "kind": "change"
+  },
+  {
+    "action": "agent.local_account.revoke_admin",
+    "category": "accounts",
+    "kind": "change"
+  },
+  {
+    "action": "agent.local_account.delete",
+    "category": "accounts",
+    "kind": "change"
+  },
+  {
+    "action": "agent.local_account.resume",
+    "category": "accounts",
+    "kind": "change"
+  },
+  {
+    "action": "agent.local_account.annotate",
+    "category": "accounts",
+    "kind": "change"
+  },
+  {
+    "action": "agent.local_account.erase",
+    "category": "accounts",
+    "kind": "change"
+  },
+  {
+    "action": "agent.local_account.transfer_team",
+    "category": "accounts",
+    "kind": "change"
+  },
+  {
+    "action": "agent.local_account.setup_admin",
+    "category": "accounts",
+    "kind": "change"
+  },
+  {
+    "action": "agent.local_account.import",
+    "category": "accounts",
+    "kind": "change"
+  },
+  {
+    "action": "agent.local_account.provision_invite",
+    "category": "accounts",
+    "kind": "change"
+  },
+  {
+    "action": "agent.local_account.provision_revoke",
+    "category": "accounts",
+    "kind": "change"
+  },
+  {
+    "action": "agent.local_account.signup",
+    "category": "accounts",
+    "kind": "self_service"
+  },
+  {
+    "action": "agent.local_account.password_set",
+    "category": "accounts",
+    "kind": "self_service"
+  },
+  {
+    "action": "agent.local_account.password_change",
+    "category": "accounts",
+    "kind": "self_service"
+  },
+  {
+    "action": "agent.local_account.request_bind_email",
+    "category": "accounts",
+    "kind": "self_service"
+  },
+  {
+    "action": "agent.local_account.bind_phone",
+    "category": "accounts",
+    "kind": "self_service"
+  },
+  {
+    "action": "agent.local_account.reclaim",
+    "category": "accounts",
+    "kind": "self_service"
+  },
+  {
+    "action": "agent.local_account.self_delete",
+    "category": "accounts",
+    "kind": "self_service"
+  },
+  {
+    "action": "agent.local_login_events.purge",
+    "category": "accounts",
+    "kind": "change"
+  },
+  {
+    "action": "agent.local_broadcast.create",
+    "category": "accounts",
+    "kind": "change"
+  },
+  {
+    "action": "agent.local_broadcast.cancel",
+    "category": "accounts",
+    "kind": "change"
+  },
+  {
+    "action": "agent.local_signup_domain.add",
+    "category": "access_control",
+    "kind": "change"
+  },
+  {
+    "action": "agent.local_signup_domain.remove",
+    "category": "access_control",
+    "kind": "change"
+  },
+  {
+    "action": "agent.settings.update",
+    "category": "settings",
+    "kind": "change"
+  },
+  {
+    "action": "agent.host_settings.set",
+    "category": "settings",
+    "kind": "change"
+  },
+  {
+    "action": "agent.sandbox_archive_settings.set",
+    "category": "settings",
+    "kind": "change"
+  },
+  {
+    "action": "agent.compute.cloudlab_defaults.set",
+    "category": "settings",
+    "kind": "change"
+  },
+  {
+    "action": "agent.compute.cloudlab_autoscaling.set",
+    "category": "settings",
+    "kind": "change"
+  },
+  {
+    "action": "agent.database.pgadmin.setup",
+    "category": "settings",
+    "kind": "change"
+  },
+  {
+    "action": "agent.runtime_version.set",
+    "category": "settings",
+    "kind": "change"
+  },
+  {
+    "action": "agent.runtime_version.upgrade",
+    "category": "settings",
+    "kind": "change"
+  },
+  {
+    "action": "agent.runner_host.set_settings",
+    "category": "settings",
+    "kind": "change"
+  },
+  {
+    "action": "agent.runner_host.set_active",
+    "category": "servers",
+    "kind": "change"
+  },
+  {
+    "action": "agent.runner_host.drain",
+    "category": "servers",
+    "kind": "change"
+  },
+  {
+    "action": "agent.runner_host.undrain",
+    "category": "servers",
+    "kind": "change"
+  },
+  {
+    "action": "agent.runner_host.remove",
+    "category": "servers",
+    "kind": "change"
+  },
+  {
+    "action": "agent.runner_host.forget",
+    "category": "servers",
+    "kind": "change"
+  },
+  {
+    "action": "agent.runner_host.set_slots",
+    "category": "servers",
+    "kind": "change"
+  },
+  {
+    "action": "agent.runner_host.enroll_token_issued",
+    "category": "servers",
+    "kind": "change"
+  },
+  {
+    "action": "agent.compute.profile.create",
+    "category": "servers",
+    "kind": "change"
+  },
+  {
+    "action": "agent.compute.profile.automatic_create",
+    "category": "servers",
+    "kind": "change"
+  },
+  {
+    "action": "agent.compute.connection.create",
+    "category": "servers",
+    "kind": "change"
+  },
+  {
+    "action": "agent.compute.connection.update",
+    "category": "servers",
+    "kind": "change"
+  },
+  {
+    "action": "agent.compute.server.add",
+    "category": "servers",
+    "kind": "change"
+  },
+  {
+    "action": "agent.compute.server.preflight",
+    "category": "servers",
+    "kind": "change"
+  },
+  {
+    "action": "agent.compute.server.remove",
+    "category": "servers",
+    "kind": "change"
+  },
+  {
+    "action": "agent.compute.allocation.import",
+    "category": "servers",
+    "kind": "change"
+  },
+  {
+    "action": "agent.compute.allocation.policy",
+    "category": "servers",
+    "kind": "change"
+  },
+  {
+    "action": "agent.compute.allocation.extend",
+    "category": "servers",
+    "kind": "change"
+  },
+  {
+    "action": "agent.compute.allocation.rotate",
+    "category": "servers",
+    "kind": "change"
+  },
+  {
+    "action": "agent.compute.allocation.retire",
+    "category": "servers",
+    "kind": "change"
+  },
+  {
+    "action": "agent.compute.operation.retry",
+    "category": "servers",
+    "kind": "change"
+  },
+  {
+    "action": "agent.compute.operation.cancel",
+    "category": "servers",
+    "kind": "change"
+  },
+  {
+    "action": "agent.compute.operation.resolve",
+    "category": "servers",
+    "kind": "change"
+  },
+  {
+    "action": "agent.compute.operation.confirm_absent",
+    "category": "servers",
+    "kind": "change"
+  },
+  {
+    "action": "agent.sandbox.archive",
+    "category": "sandboxes",
+    "kind": "change"
+  },
+  {
+    "action": "agent.sandbox.restore",
+    "category": "sandboxes",
+    "kind": "change"
+  },
+  {
+    "action": "agent.sandbox.stop",
+    "category": "sandboxes",
+    "kind": "change"
+  },
+  {
+    "action": "agent.sandbox.delete.requested",
+    "category": "sandboxes",
+    "kind": "change"
+  },
+  {
+    "action": "agent.sandbox.delete.retry_resumed",
+    "category": "sandboxes",
+    "kind": "change"
+  },
+  {
+    "action": "agent.profiling.start",
+    "category": "measurements",
+    "kind": "change"
+  },
+  {
+    "action": "agent.profiling.stop",
+    "category": "measurements",
+    "kind": "change"
+  },
+  {
+    "action": "agent.database.pgadmin.open",
+    "category": "sensitive_access",
+    "kind": "access"
+  },
+  {
+    "action": "agent.database.query",
+    "category": "sensitive_access",
+    "kind": "access"
+  },
+  {
+    "action": "agent.run.event_content.read",
+    "category": "sensitive_access",
+    "kind": "access"
+  }
+]

@@ -1,3 +1,6 @@
+import { accountsZh } from './accounts';
+import { landingZh } from './landing';
+import { composerZhCN } from './composer';
 import { modelSelectionZhCN } from './modelSelection';
 import { usageZhCN } from './usage';
 
@@ -15,6 +18,8 @@ import type { TranslationKey } from './en';
  * easier to read.
  */
 export const zhCN: Record<TranslationKey, string> = {
+  ...accountsZh,
+  ...landingZh,
   'environment.title': '环境',
   'environment.configure': '配置环境',
   'environment.sectionTitle': '环境',
@@ -264,6 +269,12 @@ export const zhCN: Record<TranslationKey, string> = {
   'workspaceFiles.copyFailed': '无法复制。请选中文本后手动复制。',
   'workspaceFiles.previewAlt': '{name} 的预览',
   'workspaceFiles.imageFailed': '无法解码此图片。仍可下载文件。',
+  'workspaceFiles.loadingImage': '正在加载图片…',
+  'turnScreenshots.title': '截图',
+  'turnScreenshots.earlier': '更早的 {count} 张截图在工作区文件中。',
+  'turnScreenshots.open': '打开 {name}',
+  'turnScreenshots.close': '关闭',
+  'turnScreenshots.failed': '无法加载',
   'workspaceFiles.tooLarge': '此文件超过工作区预览大小限制，无法预览或下载。',
   'workspaceFiles.binaryPreview': '此文件类型无法预览，请下载文件后打开。',
   'workspaceFiles.binaryMissing': '此二进制文件没有可下载内容。',
@@ -314,12 +325,6 @@ export const zhCN: Record<TranslationKey, string> = {
   'turnResults.backToWorkspace': '返回当前工作区',
   'turnResults.recordedTurn': '记录的改动 · 第 {number} 轮',
   'turnResults.recordedHint': '此视图显示本轮记录的改动。',
-  'composer.send': '发送',
-  'composer.sendHint': '发送 — 回车发送，Shift+回车换行',
-  'composer.queue': '排队',
-  'composer.queueHint': '当前轮次结束后发送',
-  'composer.steer': '立即引导',
-  'composer.steerHint': '发送到当前轮次 — {keys}',
   'deployment.version': '版本',
   'deployment.date': '部署日期',
   'deployment.unavailable': '暂无信息',
@@ -331,19 +336,11 @@ export const zhCN: Record<TranslationKey, string> = {
   'review.fixing': '正在启动修复…',
   'review.fixHint': '让此审查 Agent 在共享工作区中修复发现的问题',
   'watchPr.action': '关注 PR 并合并',
-  'watchPr.start': '让 Agent 关注测试和审查，通过后合并。需要具有合并权限的代码托管工具。',
-  'watchPr.unavailable': '此会话必须能够继续，且最新改动已经推到 PR 上，才能开始关注 PR。',
+  'watchPr.start':
+    '让 Agent 关注测试和审查，通过后合并。它以你的身份操作 GitHub，所以你的 GitHub 账号需要有合并权限。',
+  'watchPr.unavailable': '此会话可以继续、且没有正在运行的任务时才能使用。',
   'watchPr.sendFailed': '无法开始关注此 PR。',
-  'publish.create': '创建 PR',
-  'publish.update': '更新 PR',
-  'publish.createHint': '把这个工作区推到 agent/… 分支，开一个草稿 PR。',
-  'publish.updateHint': '把工作区最新的改动推到它的草稿 PR。',
-  'publish.unavailable': '当前轮次结束后才能推送。',
-  'publish.inProgress': '正在推送改动…',
-  'publish.failed': '推送失败，请重试。',
-  'publish.unchanged': '没有需要推送的改动。',
-  'publish.unpublished': '有改动还没推到 PR。',
-  'publish.sendFailed': '无法推送这个工作区。',
+  'outcome.openPr': '打开 PR',
   'sideChat.new': '新建侧聊',
   'sideChat.close': '关闭{name}',
   'sideChat.region': '侧聊',
@@ -394,11 +391,9 @@ export const zhCN: Record<TranslationKey, string> = {
   'nav.aria': '产品导航',
   'nav.skipToWorkspace': '跳转到工作区',
   'nav.status': '服务状态',
-  'nav.docsAssistant': '文档助手',
   'nav.docs': '使用文档',
   'nav.agents': 'Agents',
   'nav.admin': '管理后台',
-  'nav.dashboard': '控制台',
   'nav.logOut': '退出登录',
   'nav.logOutFailed': '退出登录失败，你仍处于登录状态，请重试。',
   'nav.switchAccount': '切换账号',
@@ -413,9 +408,6 @@ export const zhCN: Record<TranslationKey, string> = {
   'nav.expandTaskList': '展开任务列表',
   'nav.collapseTaskList': '收起任务列表',
 
-  'shell.accessRequired.title': '需要 Agent 使用权限',
-  'shell.accessRequired.body': '当前账户尚未获得此 Agent 部署的使用权限。',
-  'shell.accessRequired.back': '返回控制台',
   'shell.renderError.title': '无法显示此页面',
   'shell.renderError.body': '页面中的部分内容渲染失败。请重试，或打开其他对话或页面。',
 
@@ -518,7 +510,9 @@ export const zhCN: Record<TranslationKey, string> = {
   'settings.backToChats': '返回对话',
   'settings.collapseNavigation': '收起设置导航',
   'settings.expandNavigation': '展开设置导航',
-  'settings.personalDescription': '管理你的个人资料、默认模型和通知。',
+  'settings.personalDescription': '管理你的个人资料和通知。',
+  'settings.models.title': '模型',
+  'settings.models.description': '你的个人模型连接：任务运行所用的服务商 API key 和模型。',
   'settings.plugins': '插件与 MCP',
   'settings.pluginsDescription': '连接 MCP 服务器，管理 Agent 可使用的技能。',
   'settings.integrations': '集成',
@@ -529,10 +523,11 @@ export const zhCN: Record<TranslationKey, string> = {
   'integrations.cancel': '取消',
   'settings.environments': '环境',
   'settings.environmentsDescription': '管理仓库环境、初始化脚本和个人变量。',
-  'settings.helpDescription': '连接仓库、准备环境，然后开始你的第一个对话。',
-  'settings.helpConnect': '1. 连接 GitHub 账号并选择仓库',
-  'settings.helpEnvironment': '2. 配置仓库环境（可选）',
-  'settings.helpChat': '3. 开始对话',
+  'settings.helpDescription': '连接模型和仓库、准备环境，然后开始你的第一个对话。',
+  'settings.helpModel': '1. 用服务商的 API key 连接模型',
+  'settings.helpConnect': '2. 连接 GitHub 账号并选择仓库',
+  'settings.helpEnvironment': '3. 配置仓库环境（可选）',
+  'settings.helpChat': '4. 开始对话',
   'settings.title': '我的设置',
   'settings.shortcuts.title': '键盘快捷键',
   'settings.shortcuts.description':
@@ -634,6 +629,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'settings.projectMemory.projectsError': '无法加载仓库列表。',
   'settings.projectMemory.noProjects': '你在仓库中发起任务后，这里会出现该仓库。',
   'settings.projectMemory.confirmTitle': '清除 {repo} 的记忆？',
+  ...composerZhCN,
   ...modelSelectionZhCN,
   'settings.notifications.title': '通知',
   'settings.notifications.description':
@@ -677,7 +673,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'settings.language.title': '语言',
 
   'settings.gettingStarted.about': '新手指引是什么',
-  'settings.gettingStarted.help': '带你连上 GitHub，跑出第一个任务。',
+  'settings.gettingStarted.help': '带你连上模型，跑出第一个任务。',
   'settings.gettingStarted.show': '重新显示',
   'settings.gettingStarted.shown': '已显示',
 
@@ -737,16 +733,16 @@ export const zhCN: Record<TranslationKey, string> = {
   'archive.deleteSession': '永久删除 {title}',
   'archive.deleteAll': '永久删除全部归档',
   'archive.deleteFiltered': '永久删除筛选结果',
-  'archive.deleteBusy': '此会话正在准备 Fork 或发布，请等待完成后再删除。',
+  'archive.deleteBusy': '此会话正在准备 Fork，请等待完成后再删除。',
   'archive.preparing': '正在收集匹配的会话…',
   'archive.prepareFailed': '无法获取全部匹配会话，尚未进行任何更改，请重试。',
   'archive.deleteTitleOne': '永久删除这个会话？',
   'archive.deleteTitle': '永久删除这 {count} 个会话？',
   'archive.deleteBody':
     '删除后你将无法再查看或恢复这些会话，正在运行的任务会被停止。此操作无法撤销。已 Fork 出的会话、已推送的分支和 PR 不受影响；与其他会话共用的工作区会保留。',
-  'archive.deleteSkipped': '已排除 {count} 个正在准备 Fork 或发布的会话。',
+  'archive.deleteSkipped': '已排除 {count} 个正在准备 Fork 的会话。',
   'archive.noDeletableTitle': '暂时没有可删除的会话',
-  'archive.noDeletable': '匹配的会话都在准备 Fork 或发布，请等待完成后再试。',
+  'archive.noDeletable': '匹配的会话都在准备 Fork，请等待完成后再试。',
   'archive.bulkLimit': '每次最多操作 {count} 个会话。请缩小搜索范围，或调整项目和状态筛选后重试。',
   'archive.scopeSession': '会话：{title}',
   'archive.scopeAll': '范围：全部已归档会话',
@@ -759,7 +755,6 @@ export const zhCN: Record<TranslationKey, string> = {
   'archive.deleting': '正在删除…',
   'archive.deleteFailed': '无法删除这些会话，请检查网络连接后重试。',
   'archive.forkInProgress': '所选会话正在准备 Fork，请等待 Fork 完成。',
-  'archive.publicationPending': '所选会话仍在发布中，请等待发布完成。',
   'archive.sessionNotFound': '所选会话已不可用。',
   'archive.selectionChanged': '待操作的会话状态已变化，请查看刷新后的列表并重新选择。',
   'archive.deletedOne': '已删除 1 个会话',
@@ -785,7 +780,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'composer.heading': '让 Agent 做什么?',
   'composer.subheading': '在隔离沙箱里运行。',
   'composer.subheadingFirstVisit':
-    '描述一个任务。Agent 在隔离沙箱里改代码，改完在你的仓库开一个 draft PR。',
+    '描述一个任务。Agent 在隔离沙箱里改你仓库的副本，你让它开 PR 时再开。',
   'composer.subheadingTemporary': '描述一个任务。Agent 在一个从空目录开始的隔离沙箱里工作。',
   'temporaryWorkspace.name': '从空白开始',
   'temporaryWorkspace.option': '从空白开始',
@@ -865,6 +860,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'attach.mcpTools': '{count} 个工具',
   'attach.mcpAdd': '添加 MCP',
   'attach.mcpRetry': '重试',
+  'attach.mcpManage': '管理连接',
   'attach.mcpDisabled': '已停用',
   'attach.mcpDraft': '还没配置完',
   'attach.mcpNeedsSignIn': '需要登录',
@@ -1002,6 +998,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'gettingStarted.skip': '跳过',
   'gettingStarted.hidden': '已隐藏，可在「设置」里找回',
   'gettingStarted.undo': '撤销',
+  'gettingStarted.model': '连接模型',
   'gettingStarted.connect': '连接 GitHub',
   'gettingStarted.repository': '授权一个仓库',
   'gettingStarted.firstTask': '跑第一个任务',
@@ -1009,10 +1006,9 @@ export const zhCN: Record<TranslationKey, string> = {
   'firstRun.preparing': '为这个会话创建隔离沙箱。第一轮会慢一点，之后的回复会复用它。',
   'firstRun.checkedOut': '仓库已经克隆进沙箱，Agent 只改这份副本。',
   'firstRun.workspaceCreated': '沙箱从一个空目录开始，不克隆仓库，也不发布任何东西。',
-  'firstRun.publishing': '把改动推到 agent/… 分支，开一个草稿 PR。',
-  'firstRun.doneTitle': '第一个 draft PR 开好了',
+  'firstRun.doneTitle': '第一个 PR 开好了',
   'firstRun.doneBody':
-    '在 GitHub 上审阅，合不合并由你决定。想再改，在下面回复，然后点「更新 PR」。',
+    '在 GitHub 上审阅，合不合并由你决定。想再改，在下面回复，让 Agent 把改动推到这个 PR。',
 
   // ── Pending message queue ───────────────────────────────────────────────
   'queue.region': '待发送消息',
@@ -1224,7 +1220,4 @@ export const zhCN: Record<TranslationKey, string> = {
   'ssh.rotateHint':
     '先安装新密钥再测试。新密钥登录成功前旧密钥继续有效；成功后请删除旧的那行公钥。',
   'ssh.testNewKey': '测试新密钥',
-  'common.loading': '加载中…',
-  'common.retry': '重试',
-  'common.refreshFailed': '刷新失败，正在显示上次成功读取的内容。',
 };

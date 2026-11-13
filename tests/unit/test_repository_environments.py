@@ -9,10 +9,10 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from cloud_agent.source_control import SourceControlCipher, SourceControlError
+from cloud_agent.source_control.source_control import SourceControlCipher, SourceControlError
 from cloud_agent_host import environment_preparation
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.environment_preparation import EnvironmentPreparation
-from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_shared.environment import (
     ENVIRONMENT_DOMAIN,
     BoundEnvironment,
@@ -358,30 +358,6 @@ def test_task_only_variables_are_refused_and_an_empty_list_is_ignored():
     )
 
 
-def test_trusted_publisher_checks_known_secret_bytes_and_allows_removal(tmp_path, monkeypatch):
-    from cloud_agent import publisher
-
-    monkeypatch.setattr(publisher, "_blob_size", lambda _repo, _sha: 64)
-    content = {
-        "new": b"\x00demo-private-binary\xff",
-        "old": b"\x00demo-private-binary\xff",
-        "deleted": b"\x00\xff",
-    }
-    monkeypatch.setattr(publisher, "_read_blob", lambda _repo, sha, _size: content[sha])
-    with pytest.raises(publisher.PublishError) as rejected:
-        publisher._validate_staged_blobs(
-            tmp_path,
-            [publisher._StagedBlob("asset.bin", "new", None)],
-            {"TOKEN": "demo-private-binary"},
-        )
-    assert "demo-private-binary" not in str(rejected.value)
-    publisher._validate_staged_blobs(
-        tmp_path,
-        [publisher._StagedBlob("asset.bin", "deleted", "old")],
-        {"TOKEN": "demo-private-binary"},
-    )
-
-
 @pytest.mark.asyncio
 async def test_environment_repository_reads_without_app_installation_and_never_write_scope(
     monkeypatch,
@@ -390,8 +366,8 @@ async def test_environment_repository_reads_without_app_installation_and_never_w
 
     import httpx
 
-    from cloud_agent import environment_source
-    from cloud_agent.github_app import AppNotInstalled
+    from cloud_agent.environments import environment_source
+    from cloud_agent.source_control.github_app import AppNotInstalled
 
     credentials = SimpleNamespace(token_for=AsyncMock(side_effect=AppNotInstalled("not installed")))
     requests = []
@@ -435,7 +411,7 @@ async def test_environment_metadata_size_limit_is_enforced_before_json(monkeypat
     import httpx
     from fastapi import HTTPException
 
-    from cloud_agent import environment_source
+    from cloud_agent.environments import environment_source
 
     factory = httpx.AsyncClient
     monkeypatch.setattr(
@@ -454,29 +430,44 @@ async def test_environment_metadata_size_limit_is_enforced_before_json(monkeypat
     assert "metadata exceeds size limit" in caught.value.detail
 
 
-def test_wait_reads_foreground_failure_even_inside_poll_throttle():
+def test_wait_reads_foreground_failure_even_while_a_guest_wait_is_in_flight():
     import threading
-    import time
     from unittest.mock import Mock
 
     from cloud_agent_host.environment_process import EnvironmentProcess
 
     process = EnvironmentProcess.__new__(EnvironmentProcess)
     process._code = None
-    process._next_poll = time.monotonic() + 60
+    process._guest_wait = None
+    process._next_wait = 0.0
     process._lock = threading.Lock()
     process.uid = 30000
     process.status_path = "/private/status"
-    capture = Mock(return_value=SimpleNamespace(returncode=0, stdout="7"))
+    waiting = threading.Event()
+    release = threading.Event()
+    limits = []
+
+    def exec_capture(_spec, argv, **_kwargs):
+        limits.append(argv[-1])
+        if argv[-1] == "0":
+            return SimpleNamespace(returncode=0, stdout=b"7 0")
+        # The guest wait, still waiting when wait() reads.
+        waiting.set()
+        release.wait(5)
+        return SimpleNamespace(returncode=3, stdout=b"")
+
     process.backend = SimpleNamespace(
-        spec=None, manager=SimpleNamespace(exec_capture=capture, backend=SimpleNamespace(gid=10001))
+        spec=None,
+        manager=SimpleNamespace(exec_capture=exec_capture, backend=SimpleNamespace(gid=10001)),
     )
     process.process = Mock()
     process.process.wait.return_value = 0
     assert process.poll() is None
+    assert waiting.wait(5)
     assert process.wait() == 7
-    capture.assert_called_once()
+    assert limits == ["30", "0"]
     process.process.wait.assert_not_called()
+    release.set()
 
 
 def test_missing_completion_receipt_never_reports_success():
@@ -487,7 +478,6 @@ def test_missing_completion_receipt_never_reports_success():
 
     process = EnvironmentProcess.__new__(EnvironmentProcess)
     process._code = None
-    process._next_poll = 0
     process._lock = threading.Lock()
     process.uid = 30000
     process.status_path = "/private/status"
@@ -552,9 +542,10 @@ def test_environment_script_starts_in_the_workspace_without_importing_from_it(tm
     assert helper.returncode == 0, helper.stderr
     # Its script still starts there, with the owner's variables.
     assert helper.stdout == f"{workspace.resolve()} src"
-    assert status.read_text() == "0"
-    # The helpers that reap and prepare its identity run isolated as well.
-    assert [argv[:2] for argv in commands if argv[0] == "python3"] == [["python3", "-I"]] * 3
+    # The receipt counts the bytes the script wrote beside its exit status.
+    assert status.read_text() == f"0 {len(helper.stdout.encode())}"
+    # The one exec that reaps and prepares its identity runs isolated as well.
+    assert [argv[:2] for argv in commands if argv[0] == "python3"] == [["python3", "-I"]] * 2
 
 
 def test_runtime_refresh_preserves_setup_and_scans_both_secret_generations():
@@ -606,13 +597,6 @@ def test_environment_status_uses_bounded_inspection_cache(tmp_path):
     for _ in range(20):
         assert prepare.status(backend, "b")["ready"]
     assert backend.manager.inspect.call_count == 1
-
-
-def test_encryption_publication_failure_is_retryable():
-    from cloud_agent.environments import EnvironmentEncryptionError
-    from cloud_agent.publish_worker import _is_retryable_publication_failure
-
-    assert _is_retryable_publication_failure(EnvironmentEncryptionError("temporary key failure"))
 
 
 @pytest.mark.asyncio
@@ -678,7 +662,7 @@ async def test_repository_metadata_uses_configured_github_api(monkeypatch):
 
     import httpx
 
-    from cloud_agent import environment_source
+    from cloud_agent.environments import environment_source
 
     urls = []
 

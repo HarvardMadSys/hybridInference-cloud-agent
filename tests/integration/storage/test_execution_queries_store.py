@@ -37,6 +37,7 @@ from tests.support.migrations import apply_migrations
 from tests.support.usage import job_usage_inputs
 
 from cloud_agent.domain.execution import JobStreamState
+from cloud_agent.domain.thread_stats import ATTEMPT_ROLLUP_VERSION
 from cloud_agent.storage.assembly import Storage
 from cloud_agent.storage.repositories.execution_queries import (
     THREAD_STATS_EVENT_PAGE_SIZE,
@@ -430,7 +431,7 @@ async def test_the_stats_read_persists_and_reuses_attempt_rollups(
         )
     assert cached is not None
     assert cached["event_seq"] == 2
-    assert cached["reducer_version"] == 1
+    assert cached["reducer_version"] == ATTEMPT_ROLLUP_VERSION
 
     assert await store.attempt_commands.append_event(
         attempt_id=claim["attempt_id"],
@@ -461,7 +462,7 @@ async def test_the_stats_read_persists_and_reuses_attempt_rollups(
                 "SELECT reducer_version FROM agent_attempt_thread_stats WHERE attempt_id = $1",
                 claim["attempt_id"],
             )
-            == 1
+            == ATTEMPT_ROLLUP_VERSION
         )
 
 

@@ -47,10 +47,22 @@ Preserve all of the following privately:
 - A full agent-owned Postgres backup, including settings, identity namespace,
   enrolled hosts, placement/ownership, jobs and attempts, connections, and compute
   lifecycle records. Do not select only user-facing conversation tables.
-- Both deployment roots' `.env` and mounted credential files. Preserve
-  `AGENT_SETTINGS_ENCRYPTION_KEY`, or the original `AGENT_SESSION_SECRET` when
-  used as its fallback; also preserve source-control and compute encryption
-  keys, control/session signing secrets, sandbox manager credentials and GitHub App keys.
+- The control plane's deployment keys, apart from the database: the
+  `agent-keys` volume holds `AGENT_SETTINGS_ENCRYPTION_KEY` (or the original
+  `AGENT_SESSION_SECRET` where that is the root), the account key and the
+  database connection. Export them as `.env` lines with
+  `docker exec "${COMPOSE_PROJECT:?}-control-plane-1" python -m
+  cloud_agent.deployment.deployment_keys export > keys.env`, written only to the
+  encrypted backup storage; on a replacement machine, that file as the
+  deployment's `.env` restores them on its first start. A settings root key
+  in the environment that differs from the stored one stops the start, because
+  the `keys` service never replaces a root. Only when the environment's key is
+  the one the settings were saved with, delete the stored file first:
+  `docker run --rm --entrypoint rm -v "${COMPOSE_PROJECT:?}_agent-keys:/keys"
+  postgres:16.16-alpine@sha256:0adbf25a9e96d38823bb813f3ac0ed41fadb665c88f1df7fe6dbfb060cbdc106 /keys/AGENT_SETTINGS_ENCRYPTION_KEY`,
+  with the Postgres image the deployment pins, so nothing new is pulled. Also keep both deployment roots' `.env`, where they have one,
+  and mounted credential files: source-control and compute encryption keys,
+  control/session signing secrets, sandbox manager credentials and GitHub App keys.
   Saved settings can hold some of these keys, but they still require the
   settings root key to decrypt. Generating new keys does not recover old data.
 - Each host's persisted enrollment credential directory and deployment identity,
@@ -78,8 +90,8 @@ safe. Follow [retained Docker storage](operations.md#retained-docker-storage-on-
 1. Record current deployment markers, placement, host status, container
    inventory and encryption-key version identifiers. Schedule a maintenance
    window and prevent new admissions and admin configuration changes. Drain
-   hosts and wait for active attempts and publications to finish; record which
-   hosts were already draining or disabled so their state is preserved.
+   hosts and wait for active attempts to finish; record which hosts were
+   already draining or disabled so their state is preserved.
 2. Stop the main API and MCP listener after draining. This also stops compute
    reconciliation and background writers. Stop retained sandbox containers and
    each host stack, then stop `docker.socket`, Docker and containerd before
@@ -98,6 +110,12 @@ safe. Follow [retained Docker storage](operations.md#retained-docker-storage-on-
      sh -c 'exec pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' \
      > "${BACKUP_DIRECTORY}/agent.dump"
    ```
+
+   It dumps `POSTGRES_DB`, the database `AGENT_POSTGRES_DB` names, which is
+   this deployment's only while `AGENT_DATABASE_URL` uses that database too.
+   The `keys` service checks this at every start: before relying on the dump,
+   confirm that `docker compose logs keys` for this project shows no
+   `AGENT_POSTGRES_DB` warning.
 
    Capture configuration and the stopped host storage into that same set using
    the approved encrypted backup tooling. Transfer it off-node, record hashes,
@@ -123,9 +141,13 @@ native-session restore.
 2. Verify the selected set's hashes and decryption material. Restore into an
    isolated database first, using compatible Postgres and the selected release.
    Restore the matching configuration/root keys before starting a listener.
-   Follow [identity binding](minimal-identity.md) and the existing
-   [database recovery procedures](operations.md#preserving-an-old-chain-database)
-   for historical schema chains. Do not improvise an Alembic downgrade.
+   A deployment that then serves a restored database on the bundled `postgres`
+   service sets `AGENT_POSTGRES_DB` to its name along with
+   `AGENT_DATABASE_URL`, so its backups and maintenance commands open it too.
+   A restored database must be bound to the account system; a Gateway-era one
+   is refused and stays an archive
+   ([old databases](operations.md#preserving-an-old-chain-database)). Do not
+   improvise an Alembic downgrade.
 3. Restore the complete stopped host state with a compatible Docker/storage
    driver and the correct mounts. Check mount availability before starting
    Docker. Retain the matching enrollment credential, namespace, and container
@@ -144,7 +166,8 @@ native-session restore.
    restored database. Keep external ingress closed while completing activation
    and checking the restored system. Verify sign-in, file access,
    retained continuation, separate Fork context, a queued turn, cancellation,
-   publication, and a host restart with disposable test conversations. Reopen
+   a pull request the agent opens, and a host restart with disposable test
+   conversations. Reopen
    production admissions only after these checks and external health/queue
    monitoring pass.
 

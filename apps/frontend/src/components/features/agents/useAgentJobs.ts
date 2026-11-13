@@ -20,9 +20,9 @@ import type {
   AgentThreadApi,
   AgentThreadEventApi,
 } from '@/lib/api/agents';
-import { createDisplayJobAdapter } from './adapt';
-import { resumeAfter } from './threadHistory';
-import { useThreadHistory, type ThreadHistoryControl } from './useThreadHistory';
+import { createDisplayJobAdapter } from './adapt/jobAdapter';
+import { resumeAfter } from './conversation/threadHistory';
+import { useThreadHistory, type ThreadHistoryControl } from './conversation/useThreadHistory';
 import { useAgentReads } from './AgentReadProvider';
 import { announceAgentSessionsChanged, onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { projectKey } from '@/lib/temporaryWorkspace';
@@ -51,26 +51,6 @@ const ACTIVE_ATTEMPT_PHASES = new Set([
   'workspace_ready',
   'workspace_finalizing',
 ]);
-
-const ACTIVE_WORKSPACE_PUBLICATION_STATES = new Set([
-  'pending',
-  'capturing',
-  'captured',
-  'publishing',
-]);
-
-/** Whether one shared-workspace publication still changes owner-visible data. */
-export function isActiveWorkspacePublicationState(state: unknown): boolean {
-  return typeof state === 'string' && ACTIVE_WORKSPACE_PUBLICATION_STATES.has(state);
-}
-
-/** Whether a finished shared turn still has owner-visible state to publish. */
-export function hasActiveWorkspacePublication(job: AgentJobApi | null): boolean {
-  return (
-    job?.workspace_shared === true &&
-    isActiveWorkspacePublicationState(job.workspace_publication_state)
-  );
-}
 
 /** Apply one live attempt-state event to the cached owner-facing job row. */
 export function applyAgentLifecycleEvent(
@@ -535,8 +515,7 @@ export function useAgentJob(
           (job) =>
             job.id === jobId || (pushThreadId !== undefined && job.thread_id === pushThreadId),
         ) ||
-        change.threads.some((thread) => thread.id === pushThreadId) ||
-        (pushThreadId != null && change.publications.includes(pushThreadId));
+        change.threads.some((thread) => thread.id === pushThreadId);
       if (!touched) return;
       setApi((current) => (current?.id === jobId ? overlayPushed(current) : current));
       const read = ++latestRead;
@@ -627,8 +606,7 @@ export function useAgentJob(
 
   // A queued or terminal turn's stream cannot report another turn finishing.
   // Refresh shared activity until this turn takes over or the conversation
-  // and its publication have both settled.
-  const publicationActive = hasActiveWorkspacePublication(api);
+  // has settled.
   const conversationActive = isActiveConversationState(api?.conversation_state);
   // An active goal outlives the turn on screen: the previous round has settled
   // and the next one may not be queued yet, so `conversation_state` alone
@@ -637,9 +615,7 @@ export function useAgentJob(
   const goalActive = hasActiveGoal(api?.goal);
   const metadataActive =
     api?.id === jobId &&
-    (publicationActive ||
-      goalActive ||
-      (state !== 'running' && state !== 'publishing' && conversationActive));
+    (goalActive || (state !== 'running' && state !== 'publishing' && conversationActive));
   const metadataInterval = pushLive ? PUSH_FALLBACK_POLL_MS : 5_000;
   useEffect(() => {
     if (!active || !jobId || !metadataActive) return undefined;

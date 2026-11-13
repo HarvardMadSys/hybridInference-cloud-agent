@@ -2,46 +2,63 @@
 
 import { useT } from '@/components/providers';
 import { memo, useCallback, useRef, type ComponentProps, type ReactNode } from 'react';
-import { AttemptTurnFooter } from '../AttemptTurnFooter';
+import { AttemptTurnFooter } from '../conversation/AttemptTurnFooter';
 import {
-  CopyIcon,
-  copyMessage,
   EventList,
   EventRow,
   HistoryTurn,
-  MessageActionButton,
-  MessageActions,
-  MessageContent,
-  RewindIcon,
   ThreadTurn,
-} from '../ChatMessages';
+  UserMessage,
+} from '../conversation/ChatMessages';
 import { ownerRunNote } from '../conversationJob';
-import { messageBlockKey, type ConversationTurnDescription } from '../conversationTurnNavigation';
-import type { RecordedFileSelection, RecordedTurnOutputs } from '../recordedTurnOutputs';
-import type { TranscriptPresentation } from '../transcriptPresentation';
-import { TurnDeliverables } from '../TurnDeliverables';
+import {
+  messageBlockKey,
+  type ConversationTurnDescription,
+} from '../conversation/conversationTurnNavigation';
+import type {
+  RecordedFileSelection,
+  RecordedTurnOutputs,
+} from '../conversation/recordedTurnOutputs';
+import type { TranscriptPresentation } from '../conversation/transcriptPresentation';
+import { TurnDeliverables } from '../conversation/TurnDeliverables';
+import { TurnScreenshots } from '../conversation/TurnScreenshots';
 import type { AgentEvent, AgentJob } from '../types';
-import { OutcomeCard, RunNotices } from './RunOutcome';
+import { OutcomeCard } from './RunOutcome';
 import type { JobDetailPanels } from './useJobDetailPanels';
 
 /** A stored turn of the transcript, with the results it recorded. */
 function StoredTurnView({
   outputs,
   onOpenFile,
+  threadId,
   ...props
 }: Omit<ComponentProps<typeof HistoryTurn>, 'results'> & {
   outputs?: RecordedTurnOutputs | null;
   onOpenFile: (selection: RecordedFileSelection) => void;
+  /** The conversation, so every turn shares one listing of its images. */
+  threadId?: string;
 }) {
+  const { turn } = props;
   return (
     <HistoryTurn
       {...props}
       results={
-        <TurnDeliverables
-          job={{ id: props.turn.jobId, state: props.turn.state }}
-          outputs={outputs}
-          onOpenFile={onOpenFile}
-        />
+        <>
+          <TurnDeliverables
+            job={{ id: turn.jobId, state: turn.state }}
+            outputs={outputs}
+            onOpenFile={onOpenFile}
+          />
+          <TurnScreenshots
+            job={{
+              id: turn.jobId,
+              threadId,
+              state: turn.state,
+              startedAt: turn.startedAt,
+              finishedAt: turn.finishedAt,
+            }}
+          />
+        </>
       }
     />
   );
@@ -74,7 +91,6 @@ export function JobTranscript({
   recordedOutputs,
   onReview,
   onWatchPr,
-  onPublish,
 }: {
   panels: JobDetailPanels;
   job: AgentJob;
@@ -97,7 +113,6 @@ export function JobTranscript({
   recordedOutputs: Map<string, RecordedTurnOutputs | null>;
   onReview?: () => void;
   onWatchPr?: () => void;
-  onPublish?: () => void;
 }) {
   const t = useT();
   const { inspectTranscriptEvent, openRecordedFile, openRun, openWorkspace } = panels;
@@ -150,6 +165,7 @@ export function JobTranscript({
             onInspectEvent={hasStoredEvents ? inspectStoredEvent : undefined}
             outputs={recordedOutputs.get(turn.jobId)}
             onOpenFile={openStoredFile}
+            threadId={job.threadId}
             showActivityDetails={false}
             rewindAnchorJobId={rewindAnchorJobId}
             busy={forking}
@@ -197,37 +213,16 @@ export function JobTranscript({
         })}
 
         {job.historyIncludesPrompt ? null : (
-          <div
-            data-block-key={`${job.id}:prompt`}
-            className="group my-2 flex items-start gap-2 rounded-xl border border-gray-200/90 dark:border-white/10 bg-white dark:bg-gray-900 px-3 py-2.5 shadow-subtle"
-          >
-            <div className="min-w-0 flex-1">
-              <MessageContent text={job.prompt || job.title} presentation={presentation} />
-            </div>
-            {presentation !== 'compact' || (currentRewindAnchor && canForkWorkspace) ? (
-              <MessageActions align="end" className="!mt-0 max-w-[45%] shrink-0">
-                {presentation !== 'compact' ? (
-                  <MessageActionButton
-                    label="Copy message"
-                    onClick={() => void copyMessage(job.prompt || job.title)}
-                  >
-                    <CopyIcon />
-                    Copy
-                  </MessageActionButton>
-                ) : null}
-                {currentRewindAnchor && canForkWorkspace ? (
-                  <MessageActionButton
-                    label="Edit & rewind"
-                    onClick={() => void forkFrom(currentRewindAnchor, job.prompt || job.title)}
-                    disabled={forking}
-                  >
-                    <RewindIcon />
-                    Edit & rewind
-                  </MessageActionButton>
-                ) : null}
-              </MessageActions>
-            ) : null}
-          </div>
+          <UserMessage
+            text={job.prompt || job.title}
+            blockKey={`${job.id}:prompt`}
+            busy={forking}
+            onRewind={
+              currentRewindAnchor && canForkWorkspace
+                ? () => void forkFrom(currentRewindAnchor, job.prompt || job.title)
+                : undefined
+            }
+          />
         )}
 
         {runNote && job.state !== 'failed' ? (
@@ -320,11 +315,14 @@ export function JobTranscript({
 
         <AttemptTurnFooter job={job} attemptNo={attemptNo} />
         {selectedAttemptIsCurrent ? (
-          <TurnDeliverables
-            job={job}
-            outputs={recordedOutputs.get(job.id)}
-            onOpenFile={openRecordedFile}
-          />
+          <>
+            <TurnDeliverables
+              job={job}
+              outputs={recordedOutputs.get(job.id)}
+              onOpenFile={openRecordedFile}
+            />
+            <TurnScreenshots job={job} />
+          </>
         ) : null}
 
         {/* The inspector's Run details open on the turn the reader
@@ -345,9 +343,7 @@ export function JobTranscript({
           onOpenDiff={() => openWorkspace('git')}
           onReview={onReview}
           onWatchPr={onWatchPr}
-          onPublish={onPublish}
         />
-        {selectedAttemptIsCurrent ? <RunNotices job={job} /> : null}
         {usageFooter && lastVisibleMessageIndex < 0 && currentReplyId === undefined ? (
           <div className="mt-2">{usageFooter}</div>
         ) : null}

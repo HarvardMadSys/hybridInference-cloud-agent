@@ -11,7 +11,8 @@ from tests.integration.storage.test_schema_upgrade import _db_config
 from tests.support.migrations import apply_migrations, downgrade_to
 from tests.unit.test_user_profile import data_url, picture
 
-from cloud_agent.user_profile import ProfileConflict, ProfileView, sanitize_profile_image
+from cloud_agent.profile.user_profile import ProfileConflict, sanitize_profile_image
+from cloud_agent.schemas.user_profile import ProfileView
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 

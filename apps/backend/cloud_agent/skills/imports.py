@@ -15,9 +15,9 @@ import httpx
 import yaml
 from pydantic import ValidationError
 
-from cloud_agent.entitlement import REPO_PATTERN
-from cloud_agent.github_app import GitHubAppError, read_repository_contents
+from cloud_agent.domain.source_control import REPO_PATTERN
 from cloud_agent.skills.models import SkillContent, SkillError, skill_max_bytes, skill_size_label
+from cloud_agent.source_control.github_app import GitHubAppError, read_repository_contents
 
 
 class SkillImportNotFound(SkillError):

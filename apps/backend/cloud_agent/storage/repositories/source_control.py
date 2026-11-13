@@ -7,9 +7,10 @@ they were; only the class holding them changed.
 
 from __future__ import annotations
 
-import asyncio
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
+
+from cloud_agent.storage._sql.advisory import finish_lock_cleanup, unlock_or_reset
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -42,33 +43,11 @@ class PostgresSourceControlRepository:
     @staticmethod
     async def _unlock_or_reset(conn: asyncpg.Connection, lock_key: str) -> None:
         """Never return a session-lock-holding connection to the pool."""
-        unlocked = False
-        with suppress(BaseException):
-            unlocked = bool(
-                await conn.fetchval(
-                    "SELECT pg_advisory_unlock(hashtextextended($1::text, 0))",
-                    lock_key,
-                )
-            )
-        if unlocked:
-            return
-        try:
-            await conn.reset()
-        except BaseException:
-            await conn.close()
+        await unlock_or_reset(conn, lock_key)
 
     @classmethod
     async def _finish_lock_cleanup(cls, conn: asyncpg.Connection, lock_key: str) -> None:
-        cleanup = asyncio.create_task(cls._unlock_or_reset(conn, lock_key))
-        cancelled = False
-        while not cleanup.done():
-            try:
-                await asyncio.shield(cleanup)
-            except asyncio.CancelledError:
-                cancelled = True
-        await cleanup
-        if cancelled:
-            raise asyncio.CancelledError
+        await finish_lock_cleanup(conn, lock_key)
 
     @asynccontextmanager
     async def _serialize_account(

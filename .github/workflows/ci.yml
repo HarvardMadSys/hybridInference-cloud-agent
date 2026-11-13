@@ -56,6 +56,7 @@ jobs:
       web: ${{ steps.classify.outputs.web }}
       docker: ${{ steps.classify.outputs.docker }}
       docs: ${{ steps.classify.outputs.docs }}
+      protocol: ${{ steps.classify.outputs.protocol }}
       image_scope: ${{ steps.classify.outputs.image_scope }}
       artifacts: ${{ steps.images.outputs.artifacts }}
     steps:
@@ -111,6 +112,7 @@ jobs:
               echo "web=true"
               echo "docker=true"
               echo "docs=true"
+              echo "protocol=true"
               echo "image_scope=all"
             } >> "${GITHUB_OUTPUT}"
             exit 0
@@ -135,9 +137,9 @@ jobs:
             backend=false
           fi
 
-          # Web: the app itself, and the API contracts its client tests check
-          # their requests against.
-          if matches '^(apps/frontend/|gateway_contracts/)'; then
+          # Web: the app itself, and the backend's OpenAPI snapshot its client
+          # tests check their requests against.
+          if matches '^(apps/frontend/|apps/backend/openapi.json$)'; then
             web=true
           else
             web=false
@@ -148,8 +150,8 @@ jobs:
           # control-only code and migrations. .dockerignore changes every build
           # context even though no Dockerfile explicitly COPYs it. External
           # integration tests also select the jobs that provide their images.
-          if matches '^(deploy/|apps/backend/|apps/frontend/|migrations/|tests/external/)' \
-             || matches '^(pyproject\.toml|uv\.lock|README\.md|LICENSE|alembic\.ini|\.dockerignore)$'; then
+          if matches '^(deploy/|apps/backend/|apps/frontend/|tests/external/)' \
+             || matches '^(pyproject\.toml|uv\.lock|README\.md|LICENSE|\.dockerignore)$'; then
             docker=true
           else
             docker=false
@@ -166,10 +168,24 @@ jobs:
             docs=false
           fi
 
+          # Protocol: any backend package, its locked dependencies, and the check
+          # that runs two releases against each other (host protocol v2 design
+          # §3.2). The wire is built from models imported across schemas/,
+          # attachments/, the claim use case and host modules well beyond the
+          # clients, and pydantic itself decides what parses; a list of files
+          # misses some, and the check costs seconds.
+          if matches '^apps/backend/cloud_agent(_host|_shared)?/' \
+             || matches '^(pyproject\.toml|uv\.lock)$' \
+             || matches '^(scripts/check_mixed_protocol\.py|tests/support/mixed_protocol_.*\.py)$'; then
+            protocol=true
+          else
+            protocol=false
+          fi
+
           # A change to CI itself runs all of it: the thing being changed is the
           # checking, and a filtered CI edit is checked by nothing.
           if matches '^(\.github/workflows/|scripts/ci_image_matrix\.py$)'; then
-            backend=true; web=true; docker=true; docs=true
+            backend=true; web=true; docker=true; docs=true; protocol=true
           fi
 
           # Narrow only source-only image changes. Deployment assets, external
@@ -177,11 +193,11 @@ jobs:
           # Keep backend's sandbox: MCP parity runs backend/host code against it.
           image_scope=all
           image_files="$(printf '%s\n' "${files}" | grep -E \
-            '^(deploy/|apps/backend/|apps/frontend/|migrations/|tests/external/|\.github/workflows/|scripts/ci_image_matrix\.py$|pyproject\.toml$|uv\.lock$|README\.md$|LICENSE$|alembic\.ini$|\.dockerignore$)' || true)"
+            '^(deploy/|apps/backend/|apps/frontend/|tests/external/|\.github/workflows/|scripts/ci_image_matrix\.py$|pyproject\.toml$|uv\.lock$|README\.md$|LICENSE$|\.dockerignore$)' || true)"
           if [ "${docker}" = true ] && [ -n "${image_files}" ]; then
             if ! printf '%s\n' "${image_files}" | grep -vE '^apps/frontend/' | grep . >/dev/null; then
               image_scope=web
-            elif ! printf '%s\n' "${image_files}" | grep -vE '^(apps/backend/|migrations/|alembic\.ini$)' | grep . >/dev/null; then
+            elif ! printf '%s\n' "${image_files}" | grep -vE '^apps/backend/' | grep . >/dev/null; then
               image_scope=backend
             fi
           fi
@@ -192,6 +208,7 @@ jobs:
             echo "web=${web}"
             echo "docker=${docker}"
             echo "docs=${docs}"
+            echo "protocol=${protocol}"
           } | tee -a "${GITHUB_OUTPUT}"
 
       - name: Plan image checks
@@ -367,7 +384,39 @@ jobs:
           fi
           uv run pytest -n 4 --dist loadfile -q -m "not external and not dbtest" "${paths[@]}"
 
-      # The external checks below run once per commit, in the first shard.
+  # The checks that need a real Docker, systemd or the sandbox's own CLI.
+  # They ran after pytest in the first `test` shard and were most of its time
+  # (pytest 2.5 min, these 3.5 min), so the whole of CI waited on them in series.
+  # A job of their own runs them beside pytest. Like `test`, it runs whatever
+  # changed, and once per commit: it has no shards.
+  test-docker:
+    name: Real Docker checks
+    needs: changes
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-24.04"]' || '["self-hosted","Linux","ci-general"]') }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Isolate uv and npm cache dirs
+        run: |
+          echo "UV_CACHE_DIR=${RUNNER_TEMP}/uv-cache" >> "${GITHUB_ENV}"
+          echo "npm_config_cache=${RUNNER_TEMP}/npm-cache" >> "${GITHUB_ENV}"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          prune-cache: false
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
       # Each test skips when what this job hands it is missing, and pytest
       # calls a run that only skipped a success, so every external step in this
       # workflow keeps a junit report and `scripts/ci_tests_ran.py` fails the
@@ -376,7 +425,6 @@ jobs:
       # A single OS user cannot reproduce a sibling CLI's 0700 process registry.
       # Check the real normalizer across Linux UIDs before allowing deployment.
       - name: Shared member permissions survive a sibling CLI restart
-        if: matrix.shard == 1
         timeout-minutes: 5
         env:
           AGENT_PERMISSION_TEST_IMAGE: python:3.12-slim
@@ -398,12 +446,10 @@ jobs:
       # mirror needs, a broken build fails under this step's name, and the
       # test's own build then takes every layer from the cache.
       - name: Build the node image for the Host move
-        if: matrix.shard == 1
         timeout-minutes: 15
         run: docker build -t cloud-agent-test-compute-node:local tests/external/compute_node
 
       - name: A Host moves between two nodes over SSH
-        if: matrix.shard == 1
         timeout-minutes: 10
         env:
           AGENT_HOST_NODE_TEST_IMAGE: alpine:3.20
@@ -418,7 +464,6 @@ jobs:
       # markers included. Unit doubles never do, so a restore that every unit
       # test passed failed on staging. Commit, load and start one for real.
       - name: A restored chat starts from its checkpoint
-        if: matrix.shard == 1
         timeout-minutes: 5
         env:
           AGENT_RESTORE_TEST_IMAGE: python:3.12-slim
@@ -433,15 +478,20 @@ jobs:
       # runner and removes containers while they are read. Unit doubles do
       # neither, so release passed them all and refused on staging. Run the
       # same scripts on a Docker-in-Docker node of their own.
+      #
+      # Every test starts its own node and loads the base image into it, about
+      # twenty seconds before the test begins; one after another the eight took
+      # 173s. Nodes share nothing but the image they are built from, so `-n 4
+      # --dist load` hands the tests to four workers (loadfile would keep each
+      # file on one).
       - name: A released node stops its runner and inventories clean
-        if: matrix.shard == 1
         timeout-minutes: 8
         env:
           AGENT_HOST_NODE_TEST_IMAGE: alpine:3.20
         run: |
           set -euo pipefail
           docker pull "${AGENT_HOST_NODE_TEST_IMAGE}"
-          uv run pytest -q -m external tests/external/test_host_release_real_docker.py \
+          uv run pytest -q -n 4 --dist load -m external tests/external/test_host_release_real_docker.py \
             tests/external/test_stopped_network_release.py \
             --junitxml="${RUNNER_TEMP}/host-release.xml"
           uv run python scripts/ci_tests_ran.py "${RUNNER_TEMP}/host-release.xml"
@@ -450,13 +500,11 @@ jobs:
       # cannot catch that race; exercise the shipped pin before CI can deploy.
       # Inference is a loopback protocol fixture, with no API key or model cost.
       - name: Set up Node for native CLI regression
-        if: matrix.shard == 1
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: ${{ env.NODE_VERSION }}
 
       - name: Install the sandbox's pinned Claude CLI
-        if: matrix.shard == 1
         run: |
           set -euo pipefail
           version=$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' deploy/sandbox/Dockerfile.agent-sandbox)
@@ -466,7 +514,6 @@ jobs:
           echo "CLOUD_AGENT_TEST_CLAUDE_BINARY=${RUNNER_TEMP}/claude-context/node_modules/.bin/claude" >> "${GITHUB_ENV}"
 
       - name: Install the sandbox's pinned Claude SDK
-        if: matrix.shard == 1
         run: |
           set -euo pipefail
           version=$(sed -n 's/^[[:space:]]*org\.freeinference\.helper\.claude-agent-sdk\.version="\([^"]*\)".*/\1/p' deploy/sandbox/Dockerfile.agent-sandbox)
@@ -482,7 +529,6 @@ jobs:
       # port — `FakeAnthropicGateway` binds port 0 — so there is nothing for
       # parallel workers to collide over.
       - name: Native history survives close, restore and failed-turn retry
-        if: matrix.shard == 1
         timeout-minutes: 10
         env:
           PYTHONPATH: ${{ runner.temp }}/claude-context-sdk
@@ -618,14 +664,32 @@ jobs:
               # with fsync on, 10ms with it off, across 329 tests. The
               # container is deleted with the job; there is nothing to lose.
               await conn.execute("ALTER SYSTEM SET fsync = off")
+              # What a hung test leaves behind. pytest-timeout reports where the
+              # test was waiting, not what the server was doing, and this
+              # container's log, printed when the job ends, is the only record
+              # of the server's side. A lock wait longer than deadlock_timeout
+              # (1s) is logged with the sessions holding the lock, and a
+              # statement slower than 5s with its duration. Bind parameters are
+              # left out: some tests bind megabytes.
+              await conn.execute("ALTER SYSTEM SET log_lock_waits = on")
+              await conn.execute("ALTER SYSTEM SET log_min_duration_statement = '5s'")
+              await conn.execute("ALTER SYSTEM SET log_parameter_max_length = 0")
               await conn.execute("SELECT pg_reload_conf()")
               # The reload is asynchronous. Confirm it landed before pytest
-              # opens its own connections, or the saving disappears silently.
+              # opens its own connections, or the settings disappear silently.
+              wanted = {
+                  "fsync": "off",
+                  "log_lock_waits": "on",
+                  "log_min_duration_statement": "5s",
+                  "log_parameter_max_length": "0",
+              }
               for _ in range(50):
-                  if await conn.fetchval("SHOW fsync") == "off":
+                  shown = {name: await conn.fetchval(f"SHOW {name}") for name in wanted}
+                  if shown == wanted:
                       break
                   await asyncio.sleep(0.1)
-              print("fsync:", await conn.fetchval("SHOW fsync"))
+              for name, value in shown.items():
+                  print(f"{name}:", value)
               # One database per xdist worker. The fixtures already derive their
               # name from PYTEST_XDIST_WORKER and each runs its own
               # `alembic upgrade head`; the service container creates only the
@@ -684,6 +748,23 @@ jobs:
           # releases create lightweight tags, so include them with --tags.
           previous="$(git describe --tags --first-parent --match 'agent-*' --abbrev=0 "$base")"
           uv run python scripts/check_rolling_upgrade.py --base "$previous"
+
+      # Layer A of the mixed-version test (host protocol v2 design §3.2): this
+      # version's host code against the previous release's control plane and
+      # the previous host against this one, each release in an environment
+      # from its own lock, against this job's Postgres. Once per commit, and
+      # only when something the host protocol is made of changed.
+      - name: Host protocol works one release apart in both directions
+        if: matrix.shard == 1 && needs.changes.outputs.protocol == 'true'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="${PR_BASE_SHA:-${BEFORE_SHA:-HEAD^}}"
+          # The same release the migration check above runs against.
+          previous="$(git describe --tags --first-parent --match 'agent-*' --abbrev=0 "$base")"
+          uv run python scripts/check_mixed_protocol.py --base "$previous"
 
       # The second half of the same guard. A fixture that skips on a database
       # it cannot reach turns a broken service container into a passing job,
@@ -843,12 +924,11 @@ jobs:
         working-directory: ./apps/frontend
         run: node scripts/check-server-only-guard.mjs
 
-      # Builds both web variants — root and `/agents` — and boots each under
-      # two runtime environments. A unit test cannot see this: the failure
+      # Builds the web app and boots it under two runtime environments. A unit test cannot see this: the failure
       # being guarded against is configuration resolved at `next build` and
       # frozen into the bundle, and only the built server can show whether
       # that happened. See the script's header for the full list of
-      # assertions, including the sign-in and asset prefixes per variant.
+      # assertions.
       - name: Runtime site config
         id: runtime-config
         continue-on-error: true
@@ -1160,6 +1240,14 @@ jobs:
         # backstop, because a build can still fail for reasons of its own and
         # running it once more is cheaper than a red cell.
         continue-on-error: true
+        # A build that stops making progress is a failure, and gets the retry.
+        # Over the 60 runs before 2026-11-06 every image built in at most 312s
+        # (the sandbox; the others in under 150s), while three hosted sandbox
+        # builds hung for 27-35 minutes, and nothing else bounded them: GitHub
+        # ends a job only after six hours. Ten minutes is twice the slowest
+        # healthy build. A retry after a timeout keeps the layers the first
+        # attempt finished in the builder's cache.
+        timeout-minutes: 10
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           builder: ${{ env.BUILDER }}
@@ -1181,6 +1269,7 @@ jobs:
       # before the first attempt. What can still fail is the build itself.
       - name: Build ${{ matrix.artifact.name }} (retry)
         if: steps.build.outcome == 'failure'
+        timeout-minutes: 10
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           builder: ${{ env.BUILDER }}
@@ -1428,6 +1517,7 @@ jobs:
       - name: Build ${{ matrix.artifact.name }}
         id: build
         continue-on-error: true
+        timeout-minutes: 10
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           builder: ${{ env.BUILDER }}
@@ -1443,6 +1533,7 @@ jobs:
 
       - name: Build ${{ matrix.artifact.name }} (retry)
         if: steps.build.outcome == 'failure'
+        timeout-minutes: 10
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           builder: ${{ env.BUILDER }}
@@ -1594,16 +1685,12 @@ jobs:
           COMPOSE_PROJECT=freeinference-cloud-agent-sandbox-ci
           AGENT_SANDBOX_MANAGER_TOKEN=ci-placeholder-sandbox-manager-token
           AGENT_SANDBOX_IMAGE=cloud-agent-sandbox:ci
-          AGENT_GATEWAY_URL=http://agent-gateway:8080
-          AGENT_TUNNEL_SSH_DESTINATION=ci@gateway.invalid
-          AGENT_TUNNEL_SSH_KEY=/dev/null
-          AGENT_TUNNEL_SSH_KNOWN_HOSTS=/dev/null
           AGENT_MCP_TUNNEL_SSH_DESTINATION=ci@control-plane.invalid
           AGENT_MCP_TUNNEL_SSH_KEY=/dev/null
           AGENT_MCP_TUNNEL_SSH_KNOWN_HOSTS=/dev/null
-          # The third tunnel: the runner's own path to the control plane's main
-          # listener. Its own key, like the other two — one key opening both
-          # this and the MCP tunnel would make the 8000/8001 split cosmetic.
+          # The runner's own path to the control plane's main listener. Its own
+          # key: one key opening both this and the MCP tunnel would make the
+          # 8000/8001 split cosmetic.
           AGENT_CONTROL_PLANE_TUNNEL_SSH_DESTINATION=ci@control-plane.invalid
           AGENT_CONTROL_PLANE_TUNNEL_SSH_KEY=/dev/null
           AGENT_CONTROL_PLANE_TUNNEL_SSH_KNOWN_HOSTS=/dev/null
@@ -1612,9 +1699,11 @@ jobs:
           AGENT_EGRESS_CHAT_NETWORK_POOL=10.240.0.0/16
           AGENT_EGRESS_DNS_SERVER=192.0.2.53
           ENVFILE
+          # With the GitHub relay's profile, so its tunnel is part of what is checked.
           docker compose \
             -f deploy/host/docker-compose.sandbox.yml \
             --env-file .env \
+            --profile github-relay \
             config > ${RUNNER_TEMP}/rendered.yml
           echo "--- rendered services ---"
           docker compose -f ${RUNNER_TEMP}/rendered.yml config --services
@@ -1626,11 +1715,7 @@ jobs:
           set -euo pipefail
           cat > .env.control-plane <<'ENVFILE'
           AGENT_DATABASE_URL=postgresql://cloudagent:ci@postgres:5432/cloudagent
-          GATEWAY_BASE_URL=https://gateway.invalid
-          GATEWAY_ISSUER=https://gateway.invalid
-          GATEWAY_JWKS_URL=https://gateway.invalid/v1/identity/jwks
-          GATEWAY_GRANT_DISPATCH_TOKEN=ci-placeholder-dispatch-token-not-a-real-secret
-          AGENT_SESSION_SECRET=ci-placeholder-value-not-a-real-secret
+          AGENT_LOCAL_SESSION_SECRET=ci-placeholder-account-key-not-a-real-secret-32b
           AGENT_SETTINGS_ENCRYPTION_KEY=ci-settings-root-key-not-a-real-secret
           ADMIN_TOKEN=ci-administrator-recovery-not-a-real-secret
           AGENT_CONTROL_TOKEN_SECRET=ci-placeholder-value-not-a-real-secret
@@ -1638,21 +1723,9 @@ jobs:
           AGENT_DEPLOYMENT_SHA=ci-deployment-sha
           AGENT_POSTGRES_PASSWORD=ci-placeholder
           AGENT_SANDBOX_MANAGER_TOKEN=ci-placeholder-sandbox-manager-token
-          # Sign-in is assembled server-side now, so the control plane needs
-          # the consent page, its own callback as the gateway must see it
-          # (byte-identical to an IDENTITY_ALLOWED_REDIRECTS entry there),
-          # and where to land the browser afterwards.
-          GATEWAY_AUTHORIZE_URL=https://gateway.invalid/authorize
-          AGENT_SESSION_REDIRECT_URI=https://agents.invalid/agents/api/v1/session/callback
-          AGENT_WEB_BASE_URL=https://agents.invalid/agents
-          # The web build arguments are required rather than defaulted to
-          # empty: empty is a real answer for a deployment that owns its
-          # hostname and silently wrong for one mounted under a prefix, and
-          # the difference does not show at start. Their presence here is
-          # part of what this step checks.
-          AGENT_WEB_BASE_PATH=/agents
-          AGENT_WEB_API_URL=/agents/api
-          AGENT_WEB_GATEWAY_URL=https://gateway.invalid
+          # Account mail links and MCP OAuth callbacks are built from these two.
+          AGENT_PUBLIC_API_URL=https://agents.invalid/api
+          AGENT_WEB_BASE_URL=https://agents.invalid
           ENVFILE
           docker compose \
             -f deploy/control-plane/docker-compose.yml \
@@ -1677,18 +1750,49 @@ jobs:
 
           CP=deploy/control-plane/docker-compose.yml
           HOST=deploy/host/docker-compose.sandbox.yml
-          for required in AGENT_DATABASE_URL AGENT_POSTGRES_PASSWORD AGENT_DEPLOYMENT_SHA; do
-            check "$CP" .env.control-plane "$required"
-          done
+          # The deployment keys are not here: the `keys` service supplies them
+          # (the next step). Only the exact commit served stays required.
+          check "$CP" .env.control-plane AGENT_DEPLOYMENT_SHA
           for required in AGENT_SANDBOX_MANAGER_TOKEN AGENT_EGRESS_CHAT_NETWORK_POOL AGENT_EGRESS_DNS_SERVER; do
             check "$HOST" .env "$required"
           done
+
+      # A new installation writes no env file: the `keys` service generates the
+      # deployment keys into their own volume, and every reader waits for it.
+      - name: A control plane with no deployment keys renders around the keys service
+        run: |
+          set -euo pipefail
+          printf 'AGENT_DEPLOYMENT_SHA=ci-deployment-sha\n' > .env.new-installation
+          docker compose -f deploy/control-plane/docker-compose.yml \
+            --env-file .env.new-installation config > "${RUNNER_TEMP}/new-installation.yml"
+          uv run --no-project --with pyyaml python - <<'PY'
+          import os, yaml
+          stack = yaml.safe_load(open(os.environ["RUNNER_TEMP"] + "/new-installation.yml"))
+          services = stack["services"]
+          keys = services["keys"]
+          assert keys["network_mode"] == "none", keys
+          assert keys["cap_drop"] == ["ALL"], keys
+          postgres = services["postgres"]["environment"]
+          assert "POSTGRES_PASSWORD" not in postgres, postgres
+          assert postgres["POSTGRES_PASSWORD_FILE"] == "/run/cloud-agent/keys/AGENT_POSTGRES_PASSWORD"
+          for name in ("migrate", "control-plane", "mcp-relay"):
+              mounts = {(m["source"], m["target"]) for m in services[name]["volumes"]}
+              assert ("agent-keys", "/run/cloud-agent/keys") in mounts, (name, mounts)
+              assert not services[name]["environment"].get("AGENT_DATABASE_URL"), name
+          # One build, one image: automatic Server setup refuses an API and MCP
+          # relay that run different images.
+          builders = sorted(name for name, service in services.items() if "build" in service)
+          assert builders == ["keys", "web"], builders
+          images = {services[name]["image"] for name in ("keys", "migrate", "control-plane", "mcp-relay")}
+          assert len(images) == 1, images
+          print("a new installation renders with its keys left to the keys service")
+          PY
 
       - name: Missing runtime keys permit administrator setup without default secrets
         run: |
           set -euo pipefail
           cp .env.control-plane .env.setup
-          for imported in AGENT_SESSION_SECRET AGENT_CONTROL_TOKEN_SECRET AGENT_SOURCE_CONTROL_ENCRYPTION_KEY AGENT_SANDBOX_MANAGER_TOKEN GATEWAY_ISSUER GATEWAY_JWKS_URL; do
+          for imported in AGENT_CONTROL_TOKEN_SECRET AGENT_SOURCE_CONTROL_ENCRYPTION_KEY AGENT_SANDBOX_MANAGER_TOKEN; do
             sed -i "/^${imported}=/d" .env.setup
           done
           docker compose -f deploy/control-plane/docker-compose.yml \
@@ -1698,9 +1802,8 @@ jobs:
           stack = yaml.safe_load(open(os.environ["RUNNER_TEMP"] + "/setup.yml"))
           for name in ("control-plane", "mcp-relay"):
               env = stack["services"][name]["environment"]
-              for key in ("AGENT_SESSION_SECRET", "AGENT_CONTROL_TOKEN_SECRET",
-                          "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "AGENT_SANDBOX_MANAGER_TOKEN",
-                          "GATEWAY_ISSUER", "GATEWAY_JWKS_URL"):
+              for key in ("AGENT_CONTROL_TOKEN_SECRET",
+                          "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY", "AGENT_SANDBOX_MANAGER_TOKEN"):
                   assert not env.get(key), f"{name} supplied a default for {key}"
               assert env["AGENT_SETTINGS_ENCRYPTION_KEY"]
           print("setup can start without runtime keys; no default credentials are supplied")
@@ -1722,15 +1825,16 @@ jobs:
           if not relays.get("internal"):
               failures.append("agent-relays is not internal — the discovery network would have a route out")
 
-          # Named, not counted. Lifecycle attaches every relay it finds here to
-          # each sandbox group's bridge; a check that only counted them would
-          # pass on a stack where one had been swapped for something broader.
+          # Named, not counted. Lifecycle attaches what it finds here to each
+          # sandbox group's bridge; a check that only counted them would pass
+          # on a stack where one had been swapped for something broader.
           on_relays = {
               name
               for name, svc in stack["services"].items()
               if "agent-relays" in (svc.get("networks") or {})
           }
-          if on_relays != {"gateway-tunnel", "mcp-tunnel"}:
+          # The GitHub relay's tunnel is the second, rendered with its profile.
+          if on_relays != {"mcp-tunnel", "github-tunnel"}:
               failures.append(f"unexpected services on the relay network: {sorted(on_relays)}")
 
           # Either process may build or wake a group, so both must build the
@@ -1788,7 +1892,8 @@ jobs:
       - name: Upload limits match encoded attachments through nginx
         timeout-minutes: 5
         env:
-          AGENT_UPLOAD_TEST_NGINX_IMAGE: nginx:1.27.5-alpine
+          # The image the edge runs, as deploy/control-plane/docker-compose.yml pins it.
+          AGENT_UPLOAD_TEST_NGINX_IMAGE: nginx:1.27.5-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
         run: |
           set -euo pipefail
           docker --host=unix:///var/run/docker.sock pull "${AGENT_UPLOAD_TEST_NGINX_IMAGE}"
@@ -1908,6 +2013,7 @@ jobs:
       - changes
       - lint
       - test
+      - test-docker
       - test-db
       - check
       - web-build
@@ -1929,6 +2035,7 @@ jobs:
             changes=${{ needs.changes.result }}
             lint=${{ needs.lint.result }}
             test=${{ needs.test.result }}
+            test-docker=${{ needs.test-docker.result }}
             test-db=${{ needs.test-db.result }}
             web=${{ needs.check.result }}
             web-build=${{ needs.web-build.result }}

@@ -19,10 +19,10 @@ not prove — a check that quietly proves less than its name is worse than no
 check:
 
 * **control** — migrates a real database and answers `/healthz`. Does not prove
-  the gateway contract works; that needs a gateway.
+  an account can sign in; that needs the web app and a browser.
 * **web** (both variants) — serves its sign-in page and renders the identity it
   was configured with at *runtime*. Does not prove sign-in; that needs the
-  control plane and the gateway.
+  control plane.
 * **runner** — imports its modules and finds the Docker CLI it shells out to,
   and the `nft` its host-rule helper runs. Does not prove it can claim work, or
   that the rules hold: those need a host, a socket, an enrolled credential and
@@ -61,6 +61,10 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, and they are strings
     from collections.abc import Callable, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+#: The control plane's stack, whose `postgres` service is the database the
+#: control check migrates: the pinned image a deployment runs, not a second name.
+CONTROL_PLANE_COMPOSE = REPO_ROOT / "deploy/control-plane/docker-compose.yml"
 
 #: The runtime label namespace the sandbox image writes and the host reads.
 SMOKE_RUN_LABEL = "io.hybridinference.smoke.run"
@@ -129,14 +133,14 @@ ROLES: dict[str, Role] = {
         name="control",
         arch=_role_platform("control"),
         proves="it migrates a real database and answers /healthz",
-        does_not_prove="that the gateway contract works; that needs a gateway",
+        does_not_prove="that an account can sign in; that needs the web app and a browser",
     ),
     "web": Role(
         name="web",
         arch=_role_platform("web"),
         proves="it serves its sign-in page under its own mount prefix, with the identity "
         "read at runtime",
-        does_not_prove="sign-in end to end; that needs the control plane and the gateway",
+        does_not_prove="sign-in end to end; that needs the control plane",
         variants=_role_variants("web"),
     ),
     "runner": Role(
@@ -395,8 +399,6 @@ def verify_web(image: str, *, variant: str, suffix: str, keep: bool) -> list[str
                 "AGENT_WEB_ORG_NAME": "",
                 "AGENT_WEB_ORG_URL": "",
                 "AGENT_WEB_STATUS_URL": "",
-                "AGENT_WEB_GATEWAY_URL": "https://gateway.smoke.invalid",
-                "AGENT_WEB_FEATURE_RAG": "false",
             },
             publish=(3000,),
         )
@@ -454,7 +456,7 @@ def verify_control(image: str, *, suffix: str, keep: bool) -> list[str]:
         # handles is a network left behind on a shared runner.
         try:
             postgres.start(
-                "postgres:16-alpine",
+                deployed_postgres_image(),
                 env={
                     "POSTGRES_USER": "cloudagent",
                     "POSTGRES_PASSWORD": "smoke",
@@ -513,6 +515,20 @@ def verify_control(image: str, *, suffix: str, keep: bool) -> list[str]:
             _drop_image(image)
 
 
+def deployed_postgres_image() -> str:
+    """The Postgres image the control-plane stack runs, as that file pins it.
+
+    Read rather than named again here: this check used to start
+    `postgres:16-alpine`, which migrated whatever minor version that tag
+    pointed to that day, not necessarily the one a deployment of this
+    release runs.
+    """
+    import yaml
+
+    stack = yaml.safe_load(CONTROL_PLANE_COMPOSE.read_text())
+    return str(stack["services"]["postgres"]["image"])
+
+
 def _control_environment(dsn: str) -> dict[str, str]:
     """The smallest environment a control plane boots in, from deploy/local.
 
@@ -526,21 +542,16 @@ def _control_environment(dsn: str) -> dict[str, str]:
 
     return {
         "AGENT_DATABASE_URL": dsn,
-        "AGENT_SESSION_SECRET": base64.b64encode(os.urandom(32)).decode(),
+        # The account system's key. It must differ from any settings root, which
+        # two independent draws do. A Compose deployment keeps both in its
+        # agent-keys volume (`cloud_agent.deployment.deployment_keys`); this
+        # single container has no volume, so they are supplied here.
+        "AGENT_LOCAL_SESSION_SECRET": base64.b64encode(os.urandom(32)).decode(),
+        "AGENT_SETTINGS_ENCRYPTION_KEY": base64.b64encode(os.urandom(32)).decode(),
         "AGENT_CONTROL_TOKEN_SECRET": base64.b64encode(os.urandom(32)).decode(),
         "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY": _fernet_key(),
         "AGENT_SANDBOX_MANAGER_TOKEN": "smoke-sandbox-manager-token",
-        # Required once a gateway is configured at all: the app refuses to start
-        # without it, because verifying identity is the whole point of the
-        # service it fronts. `deploy/control-plane/.env.example` is the
-        # authority for this list, and a deployment supplies it in the host's
-        # `.env`.
-        "GATEWAY_ISSUER": "https://gateway.smoke.invalid",
-        "GATEWAY_BASE_URL": "https://gateway.smoke.invalid",
-        "GATEWAY_JWKS_URL": "https://gateway.smoke.invalid/v1/identity/jwks",
-        "GATEWAY_AUTHORIZE_URL": "https://gateway.smoke.invalid/authorize",
-        "GATEWAY_GRANT_DISPATCH_TOKEN": "smoke-dispatch-token-placeholder-32-bytes",
-        "AGENT_SESSION_REDIRECT_URI": "https://agents.smoke.invalid/api/v1/session/callback",
+        "AGENT_PUBLIC_API_URL": "https://agents.smoke.invalid/api",
         "AGENT_WEB_BASE_URL": "https://agents.smoke.invalid",
         "AGENT_SESSION_COOKIE_SECURE": "false",
         "AGENT_DEPLOYMENT_SHA": "0" * 40,
@@ -571,7 +582,7 @@ def verify_runner(image: str, *, suffix: str, keep: bool) -> list[str]:
             command=(
                 "-c",
                 "import cloud_agent_host.runner, cloud_agent_host.sandbox_manager, "
-                "cloud_agent_host.sandbox, cloud_agent_host.network_guard; print('imports ok')",
+                "cloud_agent_host.container.sandbox, cloud_agent_host.network.network_guard; print('imports ok')",
             ),
         )
         container.wait()
@@ -773,7 +784,6 @@ def verify_identity(image: str, role: str, variant: str | None, revision: str | 
 SMOKE_CASES: dict[str, SmokeCase] = {
     "control": SmokeCase("control", None, verify_control),
     "web-root": SmokeCase("web", "root", partial(verify_web, variant="root")),
-    "web-agents": SmokeCase("web", "agents", partial(verify_web, variant="agents")),
     "runner": SmokeCase("runner", None, verify_runner),
     "sandbox": SmokeCase("sandbox", None, verify_sandbox),
     "tunnel": SmokeCase("tunnel", None, verify_tunnel),

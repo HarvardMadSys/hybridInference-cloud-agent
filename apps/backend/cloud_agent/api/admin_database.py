@@ -32,7 +32,7 @@ from cloud_agent.api.deps import (
     require_store,
     verify_admin_access,
 )
-from cloud_agent.pgadmin_setup import initialize_pgadmin
+from cloud_agent.deployment.pgadmin_setup import initialize_pgadmin
 from cloud_agent.settings import setting_env
 
 if TYPE_CHECKING:

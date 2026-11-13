@@ -37,19 +37,23 @@ from tests.unit.test_sandbox_deletion_backup import _Manager
 from cloud_agent.ports.external.compute_provider import ProviderReceipt
 from cloud_agent.ports.external.host_bootstrap import default_namespace
 from cloud_agent.providers.compute.host_bootstrap import SshHostBootstrap
-from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 from cloud_agent.storage._sql.hosts import (
     authorize_superseded_removals,
     superseded_containers,
     superseded_removal_request_id,
 )
-from cloud_agent_host.chat_sandbox import ChatSandboxSpec
-from cloud_agent_host.sandbox_checkpoints import SandboxCheckpointReceipt, SandboxCheckpointStore
-from cloud_agent_host.sandbox_deletion_backup import ArchiveIdentity, SandboxDeletionBackupService
-from cloud_agent_host.shared_session_supervisor import (
-    SharedChatSessionSupervisor,
-    SharedMemberManifest,
+from cloud_agent_host.archive.sandbox_checkpoints import (
+    SandboxCheckpointReceipt,
+    SandboxCheckpointStore,
 )
+from cloud_agent_host.archive.sandbox_deletion_backup import (
+    ArchiveIdentity,
+    SandboxDeletionBackupService,
+)
+from cloud_agent_host.container.chat_sandbox import ChatSandboxSpec
+from cloud_agent_host.supervisor.shared_session_state import SharedMemberManifest
+from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 from cloud_agent_shared.sandbox_restore import MAX_RESTORE_ATTEMPTS, RESTORE_RETRY_DELAYS_S
 
 if TYPE_CHECKING:
@@ -581,7 +585,7 @@ async def test_a_release_removes_what_a_group_never_resumed_left_behind(
         )
 
     monkeypatch.setattr(
-        "cloud_agent.application.compute_reconcile.sandbox_manager_for_host", manager_for
+        "cloud_agent.application.compute_retirement.sandbox_manager_for_host", manager_for
     )
 
     async def release(ref, intent):

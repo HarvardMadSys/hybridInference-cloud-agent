@@ -41,6 +41,8 @@ describe('contentSecurityPolicy', () => {
     const policy = directives(contentSecurityPolicy({ ...BASE, apiBase: '/api' }));
 
     expect(policy.get('frame-ancestors')).toEqual(["'none'"]);
+    // Only the Turnstile challenge may be framed in.
+    expect(policy.get('frame-src')).toEqual(["'self'", 'https://challenges.cloudflare.com']);
     expect(policy.get('object-src')).toEqual(["'none'"]);
     expect(policy.get('base-uri')).toEqual(["'none'"]);
     expect(policy.get('form-action')).toEqual(["'self'"]);

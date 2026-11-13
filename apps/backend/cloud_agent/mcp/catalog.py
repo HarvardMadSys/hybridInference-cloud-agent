@@ -209,28 +209,10 @@ def _remote_options(label: str, remote: dict[str, Any]) -> list[dict[str, str]]:
     return options
 
 
-def _package_option(label: str, package: dict[str, Any]) -> dict[str, str] | None:  # noqa: C901, PLR0912 complexity baseline, #771
-    """Prefill simple pinned npm/PyPI stdio installs; leave complex recipes explicit."""
-    if (
-        package.get("transport") != {"type": "stdio"}
-        or package.get("runtimeArguments")
-        or package.get("packageArguments")
-    ):
-        return None
-    kind, name, version = (package.get(key) for key in ("registryType", "identifier", "version"))
-    if (
-        not isinstance(name, str)
-        or not isinstance(version, str)
-        or not _utf8_within(name, 512)
-        or not _utf8_within(version, 256)
-        or not re.fullmatch(r"[0-9][A-Za-z0-9.+_-]*", version)
-    ):
-        return None
-    registry_base_url = package.get(
-        "registryBaseUrl", "https://registry.npmjs.org" if kind == "npm" else "https://pypi.org"
-    )
-    if not isinstance(registry_base_url, str):
-        return None
+def _package_launcher(
+    kind: Any, name: str, version: str, registry_base_url: str
+) -> tuple[str, list[str]] | None:
+    """The pinned ``npx`` or ``uvx`` command for a public npm or PyPI package."""
     if kind == "npm" and re.fullmatch(r"(?:@[a-z0-9._-]+/)?[a-z0-9][a-z0-9._-]*", name):
         if registry_base_url.rstrip("/") != "https://registry.npmjs.org":
             return None
@@ -241,11 +223,11 @@ def _package_option(label: str, package: dict[str, Any]) -> dict[str, str] | Non
         command, args = "uvx", [f"{name}=={version}"]
     else:
         return None
-    if package.get("runtimeHint", command) != command:
-        return None
-    variables = package.get("environmentVariables") or []
-    if not isinstance(variables, list) or len(variables) > _MAX_PACKAGE_ENVIRONMENT_VARIABLES:
-        return None
+    return command, args
+
+
+def _package_environment(variables: list[Any]) -> dict[str, str] | None:
+    """Prefill a package's literal and secret variables; None for any it cannot."""
     env: dict[str, str] = {}
     for variable in variables:
         if not isinstance(variable, dict):
@@ -268,6 +250,43 @@ def _package_option(label: str, package: dict[str, Any]) -> dict[str, str] | Non
             if not variable.get("isSecret"):
                 return None
             env[name] = "${env:" + name + "}"
+    return env
+
+
+def _package_option(label: str, package: dict[str, Any]) -> dict[str, str] | None:
+    """Prefill simple pinned npm/PyPI stdio installs; leave complex recipes explicit."""
+    if (
+        package.get("transport") != {"type": "stdio"}
+        or package.get("runtimeArguments")
+        or package.get("packageArguments")
+    ):
+        return None
+    kind, name, version = (package.get(key) for key in ("registryType", "identifier", "version"))
+    if (
+        not isinstance(name, str)
+        or not isinstance(version, str)
+        or not _utf8_within(name, 512)
+        or not _utf8_within(version, 256)
+        or not re.fullmatch(r"[0-9][A-Za-z0-9.+_-]*", version)
+    ):
+        return None
+    registry_base_url = package.get(
+        "registryBaseUrl", "https://registry.npmjs.org" if kind == "npm" else "https://pypi.org"
+    )
+    if not isinstance(registry_base_url, str):
+        return None
+    launcher = _package_launcher(kind, name, version, registry_base_url)
+    if launcher is None:
+        return None
+    command, args = launcher
+    if package.get("runtimeHint", command) != command:
+        return None
+    variables = package.get("environmentVariables") or []
+    if not isinstance(variables, list) or len(variables) > _MAX_PACKAGE_ENVIRONMENT_VARIABLES:
+        return None
+    env = _package_environment(variables)
+    if env is None:
+        return None
     body: dict[str, Any] = {"command": command, "args": args}
     if env:
         body["env"] = env
@@ -307,8 +326,8 @@ def _icon_url(icons: Any) -> str | None:
     return str(candidates[0]["src"]) if candidates else None
 
 
-def catalog_entry(record: Mapping[str, Any]) -> dict[str, Any] | None:  # noqa: C901 complexity baseline, #771
-    """Normalize one active latest record, preserving its publisher identifier."""
+def _active_latest_server(record: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The server of an active, latest Registry record, or None."""
     metadata = record.get("_meta")
     if not isinstance(metadata, Mapping):
         return None
@@ -320,15 +339,28 @@ def catalog_entry(record: Mapping[str, Any]) -> dict[str, Any] | None:  # noqa: 
     server = record.get("server")
     if not isinstance(server, Mapping):
         return None
-    name = server.get("name")
-    if not isinstance(name, str) or not name or len(name) > 250:
-        return None
+    return server
+
+
+def _entry_label(server: Mapping[str, Any], name: str) -> str:
+    """The server's title, or a readable name derived from its identifier."""
     fallback = name.rsplit("/", 1)[-1]
     if fallback.lower() in {"mcp", "mcp-server", "server"}:
         publisher = name.split("/", 1)[0].partition(".")[2]
         fallback = (publisher or name).removesuffix(".mcp")
         fallback = fallback[:1].upper() + fallback[1:]
-    label = str(server.get("title") or fallback)[:200]
+    return str(server.get("title") or fallback)[:200]
+
+
+def catalog_entry(record: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Normalize one active latest record, preserving its publisher identifier."""
+    server = _active_latest_server(record)
+    if server is None:
+        return None
+    name = server.get("name")
+    if not isinstance(name, str) or not name or len(name) > 250:
+        return None
+    label = _entry_label(server, name)
     options: dict[str, dict[str, str]] = {}
     option_bytes = 0
 
@@ -416,7 +448,79 @@ def _checkpoint_page(
         state.cursors.add(cursor)
 
 
-async def fetch_catalog(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #771
+async def _read_page(
+    client: httpx.AsyncClient, registry_url: str, state: _CatalogFetchCheckpoint
+) -> dict[str, Any]:
+    """Read and shape-check the Registry page at the checkpoint's cursor."""
+    params = {"version": "latest", "limit": "100"}
+    if state.next_cursor is not None:
+        params["cursor"] = state.next_cursor
+    async with client.stream(
+        "GET",
+        f"{registry_url}/v0.1/servers",
+        params=params,
+        timeout=number_setting("mcp_catalog_request_timeout_s"),
+        follow_redirects=False,
+        headers=IDENTITY_ENCODING_HEADERS,
+    ) as response:
+        # A cursor rejected by the Registry cannot make progress on a
+        # later retry. Keep rate limits and request timeouts resumable,
+        # but make other client errors restart at page one next time.
+        if (
+            400 <= response.status_code < 500
+            and response.status_code not in {408, 429}
+            and state.next_cursor is not None
+        ):
+            state.restart()
+        response.raise_for_status()
+        data = bytearray()
+        async for chunk in iter_response_bytes(response):
+            data.extend(chunk)
+            if len(data) > 5_000_000:
+                raise ValueError("Registry page exceeded size limit")
+    page = json.loads(data)
+    # A malformed or truncated response says nothing about whether the
+    # opaque cursor is still valid. Keep the checkpoint and retry this
+    # exact page; restarting would only replay every earlier page before
+    # reaching the same upstream failure again.
+    if (
+        not isinstance(page, dict)
+        or not isinstance(page.get("servers"), list)
+        or not isinstance(page.get("metadata"), dict)
+    ):
+        raise ValueError("Invalid Registry page")
+    return page
+
+
+def _page_entries(
+    state: _CatalogFetchCheckpoint, records: list[Any]
+) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
+    """Normalize one page's records, refusing a page that would overflow the checkpoint."""
+    page_entries: dict[str, dict[str, Any]] = {}
+    page_sizes: dict[str, int] = {}
+    page_bytes = 0
+    for record in records:
+        if not isinstance(record, Mapping):
+            continue
+        entry = catalog_entry(record)
+        if entry is not None:
+            name = entry["name"]
+            size = _entry_size(entry)
+            next_page_bytes = page_bytes + size - page_sizes.get(name, 0)
+            next_page_count = len(page_entries) + (name not in page_entries)
+            if (
+                len(state.entries) + next_page_count > _MAX_CHECKPOINT_ENTRIES
+                or state.entry_bytes + state.cursor_bytes + next_page_bytes > _MAX_CHECKPOINT_BYTES
+            ):
+                state.restart()
+                raise ValueError("Registry checkpoint exceeded size limit")
+            page_entries[name] = entry
+            page_sizes[name] = size
+            page_bytes = next_page_bytes
+    return page_entries, page_sizes
+
+
+async def fetch_catalog(
     client: httpx.AsyncClient,
     *,
     checkpoint: _CatalogFetchCheckpoint | None = None,
@@ -436,65 +540,8 @@ async def fetch_catalog(  # noqa: C901, PLR0912, PLR0915 complexity baseline, #7
         return sorted(state.entries.values(), key=_sort_key)
     async with asyncio.timeout(number_setting("mcp_catalog_sync_timeout_s")):
         while state.pages < 1000:
-            params = {"version": "latest", "limit": "100"}
-            if state.next_cursor is not None:
-                params["cursor"] = state.next_cursor
-            async with client.stream(
-                "GET",
-                f"{registry_url}/v0.1/servers",
-                params=params,
-                timeout=number_setting("mcp_catalog_request_timeout_s"),
-                follow_redirects=False,
-                headers=IDENTITY_ENCODING_HEADERS,
-            ) as response:
-                # A cursor rejected by the Registry cannot make progress on a
-                # later retry. Keep rate limits and request timeouts resumable,
-                # but make other client errors restart at page one next time.
-                if (
-                    400 <= response.status_code < 500
-                    and response.status_code not in {408, 429}
-                    and state.next_cursor is not None
-                ):
-                    state.restart()
-                response.raise_for_status()
-                data = bytearray()
-                async for chunk in iter_response_bytes(response):
-                    data.extend(chunk)
-                    if len(data) > 5_000_000:
-                        raise ValueError("Registry page exceeded size limit")
-            page = json.loads(data)
-            # A malformed or truncated response says nothing about whether the
-            # opaque cursor is still valid. Keep the checkpoint and retry this
-            # exact page; restarting would only replay every earlier page before
-            # reaching the same upstream failure again.
-            if (
-                not isinstance(page, dict)
-                or not isinstance(page.get("servers"), list)
-                or not isinstance(page.get("metadata"), dict)
-            ):
-                raise ValueError("Invalid Registry page")
-            page_entries: dict[str, dict[str, Any]] = {}
-            page_sizes: dict[str, int] = {}
-            page_bytes = 0
-            for record in page["servers"]:
-                if not isinstance(record, Mapping):
-                    continue
-                entry = catalog_entry(record)
-                if entry is not None:
-                    name = entry["name"]
-                    size = _entry_size(entry)
-                    next_page_bytes = page_bytes + size - page_sizes.get(name, 0)
-                    next_page_count = len(page_entries) + (name not in page_entries)
-                    if (
-                        len(state.entries) + next_page_count > _MAX_CHECKPOINT_ENTRIES
-                        or state.entry_bytes + state.cursor_bytes + next_page_bytes
-                        > _MAX_CHECKPOINT_BYTES
-                    ):
-                        state.restart()
-                        raise ValueError("Registry checkpoint exceeded size limit")
-                    page_entries[name] = entry
-                    page_sizes[name] = size
-                    page_bytes = next_page_bytes
+            page = await _read_page(client, registry_url, state)
+            page_entries, page_sizes = _page_entries(state, page["servers"])
             cursor = page["metadata"].get("nextCursor")
             if cursor is not None and not isinstance(cursor, str):
                 state.restart()

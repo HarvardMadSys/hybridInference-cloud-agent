@@ -7,8 +7,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import AliasChoices, BaseModel, Field, StrictInt, ValidationError, model_validator
 
-from cloud_agent.capacity_protocol import HostCapacityReport, parse_capacity_block
-from cloud_agent.host_pool import ENROLL_TOKEN_TTL_S
+from cloud_agent.domain.host_pool import ENROLL_TOKEN_TTL_S
 from cloud_agent.schemas._host_reports import (
     HOST_LABELS_MAX_ITEMS,
     _HostCapability,
@@ -20,12 +19,17 @@ from cloud_agent.schemas._host_reports import (
 from cloud_agent.schemas.archive_settings import (
     HostSandboxArchiveSettings,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
+from cloud_agent.schemas.capacity_protocol import HostCapacityReport, parse_capacity_block
 from cloud_agent.schemas.workers import (
     WorkerSandboxMember,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
 from cloud_agent_shared.host_settings import MAX_SETTINGS_KEYS
+
+#: The configuration reports a host may make about itself on the heartbeat.
+HOST_CONFIG_REPORT_NAMES = frozenset({"runtime_registry_url"})
 from cloud_agent_shared.runtime_catalog import downloadable_runtimes
 from cloud_agent_shared.runtime_downloads import read_reports
+from cloud_agent_shared.sandbox_incidents import SandboxIncident, parse_incidents
 from cloud_agent_shared.sandbox_resources import (
     SandboxResourceSample,
     parse_sandbox_resource_sample,
@@ -206,6 +210,9 @@ class RetainedSandboxBeat(BaseModel):
     resource_usage: SandboxResourceSample | None = None
     terminal_count: StrictInt | None = Field(None, ge=0, le=4096)
     checkpoint: SandboxCheckpointBeat | None = None
+    #: What went wrong in this sandbox since the host's rows were last confirmed
+    #: (``cloud_agent_shared.sandbox_incidents``). An older host sends none.
+    incidents: list[SandboxIncident] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -214,6 +221,8 @@ class RetainedSandboxBeat(BaseModel):
         if not isinstance(data, dict):
             return data
         result = dict(data)
+        if "incidents" in result:
+            result["incidents"] = parse_incidents(result["incidents"])
         if result.get("resource_usage") is not None:
             result["resource_usage"] = parse_sandbox_resource_sample(result["resource_usage"])
         if result.get("checkpoint") is not None:
@@ -375,6 +384,15 @@ class HostHeartbeatRequest(BaseModel):
             "keeps the last observation for compatibility with older runners."
         ),
     )
+    config_reports: dict[str, str] | None = Field(
+        None,
+        max_length=8,
+        description=(
+            "Non-numeric configuration this host uses now, by name: "
+            "runtime_registry_url is the npm registry its next agent download uses "
+            "(empty for the public registry). Unknown names are dropped."
+        ),
+    )
     runtime_downloads: list[dict[str, Any]] | None = Field(
         None,
         description=(
@@ -385,6 +403,22 @@ class HostHeartbeatRequest(BaseModel):
             "heartbeat. Null means not reported and keeps what is stored."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _keep_known_config_reports(cls, data: Any) -> Any:
+        """Keep only report names this release knows, with bounded text values."""
+        if not isinstance(data, dict) or not isinstance(data.get("config_reports"), dict):
+            return data
+        kept = {
+            name: value
+            for name, value in data["config_reports"].items()
+            if name in HOST_CONFIG_REPORT_NAMES
+            and isinstance(value, str)
+            and len(value) <= 2048
+            and "\x00" not in value
+        }
+        return {**data, "config_reports": kept}
 
     @model_validator(mode="before")
     @classmethod
@@ -431,7 +465,7 @@ class HostResidencyEstablishResponse(BaseModel):
     thread_id: str
     generation: int
     ttl_seconds: float
-    #: A Gateway grant, or an owner connection's own long-lived key: never in a repr.
+    #: The owner model connection's own long-lived key: never in a repr.
     credential: str | None = Field(None, repr=False)
     model: str | None = None
     #: For a residency on an owner model connection, the credential revision
@@ -449,6 +483,29 @@ class HostResidencyEstablishResponse(BaseModel):
             "one the host gives it. It names the residency, not this attempt, so "
             "the process keeps it for every later turn it serves."
         ),
+    )
+    github_credential: str = Field(
+        "",
+        repr=False,
+        description=(
+            "The GitHub relay placeholder for this residency's process: what git and "
+            "gh present to GitHub, which only the GitHub relay accepts and exchanges "
+            "for the owner's own GitHub token. Like `mcp_credential` it names the "
+            "residency, so the process keeps it across turns."
+        ),
+    )
+    git_author_name: str = Field(
+        "",
+        description="The owner's GitHub login, as commit author and committer. Empty "
+        "when the owner has not connected GitHub.",
+    )
+    git_author_email: str = Field(
+        "",
+        description="The owner's GitHub noreply address, so GitHub attributes the commits to them.",
+    )
+    git_coauthor: str = Field(
+        "",
+        description="`Name <email>` the agent names as its commits' co-author, or empty.",
     )
 
 
@@ -482,6 +539,15 @@ class HostHeartbeatResponse(BaseModel):
             "The archive policy this host should apply. Null for a host that cannot "
             "apply it: an enabled policy with a bucket other than the default goes "
             "only to a host advertising sandbox-archive-destination-v1."
+        ),
+    )
+    runtime_registry_url: str | None = Field(
+        None,
+        max_length=2048,
+        description=(
+            "The npm registry this deployment downloads agent versions from; empty is "
+            "the public registry. Absent from a control plane that does not manage it, "
+            "in which case the host keeps its own environment value."
         ),
     )
     runtime_downloads: list[dict[str, str]] = Field(
@@ -524,5 +590,13 @@ class HostHeartbeatResponse(BaseModel):
         description=(
             "How often to report in. Missing three consecutive intervals is "
             "what moves a host to offline."
+        ),
+    )
+    incidents: Literal["accepted"] | None = Field(
+        None,
+        description=(
+            "`accepted` when every sandbox incident this beat carried is stored: "
+            "the host forgets those rows only then. Absent from a control plane "
+            "that does not store incidents, or when one could not be stored."
         ),
     )

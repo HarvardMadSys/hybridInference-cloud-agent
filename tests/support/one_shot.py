@@ -36,8 +36,11 @@ def one_shot_argv(
         return argv
     if runtime == "codex":
         resume = ["resume", resume_session_id] if resume_session_id else []
+        # The launch through the binary's name, so the one-shot form starts
+        # the native binary the way a member does.
+        binary = live_argv.index("codex") + 1
         return [
-            live_argv[0],
+            *live_argv[:binary],
             "exec",
             "--json",
             "--skip-git-repo-check",
@@ -47,7 +50,7 @@ def one_shot_argv(
             "--model",
             model,
             # Every -c override of the resident launch, without ``app-server``.
-            *live_argv[1:-1],
+            *live_argv[binary:-1],
             *resume,
             prompt,
         ]

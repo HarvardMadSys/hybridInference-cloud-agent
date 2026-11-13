@@ -7,8 +7,7 @@ catalog, workspace and config routers share one definition of what a job looks
 like to its owner.
 
 ``_EVENT_PAGE_SIZE`` and ``_SAFE_EVENT_TYPE`` travel with the event envelope:
-``service_jobs`` pages the same events this module renders, and the aggregator's
-SSE writer validates event names against the same pattern.
+the aggregator's SSE writer validates event names against the same pattern.
 """
 
 from __future__ import annotations
@@ -31,7 +30,7 @@ from cloud_agent.schemas import (
     ProcessObservation,
     ToolCallResources,
 )
-from cloud_agent_shared.git.patch_gate import branch_name_for
+from cloud_agent_shared.git.branches import branch_name_for
 
 if TYPE_CHECKING:
     from typing import Any
@@ -124,12 +123,10 @@ def mid_turn_input_supported(job: dict[str, Any]) -> bool:
 
 def _job_response(
     job: dict[str, Any],
-    usage: dict[str, Any] | None = None,
     telemetry: dict[str, Any] | None = None,
     attempt_telemetry: list[dict[str, Any]] | None = None,
 ) -> AgentJobResponse:
     """Shape a store job row for the owner-facing API."""
-    usage = usage or {}
     metadata = dict(job.get("metadata") or {})
     base_ref = metadata.pop(BASE_REF_METADATA_KEY, None)
     if not isinstance(base_ref, str):
@@ -179,7 +176,6 @@ def _job_response(
         published_pr_url=job["published_pr_url"],
         revision=job.get("revision") or 0,
         thread_revision=job.get("thread_revision") or 0,
-        published_commit_sha=job.get("published_commit_sha"),
         detail=job["detail"],
         forked_from_job_id=job.get("fork_source_job_id"),
         # How this turn came to exist, and what it said about the
@@ -204,10 +200,6 @@ def _job_response(
         updated_at=_iso(job["updated_at"]),
         pinned_at=_iso(job.get("pinned_at")),
         archived_at=_iso(job.get("archived_at")),
-        spent_usd=usage.get("spent_usd"),
-        tokens_in=usage.get("tokens_in"),
-        tokens_out=usage.get("tokens_out"),
-        model_calls=usage.get("model_calls"),
         telemetry_attempt_id=(telemetry or {}).get("attempt_id"),
         continuity_mode=(telemetry or {}).get("continuity_mode"),
         context_status=(telemetry or {}).get("context_status"),
@@ -218,10 +210,7 @@ def _job_response(
         fork_anchor_job_id=sandbox.get("fork_anchor_job_id"),
         native_fork_available=native_fork_available,
         mid_turn_input_supported=mid_turn_input_supported(job),
-        workspace_publication_state=sandbox.get("workspace_publication_state"),
-        workspace_publication_unchanged=bool(sandbox.get("workspace_publication_unchanged")),
         workspace_pr_url=sandbox.get("workspace_pr_url"),
-        workspace_unpublished_changes=bool(sandbox.get("workspace_unpublished_changes")),
         workspace_epoch=sandbox.get("workspace_epoch"),
         started_at=_iso((telemetry or {}).get("started_at")),
         finished_at=_iso((telemetry or {}).get("finished_at")),

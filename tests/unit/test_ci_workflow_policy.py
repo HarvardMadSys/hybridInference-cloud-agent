@@ -565,3 +565,102 @@ def test_real_kata_probe_is_unreachable_from_pull_requests_and_reported_as_skipp
     )
     assert report["if"] == "github.event_name == 'pull_request'"
     assert "skipped" in report["run"] and "GITHUB_STEP_SUMMARY" in report["run"]
+
+
+# The persistent pools run under accounts that have no sudo, beside other
+# repositories' runner accounts on the same machines. So every workflow is
+# checked for every event and cell that routes a job to them: a step that calls
+# sudo must be unreachable there, Chromium's system packages (which Playwright
+# installs through sudo) are a hosted runner's alone, and no step uses a fixed
+# name in the machines' shared /tmp.
+WORKFLOWS = sorted(WORKFLOW.parent.glob("*.yml"))
+SUDO = re.compile(r"(?:^|[\s;&|(!`{])sudo(?=\s|$)")
+SHARED_TMP = re.compile(r"(?:^|[\s=:'\"(])/tmp/")
+
+
+def _script(step: dict) -> str:
+    """A step's shell without its comment lines, which may name sudo freely."""
+    lines = str(step.get("run", "")).splitlines()
+    return "\n".join(line for line in lines if not line.lstrip().startswith("#"))
+
+
+def _self_hosted_routes(document: dict) -> list[tuple[str, dict, str, dict]]:
+    """Every (job, event, cell) of a workflow whose runner labels are self-hosted."""
+    triggers = document.get("on") or document[True]
+    events = [triggers] if isinstance(triggers, str) else sorted(triggers)
+    return [
+        (name, job, event, cell)
+        for name, job in document["jobs"].items()
+        for event in events
+        for cell in _cells(job)
+        if "self-hosted" in _runner_labels(job, event, cell)
+    ]
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda path: path.name)
+def test_no_step_a_self_hosted_runner_can_run_calls_sudo(path: Path) -> None:
+    """A sudo step is unreachable wherever its job lands on a persistent runner."""
+    guarded = 0
+    for name, job, event, cell in _self_hosted_routes(yaml.safe_load(path.read_text())):
+        for step in job.get("steps", []):
+            if not SUDO.search(_script(step)):
+                continue
+            where = (path.name, name, step.get("name"), event, cell.get("name"))
+            assert "if" in step, where
+            reachable = _expression(step["if"], event, cell, runner_environment="self-hosted")
+            assert reachable is False, where
+            guarded += 1
+    if path == WORKFLOW:
+        # The hosted sandbox cells' SDK cleanup, in `artifacts` and `mcp`: the
+        # check above did see the steps it exists for.
+        assert guarded > 0
+
+
+@pytest.mark.parametrize("environment", ["github-hosted", "self-hosted"])
+def test_only_a_hosted_runner_installs_the_browser_system_packages(
+    tmp_path: Path, environment: str
+) -> None:
+    """`playwright install --with-deps` apt-installs Chromium's libraries through sudo.
+
+    A persistent runner has them provisioned and no sudo to install them with,
+    so it downloads the browser alone. The step runs here with recorders in place
+    of npx, npm and sudo, as each kind of runner would run it.
+    """
+    steps = {
+        id(step): step
+        for _, job, _, _ in _self_hosted_routes(_document())
+        for step in job.get("steps", [])
+        if "playwright install" in _script(step)
+    }
+    assert len(steps) == 1
+    (step,) = steps.values()
+    script = re.sub(r"\$\{\{\s*runner\.environment\s*\}\}", environment, step["run"])
+    assert "${{" not in script
+    commands = tmp_path / "commands"
+    recorders = "\n".join(
+        f'{tool}() {{ printf "%s\\n" "{tool} $*" >> {shlex.quote(str(commands))}; }}'
+        for tool in ("npx", "npm", "sudo")
+    )
+    env = {key: value for key, value in os.environ.items() if key != "BASH_ENV"}
+    subprocess.run(["bash", "-c", f"{recorders}\n{script}"], cwd=tmp_path, env=env, check=True)
+    recorded = commands.read_text().splitlines()
+    installs = [line for line in recorded if line.startswith("npx playwright install")]
+    assert installs == [
+        "npx playwright install --with-deps chromium"
+        if environment == "github-hosted"
+        else "npx playwright install chromium"
+    ]
+    assert not [line for line in recorded if line.startswith("sudo")]
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda path: path.name)
+def test_no_self_hosted_step_uses_a_fixed_name_in_the_shared_tmp(path: Path) -> None:
+    """Every runner account on a machine shares its sticky /tmp.
+
+    A file another account left at a fixed name there cannot be replaced
+    (fs.protected_regular), so the step fails on whichever account comes second.
+    RUNNER_TEMP belongs to one runner process, and mktemp picks a fresh name.
+    """
+    for name, job, _, _ in _self_hosted_routes(yaml.safe_load(path.read_text())):
+        for step in job.get("steps", []):
+            assert not SHARED_TMP.search(_script(step)), (path.name, name, step.get("name"))

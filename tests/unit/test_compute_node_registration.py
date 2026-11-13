@@ -24,9 +24,9 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 
 from cloud_agent.application.compute_resources import ComputeCommands
-from cloud_agent.compute_config import registration_url
 from cloud_agent.domain.compute import ComputeRefusal, normalize_host_keys
-from cloud_agent.host_pool import hash_secret
+from cloud_agent.domain.host_pool import hash_secret
+from cloud_agent.providers.compute.compute_config import registration_url
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROFILE = REPO_ROOT / "deploy" / "cloudlab" / "cloud-agent-node.py"
@@ -118,15 +118,15 @@ async def test_a_malformed_token_is_refused_like_an_unknown_one_without_a_lookup
     "environment,expected",
     [
         (
-            {"AGENT_SESSION_REDIRECT_URI": "https://example.org/agents/api/v1/session/callback"},
+            {"AGENT_PUBLIC_API_URL": "https://example.org/agents/api"},
             "https://example.org/agents/api/v1/compute/node-registrations",
         ),
         # A node checks the control plane's certificate before sending its token.
-        ({"AGENT_SESSION_REDIRECT_URI": "http://example.org/v1/session/callback"}, ""),
-        ({"AGENT_SESSION_REDIRECT_URI": "https://example.org/elsewhere"}, ""),
+        ({"AGENT_PUBLIC_API_URL": "http://example.org"}, ""),
+        ({"AGENT_PUBLIC_API_URL": "https://example.org/api?next=elsewhere"}, ""),
         (
             {
-                "AGENT_SESSION_REDIRECT_URI": "https://example.org/v1/session/callback",
+                "AGENT_PUBLIC_API_URL": "https://example.org",
                 "AGENT_COMPUTE_REGISTRATION_URL": "https://nodes.example.org/register",
             },
             "https://nodes.example.org/register",
@@ -135,7 +135,7 @@ async def test_a_malformed_token_is_refused_like_an_unknown_one_without_a_lookup
     ],
 )
 def test_nodes_register_only_with_an_https_public_address(monkeypatch, environment, expected):
-    for name in ("AGENT_SESSION_REDIRECT_URI", "AGENT_COMPUTE_REGISTRATION_URL"):
+    for name in ("AGENT_PUBLIC_API_URL", "AGENT_COMPUTE_REGISTRATION_URL"):
         monkeypatch.delenv(name, raising=False)
     for name, value in environment.items():
         monkeypatch.setenv(name, value)

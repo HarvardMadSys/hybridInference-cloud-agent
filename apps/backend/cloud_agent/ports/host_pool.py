@@ -40,13 +40,17 @@ class HostPoolRepository(Protocol):
         """
         ...
 
-    async def queue_health(self, *, expected_deployment_sha: str) -> dict[str, int]:
+    async def queue_health(
+        self, *, expected_deployment_sha: str, queue_alert_after_s: float
+    ) -> dict[str, int]:
         """Observe configured queue stalls without claiming or changing jobs.
 
         Occupied slots are ordinary backpressure. Missing/stale/disabled hosts,
         lost deployment markers and a wrong placement pin are not. Retained
         members use their owner, independent of the pin for new conversations.
         No user content, job identifiers or credentials leave this projection.
+        ``queue_alert_after_s`` is how long a turn waits before it counts; the
+        caller reads it from the ``queue_alert_after_s`` setting.
         """
         ...
 
@@ -162,6 +166,7 @@ class HostPoolRepository(Protocol):
         sandbox_archive_settings_applied_revision: int | None = None,
         sandbox_archive_settings_revision_reported: bool = False,
         runtime_downloads: Sequence[Mapping[str, Any]] | None = None,
+        config_reports: Mapping[str, str] | None = None,
     ) -> dict[str, Any] | None:
         """Record a heartbeat, promoting the host to ``online`` when it may.
 
@@ -223,6 +228,8 @@ class HostPoolRepository(Protocol):
                 stays.
             runtime_downloads: This host's progress on each agent version it
                 was asked to hold, already validated. ``None`` leaves it.
+            config_reports: Non-numeric configuration the host says it uses
+                now, such as its npm registry. ``None`` leaves the report.
 
         Returns:
             The updated host row, or ``None`` when the host no longer exists.

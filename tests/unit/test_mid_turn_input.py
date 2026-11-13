@@ -19,6 +19,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from cloud_agent_host import drivers
+from cloud_agent_host.container.sandbox import ProcessBackend
 from cloud_agent_host.drivers import (
     LINE,
     TURN_COMPLETED,
@@ -26,7 +27,6 @@ from cloud_agent_host.drivers import (
     LaunchContext,
     PendingInput,
     TurnInput,
-    driver_for,
 )
 from cloud_agent_host.runtimes import (
     EMPTY_RUNTIME_MCP_CONFIG,
@@ -36,12 +36,11 @@ from cloud_agent_host.runtimes import (
     OpencodeRuntime,
     PiRuntime,
 )
-from cloud_agent_host.sandbox import ProcessBackend
+from cloud_agent_host.runtimes.claude import session as claude_session
+from cloud_agent_host.runtimes.codex import session as codex_session
+from cloud_agent_host.runtimes.live import driver_for
 from cloud_agent_host.sandbox_manager import create_app
-from cloud_agent_host.shared_session_supervisor import (
-    HELD_INPUT_TTL_S,
-    SharedChatSessionSupervisor,
-)
+from cloud_agent_host.supervisor.member_sessions import HELD_INPUT_TTL_S, MemberSessions
 from cloud_agent_shared.shared_protocol import (
     INPUT_PROCESS_GONE,
     INPUT_REFUSED,
@@ -103,7 +102,7 @@ class _StreamingProcess(_LiveProcess):
 def _context(process: _LiveProcess, tmp_path) -> LaunchContext:
     return LaunchContext(
         workdir="/w",
-        gateway_base_url="http://gw",
+        model_base_url="http://gw",
         credential="agr",
         provides_isolation=True,
         mcp_config=EMPTY_RUNTIME_MCP_CONFIG,
@@ -175,7 +174,7 @@ def _written(process: _LiveProcess) -> list[str]:
 
 def test_claude_the_launch_echoes_what_it_reads():
     argv, _ = ClaudeCodeRuntime().prepare_live(
-        workdir="/w", model="m", gateway_base_url="http://gw", credential="agr"
+        workdir="/w", model="m", model_base_url="http://gw", credential="agr"
     )
 
     assert "--replay-user-messages" in argv
@@ -344,7 +343,7 @@ def test_a_message_the_cli_read_too_late_is_stopped_and_the_next_turn_starts_cle
 
 
 def test_when_no_turn_of_its_own_follows_the_next_turn_is_not_kept_waiting(tmp_path, monkeypatch):
-    monkeypatch.setattr(drivers, "CLAUDE_UNANSWERED_START_S", 0.05)
+    monkeypatch.setattr(claude_session, "CLAUDE_UNANSWERED_START_S", 0.05)
     process = _StreamingProcess()
     _, _session, turn, events = _claude_turn(tmp_path, process)
     process.emit(_assistant(_tool_use("toolu_1")))
@@ -518,7 +517,7 @@ def test_codex_refusals_say_why(tmp_path, message, reason):
 
 
 def test_a_slow_steer_is_not_a_refusal_and_its_late_acceptance_is_reported(tmp_path, monkeypatch):
-    monkeypatch.setattr(drivers, "STEER_REPLY_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(codex_session, "STEER_REPLY_TIMEOUT_S", 0.05)
     process, turn = _codex_turn(tmp_path)
 
     assert turn.inject("anyone there?", message_id="apmsg_1") == InputOutcome(True)
@@ -529,7 +528,7 @@ def test_a_slow_steer_is_not_a_refusal_and_its_late_acceptance_is_reported(tmp_p
 
 
 def test_a_late_refusal_is_no_error_of_the_turn(tmp_path, monkeypatch):
-    monkeypatch.setattr(drivers, "STEER_REPLY_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(codex_session, "STEER_REPLY_TIMEOUT_S", 0.05)
     process, turn = _codex_turn(tmp_path)
     turn.inject("anyone there?", message_id="apmsg_1")
 
@@ -652,15 +651,17 @@ async def test_the_sandbox_manager_takes_input_only_from_the_control_plane():
     assert supervisor.calls == []
 
 
-def _supervisor(members: dict, now: list[float]) -> SharedChatSessionSupervisor:
-    supervisor = SharedChatSessionSupervisor.__new__(SharedChatSessionSupervisor)
-    supervisor._lock = threading.RLock()
-    supervisor._members = {
-        thread_id: SimpleNamespace(members={thread_id: member})
-        for thread_id, member in members.items()
-    }
-    supervisor._held_inputs = {}
-    supervisor._clock = lambda: now[0]
+def _supervisor(members: dict, now: list[float]) -> MemberSessions:
+    supervisor = MemberSessions.__new__(MemberSessions)
+    supervisor._state = SimpleNamespace(
+        lock=threading.RLock(),
+        members={
+            thread_id: SimpleNamespace(members={thread_id: member})
+            for thread_id, member in members.items()
+        },
+        held_inputs={},
+        clock=lambda: now[0],
+    )
     return supervisor
 
 

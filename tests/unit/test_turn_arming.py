@@ -14,10 +14,10 @@ from tests.unit.test_shared_session_supervisor import (
     _TransportFactory,
 )
 
-from cloud_agent_host.chat_sandbox_models import MEMBER_UID_BASE
-from cloud_agent_host.sandbox import KATA_RUNTIME, SandboxError
+from cloud_agent_host.container.chat_sandbox_models import MEMBER_UID_BASE
+from cloud_agent_host.container.sandbox import KATA_RUNTIME, SandboxError
 from cloud_agent_host.session_lifecycle import SessionLeaseLost
-from cloud_agent_host.turn_arming import run_beside
+from cloud_agent_host.supervisor.turn_arming import run_beside
 
 _CENSUS_THREAD = "turn-member-census"
 
@@ -88,7 +88,7 @@ def test_the_census_and_the_tool_mark_fence_run_side_by_side():
 
     turn = _start(supervisor, lease.token)
 
-    member = supervisor._members["athr_source"].members["athr_source"]
+    member = supervisor.state.members["athr_source"].members["athr_source"]
     assert factory.transports[-1].turns == [turn]
     assert member.activation_processes == ((41, 400),)
     assert member.tool_mark_reader is not None
@@ -146,7 +146,7 @@ def test_a_failed_census_beside_the_fence_fails_the_turn_before_its_prompt():
     with pytest.raises(SandboxError, match="member process census failed"):
         _start(supervisor, lease.token)
 
-    member = supervisor._members["athr_source"].members["athr_source"]
+    member = supervisor.state.members["athr_source"].members["athr_source"]
     assert factory.transports[-1].turns == []
     assert member.turn_lock.locked() is False
     assert member.current_turn is None
@@ -181,7 +181,7 @@ def test_a_failed_tool_mark_fence_waits_for_the_census_before_failing_the_turn()
 
     assert census_finished.is_set()
     assert _census_threads() == []
-    member = supervisor._members["athr_source"].members["athr_source"]
+    member = supervisor.state.members["athr_source"].members["athr_source"]
     assert member.turn_lock.locked() is False
     assert factory.transports[-1].turns == []
 
@@ -203,7 +203,7 @@ def test_a_lease_lost_while_arming_side_by_side_is_refused_before_the_prompt():
     with pytest.raises(SessionLeaseLost, match="before turn admission"):
         _start(supervisor, lease.token)
 
-    member = supervisor._members["athr_source"].members["athr_source"]
+    member = supervisor.state.members["athr_source"].members["athr_source"]
     assert factory.transports[-1].turns == []
     assert member.turn_lock.locked() is False
     assert _census_threads() == []
@@ -225,7 +225,7 @@ def test_a_kata_census_failure_opens_no_observation():
         _start(supervisor, lease.token)
 
     assert manager.events == []
-    member = supervisor._members["athr_source"].members["athr_source"]
+    member = supervisor.state.members["athr_source"].members["athr_source"]
     assert member.turn_lock.locked() is False
     assert factory.transports[-1].turns == []
 

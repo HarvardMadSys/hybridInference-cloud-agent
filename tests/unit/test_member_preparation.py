@@ -3,7 +3,7 @@
 The reap of its slot, the removal of stale pidfiles and credentials, the
 provider home's preparation and Claude's hook merge were one ``docker exec``
 each. They now run, in the order they ran, as processes of one host-supplied
-runner (``cloud_agent_host.member_preparation``). The runner tests below run
+runner (``cloud_agent_host.member_setup.member_preparation``). The runner tests below run
 it for real on this host, as the exec would run it in the guest; the launch
 tests read the queue each exec carries.
 """
@@ -20,25 +20,34 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from tests.support.owners import launch_connection
 
 from cloud_agent_host import resident_transport
-from cloud_agent_host.chat_sandbox import (
-    MEMBER_REAPER_TARGET,
+from cloud_agent_host.container.chat_sandbox import (
     MEMBER_UID_BASE,
     ChatSandboxManager,
     ChatSandboxSpec,
     claude_member_config_dir,
 )
-from cloud_agent_host.chat_sandbox_inspect import container_inspection
+from cloud_agent_host.container.chat_sandbox_inspect import container_inspection
+from cloud_agent_host.container.chat_sandbox_members import MEMBER_REAPER_TARGET
+from cloud_agent_host.container.chat_sandbox_models import BROWSER_SERVICE_UID
+from cloud_agent_host.container.sandbox import KATA_RUNTIME, ContainerBackend, SandboxError
 from cloud_agent_host.drivers import DriverError
-from cloud_agent_host.member_preparation import (
+from cloud_agent_host.launch import inference as inference_facet
+from cloud_agent_host.member_setup.compat_helper import helper_key
+from cloud_agent_host.member_setup.member_preparation import (
     RUNNER,
     TOOL_HOOKS_SCRIPT,
     MemberPreparation,
     MemberStep,
 )
 from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTransportFactory
-from cloud_agent_host.sandbox import ContainerBackend, SandboxError
+from cloud_agent_host.runtimes.claude import member as claude_member
+from cloud_agent_host.runtimes.codex import member as codex_member
+from cloud_agent_host.runtimes.pi import member as pi_member
+from cloud_agent_host.sandbox_browser import LAUNCHER
+from cloud_agent_host.sandbox_mcp import GATEWAY
 from cloud_agent_shared.environment import BoundEnvironment, EnvironmentVariable
 
 _SPEC = ChatSandboxSpec(
@@ -238,10 +247,11 @@ def test_each_step_sees_the_environment_its_own_exec_gave_it(tmp_path):
 
     preparation.run()
 
-    alone = subprocess.run(
-        ["/bin/sh", "-c", "env"], env=exec_environment, cwd="/", capture_output=True, check=True
-    )
-    assert sorted(seen.read_bytes().splitlines()) == sorted(alone.stdout.splitlines())
+    # Run the same redirected command: bash can exec-optimize a bare `env`,
+    # changing SHLVL even without the preparation runner.
+    alone = tmp_path / "seen-alone"
+    subprocess.run(["/bin/sh", "-c", f"env > {alone}"], env=exec_environment, cwd="/", check=True)
+    assert sorted(seen.read_bytes().splitlines()) == sorted(alone.read_bytes().splitlines())
     assert b"LC_CTYPE" not in seen.read_bytes()
 
 
@@ -299,6 +309,78 @@ def test_a_runner_that_ends_early_fails_the_step_it_was_in(tmp_path, capsys):
     assert calls[-1] == ["/bin/sh", "-c", f"touch {after}"]
 
 
+def test_kata_executes_member_steps_individually(tmp_path):
+    manager = _LocalExec()
+    manager.backend = SimpleNamespace(runtime=KATA_RUNTIME)
+    preparation = _preparation(manager)
+    log = tmp_path / "log"
+    _queue(preparation, _step(f"echo first >> {log}"), _step(f"echo second >> {log}"))
+
+    preparation.run()
+
+    assert log.read_text() == "first\nsecond\n"
+    assert len(manager.calls) == 2
+    assert all(call[0][0] == "/bin/sh" for call in manager.calls)
+
+
+def test_kata_reap_failure_stops_all_following_steps(tmp_path):
+    manager = _LocalExec()
+    manager.backend = SimpleNamespace(runtime=KATA_RUNTIME)
+    preparation = _preparation(manager)
+    after = tmp_path / "after"
+    reap = _step(
+        'read line; test "$line" = baseline || exit 12; exit 9',
+        failure="reap",
+        input_bytes=b"baseline\n",
+        reaps=True,
+    )
+    _queue(preparation, reap, _step(f"touch {after}"))
+
+    with pytest.raises(SandboxError, match=r"^reap:"):
+        preparation.run()
+
+    assert manager.reaper_ensured == 1
+    assert len(manager.calls) == 1
+    assert manager.calls[0][1]["input_bytes"] == b"baseline\n"
+    assert not after.exists()
+
+
+def test_kata_soft_failure_continues_and_retry_preserves_order(tmp_path, capsys):
+    manager = _LocalExec()
+    manager.backend = SimpleNamespace(runtime=KATA_RUNTIME)
+    preparation = _preparation(manager)
+    secured = tmp_path / "secured"
+    after = tmp_path / "after"
+    _queue(
+        preparation,
+        _step("echo hooks-error >&2; exit 2", soft="hooks not installed"),
+        _step(
+            f"test -f {secured} || exit 75",
+            retry_status=75,
+            before_retry=lambda: secured.touch(),
+        ),
+        _step(f"touch {after}"),
+    )
+
+    preparation.run()
+
+    assert "hooks not installed: step failed: hooks-error" in capsys.readouterr().err
+    assert secured.exists() and after.exists()
+    assert len(manager.calls) == 4
+
+
+def test_successful_runner_with_missing_reports_does_not_blame_next_step():
+    def truncated(_spec, argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, b'{"status": 0, "stderr": ""}\n', b"")
+
+    preparation = _preparation(SimpleNamespace(exec_capture=truncated))
+    _queue(preparation, _step("true"), _step("true", failure="stale cleanup"))
+    with pytest.raises(
+        SandboxError, match=r"incomplete report \(1 of 2 steps\); outcome is unknown"
+    ):
+        preparation.run()
+
+
 def test_a_step_for_another_uid_is_refused():
     preparation = _preparation(_LocalExec())
     with pytest.raises(ValueError, match="as the member it is queued for"):
@@ -325,6 +407,12 @@ def _name(argv: list[str]) -> str:
         if marker in script:
             return name
     return argv[0]
+
+
+#: The sandbox's shared browser service, started as its own user before each CLI,
+#: and the first launch's revoke of any sandbox MCP admission the slot held.
+_BROWSER = ("exec", LAUNCHER, BROWSER_SERVICE_UID)
+_MCP_REVOKE = ("exec", GATEWAY, 0)
 
 
 class _Guest:
@@ -356,15 +444,19 @@ class _Guest:
 def _manager(guest: _Guest) -> ChatSandboxManager:
     manager = ChatSandboxManager(ContainerBackend(image="img", sandbox_namespace="ns"))
     # The reaper was found in this container at an earlier census.
-    proven = manager._proven.record(
+    proven = manager.exact._proven.record(
         _SPEC,
         container_inspection(
             {"Id": "container", "Name": "/chat", "State": {"Status": "running", "Running": True}}
         ),
     )
-    manager._proven.note_helper(proven, MEMBER_REAPER_TARGET)
+    manager.exact._proven.note_helper(proven, MEMBER_REAPER_TARGET)
+    # So was this host's member loopback service, which a direct plan's CLI
+    # starts behind: once found, a launch spends no exec on it.
+    manager.exact._proven.note_helper(proven, helper_key())
     manager.exec_capture = guest.exec_capture
     manager.spawn = lambda *_a, **_kw: guest.events.append(("spawn", None, None))
+    manager.await_member_launch = lambda *_a, **_kw: None
     for root_only in ("ensure_mcp_helpers", "ensure_kilo_mcp_runtime", "ensure_codex_mcp_policy"):
         setattr(manager, root_only, lambda *_a: None)
     return manager
@@ -379,9 +471,9 @@ def _launch(runtime_id: str, *, slot: int = 1, **changes: Any) -> ResidentLaunch
             native_session_id="native-member",
             model="model",
             reasoning_effort=None,
-            gateway_base_url="http://gateway",
             credential="residency-grant",
             slot_id=slot,
+            **launch_connection(runtime_id),
         ),
         **changes,
     )
@@ -440,7 +532,12 @@ def test_a_launch_runs_its_member_steps_in_one_exec_in_their_order(driver, runti
 
     factory.open(_SPEC, _launch(runtime_id))
 
-    assert guest.events == [("runner", queue, MEMBER_UID_BASE + 1), ("spawn", None, None)]
+    assert guest.events == [
+        ("runner", queue, MEMBER_UID_BASE + 1),
+        _BROWSER,
+        _MCP_REVOKE,
+        ("spawn", None, None),
+    ]
 
 
 @pytest.mark.parametrize("runtime_id", ["claude-code", "codex", "pi"])
@@ -451,9 +548,10 @@ def test_owner_credentials_are_written_by_their_own_exec_after_the_reap(driver, 
 
     factory.open(_SPEC, _launch(runtime_id, environment=_OWNER_SECRET))
 
-    (runner, write, spawn) = guest.events
+    (runner, write, browser, revoke, spawn) = guest.events
     assert runner[0] == "runner" and "reap" in runner[1]
     assert write == ("exec", "inference-env", MEMBER_UID_BASE + 1)
+    assert (browser, revoke) == (_BROWSER, _MCP_REVOKE)
     assert spawn[0] == "spawn"
 
 
@@ -468,12 +566,12 @@ def test_plugin_installers_find_their_slot_reaped_and_home_prepared(
         guest.events.append(("install", None, None))
         return {}
 
-    for installer in (
-        "install_claude_plugins",
-        "install_codex_plugins",
-        "install_other_runtime_plugins",
+    for module, installer in (
+        (claude_member, "install_claude_plugins"),
+        (codex_member, "install_codex_plugins"),
+        (pi_member, "install_other_runtime_plugins"),
     ):
-        monkeypatch.setattr(resident_transport, installer, install)
+        monkeypatch.setattr(module, installer, install)
     plugins = (
         ({"plugin": "@owner/plugin@1.2.3"},)
         if runtime_id == "pi"
@@ -491,6 +589,8 @@ def test_plugin_installers_find_their_slot_reaped_and_home_prepared(
         # After the installers, alone, as before: its failure is the driver's to report.
         *hooks,
         ("exec", "inference-env", MEMBER_UID_BASE + 1),
+        _BROWSER,
+        _MCP_REVOKE,
         ("spawn", None, None),
     ]
 
@@ -525,6 +625,8 @@ def test_an_untrusted_collection_is_secured_and_the_queue_resumed_from_the_home(
         ("runner", ["home", "reap", "stale"], MEMBER_UID_BASE + 1),
         ("exec", "collections", None),  # as the sandbox user, never a member
         ("runner", ["home", "reap", "stale"], MEMBER_UID_BASE + 1),
+        _BROWSER,
+        _MCP_REVOKE,
         ("spawn", None, None),
     ]
 
@@ -552,3 +654,43 @@ def test_the_hooks_reach_the_members_own_settings_through_the_queue(driver):
     assert json.loads(base64.b64decode(hooks["input"])) == {"hooks": {"PreToolUse": []}}
     assert hooks["soft"] is True and hooks["timeout"] == 10
     assert all(not step["soft"] for step in captured[:-1])
+
+
+def test_claude_slot_is_reaped_before_new_member_launch_state(monkeypatch):
+    """Moved from test_shared_session_supervisor; the browser service starts before the CLI."""
+    events: list[str] = []
+    contexts: list[Any] = []
+    manager = SimpleNamespace(
+        backend=SimpleNamespace(gid=10001, base_env=lambda: {}),
+        reap_member_processes=lambda *_args, **_kwargs: events.append("reap"),
+        exec_capture=lambda _spec, argv, **_kwargs: (
+            events.append({LAUNCHER: "browser", GATEWAY: "mcp"}.get(argv[0], argv[0]))
+            or subprocess.CompletedProcess(argv, 0, b"", b"")
+        ),
+        spawn=lambda *_args, **_kwargs: events.append("spawn"),
+        await_member_launch=lambda *_args, **_kwargs: None,
+    )
+    factory = ResidentTransportFactory(manager)  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        claude_member, "prepare_member_state", lambda *_args: events.append("prepare")
+    )
+    # A direct plan's CLI starts behind its request meter, installed last.
+    monkeypatch.setattr(
+        inference_facet, "install_compat_helper", lambda *_args: events.append("helper")
+    )
+
+    def launch_live(context):
+        contexts.append(context)
+        return SimpleNamespace(
+            ensure_started=lambda **_kwargs: context.spawn_live(["claude"], {}),
+            process_alive=lambda: True,
+        )
+
+    monkeypatch.setattr(
+        resident_transport, "get_driver", lambda _runtime: SimpleNamespace(launch_live=launch_live)
+    )
+
+    factory.open(_SPEC, _launch("claude-code", native_session_id=None, thread_id="athr_new"))
+
+    assert events == ["reap", "prepare", "browser", "mcp", "helper", "spawn"]
+    assert contexts[0].claude_config_dir == claude_member_config_dir(1, "athr_new")

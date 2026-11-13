@@ -33,7 +33,7 @@ from cloud_agent.providers.compute.host_bootstrap import (
     _REQUIRED_ENV,
     SshHostBootstrap,
 )
-from cloud_agent_host.chat_sandbox_models import CHAT_NAMESPACE_LABEL
+from cloud_agent_host.container.chat_sandbox_models import CHAT_NAMESPACE_LABEL
 from cloud_agent_host.runtime_images import (
     NAMESPACE_LABEL,
     RUNTIME_LABEL,
@@ -96,7 +96,7 @@ def setup(tmp_path, *, unsafe_member=None):
     env = dict.fromkeys(_REQUIRED_ENV, "value")
     files = {}
     secrets = {}
-    for prefix in ("AGENT_TUNNEL", "AGENT_MCP_TUNNEL", "AGENT_CONTROL_PLANE_TUNNEL"):
+    for prefix in ("AGENT_MCP_TUNNEL", "AGENT_CONTROL_PLANE_TUNNEL"):
         for suffix in ("SSH_KEY", "SSH_KNOWN_HOSTS"):
             filename = ".compute-secrets/" + prefix.lower() + "-" + suffix.lower()
             ref = "deployment:" + prefix.lower() + "-" + suffix.lower()
@@ -605,7 +605,7 @@ async def test_checked_operator_example_loads_and_renders_real_bootstrap_payload
     tmp_path, monkeypatch
 ):
     """The shipped runbook profile must satisfy the actual deployment boundary."""
-    from cloud_agent.compute_config import ComputeConfiguration
+    from cloud_agent.providers.compute.compute_config import ComputeConfiguration
 
     repo = Path(__file__).resolve().parents[2]
     document = json.loads((repo / "deploy/control-plane/compute.example.json").read_text())
@@ -639,11 +639,11 @@ async def test_checked_operator_example_loads_and_renders_real_bootstrap_payload
         )
         assert env["AGENT_MCP_TUNNEL_REMOTE_PORT"] == "8001"
         assert env["AGENT_CONTROL_PLANE_TUNNEL_REMOTE_PORT"] == "8000"
-        assert env["AGENT_TUNNEL_SSH_KEY"] == "/opt/cloud-agent-pilot/.compute-secrets/gateway.key"
+        assert "AGENT_TUNNEL_SSH_KEY" not in env
         assert env["AGENT_SANDBOX_MANAGER_REVERSE_PORT"] == "19092"
         assert "{" not in archive.extractfile(".env").read().decode()
         secrets = [m for m in archive.getmembers() if m.name.startswith(".compute-secrets/")]
-        assert len(secrets) == 6
+        assert len(secrets) == 4
         # The secrets above were written without a final newline, as an Admin
         # request delivers them; OpenSSH cannot read a key in that form.
         for member in secrets:
@@ -784,7 +784,7 @@ def _saved_checkpoint(archives: Path, sandbox_id: str = "asbx_one") -> dict:
     """Have the Host's checkpoint store keep a receipt; return what the control plane recorded."""
     from tests.unit.test_sandbox_checkpoints import _receipt
 
-    from cloud_agent_host.sandbox_checkpoints import SandboxCheckpointStore
+    from cloud_agent_host.archive.sandbox_checkpoints import SandboxCheckpointStore
 
     receipt = _receipt(sandbox_id)
     SandboxCheckpointStore(archives / "checkpoints").save(receipt)
@@ -800,15 +800,13 @@ def _discarded(
     """
     from tests.unit.test_sandbox_deletion_backup import _Manager
 
-    from cloud_agent_host.chat_sandbox import ChatSandboxSpec
-    from cloud_agent_host.sandbox_deletion_backup import (
+    from cloud_agent_host.archive.sandbox_deletion_backup import (
         ArchiveIdentity,
         SandboxDeletionBackupService,
     )
-    from cloud_agent_host.shared_session_supervisor import (
-        SharedChatSessionSupervisor,
-        SharedMemberManifest,
-    )
+    from cloud_agent_host.container.chat_sandbox import ChatSandboxSpec
+    from cloud_agent_host.supervisor.shared_session_state import SharedMemberManifest
+    from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 
     spec = ChatSandboxSpec(
         thread_id="thread-origin", sandbox_id="sandbox-1", generation=2, runtime_id="claude-code"
@@ -1377,11 +1375,16 @@ async def test_inventory_believes_only_its_own_reasons(tmp_path):
         "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY",
         "AGENT_CONTROL_TOKEN_SECRET",
         "AGENT_SESSION_SECRET",
+        "AGENT_LOCAL_SESSION_SECRET",
+        "AGENT_SMTP_PASSWORD",
     ],
 )
 async def test_deployment_environment_rejects_unrelated_and_control_plane_authority(tmp_path, name):
     bootstrap, profile, transport, secrets = setup(tmp_path)
     secrets["deployment:env"] += f"\n{name}=must-not-leave-control-plane"
+    with pytest.raises(ProviderError, match="security boundary"):
+        await bootstrap._archive(profile, INTENT, SecretStr("enrollment"))
+    transport.run.assert_not_awaited()
     with pytest.raises(ProviderError, match="security boundary"):
         await bootstrap.deploy(NODE, profile, INTENT, SecretStr("enrollment"))
     assert transport.run.await_count == 1
@@ -1407,3 +1410,35 @@ async def test_a_template_can_name_the_sandbox_image_published_for_the_deployed_
         "ghcr.io/harvardmadsys/cloud-agent-sandbox:sandbox-" + profile.deployment_sha
     )
     assert env["AGENT_SANDBOX_IMAGE_PULL"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_writes_no_account_mode_and_no_inference_relay(tmp_path):
+    bootstrap, profile, _transport, _secrets = setup(tmp_path)
+    payload = await bootstrap._archive(profile, INTENT, SecretStr("enrollment"))
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+        env = dotenv_values(stream=io.StringIO(archive.extractfile(".env").read().decode()))
+        assert "AGENT_AUTH_MODE" not in env
+        assert not any(name.startswith("AGENT_TUNNEL_") for name in env)
+        assert "AGENT_MCP_TUNNEL_SSH_DESTINATION" in env
+        assert "AGENT_CONTROL_PLANE_TUNNEL_SSH_DESTINATION" in env
+        assert not any("agent_tunnel-" in name for name in archive.getnames())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stale",
+    [
+        "AGENT_AUTH_MODE=local",
+        "AGENT_AUTH_MODE=gateway",
+        "AGENT_GATEWAY_URL=http://inference:8080",
+        "AGENT_TUNNEL_SSH_DESTINATION=tunnel@inference.example",
+        "AGENT_TUNNEL_SSH_KEY=/keys/inference",
+    ],
+)
+async def test_a_profile_naming_the_retired_mode_or_inference_relay_is_refused(tmp_path, stale):
+    bootstrap, profile, transport, secrets = setup(tmp_path)
+    secrets["deployment:env"] += "\n" + stale
+    with pytest.raises(ProviderError, match="removed Gateway inference relay"):
+        await bootstrap._archive(profile, INTENT, None)
+    transport.run.assert_not_awaited()

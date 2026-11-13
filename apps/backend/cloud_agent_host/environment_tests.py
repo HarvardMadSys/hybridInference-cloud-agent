@@ -6,22 +6,29 @@ import contextlib
 import logging
 import threading
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from cloud_agent_host.chat_sandbox import ChatSandboxManager, ChatSandboxSpec, RetainedChatBackend
-from cloud_agent_host.chat_sandbox_models import ENVIRONMENT_TEST_LABEL
+from cloud_agent_host.container.chat_sandbox import (
+    ChatSandboxManager,
+    ChatSandboxSpec,
+)
+from cloud_agent_host.container.chat_sandbox_models import ENVIRONMENT_TEST_LABEL
+from cloud_agent_host.container.retained_backend import RetainedChatBackend
 from cloud_agent_host.environment_preparation import (
     RUNNING_PROGRESS_INTERVAL_S,
     EnvironmentPreparation,
     run_step,
     write_setup_marker,
 )
-from cloud_agent_host.host_control import keepalive_client
+from cloud_agent_host.service.host_control import keepalive_client
 from cloud_agent_shared.environment import ENVIRONMENT_CAPABILITY, BoundEnvironment
 from cloud_agent_shared.environment_snapshots import ENVIRONMENT_SNAPSHOT_CAPABILITY
 from cloud_agent_shared.secret_redaction import SecretRedactor
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 #: Snapshot ids per question to the control plane; one Sandbox Manager delete
 #: request takes as many.
@@ -67,7 +74,7 @@ def claim_and_execute(
     open; without one, this opens its own. ``attestation`` is the proof the
     claim loop just built for its own claim; without one, this builds it.
     """
-    from cloud_agent_host.runner import _claim_attestation
+    from cloud_agent_host.service.host_capabilities import claim_attestation
 
     with contextlib.ExitStack() as stack:
         if client is None:
@@ -100,7 +107,7 @@ def claim_and_execute(
             "/v1/agent/worker/environment-runs/claim",
             json={
                 "capabilities": [ENVIRONMENT_CAPABILITY, ENVIRONMENT_SNAPSHOT_CAPABILITY],
-                "attestation": _claim_attestation(backend) if attestation is None else attestation,
+                "attestation": claim_attestation(backend) if attestation is None else attestation,
             },
         )
         response.raise_for_status()
@@ -237,7 +244,8 @@ def execute_test(
     *, client: Any, run: dict[str, Any], backend: Any, stop: threading.Event | None = None
 ) -> None:
     """Prepare exact source, install/start/verify, then remove the ephemeral group."""
-    from cloud_agent_host.runner import ClaimedJob, _SourcePrefetch
+    from cloud_agent_host.claimed_job import ClaimedJob
+    from cloud_agent_host.turn.source_preparation import GitSourcePrefetch
 
     bound = BoundEnvironment.model_validate(run["environment"])
     prebuild = run.get("purpose") == "prebuild"
@@ -286,10 +294,9 @@ def execute_test(
             runtime="claude-code",
             model="",
             worker_token="",
-            sandbox_token="",
             clone_token=run.get("clone_token"),
         )
-        source = _SourcePrefetch(job, uid=backend.uid, gid=backend.gid, max_bytes=None)
+        source = GitSourcePrefetch(job, uid=backend.uid, gid=backend.gid, max_bytes=None)
         source_sha = source.import_into(manager, spec)
         manager.prepare_shared_workspace(spec)
         retained = RetainedChatBackend(manager, spec)
@@ -382,7 +389,8 @@ def _save_snapshot(
     container is committed and uploaded by the sandbox manager, which holds
     the bucket's credentials.
     """
-    from cloud_agent_host.runner import _SAFE_DIRECTORY_ENV, _session_supervisor_from_env
+    from cloud_agent_host.sandbox_manager_client import sandbox_manager_from_env
+    from cloud_agent_host.turn.source_preparation import SAFE_DIRECTORY_ENV
 
     if lockfiles is None:
         raise RuntimeError("the checkout's dependency manifests are unknown")
@@ -401,7 +409,7 @@ def _save_snapshot(
             "-c",
             "set -eu; git ls-files -z | xargs -0 -r rm -f --; rm -rf .git",
         ],
-        env=dict(_SAFE_DIRECTORY_ENV),
+        env=dict(SAFE_DIRECTORY_ENV),
         workdir="/workspace",
         timeout_s=300,
         user_uid=manager.backend.uid,
@@ -411,7 +419,7 @@ def _save_snapshot(
     if removed.returncode != 0:
         raise RuntimeError("the repository could not be removed from the snapshot")
     manager.stop(spec, expected_container_id=container_id)
-    receipt = _session_supervisor_from_env().capture_environment_snapshot(
+    receipt = sandbox_manager_from_env().capture_environment_snapshot(
         run_id=str(run["id"]),
         lease_generation=int(run["lease_generation"]),
         container_id=container_id,
@@ -424,12 +432,14 @@ def _save_snapshot(
 
 def _delete_retired_snapshots(client: httpx.Client) -> None:
     """Delete retired snapshots' stored objects, and drop retired images held here."""
-    from cloud_agent_host.runner import _session_supervisor_from_env
-    from cloud_agent_host.sandbox import SandboxError
-    from cloud_agent_host.session_supervisor_client import SessionSupervisorError
+    from cloud_agent_host.container.sandbox import SandboxError
+    from cloud_agent_host.sandbox_manager_client import (
+        SandboxManagerError,
+        sandbox_manager_from_env,
+    )
 
     try:
-        supervisor = _session_supervisor_from_env()
+        supervisor = sandbox_manager_from_env()
     except SandboxError:
         # Without a Sandbox Manager this host neither stores nor holds snapshots.
         return
@@ -443,7 +453,7 @@ def _delete_retired_snapshots(client: httpx.Client) -> None:
     # many snapshots were retired since.
     try:
         held = supervisor.environment_snapshot_images()
-    except SessionSupervisorError:
+    except SandboxManagerError:
         # An older Sandbox Manager cannot list them.
         return
     for start in range(0, len(held), _RETIRED_IMAGES_BATCH):
@@ -466,11 +476,20 @@ def _delete_retired_snapshots(client: httpx.Client) -> None:
 class EnvironmentTestWorker:
     """Keep test execution and orphan RPCs off the host's coding-task claim loop."""
 
-    def __init__(self, base_url: str, backend: Any) -> None:
+    def __init__(
+        self, base_url: str, backend: Any, *, on_idle: Callable[[], None] | None = None
+    ) -> None:
         self._base_url = base_url
         self._backend = backend
+        #: Called from the poll's thread once its claim or test is over, so a
+        #: claim loop waiting at capacity takes the freed slot at once.
+        self._on_idle = on_idle
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        #: Set before a poll's thread starts and cleared when its work is done,
+        #: before ``on_idle``: the loop that call wakes must find the slot free,
+        #: and the thread may still be alive for a moment as it exits.
+        self._in_flight = False
         self._next_poll = 0.0
         self._next_cleanup = 0.0
         self._next_snapshot_cleanup = 0.0
@@ -482,7 +501,7 @@ class EnvironmentTestWorker:
     @property
     def busy(self) -> bool:
         """Count an in-flight claim or test as one reserved local slot."""
-        return self._thread is not None and self._thread.is_alive()
+        return self._in_flight
 
     def poll(self, credential: str, attestation: dict[str, Any] | None = None) -> None:
         """Start at most one bounded poll without waiting for its HTTP or script work.
@@ -515,9 +534,19 @@ class EnvironmentTestWorker:
                 )
             except Exception:
                 logging.getLogger(__name__).warning("environment_test_poll_failed")
+            finally:
+                self._in_flight = False
+                if self._on_idle is not None:
+                    self._on_idle()
 
         self._thread = threading.Thread(target=execute, name="environment-test", daemon=True)
-        self._thread.start()
+        self._in_flight = True
+        try:
+            self._thread.start()
+        except BaseException:
+            # No thread started, so nothing holds the slot.
+            self._in_flight = False
+            raise
 
     def _client_for(self, credential: str) -> httpx.Client:
         """The client presenting ``credential``, replacing one made for another.

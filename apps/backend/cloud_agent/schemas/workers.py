@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 from cloud_agent.attachments.models import (
     AttachmentView,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
-from cloud_agent.execution_profiles import ExecutionProfile
+from cloud_agent.domain.execution_profiles import ExecutionProfile
 from cloud_agent.schemas._host_reports import (
     WORKER_ID_MAX_CHARS,
     ReportedText,
@@ -25,6 +25,7 @@ from cloud_agent_shared.model_connections import (  # noqa: TC001 — Pydantic r
 from cloud_agent_shared.plugins import (
     SandboxPlugin,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
+from cloud_agent_shared.sandbox_mcp import MAX_SANDBOX_MCP_SERVERS, SandboxMcpServer
 from cloud_agent_shared.sandbox_restore import CheckpointRestore, RestoreFormatVersion
 from cloud_agent_shared.shared_protocol import ABANDON_DETAIL_MAX_CHARS
 from cloud_agent_shared.ssh_access import (
@@ -249,8 +250,8 @@ class WorkerClaimResponse(BaseModel):
     #: The sandbox group's whole SSH state, keys included; absent for a group
     #: whose chats never selected an SSH server.
     ssh_access: SshAccess | None = Field(None, repr=False)
-    #: The owner's own model connection this turn runs on, key included;
-    #: absent for a Gateway turn. Only a host advertising
+    #: The owner's own model connection this turn runs on, key included. The
+    #: control plane hands a claim out only with one; only a host advertising
     #: ``MODEL_CONNECTION_CAPABILITY`` is ever handed one.
     model_connection: ModelConnectionAccess | None = Field(None, repr=False)
 
@@ -275,6 +276,9 @@ class WorkerClaimResponse(BaseModel):
     repo: str | None
     base_sha: str | None = None
     task_prompt: str
+    #: What the platform wrapped ``task_prompt`` in, by size and never by text
+    #: (``cloud_agent.application.prompt_injections``); the runner stores it on ``started``.
+    context_injections: list[dict[str, Any]] = Field(default_factory=list)
     setup_script: str | None = None
     plugins: list[SandboxPlugin] = Field(default_factory=list)
     runtime: str
@@ -304,14 +308,6 @@ class WorkerClaimResponse(BaseModel):
         ),
     )
     worker_token: str
-    sandbox_token: str = Field(
-        "",
-        description=(
-            "This attempt's gateway grant, scoped to the models it may call. It does "
-            "not enter the sandbox: each member's CLI runs on its own residency grant "
-            "from the sandbox residency route."
-        ),
-    )
     mcp_token: str = Field(
         "",
         description=(
@@ -329,22 +325,21 @@ class WorkerClaimResponse(BaseModel):
             "no GitHub App is configured, which is enough for a public repository."
         ),
     )
-    github_token: str | None = Field(
-        None,
-        repr=False,
-        description=(
-            "Short-lived GitHub App token scoped to this repository with contents and "
-            "pull_requests write permissions. Injected as GH_TOKEN in the owning sandbox "
-            "member for pushing branches and creating pull requests. Null when no GitHub "
-            "App installation covers the repository."
-        ),
-    )
     mcp_bindings: list[str] = Field(
         default_factory=list,
         description=(
             "Aliases of the MCP connections this job may reach through the control-plane "
             "relay. The runner passes them to the runtime adapter; it never learns their "
             "addresses or their credentials."
+        ),
+    )
+    sandbox_mcp_servers: list[SandboxMcpServer] = Field(
+        default_factory=list,
+        max_length=MAX_SANDBOX_MCP_SERVERS,
+        description=(
+            "MCP servers the owner chose to run inside the sandbox, next to the agent, "
+            "with their pinned launch. The host admits them to the sandbox's MCP gateway "
+            "for the member that runs this job. They carry no secret."
         ),
     )
     metadata: dict[str, Any] | None = None
@@ -429,7 +424,7 @@ class WorkerSandboxRunningRequest(BaseModel):
 
 
 class WorkerSandboxResidencyRequest(BaseModel):
-    """Mint/rotate the renewable grant for a supervisor-owned member process."""
+    """Establish or rotate the residency of a supervisor-owned member process."""
 
     sandbox_id: str = Field(..., min_length=1, max_length=256)
     runtime_id: str = Field(..., min_length=1, max_length=128)
@@ -527,9 +522,8 @@ class WorkerFinishRequest(BaseModel):
         max_length=255,
         description=(
             "Branch to work from. Resolved to a commit at creation and stored as "
-            "base_sha — a branch moves, and the publisher applies onto a pinned commit. "
-            "The draft PR targets this branch; jobs that name none target the "
-            "deployment default."
+            "base_sha, because a branch moves and the conversation works from one "
+            "commit. Jobs that name none start from the repository's default branch."
         ),
     )
     base_sha: str | None = Field(
@@ -537,8 +531,8 @@ class WorkerFinishRequest(BaseModel):
         pattern=r"^[0-9a-fA-F]{7,64}$",
         description=(
             "The commit the agent actually worked from. Recorded only when the job "
-            "did not already carry one — the publisher cannot apply a patch without "
-            "knowing its base, and a job may be submitted without naming a commit."
+            "did not already carry one: a job may be submitted without naming a "
+            "commit, and its follow-ups start from this one."
         ),
     )
 

@@ -32,7 +32,7 @@ from pathlib import Path
 from cloud_agent.domain import execution
 
 REPO = Path(__file__).resolve().parents[2]
-VERSIONS = REPO / "migrations/versions"
+VERSIONS = REPO / "apps/backend/migrations/versions"
 STORAGE = REPO / "apps" / "backend" / "cloud_agent/storage"
 
 #: The states ``0005_queued_follow_ups`` removed, and why. Kept here so a

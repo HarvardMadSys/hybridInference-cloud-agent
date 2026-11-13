@@ -7,7 +7,11 @@ import pytest
 from tests.integration.storage.test_agent_job_store import _create_job
 from tests.integration.storage.test_attempt_ledger import db as db, store as store
 
-from cloud_agent.admin_database import DatabaseQuery, DatabaseQueryInvalid, DatabaseQueryTimeout
+from cloud_agent.schemas.admin_database import (
+    DatabaseQuery,
+    DatabaseQueryInvalid,
+    DatabaseQueryTimeout,
+)
 
 pytestmark = [pytest.mark.dbtest, pytest.mark.asyncio]
 
@@ -53,6 +57,13 @@ async def test_schema_and_rows_exclude_credentials_content_and_new_columns(db, s
     finally:
         async with db.acquire() as conn:
             await conn.execute("ALTER TABLE agent_jobs DROP COLUMN browser_future_secret")
+
+
+async def test_composite_primary_keys_keep_their_declared_order(store):
+    schema = await store.admin_database.list_tables()
+    keys = {table.name: table.primary_key for table in schema.tables}
+    assert keys["agent_thread_pull_requests"] == ["thread_id", "repo", "number"]
+    assert keys["agent_tool_call_resources"] == ["attempt_id", "call_seq"]
 
 
 async def test_numeric_boolean_time_null_filters_and_stable_pagination(db, store):

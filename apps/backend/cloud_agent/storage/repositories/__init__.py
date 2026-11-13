@@ -8,19 +8,28 @@ transaction ownership it has here.
 
 from __future__ import annotations
 
+from cloud_agent.storage.repositories.account_provisioning import (
+    PostgresAccountProvisioningRepository,
+)
+from cloud_agent.storage.repositories.accounts import PostgresLocalAccountRepository
 from cloud_agent.storage.repositories.agent_memory import PostgresAgentMemoryRepository
 from cloud_agent.storage.repositories.attachments import PostgresAttachmentRepository
 from cloud_agent.storage.repositories.attempt_commands import PostgresAttemptCommands
 from cloud_agent.storage.repositories.audit import PostgresAuditRepository
 from cloud_agent.storage.repositories.audit_log import PostgresAuditLogRepository
-from cloud_agent.storage.repositories.compute_resources import PostgresComputeResourceRepository
+from cloud_agent.storage.repositories.command_execution_queries import (
+    PostgresCommandExecutionQueries,
+)
+from cloud_agent.storage.repositories.compute import PostgresComputeResourceRepository
+from cloud_agent.storage.repositories.context_queries import PostgresContextQueries
 from cloud_agent.storage.repositories.conversation_commands import PostgresConversationCommands
 from cloud_agent.storage.repositories.conversation_queries import PostgresConversationQueries
 from cloud_agent.storage.repositories.credential_queries import PostgresCredentialQueries
 from cloud_agent.storage.repositories.execution_queries import PostgresExecutionQueries
+from cloud_agent.storage.repositories.file_activity import PostgresFileActivityQueries
+from cloud_agent.storage.repositories.github_relay import PostgresGitHubRelayRepository
 from cloud_agent.storage.repositories.goal_wakeups import PostgresGoalWakeupRepository
 from cloud_agent.storage.repositories.goals import PostgresGoalRepository
-from cloud_agent.storage.repositories.grants import PostgresGrantRepository
 from cloud_agent.storage.repositories.host_capacity import PostgresHostCapacityRepository
 from cloud_agent.storage.repositories.host_pool import PostgresHostPoolRepository
 from cloud_agent.storage.repositories.ledger import PostgresLedgerRepository
@@ -39,16 +48,17 @@ from cloud_agent.storage.repositories.operation_measurements import (
     PostgresOperationMeasurementRepository,
 )
 from cloud_agent.storage.repositories.owner_usage import PostgresOwnerUsageRepository
+from cloud_agent.storage.repositories.owner_work import PostgresOwnerWorkRepository
 from cloud_agent.storage.repositories.pending_messages import PostgresPendingMessageRepository
 from cloud_agent.storage.repositories.profiling_control import (
     PostgresProfilingControlRepository,
 )
 from cloud_agent.storage.repositories.residency import PostgresResidencyRepository
-from cloud_agent.storage.repositories.sandbox import PostgresSandboxRepository
+from cloud_agent.storage.repositories.sandbox.repository import PostgresSandboxRepository
+from cloud_agent.storage.repositories.sandbox_incidents import PostgresSandboxIncidentRepository
 from cloud_agent.storage.repositories.session_fork import PostgresSessionForkRepository
 from cloud_agent.storage.repositories.settings import PostgresSettingsRepository
 from cloud_agent.storage.repositories.skills import PostgresSkillRepository
-from cloud_agent.storage.repositories.snapshot import PostgresSnapshotRepository
 from cloud_agent.storage.repositories.source_control import PostgresSourceControlRepository
 from cloud_agent.storage.repositories.ssh_servers import PostgresSshServerRepository
 from cloud_agent.storage.repositories.team_admin import PostgresTeamAdminQueries
@@ -58,22 +68,27 @@ from cloud_agent.storage.repositories.web_search import PostgresWebSearchReposit
 from cloud_agent.storage.repositories.work_insights import PostgresWorkInsightsRepository
 
 __all__ = [
+    "PostgresAccountProvisioningRepository",
     "PostgresAgentMemoryRepository",
     "PostgresAttachmentRepository",
     "PostgresAttemptCommands",
     "PostgresAuditLogRepository",
     "PostgresAuditRepository",
+    "PostgresCommandExecutionQueries",
     "PostgresComputeResourceRepository",
+    "PostgresContextQueries",
     "PostgresConversationCommands",
     "PostgresConversationQueries",
     "PostgresCredentialQueries",
     "PostgresExecutionQueries",
+    "PostgresFileActivityQueries",
+    "PostgresGitHubRelayRepository",
     "PostgresGoalRepository",
     "PostgresGoalWakeupRepository",
-    "PostgresGrantRepository",
     "PostgresHostCapacityRepository",
     "PostgresHostPoolRepository",
     "PostgresLedgerRepository",
+    "PostgresLocalAccountRepository",
     "PostgresMcpCatalogRepository",
     "PostgresMcpConnectionRepository",
     "PostgresModelConnectionRepository",
@@ -81,14 +96,15 @@ __all__ = [
     "PostgresNotificationMaintenanceRepository",
     "PostgresOperationMeasurementRepository",
     "PostgresOwnerUsageRepository",
+    "PostgresOwnerWorkRepository",
     "PostgresPendingMessageRepository",
     "PostgresProfilingControlRepository",
     "PostgresResidencyRepository",
+    "PostgresSandboxIncidentRepository",
     "PostgresSandboxRepository",
     "PostgresSessionForkRepository",
     "PostgresSettingsRepository",
     "PostgresSkillRepository",
-    "PostgresSnapshotRepository",
     "PostgresSourceControlRepository",
     "PostgresSshServerRepository",
     "PostgresTeamAdminQueries",

@@ -5,7 +5,7 @@
 // release or any other from `getRuntimeVersions`. Rolling back is
 // `setAgentRuntimeVersion` in `./admin`, which also replaces the update and
 // keeps the chosen version on every server. See
-// `cloud_agent/runtime_upgrades.py` for how an update completes.
+// `cloud_agent/application/runtime_upgrades.py` for how an update completes.
 
 import { config } from '@/config/env';
 
@@ -47,6 +47,11 @@ export interface RuntimeUpgradeItem {
 
 export interface RuntimeUpgrades {
   runtimes: RuntimeUpgradeItem[];
+  /**
+   * Online servers, by host name, not yet reporting the saved agent package
+   * registry. No update starts until this is empty. Absent from an older API.
+   */
+  registry_waiting_on?: string[];
 }
 
 /** The npm releases one agent can move to. */

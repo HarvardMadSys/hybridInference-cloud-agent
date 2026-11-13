@@ -50,33 +50,33 @@ class Repository:
 
 
 async def test_environment_is_imported_once_and_saved_reset_ignores_later_env(monkeypatch):
-    monkeypatch.setenv("AGENT_PUBLISH_BASE_BRANCH", "release")
+    monkeypatch.setenv("AGENT_GITHUB_API", "https://release.example")
     repository = Repository()
     await settings.initialize_settings(repository)
-    assert settings.text_setting("publish_base_branch") == "release"
-    monkeypatch.setenv("AGENT_PUBLISH_BASE_BRANCH", "changed-env")
+    assert settings.text_setting("github_api_url") == "https://release.example"
+    monkeypatch.setenv("AGENT_GITHUB_API", "https://changed-env.example")
     await settings.initialize_settings(repository)
     assert repository.seeds == 1
-    assert settings.setting_env("AGENT_PUBLISH_BASE_BRANCH") == "release"
-    repository.values.update(settings.encode_changes({"publish_base_branch": None}))
+    assert settings.setting_env("AGENT_GITHUB_API") == "https://release.example"
+    repository.values.update(settings.encode_changes({"github_api_url": None}))
     settings.apply_settings(2, repository.values)
-    assert settings.setting_env("AGENT_PUBLISH_BASE_BRANCH") == "dev"
-    assert settings.settings_environment()["AGENT_PUBLISH_BASE_BRANCH"] == "dev"
-    assert __import__("os").environ["AGENT_PUBLISH_BASE_BRANCH"] == "changed-env"
+    assert settings.setting_env("AGENT_GITHUB_API") == "https://api.github.com"
+    assert settings.settings_environment()["AGENT_GITHUB_API"] == "https://api.github.com"
+    assert __import__("os").environ["AGENT_GITHUB_API"] == "https://changed-env.example"
 
 
 def test_secrets_are_encrypted_imported_write_only_and_bound_to_their_key(monkeypatch):
     secret = "test-dispatch-secret-unique-value"
-    monkeypatch.setenv("GATEWAY_GRANT_DISPATCH_TOKEN", secret)
+    monkeypatch.setenv("AGENT_MCP_GITHUB_CLIENT_SECRET", secret)
     encoded = settings.initial_settings()
     assert secret not in json.dumps(encoded)
     settings.apply_settings(1, encoded)
-    assert settings.setting_env("GATEWAY_GRANT_DISPATCH_TOKEN") == secret
+    assert settings.setting_env("AGENT_MCP_GITHUB_CLIENT_SECRET") == secret
     view = settings.settings_response(1, encoded)
-    assert view["values"]["gateway_dispatch_token"] is None
-    assert view["secret_configured"]["gateway_dispatch_token"] is True
+    assert view["values"]["mcp_github_client_secret"] is None
+    assert view["secret_configured"]["mcp_github_client_secret"] is True
     assert secret not in json.dumps(view)
-    moved = {**encoded, "oncall_dispatch_token": encoded["gateway_dispatch_token"]}
+    moved = {**encoded, "serper_api_key": encoded["mcp_github_client_secret"]}
     with pytest.raises(SettingsEncryptionError):
         settings.validate_stored_settings(moved)
 
@@ -84,8 +84,8 @@ def test_secrets_are_encrypted_imported_write_only_and_bound_to_their_key(monkey
 def test_secret_configuration_requires_a_stable_key(monkeypatch):
     monkeypatch.delenv("AGENT_SESSION_SECRET", raising=False)
     with pytest.raises(SettingsEncryptionError):
-        settings.encode_changes({"gateway_dispatch_token": "secret-that-must-never-be-persisted"})
-    assert settings.encode_changes({"github_publish_token": None}) == {"github_publish_token": ""}
+        settings.encode_changes({"sandbox_manager_token": "secret-that-must-never-be-persisted"})
+    assert settings.encode_changes({"serper_api_key": None}) == {"serper_api_key": ""}
 
 
 def test_stale_snapshots_do_not_revert_current_values():
@@ -101,8 +101,8 @@ def test_unchanged_and_stale_snapshots_do_not_decode_secrets(monkeypatch):
         pytest.fail("an already adopted revision must not be decoded again")
 
     monkeypatch.setattr(settings, "_decode", unexpected_decode)
-    settings.apply_settings(3, {"oncall_dispatch_token": "invalid"})
-    settings.apply_settings(2, {"oncall_dispatch_token": "invalid"})
+    settings.apply_settings(3, {"serper_api_key": "invalid"})
+    settings.apply_settings(2, {"serper_api_key": "invalid"})
     assert settings.text_setting("site.app_name") == "Current"
 
 
@@ -110,7 +110,7 @@ async def test_synchronization_polls_from_last_successfully_adopted_revision(mon
     repository = Repository()
     requested = []
     snapshots = [
-        (2, {"oncall_dispatch_token": "plaintext"}),
+        (2, {"serper_api_key": "plaintext"}),
         (2, {"site.app_name": "Next"}),
         (-1, {}),
     ]
@@ -206,53 +206,51 @@ def test_one_key_at_a_time_repairs_every_stored_value_this_release_refuses():
         update = {**stored, **settings.encode_changes({key: None})}
         settings.validate_settings_update(stored, update)
         stored = update
-    unrelated = {**stored, **settings.encode_changes({"publish_base_branch": "main"})}
+    unrelated = {**stored, **settings.encode_changes({"github_api_url": "https://main.example"})}
     settings.validate_settings_update(stored, unrelated)
 
 
 def test_a_stored_pair_out_of_order_falls_back_to_both_defaults():
     stored = {
         **settings.initial_settings(),
-        "task_titles.timeout_seconds": 100.0,
-        "task_titles.total_timeout_seconds": 50.0,
+        "goals.wakeup_backoff_seconds": 100.0,
+        "goals.wakeup_backoff_max_seconds": 50.0,
     }
     settings.apply_settings(1, stored)
-    assert settings.number_setting("task_titles.timeout_seconds") == 10.0
-    assert settings.number_setting("task_titles.total_timeout_seconds") == 120.0
+    assert settings.number_setting("goals.wakeup_backoff_seconds") == 5.0
+    assert settings.number_setting("goals.wakeup_backoff_max_seconds") == 300.0
     # A pair the update does not touch does not block it either.
     settings.validate_settings_update(
-        stored, {**stored, **settings.encode_changes({"publish_base_branch": "main"})}
+        stored, {**stored, **settings.encode_changes({"github_api_url": "https://main.example"})}
     )
 
 
 def test_a_stored_key_shorter_than_its_minimum_is_kept_and_reported(caplog):
     """The default is no key at all, which would orphan everything it signed."""
-    definition = settings.SETTINGS_BY_KEY["session_signing_secret"]
+    definition = settings.SETTINGS_BY_KEY["compute_encryption_key"]
     stored = {
         **settings.initial_settings(),
-        "session_signing_secret": settings._encode(definition, "a-short-saved-key"),
+        "compute_encryption_key": settings._encode(definition, "a-short-saved-key"),
     }
     caplog.set_level(logging.WARNING, logger=settings.__name__)
 
     settings.apply_settings(1, stored)
 
-    assert settings.setting_env("AGENT_SESSION_SECRET") == "a-short-saved-key"
+    assert settings.setting_env("AGENT_COMPUTE_SECRET_KEY") == "a-short-saved-key"
     logged = _warnings(caplog)
     assert len(logged) == 1
-    assert "session_signing_secret" in logged[0]
+    assert "compute_encryption_key" in logged[0]
     assert "a-short-saved-key" not in logged[0]
     settings.validate_settings_update(
-        stored, {**stored, **settings.encode_changes({"publish_base_branch": "main"})}
+        stored, {**stored, **settings.encode_changes({"github_api_url": "https://main.example"})}
     )
     with pytest.raises(ValueError, match="at least 32 bytes"):
-        settings.encode_changes({"session_signing_secret": "another-short-key"})
+        settings.encode_changes({"compute_encryption_key": "another-short-key"})
 
 
 _KEYS_WITH_A_MINIMUM = (
     "control_signing_secret",
     "source_control_encryption_key",
-    "gateway_dispatch_token",
-    "oncall_dispatch_token",
 )
 
 
@@ -302,20 +300,20 @@ def test_an_update_still_cannot_save_an_ordering_it_breaks():
 
 
 def test_an_undecryptable_stored_secret_still_fails_closed(monkeypatch):
-    monkeypatch.setenv("GATEWAY_GRANT_DISPATCH_TOKEN", "test-dispatch-secret-unique-value")
+    monkeypatch.setenv("AGENT_MCP_GITHUB_CLIENT_SECRET", "test-dispatch-secret-unique-value")
     encoded = settings.initial_settings()
-    moved = {**encoded, "oncall_dispatch_token": encoded["gateway_dispatch_token"]}
+    moved = {**encoded, "serper_api_key": encoded["mcp_github_client_secret"]}
     with pytest.raises(SettingsEncryptionError):
         settings.apply_settings(1, moved)
     with pytest.raises(ValueError, match="Unencrypted stored secret"):
-        settings.apply_settings(1, {**encoded, "oncall_dispatch_token": "plaintext"})
+        settings.apply_settings(1, {**encoded, "serper_api_key": "plaintext"})
 
 
 async def test_a_failed_synchronization_names_the_setting_in_its_log(monkeypatch, caplog):
     """The message names a setting and never its value, so it is safe to log."""
     repository = Repository()
     repository.revision = 2
-    repository.values = {**settings.initial_settings(), "oncall_dispatch_token": "plaintext"}
+    repository.values = {**settings.initial_settings(), "serper_api_key": "plaintext"}
     ticks = 0
 
     async def tick(_delay):
@@ -329,18 +327,17 @@ async def test_a_failed_synchronization_names_the_setting_in_its_log(monkeypatch
     with pytest.raises(asyncio.CancelledError):
         await settings.synchronize_settings(repository)
     assert _warnings(caplog) == [
-        "settings synchronization failed "
-        "(ValueError: Unencrypted stored secret for On-call dispatch token)"
+        "settings synchronization failed (ValueError: Unencrypted stored secret for Serper API key)"
     ]
 
 
 async def test_a_secret_that_cannot_be_decrypted_is_named_in_the_log(monkeypatch, caplog):
     """Which stored credential failed is what an operator can act on; never its value."""
-    monkeypatch.setenv("GATEWAY_GRANT_DISPATCH_TOKEN", "test-dispatch-secret-unique-value")
+    monkeypatch.setenv("AGENT_MCP_GITHUB_CLIENT_SECRET", "test-dispatch-secret-unique-value")
     encoded = settings.initial_settings()
     repository = Repository()
     repository.revision = 2
-    repository.values = {**encoded, "oncall_dispatch_token": encoded["gateway_dispatch_token"]}
+    repository.values = {**encoded, "serper_api_key": encoded["mcp_github_client_secret"]}
     ticks = 0
 
     async def tick(_delay):
@@ -355,7 +352,7 @@ async def test_a_secret_that_cannot_be_decrypted_is_named_in_the_log(monkeypatch
         await settings.synchronize_settings(repository)
     assert _warnings(caplog) == [
         "settings synchronization failed "
-        "(SettingsEncryptionError: Stored secret for On-call dispatch token could not be decrypted)"
+        "(SettingsEncryptionError: Stored secret for Serper API key could not be decrypted)"
     ]
 
 
@@ -378,10 +375,21 @@ def test_a_url_policy_is_declared_only_on_url_settings():
     misdeclared = [
         definition.key
         for definition in settings.SETTINGS
-        if (definition.https_only or definition.https_unless_private or definition.mailto)
-        and not definition.url
+        if (definition.https_only or definition.mailto) and not definition.url
     ]
     assert misdeclared == []
+
+
+def test_what_an_operator_reads_names_no_one_deployment():
+    """Labels, descriptions and hints describe the product, not a deployment of it."""
+    read = ("label", "description", "hint", "apply_description")
+    named = [
+        (definition.key, field)
+        for definition in settings.SETTINGS
+        for field in read
+        if "freeinference" in getattr(definition, field).lower()
+    ]
+    assert named == []
 
 
 @pytest.mark.parametrize(
@@ -479,35 +487,35 @@ async def test_relay_never_seeds_a_partial_environment(monkeypatch):
         reads += 1
         repository.revision, repository.values = (
             1,
-            {**settings.initial_settings(), "publish_base_branch": "main-import"},
+            {**settings.initial_settings(), "github_api_url": "https://main-import.example"},
         )
 
     monkeypatch.setattr(settings.asyncio, "sleep", main_initializes)
     await settings.initialize_settings(repository, seed=False)
     assert repository.seeds == 0
     assert reads == 1
-    assert settings.text_setting("publish_base_branch") == "main-import"
+    assert settings.text_setting("github_api_url") == "https://main-import.example"
 
 
 async def test_upgrade_imports_new_fields_once_without_reimporting_old_settings(monkeypatch):
     repository = Repository()
     repository.revision = 4
-    repository.values = {"publish_base_branch": "saved-branch", "max_attempts": 3}
-    monkeypatch.setenv("AGENT_PUBLISH_BASE_BRANCH", "stale-env-branch")
-    monkeypatch.setenv("GATEWAY_ISSUER", "https://original.example")
+    repository.values = {"github_api_url": "https://saved.example", "max_attempts": 3}
+    monkeypatch.setenv("AGENT_GITHUB_API", "https://stale-env.example")
+    monkeypatch.setenv("AGENT_PUBLIC_API_URL", "https://original.example")
     monkeypatch.setenv("AGENT_CONTROL_TOKEN_SECRET", "private-host-signing-key-of-32-bytes")
     await settings.initialize_settings(repository)
     assert repository.revision == 5
-    assert settings.text_setting("publish_base_branch") == "saved-branch"
-    assert settings.text_setting("gateway_issuer") == "https://original.example"
+    assert settings.text_setting("github_api_url") == "https://saved.example"
+    assert settings.text_setting("public_api_url") == "https://original.example"
     assert (
         settings.setting_env("AGENT_CONTROL_TOKEN_SECRET") == "private-host-signing-key-of-32-bytes"
     )
     assert "private-host-signing-key-of-32-bytes" not in json.dumps(repository.values)
-    monkeypatch.setenv("GATEWAY_ISSUER", "https://stale-new-env.example")
+    monkeypatch.setenv("AGENT_PUBLIC_API_URL", "https://stale-new-env.example")
     await settings.initialize_settings(repository)
     assert repository.seeds == 1
-    assert settings.text_setting("gateway_issuer") == "https://original.example"
+    assert settings.text_setting("public_api_url") == "https://original.example"
 
 
 def test_missing_required_setup_is_reported_without_exposing_saved_secrets(monkeypatch):
@@ -519,10 +527,7 @@ def test_missing_required_setup_is_reported_without_exposing_saved_secrets(monke
     groups = {group["key"]: group for group in view["setup"]["groups"]}
     assert groups["sign_in"]["needs_setup"] is True
     assert groups["github"]["needs_setup"] is False
-    assert {field["key"] for field in groups["sign_in"]["missing"]} >= {
-        "gateway_issuer",
-        "gateway_jwks_url",
-    }
+    assert {field["key"] for field in groups["sign_in"]["missing"]} == {"web_base_url"}
     monkeypatch.setenv(
         "AGENT_SETTINGS_ENCRYPTION_KEY", "test-root-key-longer-than-thirty-two-bytes"
     )
@@ -538,12 +543,6 @@ def test_complete_required_setup_and_unused_optional_features_do_not_prompt():
     values.update(
         settings.encode_changes(
             {
-                "gateway_base_url": "https://gateway.example",
-                "gateway_dispatch_token": "test-dispatch-key-of-at-least-32-bytes",
-                "gateway_issuer": "https://identity.example",
-                "gateway_jwks_url": "https://gateway.example/jwks",
-                "gateway_authorize_url": "https://gateway.example/authorize",
-                "session_redirect_uri": "https://agents.example/callback",
                 "web_base_url": "https://agents.example",
                 "control_signing_secret": "test-control-key-longer-than-thirty-two-bytes",
                 "sandbox_manager_token": "test-sandbox-manager-key",
@@ -565,60 +564,6 @@ def test_existing_credential_encryption_keys_cannot_be_reset_or_replaced(key):
             settings.validate_settings_update(encoded, replacement)
 
 
-def _saved_gateway() -> dict[str, Any]:
-    return {
-        **settings.initial_settings(),
-        **settings.encode_changes(
-            {
-                "gateway_base_url": "https://gateway.example",
-                "gateway_dispatch_token": "gateway-dispatch-token-of-32-bytes",
-            }
-        ),
-    }
-
-
-def _moved(stored: dict[str, Any], **changes: Any) -> dict[str, Any]:
-    return {**stored, **settings.encode_changes(changes)}
-
-
-@pytest.mark.parametrize(
-    "url",
-    [
-        "https://attacker.example",
-        "http://localhost:8080",
-        "https://gateway.example:8443",
-    ],
-)
-def test_the_saved_dispatch_token_does_not_follow_the_gateway_url_to_another_origin(url):
-    """The token is write-only; an editor must not be able to send it elsewhere.
-
-    It authorizes minting grants for any user at the Gateway. Moving the URL it
-    is sent to, and leaving it saved, would deliver it to whoever owns the new
-    host, whatever the editor could read.
-    """
-    stored = _saved_gateway()
-    with pytest.raises(ValueError, match="Gateway dispatch token"):
-        settings.validate_settings_update(stored, _moved(stored, gateway_base_url=url))
-    # Nor in two steps, by clearing the URL and then naming a new one.
-    cleared = _moved(stored, gateway_base_url=None)
-    settings.validate_settings_update(stored, cleared)
-    with pytest.raises(ValueError, match="Gateway dispatch token"):
-        settings.validate_settings_update(cleared, _moved(cleared, gateway_base_url=url))
-
-
-def test_the_gateway_url_moves_when_its_token_is_reset_or_replaced_with_it():
-    stored = _saved_gateway()
-    for token in (None, "replacement-dispatch-token-of-32-bytes"):
-        settings.validate_settings_update(
-            stored,
-            _moved(stored, gateway_base_url="https://new.example", gateway_dispatch_token=token),
-        )
-    unbound = _moved(settings.initial_settings(), gateway_base_url="https://gateway.example")
-    settings.validate_settings_update(
-        unbound, _moved(unbound, gateway_base_url="https://new.example")
-    )
-
-
 async def test_public_site_settings_expose_only_display_allowlist():
     settings.apply_settings(
         1,
@@ -627,7 +572,6 @@ async def test_public_site_settings_expose_only_display_allowlist():
             "site.app_name": "Configured app",
             "site.docs_url": "https://docs.example.com/agents/",
             "site.contact_url": "mailto:support@example.com",
-            "site.feature_rag": True,
         },
     )
     async with httpx.AsyncClient(
@@ -637,7 +581,9 @@ async def test_public_site_settings_expose_only_display_allowlist():
     assert response.status_code == 200
     assert response.headers["Cache-Control"] == "no-store"
     view = response.json()
-    assert set(view) == {"branding", "features"}
+    assert set(view) == {"branding", "content"}
+    # The deployment's site files, not settings; none are mounted here.
+    assert view["content"] == {"sourceUrl": "", "team": []}
     assert set(view["branding"]) == {
         "appName",
         "orgName",
@@ -645,12 +591,10 @@ async def test_public_site_settings_expose_only_display_allowlist():
         "statusUrl",
         "docsUrl",
         "contactUrl",
-        "gatewayUrl",
     }
     assert view["branding"]["appName"] == "Configured app"
     assert view["branding"]["docsUrl"] == "https://docs.example.com/agents/"
     assert view["branding"]["contactUrl"] == "mailto:support@example.com"
-    assert view["features"] == {"rag": True}
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=create_mcp_app()), base_url="http://relay"
     ) as client:
@@ -700,24 +644,6 @@ def test_documentation_link_is_imported_from_the_environment(monkeypatch):
     assert settings.initial_settings()["site.docs_url"] == ""
 
 
-@pytest.mark.parametrize(
-    "prefix",
-    ["", "/", "relative", "//gateway.example/path", "/grants?x=1", "/grants#x", "/bad path"],
-)
-def test_invalid_grant_prefix_cannot_be_saved_and_break_client_startup(prefix):
-    with pytest.raises(ValueError, match="Grant API path"):
-        settings.encode_changes({"gateway_grant_base_path": prefix})
-
-
-@pytest.mark.parametrize("prefix", ["/internal/agent-grants", "/custom/grants/"])
-def test_saved_grant_prefix_can_be_loaded_by_a_gateway_client(prefix):
-    from cloud_agent.grants import GrantClient
-
-    settings.apply_settings(1, settings.encode_changes({"gateway_grant_base_path": prefix}))
-    client = GrantClient("https://gateway.example", "test-credential")
-    assert client._base_path == prefix.rstrip("/")
-
-
 def test_a_new_control_signing_key_must_be_at_least_32_bytes():
     """Every sandbox holds a worker token this key signed: a short one is guessable."""
     definition = settings.SETTINGS_BY_KEY["control_signing_secret"].definition()
@@ -763,20 +689,6 @@ async def test_credentials_at_the_floor_are_not_reported(monkeypatch, caplog):
     assert "agent_weak_credential" not in caplog.text
 
 
-@pytest.mark.parametrize("key", ["gateway_base_url", "gateway_jwks_url", "gateway_authorize_url"])
-@pytest.mark.parametrize(
-    "url",
-    ["http://gateway.example", "http://10.0.0.5:8080", "http://gateway.example.localhost.evil"],
-)
-def test_a_new_gateway_trust_url_must_use_https(key, url):
-    """The dispatch token, the identity keys and sign-in itself travel to these."""
-    with pytest.raises(ValueError, match="Invalid value for") as cause:
-        settings.encode_changes({key: url})
-    assert url not in str(cause.value)
-    https = url.replace("http://", "https://", 1)
-    assert settings.encode_changes({key: https}) == {key: https}
-
-
 @pytest.mark.parametrize(
     "url",
     [
@@ -787,67 +699,13 @@ def test_a_new_gateway_trust_url_must_use_https(key, url):
         "http://local-gateway:8080",
     ],
 )
-def test_plain_http_stays_available_for_this_machine_and_compose_names(url):
-    assert settings.encode_changes({"gateway_base_url": url}) == {"gateway_base_url": url}
-
-
-def test_a_plain_http_gateway_url_saved_before_the_rule_still_loads(monkeypatch):
-    monkeypatch.setenv("GATEWAY_BASE_URL", "http://gateway.internal.example:8080")
-    encoded = settings.initial_settings()
-    settings.apply_settings(1, encoded)
-    assert settings.text_setting("gateway_base_url") == "http://gateway.internal.example:8080"
-    # And an unrelated change to the same snapshot is still accepted.
-    settings.validate_settings_update(
-        encoded, {**encoded, **settings.encode_changes({"publish_base_branch": "main"})}
-    )
-
-
 def _bound_gateway() -> dict[str, Any]:
     return {
         **settings.initial_settings(),
         **settings.encode_changes(
             {
                 "gateway_base_url": "https://gateway.example",
-                "gateway_dispatch_token": "test-dispatch-token-for-this-gateway",
+                "sandbox_manager_token": "test-dispatch-token-for-this-gateway",
             }
         ),
     }
-
-
-def test_moving_the_gateway_url_requires_the_dispatch_token_again():
-    """A write-only token must not be readable by pointing its destination elsewhere."""
-    previous = _bound_gateway()
-    moved = {**previous, **settings.encode_changes({"gateway_base_url": "https://other.example"})}
-    with pytest.raises(ValueError, match="clear Gateway dispatch token first") as cause:
-        settings.validate_settings_update(previous, moved)
-    assert "other.example" not in str(cause.value)
-
-
-@pytest.mark.parametrize(
-    "token", ["test-dispatch-token-for-this-gateway", "test-dispatch-token-for-the-new-one", None]
-)
-def test_moving_the_gateway_url_with_the_token_supplied_or_cleared_is_accepted(token):
-    previous = _bound_gateway()
-    changes = settings.encode_changes(
-        {"gateway_base_url": "https://other.example", "gateway_dispatch_token": token}
-    )
-    settings.validate_settings_update(previous, {**previous, **changes})
-
-
-def test_clearing_the_gateway_url_or_changing_something_else_needs_no_token():
-    previous = _bound_gateway()
-    for change in ({"gateway_base_url": None}, {"gateway_request_timeout_s": 20.0}):
-        settings.validate_settings_update(previous, {**previous, **settings.encode_changes(change)})
-
-
-def test_the_settings_page_can_move_the_gateway_one_field_at_a_time():
-    """The page saves one field per request: clear, move, then enter the token again."""
-    current = _bound_gateway()
-    for change in (
-        {"gateway_dispatch_token": None},
-        {"gateway_base_url": "https://other.example"},
-        {"gateway_dispatch_token": "test-dispatch-token-for-the-new-one"},
-    ):
-        following = {**current, **settings.encode_changes(change)}
-        settings.validate_settings_update(current, following)
-        current = following

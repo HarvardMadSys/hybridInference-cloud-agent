@@ -26,7 +26,7 @@ from pydantic import SecretStr
 from cloud_agent.application.compute_release import NEVER_CREATED, release_evidence
 from cloud_agent.application.compute_setup import load_control_plane_host_release
 from cloud_agent.application.host_commands import HostCommands
-from cloud_agent.compute_secrets import ComputeSecretError
+from cloud_agent.deployment.operational_health import deliver_event
 from cloud_agent.domain.compute import (
     ComputeRefusal,
     discard_request_id,
@@ -34,16 +34,17 @@ from cloud_agent.domain.compute import (
     refused_for_capacity,
 )
 from cloud_agent.logging_utils import get_logger
-from cloud_agent.operational_health import deliver_event
+from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.ports.external.compute_provider import NodeObservation, ProviderError
 from cloud_agent.ports.external.host_bootstrap import (
     BootstrapIntent,
     DeploymentProfile,
     default_namespace,
 )
-from cloud_agent.sandbox_manager_client import SandboxManagerError
-from cloud_agent.sandbox_manager_routing import sandbox_manager_for_host
-from cloud_agent.schemas_compute import RenewalPolicy, RetireComputeRequest
+from cloud_agent.providers.compute.compute_secrets import ComputeSecretError
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_routing import sandbox_manager_for_host
+from cloud_agent.schemas.compute import RenewalPolicy, RetireComputeRequest
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -267,7 +268,9 @@ class ComputeRotation:
                 "compute_rotation_not_started",
                 extra={"allocation_id": row["id"], "reason": str(exc)},
             )
-            return str(exc) == "rotation_in_progress"
+            return (
+                isinstance(exc, StorageConflict) and exc.code is ConflictCode.ROTATION_IN_PROGRESS
+            )
         if operation.get("state") in {"succeeded", "failed", "cancelled"}:
             # The store returned this lease's earlier, finished move.
             return False
@@ -343,7 +346,7 @@ class ComputeRotation:
         try:
             await self._resume(operation, allocation)
         except (ProviderError, ComputeRefusal, ComputeSecretError, ValueError) as exc:
-            if isinstance(exc, ValueError) and str(exc) == "operation_lease_lost":
+            if isinstance(exc, StorageConflict) and exc.code is ConflictCode.OPERATION_LEASE_LOST:
                 raise
             await self._stop_for_attention(operation, exc)
 
@@ -638,8 +641,8 @@ class ComputeRotation:
                 parameters=parameters,
                 **self.reconciler._fence(operation),
             )
-        except ValueError as exc:
-            if str(exc) != "deployment_profile_in_use":
+        except StorageConflict as exc:
+            if exc.code is not ConflictCode.DEPLOYMENT_PROFILE_IN_USE:
                 raise
             await self.reconciler._finish(
                 operation,
@@ -1062,7 +1065,10 @@ class ComputeRotation:
                     operation, "cleaning_up", {"retire_requested": True}
                 )
             except (ProviderError, ComputeRefusal, ValueError) as exc:
-                if isinstance(exc, ValueError) and str(exc) == "operation_lease_lost":
+                if (
+                    isinstance(exc, StorageConflict)
+                    and exc.code is ConflictCode.OPERATION_LEASE_LOST
+                ):
                     raise
                 # The new Host is serving already; keep retrying the old copy's
                 # cleanup without repeating a handover or claiming it succeeded.
@@ -1293,7 +1299,7 @@ class ComputeRotation:
             allocation = await self.reconciler._allocation(allocation["id"])
         # Abandoning the node cancelled its acquisition, which may hold the
         # only record of the experiment the provider created for it.
-        ref = await self.reconciler._provider_resource(allocation)
+        ref = await self.reconciler.release.provider_resource(allocation)
         if ref is None:
             # The provider never created it, or definitely refused to.
             await self.repository.observe_allocation(
@@ -1311,7 +1317,7 @@ class ComputeRotation:
             return
         # It never ran its Host, so its node scope needs no review: a failed
         # experiment has no nodes at all. Delete by its exact identity.
-        observation = await self.reconciler._delete_by_identity(operation, allocation, ref)
+        observation = await self.reconciler.release.delete_by_identity(operation, allocation, ref)
         if observation.state != "terminated":
             await self.reconciler._finish(
                 operation,

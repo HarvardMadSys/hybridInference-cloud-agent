@@ -28,7 +28,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from tests.support.storage import OneFake
 
-from cloud_agent.sandbox_manager_client import SandboxManagerError
+from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerError
 from cloud_agent.workers.attempts import _reconcile_settled_terminals, reap_expired_attempts
 
 pytestmark = pytest.mark.asyncio
@@ -68,7 +68,7 @@ async def test_a_settled_terminal_resume_retries_until_the_sandbox_manager_confi
         ),
     )
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_host",
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.sandbox_manager_for_host",
         Mock(return_value=sandbox_manager),
     )
 
@@ -89,7 +89,7 @@ async def test_a_missing_owner_sandbox_manager_keeps_the_marker_for_retry(
 ) -> None:
     """A routing/configuration fault must not be reported as recovered."""
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_host",
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.sandbox_manager_for_host",
         Mock(return_value=None),
     )
 
@@ -112,7 +112,8 @@ async def test_a_cancelled_pre_claim_job_has_no_workspace_to_resume(
     ]
     sandbox_manager = Mock()
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_host", sandbox_manager
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.sandbox_manager_for_host",
+        sandbox_manager,
     )
 
     await _reconcile_settled_terminals(store)
@@ -149,7 +150,7 @@ async def test_one_broken_host_does_not_skip_other_terminal_markers(
         resume_settled_terminals=AsyncMock(return_value={"ok": True}),
     )
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.sandbox_manager_for_host",
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.sandbox_manager_for_host",
         Mock(side_effect=[broken, ready]),
     )
 
@@ -169,7 +170,7 @@ async def test_a_sandbox_manager_that_never_answers_does_not_hold_up_the_reaper(
 
     A host that drops packets costs each of its markers a full request timeout,
     and its markers stay set, so inside the pass that wait came back on every
-    pass -- before any lease was reaped or any grant renewed.
+    pass -- before any lease was reaped.
     """
     replay_started = asyncio.Event()
     replay_cancelled = asyncio.Event()
@@ -182,19 +183,17 @@ async def test_a_sandbox_manager_that_never_answers_does_not_hold_up_the_reaper(
             replay_cancelled.set()
 
     monkeypatch.setattr(
-        "cloud_agent.sandbox_manager_routing.hydrate_shared_sandbox_manager", silent_sandbox_manager
+        "cloud_agent.sandbox_manager.sandbox_manager_routing.hydrate_shared_sandbox_manager",
+        silent_sandbox_manager,
     )
     store.reap_expired = AsyncMock(return_value=[])
-    store.take_revocable_grants = AsyncMock(return_value=[])
-    store.list_renewable_grants = AsyncMock(return_value=[])
-    grants = SimpleNamespace(renew=AsyncMock(), revoke=AsyncMock(return_value=True))
     task = asyncio.create_task(
-        reap_expired_attempts(store, interval_seconds=0.001, grants=grants)  # type: ignore[arg-type]
+        reap_expired_attempts(store, interval_seconds=0.001)  # type: ignore[arg-type]
     )
     try:
         async with asyncio.timeout(10):
             await replay_started.wait()
-            while store.list_renewable_grants.await_count < 2:
+            while store.reap_expired.await_count < 2:
                 await asyncio.sleep(0.005)
     finally:
         task.cancel()

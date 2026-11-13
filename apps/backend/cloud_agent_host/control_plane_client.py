@@ -20,17 +20,17 @@ from cloud_agent_host.event_sender import OrderedSender
 from cloud_agent_host.logging_utils import get_logger
 from cloud_agent_host.measurement_delivery import DELIVERY_TIMEOUT_S
 from cloud_agent_host.runtimes import NormalizedEvent  # noqa: TC001 — Public method introspection.
-from cloud_agent_shared.secret_redaction import SecretRedactor
+from cloud_agent_shared.secret_redaction import SecretRedactor, merged_secrets
 from cloud_agent_shared.shared_protocol import ABANDON_DETAIL_MAX_CHARS
 from cloud_agent_shared.storable_text import storable_json
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
 # Heartbeats must answer before ordinary lifecycle requests consume the lease.
 _HEARTBEAT_TIMEOUT_S = 10.0
-# A question notification is a wake-up; owner views still poll every 2 s while
-# active and every 12 s in the background if a hint is missed.
+# Owner question views poll every two seconds while active and every twelve in
+# the background; a missed wake-up is recovered by those reads.
 _QUESTION_HINT_TIMEOUT_S = 2.0
 # Attachments may need longer than the client's default deadline for transfer.
 _ATTACHMENT_TIMEOUT_S = 120.0
@@ -110,6 +110,23 @@ class ControlPlane:
         heartbeat's own flag, and a lost lease ends the turn there.
         """
         return self._events.lease_lost
+
+    def add_secrets(self, values: Mapping[str, str]) -> None:
+        """Mask ``values`` too, from the next write on.
+
+        Nothing already masked is lost (``merged_secrets``). Every open
+        preview is rebuilt from the new set as a reset would rebuild it, but
+        keeps the tail it holds back, so a value that tail begins is still
+        masked once the rest of it arrives.
+        """
+        with self._appending:
+            merged = merged_secrets(self._secret_values, values)
+            if merged == self._secret_values:
+                return
+            self._secret_values = merged
+            self._redactor = SecretRedactor(merged)
+            for stream_id, redactor in tuple(self._preview_redactors.items()):
+                self._preview_redactors[stream_id] = redactor.continued(merged)
 
     def close(self) -> None:
         """Stop the event sender and release the HTTP connection pool.
@@ -445,17 +462,63 @@ class ControlPlane:
         activation_generation: int,
         residency_generation: int,
         process_generation: int,
+        continuity: tuple[str | None, str] | None = None,
     ) -> None:
-        """Record a CLI process rotation inside the same chat container."""
-        self._post(
-            f"/v1/agent/worker/jobs/{self.job_id}/sandbox/process",
-            {
-                "sandbox_generation": sandbox_generation,
-                "activation_generation": activation_generation,
-                "residency_generation": residency_generation,
-                "process_generation": process_generation,
-            },
+        """Record a CLI process rotation inside the same chat container.
+
+        ``continuity`` is the turn's continuity report: its rung, or ``None``
+        for a new context, and its context status. It is sent on a thread of
+        its own beside the record. The report is best-effort, neither endpoint
+        reads what the other writes, and the turn used to wait out its round
+        trip after the record's. Both have landed when this returns, so what
+        the turn sends next still follows the report. The record's own failure
+        is raised first, as when the report was sent only once the record had
+        succeeded; then a lost lease the report met, where the turn has always
+        learned of it.
+        """
+        path = f"/v1/agent/worker/jobs/{self.job_id}/sandbox/process"
+        body = {
+            "sandbox_generation": sandbox_generation,
+            "activation_generation": activation_generation,
+            "residency_generation": residency_generation,
+            "process_generation": process_generation,
+        }
+        if continuity is None:
+            self._post(path, body)
+            return
+        lost: list[LeaseLost] = []
+        reporter = threading.Thread(
+            target=self._report_continuity_into,
+            args=(continuity, lost),
+            name="continuity-report",
+            daemon=True,
         )
+        try:
+            reporter.start()
+        except RuntimeError:
+            # A process out of threads sends it after the record, as before.
+            self._post(path, body)
+            self._report_continuity_into(continuity, lost)
+        else:
+            try:
+                self._post(path, body)
+            finally:
+                reporter.join()
+        if lost:
+            raise lost[0]
+
+    def _report_continuity_into(
+        self, continuity: tuple[str | None, str], lost: list[LeaseLost]
+    ) -> None:
+        """Send one continuity report, keeping a lost lease for the caller to raise."""
+        mode, context_status = continuity
+        try:
+            if mode is None:
+                self.report_context_status(context_status)
+            else:
+                self.report_continuity(mode, context_status=context_status)
+        except LeaseLost as exc:
+            lost.append(exc)
 
     def establish_shared_residency(
         self,
@@ -582,8 +645,8 @@ class ControlPlane:
         """Drive the fenced terminal transition, after the attempt's events.
 
         ``base_sha`` reports the commit the agent actually worked from. A job
-        may be submitted without one, and the publisher cannot apply a patch
-        without knowing its base — so the runner, which resolves it when it
+        may be submitted without one, and the conversation's follow-up turns
+        start from that commit — so the runner, which resolves it when it
         checks the repository out, is the component that knows.
 
         Every event the attempt reported is delivered first, so the error a

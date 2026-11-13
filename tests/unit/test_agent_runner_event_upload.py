@@ -25,17 +25,10 @@ from tests.unit.test_agent_runner import (  # noqa: F401 - the autouse pytest fi
     _virtual_clock,
 )
 
-from cloud_agent_host import control_plane_client, runner as runner_mod
-from cloud_agent_host.runner import LeaseLost, SessionSupervisorError
-
-
-class _QuestionControl(_Control):
-    def __init__(self):
-        super().__init__()
-        self.question_hints = []
-
-    def report_question_change(self, job_id):
-        self.question_hints.append(job_id)
+from cloud_agent_host import control_plane_client, runtimes
+from cloud_agent_host.claimed_job import LeaseLost
+from cloud_agent_host.service import local_settings
+from cloud_agent_host.turn import shared_live_attempt, turn_stream
 
 
 def test_a_lease_an_event_upload_lost_ends_the_turn_at_once():
@@ -56,7 +49,7 @@ def test_a_lease_an_event_upload_lost_ends_the_turn_at_once():
     )
     control = _Refused()
     with pytest.raises(LeaseLost):
-        runner_mod._stream_shared_agent_turn(
+        turn_stream._stream_shared_agent_turn(
             supervisor=supervisor,
             job=_JOB,
             control=control,
@@ -72,16 +65,52 @@ def test_a_lease_an_event_upload_lost_ends_the_turn_at_once():
     ]
 
 
-def test_question_change_frame_notifies_the_attempt_control_plane():
+def test_question_hint_is_best_effort_but_409_still_loses_the_lease():
+    outcomes = []
+
+    def endpoint(request):
+        outcomes.append(request)
+        if len(outcomes) == 1:
+            return httpx.Response(503, json={"detail": "busy"})
+        if len(outcomes) == 2:
+            raise httpx.ConnectTimeout("no route", request=request)
+        return httpx.Response(409, json={"detail": "lease expired"})
+
+    control = control_plane_client.ControlPlane("https://control.test", "token")
+    control.close()
+    control._client = httpx.Client(timeout=30, transport=httpx.MockTransport(endpoint))
+    try:
+        control.report_question_change("ajob_questions")
+        control.report_question_change("ajob_questions")
+        with pytest.raises(LeaseLost):
+            control.report_question_change("ajob_questions")
+    finally:
+        control.close()
+
+    assert len(outcomes) == 3
+    assert outcomes[0].url.path == "/v1/agent/worker/jobs/ajob_questions/questions:changed"
+    assert outcomes[0].extensions["timeout"] == dict.fromkeys(
+        ("connect", "read", "write", "pool"), 2.0
+    )
+
+
+def test_question_change_frame_only_reports_the_claimed_job():
+    class _QuestionControl(_Control):
+        def __init__(self):
+            super().__init__()
+            self.question_hints = []
+
+        def report_question_change(self, job_id):
+            self.question_hints.append(job_id)
+
+    control = _QuestionControl()
     supervisor = _Supervisor(
         [
             {"kind": "question_changed"},
             {"kind": "result", "status": "completed", "exit_code": 0},
         ]
     )
-    control = _QuestionControl()
-
-    code, _tail, errors, result, _reported = runner_mod._stream_shared_agent_turn(
+    result = turn_stream._stream_shared_agent_turn(
         supervisor=supervisor,
         job=_JOB,
         control=control,
@@ -90,24 +119,9 @@ def test_question_change_frame_notifies_the_attempt_control_plane():
         timeout_s=30,
     )
 
-    assert code == 0 and not errors and result["status"] == "completed"
-    assert control.question_hints == [_JOB.job_id]
+    assert result[0] == 0
+    assert control.question_hints == ["ajob_1"]
     assert control.events == [("lifecycle", {"phase": "turn_started"})]
-
-
-@pytest.mark.parametrize("frame", [{}, {"kind": None}, {"kind": 7}, {"kind": "future"}])
-def test_unknown_question_change_frame_shape_fails_the_shared_turn(frame):
-    supervisor = _Supervisor([frame, {"kind": "result", "status": "completed", "exit_code": 0}])
-
-    with pytest.raises(SessionSupervisorError, match="unknown frame"):
-        runner_mod._stream_shared_agent_turn(
-            supervisor=supervisor,
-            job=_JOB,
-            control=_QuestionControl(),
-            heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
-            lease_token="lease",
-            timeout_s=30,
-        )
 
 
 def _uploaded_events(request: httpx.Request) -> list[dict[str, Any]]:
@@ -143,7 +157,7 @@ def test_a_control_plane_restart_mid_turn_does_not_lose_the_turn(monkeypatch):
             {"kind": "result", "status": "completed", "exit_code": 0},
         ]
     )
-    stream_turn = runner_mod._stream_shared_agent_turn
+    stream_turn = turn_stream._stream_shared_agent_turn
 
     def configure(control, supervisor, finish):
         control.append_event.side_effect = events.append_event
@@ -152,7 +166,7 @@ def test_a_control_plane_restart_mid_turn_does_not_lose_the_turn(monkeypatch):
         # The real finish delivers whatever the turn still has queued first.
         finish.side_effect = lambda *_args, **_kwargs: events.flush()
         supervisor.start_shared_turn.return_value = stream
-        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream_turn)
+        monkeypatch.setattr(shared_live_attempt, "_stream_shared_agent_turn", stream_turn)
 
     try:
         result, control, supervisor, finish = _run_shared_boundary_case(
@@ -198,7 +212,7 @@ def test_a_turn_whose_events_cannot_be_recorded_fails_instead_of_settling(monkey
             {"kind": "result", "status": "completed", "exit_code": 0},
         ]
     )
-    stream_turn = runner_mod._stream_shared_agent_turn
+    stream_turn = turn_stream._stream_shared_agent_turn
 
     def configure(control, supervisor, finish):
         control.append_event.side_effect = events.append_event
@@ -206,7 +220,7 @@ def test_a_turn_whose_events_cannot_be_recorded_fails_instead_of_settling(monkey
         control.lease_lost = False
         finish.side_effect = lambda *_args, **_kwargs: events.flush()
         supervisor.start_shared_turn.return_value = stream
-        monkeypatch.setattr(runner_mod, "_stream_shared_agent_turn", stream_turn)
+        monkeypatch.setattr(shared_live_attempt, "_stream_shared_agent_turn", stream_turn)
 
     try:
         result, control, supervisor, finish = _run_shared_boundary_case(
@@ -222,7 +236,9 @@ def test_a_turn_whose_events_cannot_be_recorded_fails_instead_of_settling(monkey
     supervisor.settle_shared.assert_not_called()
     control.settle_chat_sandbox.assert_not_called()
     assert control.abandon_chat_sandbox.call_args.kwargs["lost"] is True
-    assert clock.now <= control_plane_client._EVENT_RETRY_BUDGET_S + runner_mod.DEFAULT_LEASE_TTL_S
+    assert (
+        clock.now <= control_plane_client._EVENT_RETRY_BUDGET_S + local_settings.DEFAULT_LEASE_TTL_S
+    )
     assert delivered[-1]["event_type"] == "error"
 
 
@@ -250,7 +266,7 @@ def test_event_upload_retries_only_what_a_replay_can_fix(monkeypatch, answers, o
         return httpx.Response(answer, json={"event_ids": [1]})
 
     control = _event_control(endpoint)
-    event = runner_mod.NormalizedEvent("assistant", {"text": "hi"})
+    event = runtimes.NormalizedEvent("assistant", {"text": "hi"})
     try:
         if outcome is None:
             control.append_event(event)
@@ -279,11 +295,13 @@ def test_event_upload_gives_up_inside_its_budget(monkeypatch):
     control = _event_control(endpoint)
     try:
         with pytest.raises(httpx.ConnectError):
-            control.append_event(runner_mod.NormalizedEvent("assistant", {"text": "hi"}))
+            control.append_event(runtimes.NormalizedEvent("assistant", {"text": "hi"}))
             control.flush()
     finally:
         control.close()
 
     assert len(tries) > 2
     assert max(clock.sleeps) == control_plane_client._EVENT_RETRY_MAX_DELAY_S
-    assert clock.now <= control_plane_client._EVENT_RETRY_BUDGET_S < runner_mod.DEFAULT_LEASE_TTL_S
+    assert (
+        clock.now <= control_plane_client._EVENT_RETRY_BUDGET_S < local_settings.DEFAULT_LEASE_TTL_S
+    )

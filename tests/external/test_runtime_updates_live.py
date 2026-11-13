@@ -23,14 +23,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud_agent_host.chat_sandbox import ChatSandboxManager
-from cloud_agent_host.chat_sandbox_models import MEMBER_UID_BASE
-from cloud_agent_host.docker_engine import run_docker
+from cloud_agent_host.container.chat_sandbox_models import MEMBER_UID_BASE
+from cloud_agent_host.container.docker_engine import run_docker
+from cloud_agent_host.container.exact_container import ExactContainer
+from cloud_agent_host.container.sandbox import ContainerBackend, runtime_bin_dir
+from cloud_agent_host.member_setup.runtime_install import ensure_downloaded_runtime
 from cloud_agent_host.runtime_downloads import RuntimeDownloads
 from cloud_agent_host.runtime_images import discover
-from cloud_agent_host.runtime_install import ensure_downloaded_runtime
 from cloud_agent_host.runtime_probe import probe_runtime
-from cloud_agent_host.sandbox import ContainerBackend, runtime_bin_dir
 
 pytestmark = pytest.mark.external
 
@@ -122,9 +122,11 @@ def test_an_update_downloads_checks_offers_and_runs_in_a_chat(namespace, runtime
         manager = SimpleNamespace(
             backend=backend,
             exec_capture=exec_capture,
-            _require=lambda _spec: SimpleNamespace(container_id=container),
-            _run=run_docker,
-            _run_bytes=ChatSandboxManager._run_bytes,
+            exact=SimpleNamespace(
+                require=lambda _spec: SimpleNamespace(container_id=container),
+                run=run_docker,
+                run_bytes=ExactContainer.run_bytes,
+            ),
         )
         ensure_downloaded_runtime(manager, None, runtime, version)  # type: ignore[arg-type]
 

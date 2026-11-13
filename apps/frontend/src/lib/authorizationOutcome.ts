@@ -35,7 +35,7 @@ const AUTHORIZATION_ERRORS = new Map<string, string>([
  * The fixed reasons the MCP callback sends back as `mcp_message`.
  *
  * Written by the control plane (`oauth_callback` and `_callback_redirect` in
- * `apps/backend/cloud_agent/api/mcp_connections.py`), so they are this
+ * `apps/backend/cloud_agent/api/mcp_authorization.py`), so they are this
  * service's own wording and are shown as they are. A reason added there and
  * not here still reaches the reader, as unverified detail.
  */

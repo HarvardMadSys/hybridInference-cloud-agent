@@ -72,4 +72,3 @@ msgid ""
 msgstr ""
 "这道保护既不是配额，也不会真的预留空间。容量如果是未知、已禁用、读不到、不支持或未经验证，就明确记为\"未测量\"，不会据此判定存储吃紧。运维上的边界见[存储测量与证明](operations.md"
 "#how-full-is-the-sandbox-storage)和[主机执行限制](host-execution-limits.md)。"
-

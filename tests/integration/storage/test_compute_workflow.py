@@ -14,10 +14,7 @@ from tests.integration.storage.test_host_pool_store import db as db, hosts as ho
 from cloud_agent.application.compute_autoscale import CloudLabAutoscaler
 from cloud_agent.application.compute_reconcile import ComputeReconciler
 from cloud_agent.application.compute_resources import ComputeCommands
-from cloud_agent.compute_config import ComputeConfiguration
-from cloud_agent.compute_registry import ComputeProviderRegistration, ComputeProviderRegistry
-from cloud_agent.compute_secrets import ComputeSecretStore
-from cloud_agent.host_pool import hash_secret
+from cloud_agent.domain.host_pool import hash_secret
 from cloud_agent.ports.external.compute_provider import (
     NodeObservation,
     ProviderCapabilities,
@@ -31,7 +28,13 @@ from cloud_agent.ports.external.host_bootstrap import (
     DeploymentProfile,
     HostInventory,
 )
-from cloud_agent.schemas_compute import RenewalPolicy, RetireComputeRequest
+from cloud_agent.providers.compute.compute_config import ComputeConfiguration
+from cloud_agent.providers.compute.compute_registry import (
+    ComputeProviderRegistration,
+    ComputeProviderRegistry,
+)
+from cloud_agent.providers.compute.compute_secrets import ComputeSecretStore
+from cloud_agent.schemas.compute import RenewalPolicy, RetireComputeRequest
 from cloud_agent.storage._sql.compute_admission import host_compute_admission
 from cloud_agent.workers.compute_resources import ComputeResourceWorker
 
@@ -112,10 +115,11 @@ async def rig(store, hosts, monkeypatch):
     sandbox_manager = SimpleNamespace(
         health=AsyncMock(return_value={}), list_sandboxes=AsyncMock(return_value=[])
     )
-    monkeypatch.setattr(
-        "cloud_agent.application.compute_reconcile.sandbox_manager_for_host",
-        lambda host: sandbox_manager,
-    )
+    for module in ("compute_reconcile", "compute_acquisition", "compute_retirement"):
+        monkeypatch.setattr(
+            f"cloud_agent.application.{module}.sandbox_manager_for_host",
+            lambda host: sandbox_manager,
+        )
     reconciler = ComputeReconciler(commands=commands, host_pool=hosts, bootstrap=bootstrap)
     request_id = str(uuid4())
     op = await store.compute_resources.create_allocation_operation(

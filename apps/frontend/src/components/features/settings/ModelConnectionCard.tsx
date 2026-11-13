@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useT } from '@/components/providers';
 import {
   deleteModelConnection,
+  refreshModelConnectionEfforts,
   updateModelConnection,
   type ModelConnection,
 } from '@/lib/api/modelConnections';
@@ -30,20 +31,33 @@ export function ModelConnectionCard({
 }) {
   const t = useT();
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(false);
+  const [error, setError] = useState<'' | 'connections.error' | 'connections.refreshEffortsFailed'>(
+    '',
+  );
   const [confirm, setConfirm] = useState<'delete' | 'disable' | null>(null);
 
-  async function run(action: () => Promise<void>) {
+  async function run(
+    action: () => Promise<void>,
+    failure: 'connections.error' | 'connections.refreshEffortsFailed' = 'connections.error',
+  ) {
     if (busy) return;
     setBusy(true);
-    setError(false);
+    setError('');
     try {
       await action();
     } catch {
-      setError(true);
+      setError(failure);
     } finally {
       setBusy(false);
     }
+  }
+
+  /** Re-read the provider's declared reasoning levels; nothing else changes. */
+  async function refreshEfforts() {
+    const refreshed = await operate(connection.id, () =>
+      refreshModelConnectionEfforts(connection.id),
+    );
+    if (refreshed) onChange(refreshed);
   }
 
   /** A change whose answer applies only if nothing else touched the connection meanwhile. */
@@ -98,6 +112,15 @@ export function ModelConnectionCard({
           <button
             type="button"
             className={buttonClass}
+            disabled={busy || !available}
+            title={t('connections.refreshEffortsHint')}
+            onClick={() => void run(refreshEfforts, 'connections.refreshEffortsFailed')}
+          >
+            {t('connections.refreshEfforts')}
+          </button>
+          <button
+            type="button"
+            className={buttonClass}
             disabled={busy}
             onClick={() => setConfirm('delete')}
           >
@@ -139,7 +162,7 @@ export function ModelConnectionCard({
       ) : null}
       {error ? (
         <p role="alert" className="mt-3 text-sm text-status-error">
-          {t('connections.error')}
+          {t(error)}
         </p>
       ) : null}
     </article>

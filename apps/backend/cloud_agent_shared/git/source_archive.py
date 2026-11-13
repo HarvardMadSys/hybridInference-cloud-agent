@@ -235,7 +235,7 @@ def build_source_archive(
         raise SandboxError("source preparer produced no Git checkout")
 
     try:
-        with tempfile.TemporaryFile(prefix="freeinference-source-manifest-") as manifest:
+        with tempfile.TemporaryFile(prefix="cloud-agent-source-manifest-") as manifest:
             _write_source_manifest(
                 str(root),
                 manifest,
@@ -268,16 +268,15 @@ def build_base_bundle(
 ) -> BinaryIO:
     """Build a bounded credential-free Git bundle in a seekable temporary file.
 
-    Follow-up turns run against the commit produced by the trusted publisher,
-    while the retained workspace intentionally keeps the Agent CLI's own HEAD,
-    index and working tree. Shipping only this object's bundle lets the
-    sandbox resolve the new diff base without cloning in the sandbox or
+    Follow-up turns run against the conversation's base commit, while the
+    retained workspace intentionally keeps the Agent CLI's own HEAD, index
+    and working tree. Shipping only this object's bundle lets a workspace
+    that lacks the base resolve it without cloning in the sandbox or
     rewriting any of that owner-visible Git state.
 
     ``prerequisite`` names a commit the receiving workspace already holds. The
-    bundle then carries only what ``commit`` adds on top of it — for a
-    published turn, the agent's own change — instead of the whole tree a
-    second time, which for a large repository is gigabytes against a limit of
+    bundle then carries only what ``commit`` adds on top of it instead of
+    the whole tree a second time, which for a large repository is gigabytes against a limit of
     one. Git refuses to unbundle it into a workspace that lacks the
     prerequisite, so a wrong guess fails closed. Without one the bundle holds
     everything ``commit`` reaches in this checkout.

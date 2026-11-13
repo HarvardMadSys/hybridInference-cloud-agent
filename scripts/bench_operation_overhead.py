@@ -29,7 +29,7 @@ Server-request operations (the default; ``--skip-server-ops`` turns them off)
     The four declared startup paths -- ``new_group``, ``resume_stopped``,
     ``resume_running``, ``reuse_live`` -- produced by a real retained container
     and a real :class:`SharedChatSessionSupervisor`, classified by the real
-    ``cloud_agent_host.runner._classify_startup_path``.
+    ``cloud_agent_host.turn.shared_live_attempt._classify_startup_path``.
 
 Cohorts, and what each one really is
 ------------------------------------
@@ -156,8 +156,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from cloud_agent import measurement_writer, sandbox_manager_routing
-from cloud_agent.operation_measurement import reset as reset_selections
+from cloud_agent.measurement import measurement_writer
+from cloud_agent.measurement.operation_measurement import reset as reset_selections
+from cloud_agent.sandbox_manager import sandbox_manager_routing
 from cloud_agent_host import operation_call
 from cloud_agent_shared import operation_profiling
 from cloud_agent_shared.sandbox_manager_compat import SANDBOX_MANAGER_PRODUCER
@@ -178,7 +179,8 @@ ALLOWED_DATABASE_PATTERN = "_test_"
 DATABASE_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 #: Roles this process plays in the seeded fixture.
-BENCH_USER_ID = "user-overhead-bench"
+#: A fixed account id, in the ULID form every account id takes.
+BENCH_USER_ID = "01JBENCH0VERHEAD000000000A"
 BENCH_REPO = "bench/overhead-repo"
 BENCH_HOST = "bench-overhead-runner"
 BENCH_HOST_CREDENTIAL = "bench-overhead-credential-hash"
@@ -192,7 +194,8 @@ BENCH_ADMIN_TOKEN = "bench-overhead-admin-token"
 BENCH_SESSION_SECRET = "bench-overhead-session-secret-32-bytes-minimum"
 BENCH_CONTROL_TOKEN_SECRET = "bench-overhead-control-token-secret"
 BENCH_SANDBOX_MANAGER_TOKEN = "bench-overhead-sandbox-manager-token"
-BENCH_GATEWAY_ISSUER = "https://bench-gateway.example"
+BENCH_ENCRYPTION_KEY = "bench-overhead-encryption-key-32-bytes-minimum"
+BENCH_SETTINGS_KEY = "bench-overhead-settings-root-key-32-bytes"
 
 #: The terminal id the sandbox manager stand-in answers with. The route validates ids
 #: against ``^term_[A-Za-z0-9_-]{1,80}$``.
@@ -253,15 +256,13 @@ RUN_LIFETIME = timedelta(minutes=30)
 
 #: Docker plumbing for ``--startup``: the same shape the file-open benchmark
 #: uses. The manager builds a real group bridge behind real host rules, so it
-#: needs a relay network with two listening relays, a pool of its own, and an
+#: needs a relay network with a listening relay, a pool of its own, and an
 #: image carrying ``nft`` for the host-rule helper (the guest image doubles as
 #: it). The resolver is never queried; override it where 1.1.1.1 is wrong.
 BENCH_IMAGE = "cae-bench-guest:bookworm"
 BENCH_NAMESPACE = "cae-overhead-bench"
 BENCH_RELAY_NET = "cae-overhead-relays"
 BENCH_POOL = "10.251.0.0/16"
-BENCH_GATEWAY = "cae-overhead-gateway"
-BENCH_GATEWAY_PORT = 8080
 BENCH_MCP = "cae-overhead-mcp"
 BENCH_MCP_PORT = 8000
 BENCH_STARTUP_THREAD = "athr_overhead_bench"
@@ -471,6 +472,10 @@ class BenchSandboxManager:
         """Accept the manifest re-registration a shared workspace request makes."""
         return None
 
+    def with_start_seq(self, _start_seq: int | None) -> BenchSandboxManager:
+        """The start fence labels a run on a real host; nothing here starts one."""
+        return self
+
     def _open(self, context: Any, *operations: str) -> operation_call.SandboxManagerCall:
         """Validate the inherited selection the way the sandbox manager route does."""
         call = operation_call.open_call(context, operations=operations)
@@ -545,7 +550,7 @@ class BenchSandboxManager:
         """Answer a stream attach in headers, the way the sandbox manager's SSE route does."""
         import httpx
 
-        from cloud_agent.sandbox_manager_client import SandboxManagerStream
+        from cloud_agent.sandbox_manager.sandbox_manager_client import SandboxManagerStream
 
         self.calls.append({"op": "stream_terminal", "workspace_id": workspace_id})
         call = self._open(profiling, "terminal.open")
@@ -644,12 +649,45 @@ class DestinationStorage:
         return getattr(self._storage, name)
 
 
-class BenchGateway:
-    """Gateway admission that always grants the one benchmark user ``agent.use``."""
+async def _seed_bench_account(storage: Any) -> None:
+    """Make the benchmark user a verified, approved account, as an operator would.
 
-    async def agent_access(self, user_id: str) -> dict[str, Any]:
-        """Return the decision the owner routes require."""
-        return {"user_id": user_id, "allowed": True, "permissions": ["agent.use"]}
+    The owner routes are authenticated by override, but admission is not: the
+    account directory and the terminal fence read this row, and an owner with
+    no account has no access.
+    """
+    from cloud_agent.accounts import tokens
+    from cloud_agent.accounts.passwords import hash_password
+
+    accounts = storage.local_accounts
+    email = "overhead-bench@example.invalid"
+    created = await accounts.create_account(
+        account_id=BENCH_USER_ID,
+        email=email,
+        email_normalized=email,
+        password_hash=await hash_password(tokens.new_session_token()),
+    )
+    if not created:  # pragma: no cover - fixture failure
+        raise RuntimeError("the benchmark account could not be created")
+    token = tokens.new_email_token()
+    await accounts.issue_email_token(
+        account_id=BENCH_USER_ID,
+        purpose="verify_email",
+        token_hash=tokens.email_token_hash(token),
+        ttl_s=60,
+    )
+    await accounts.verify_email(token_hash=tokens.email_token_hash(token))
+    await accounts.submit_application(account_id=BENCH_USER_ID, purpose="benchmark")
+    record = await accounts.get_account(BENCH_USER_ID)
+    await accounts.apply_admin_action(
+        account_id=BENCH_USER_ID,
+        action="approve",
+        reason=None,
+        expected_version=record.version,
+        actor_id="admin-token",
+        actor_account_id=None,
+        admin_ip="127.0.0.1",
+    )
 
 
 # --------------------------------------------------------------------------
@@ -730,8 +768,9 @@ def _open_session_environment(config: dict[str, Any], args: argparse.Namespace) 
             "AGENT_DATABASE_URL": _dsn(config),
             "AGENT_CONTROL_TOKEN_SECRET": BENCH_CONTROL_TOKEN_SECRET,
             "ADMIN_TOKEN": BENCH_ADMIN_TOKEN,
-            "AGENT_SESSION_SECRET": BENCH_SESSION_SECRET,
-            "GATEWAY_ISSUER": BENCH_GATEWAY_ISSUER,
+            "AGENT_LOCAL_SESSION_SECRET": BENCH_SESSION_SECRET,
+            "AGENT_SOURCE_CONTROL_ENCRYPTION_KEY": BENCH_ENCRYPTION_KEY,
+            "AGENT_SETTINGS_ENCRYPTION_KEY": BENCH_SETTINGS_KEY,
             "AGENT_SANDBOX_MANAGER_TOKEN": BENCH_SANDBOX_MANAGER_TOKEN,
             "AGENT_REPO_ALLOWLIST": BENCH_REPO,
             "AGENT_OPERATION_PROFILING_ENABLED": "",
@@ -847,9 +886,9 @@ async def _open_session(config: dict[str, Any], args: argparse.Namespace) -> Ben
     import asyncpg
     import httpx
 
-    from cloud_agent.api.deps import get_agent_app_credentials, get_gateway_client
+    from cloud_agent.api._owner_auth import authenticate_agent_owner
+    from cloud_agent.api.deps import get_agent_app_credentials
     from cloud_agent.app import create_app
-    from cloud_agent.identity import SESSION_COOKIE, mint_session
     from cloud_agent.tokens import SCOPE_FULL, mint_worker_token
 
     _open_session_environment(config, args)
@@ -859,15 +898,20 @@ async def _open_session(config: dict[str, Any], args: argparse.Namespace) -> Ben
     await _truncate(pool)
 
     app = create_app()
-    app.dependency_overrides[get_gateway_client] = lambda: BenchGateway()
+    # The one benchmark user: every cohort skips the same session read, and
+    # what they differ in is the measured operation. Admission is the account
+    # directory's, over the approved account seeded below.
+    app.dependency_overrides[authenticate_agent_owner] = lambda: {
+        "user_id": BENCH_USER_ID,
+        "authenticated": True,
+    }
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
     server, task, url = await _serve(app)
     storage = app.state.storage
+    await _seed_bench_account(storage)
     rows = await _seed_workspace_rows(storage)
-    session_token = mint_session(user_id=BENCH_USER_ID)
     client = httpx.AsyncClient(
         base_url=url,
-        cookies={SESSION_COOKIE: session_token},
         timeout=httpx.Timeout(120.0),
     )
     session = BenchSession(
@@ -1561,12 +1605,12 @@ class StartupSandbox:
     """The Docker plumbing one real retained chat container needs."""
 
     def __init__(self) -> None:
-        from cloud_agent_host.chat_sandbox import (
+        from cloud_agent_host.container.chat_sandbox import (
             ChatSandboxManager,
             ChatSandboxSpec,
-            RetainedChatBackend,
         )
-        from cloud_agent_host.sandbox import ContainerBackend
+        from cloud_agent_host.container.retained_backend import RetainedChatBackend
+        from cloud_agent_host.container.sandbox import ContainerBackend
         from cloud_agent_shared.egress import network_from_env
 
         self.network = network_from_env(
@@ -1575,7 +1619,6 @@ class StartupSandbox:
                 "AGENT_EGRESS_CHAT_NETWORK_POOL": BENCH_POOL,
                 "AGENT_EGRESS_DNS_SERVER": os.environ.get("CAE_BENCH_DNS_SERVER", "1.1.1.1"),
                 "AGENT_RELAY_NETWORK": BENCH_RELAY_NET,
-                "AGENT_GATEWAY_URL": f"http://{BENCH_GATEWAY}:{BENCH_GATEWAY_PORT}",
                 "AGENT_SANDBOX_MCP_URL": f"http://{BENCH_MCP}:{BENCH_MCP_PORT}",
             }
         )
@@ -1606,7 +1649,7 @@ class StartupSandbox:
         return self.spec.container_name
 
     def _relay(self, name: str, port: int) -> None:
-        # Listening, because the guest check dials both relays before the
+        # Listening, because the guest check dials the relay before the
         # sandbox counts as started.
         _docker("rm", "-f", name, check=False)
         _docker(
@@ -1628,9 +1671,8 @@ class StartupSandbox:
         )
 
     def up(self) -> None:
-        """Create the relay network and its two listening relay stand-ins."""
+        """Create the relay network and its listening relay stand-in."""
         _docker("network", "create", "--internal", BENCH_RELAY_NET, check=False)
-        self._relay(BENCH_GATEWAY, BENCH_GATEWAY_PORT)
         self._relay(BENCH_MCP, BENCH_MCP_PORT)
 
     def remove_container(self) -> None:
@@ -1639,11 +1681,10 @@ class StartupSandbox:
 
     def down(self) -> None:
         """Remove the container, the relays, every network and the host rules."""
-        from cloud_agent_host.chat_sandbox import CHAT_NAMESPACE_LABEL
+        from cloud_agent_host.container.chat_sandbox import CHAT_NAMESPACE_LABEL
 
         _docker("rm", "-f", self.container_name, check=False)
-        for name in (BENCH_GATEWAY, BENCH_MCP):
-            _docker("rm", "-f", name, check=False)
+        _docker("rm", "-f", BENCH_MCP, check=False)
         listed = _docker(
             "network",
             "ls",
@@ -1741,7 +1782,7 @@ class BenchTransportFactory:
 
 def _startup_manifest(*, native_session_id: str | None) -> list[Any]:
     """Return the control plane's member manifest for the one bench member."""
-    from cloud_agent_host.shared_session_supervisor import SharedMemberManifest
+    from cloud_agent_host.supervisor.shared_session_state import SharedMemberManifest
 
     return [
         SharedMemberManifest(
@@ -1765,6 +1806,7 @@ def _startup_launch(*, native_session_id: str | None) -> Any:
     deliberately excludes from transport compatibility.
     """
     from cloud_agent_host.resident_transport import ResidentLaunch
+    from cloud_agent_shared.model_connections import runtime_protocol
 
     return ResidentLaunch(
         thread_id=BENCH_STARTUP_THREAD,
@@ -1773,10 +1815,12 @@ def _startup_launch(*, native_session_id: str | None) -> Any:
         native_session_id=native_session_id,
         model="bench-model",
         reasoning_effort=None,
-        gateway_base_url="http://gateway.invalid",
         credential="bench-residency-credential",
         slot_id=0,
         residency_generation=BENCH_RESIDENCY_GENERATION,
+        inference_base_url="https://bench-provider.invalid/v1",
+        inference_protocol=runtime_protocol(BENCH_RUNTIME_ID) or "chat_completions",
+        inference_source=f"mconn_{'0' * 32}@1",
     )
 
 
@@ -1970,7 +2014,7 @@ def _activate_path(
     ``timed`` exists for the warmup: a warmup activation runs the same code with
     no measurement open, and its duration is discarded.
     """
-    from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+    from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 
     def run(supervisor: Any, **kwargs: Any) -> tuple[int, str, str, Any]:
         if not timed:
@@ -2108,8 +2152,9 @@ def _ensure_running_container(sandbox: StartupSandbox) -> Any:
 
 async def _run_startup_section(session: BenchSession, args: argparse.Namespace) -> dict[str, Any]:
     """Measure the four startup paths, per cohort, on a real container."""
-    from cloud_agent_host import runner as runner_mod
-    from cloud_agent_host.runner import ClaimedJob
+    from cloud_agent_host.claimed_job import ClaimedJob
+    from cloud_agent_host.measurement_delivery import DELIVERY_HANDOFF_DRAIN_S
+    from cloud_agent_host.service import measurement_sender
 
     sandbox = StartupSandbox()
     results: dict[str, dict[str, Any]] = {}
@@ -2140,11 +2185,11 @@ async def _run_startup_section(session: BenchSession, args: argparse.Namespace) 
     )
 
     def handoff(_frozen: Any) -> None:
-        runner_mod._enqueue_delivery(
+        measurement_sender._enqueue_delivery(
             _frozen,
             job=bench_job,
             base_url=session.url,
-            drain_s=runner_mod.DELIVERY_HANDOFF_DRAIN_S,
+            drain_s=DELIVERY_HANDOFF_DRAIN_S,
         )
 
     try:
@@ -2164,7 +2209,7 @@ async def _run_startup_section(session: BenchSession, args: argparse.Namespace) 
                 operations=(STARTUP_OPERATION,),
                 target={"job_id": session.job_id},
             )
-            runner_mod.reset_delivery_state()
+            measurement_sender.reset_delivery_state()
             on_frozen = handoff if cohort == "on-persist" else None
             #: Rows the control plane had accepted while this cohort was still
             #: activating. A delivery this script cannot serve is not a
@@ -2277,7 +2322,7 @@ async def _run_startup_section(session: BenchSession, args: argparse.Namespace) 
                     # delivered/duplicate/dropped names are the runner's, so a
                     # shortfall here is the delivery runtime's answer and not
                     # this script's bookkeeping.
-                    waited = await _await_handoff_deliveries(runner_mod, expected=expected)
+                    waited = await _await_handoff_deliveries(measurement_sender, expected=expected)
                     delivery = {**(delivery or {}), **waited}
                     stored = await _postgres_measurement_footprint(session.pool, run_id)
                     wanted = dict.fromkeys(STARTUP_PATHS, args.startup_iterations)
@@ -2361,7 +2406,7 @@ def _recorded_startup_path(record: dict[str, Any]) -> str:
     return str(record.get("startup_path") or "")
 
 
-async def _await_handoff_deliveries(runner_mod: Any, *, expected: int) -> dict[str, Any]:
+async def _await_handoff_deliveries(sender: Any, *, expected: int) -> dict[str, Any]:
     """Wait for the sends the handoff started, and report the runner's counts.
 
     The enqueue at the freeze point deliberately does not wait -- that is the
@@ -2374,15 +2419,15 @@ async def _await_handoff_deliveries(runner_mod: Any, *, expected: int) -> dict[s
     def _join() -> dict[str, Any]:
         deadline = time.monotonic() + 60.0
         while time.monotonic() < deadline:
-            state = runner_mod._IN_FLIGHT_DELIVERIES
+            state = sender._IN_FLIGHT_DELIVERIES
             if not state:
                 break
             for thread in list(state.values()):
                 thread.join(timeout=1.0)
         return {
-            "delivered": len(runner_mod._DELIVERED_MEASUREMENT_IDS),
-            "dropped": int(runner_mod._DELIVERY_DROPPED_COUNT),
-            "drain_timeouts": int(runner_mod._DELIVERY_DRAIN_TIMEOUTS),
+            "delivered": len(sender._DELIVERED_MEASUREMENT_IDS),
+            "dropped": int(sender._DELIVERY_DROPPED_COUNT),
+            "drain_timeouts": int(sender._DELIVERY_DRAIN_TIMEOUTS),
             "expected": expected,
         }
 
@@ -2391,7 +2436,7 @@ async def _await_handoff_deliveries(runner_mod: Any, *, expected: int) -> dict[s
 
 def _classify(container_action: str, resident_action: str) -> str:
     """Call the real startup-path classifier."""
-    from cloud_agent_host.runner import _classify_startup_path
+    from cloud_agent_host.turn.shared_live_attempt import _classify_startup_path
 
     return _classify_startup_path(container_action, resident_action)
 

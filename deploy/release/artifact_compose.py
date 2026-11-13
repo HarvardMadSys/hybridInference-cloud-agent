@@ -14,6 +14,24 @@ to write a result in which either half of that is untrue. `test_artifact_compose
 compares the output against the source to show that nothing else moved: the same
 services, the same ports, mounts, networks and dependencies.
 
+A source file may build a role's image once and run it in several services: the
+builder names the image, and the others name the same one with
+`pull_policy: never` and no `build` of their own (the control plane's `keys`
+and its four followers). A follower gets the manifest's image like its builder,
+and loses its `pull_policy`, because a release pulls the image it deploys rather
+than finding it built. A service with no `build` whose image is neither the
+recipe's placeholder nor its builder's is still refused.
+
+Every other service runs a third-party image (Postgres, the edge's nginx,
+pgAdmin), and the release keeps it as the source names it, so the source must
+name it the way the manifest names ours: by digest — the digest of the image's
+multi-architecture index, with the version tag beside it for people. A tag
+alone deploys whatever that tag points to on the day, which is how a database
+once changed minor version in the middle of an unrelated deploy, so a stack
+that names one any other way is refused. Whether the digest really is an index
+carrying both architectures is a registry question, checked when the pin
+changes rather than here.
+
 Comments do not survive the round trip through YAML, which is why the generated
 file is written next to the recipe's own README rather than published as a
 document — the annotated source stays the place to read about a service.
@@ -36,30 +54,42 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, and they are strings
 #: Which release role supplies each service, per stack.
 #:
 #: One image answers several services on purpose — the runner image runs the
-#: sandbox manager, the tunnel image runs all three tunnels — and the manifest carries
+#: sandbox manager, the tunnel image runs both tunnels — and the manifest carries
 #: one entry per role, so this table is what keeps "five roles" from becoming
 #: "six images and nine questions".
 STACKS: dict[str, dict[str, tuple[str, ...]]] = {
     "control-plane": {
-        "control": ("migrate", "control-plane", "mcp-relay"),
+        "control": ("keys", "migrate", "control-plane", "mcp-relay", "github-relay"),
         "web": ("web",),
     },
     "host": {
         "runner": ("runner", "sandbox-manager"),
-        "tunnel": ("gateway-tunnel", "mcp-tunnel", "control-plane-tunnel"),
+        "tunnel": ("mcp-tunnel", "control-plane-tunnel", "github-tunnel"),
     },
 }
 
-#: The web variant each stack's web service is built for. The control plane
-#: stack serves one mount shape; which one is a deployment's decision, and it
-#: has to match the image the manifest names.
-WEB_VARIANTS = ("root", "agents")
+#: The web variant each stack's web service is built for: only `root`, served at
+#: the root of its own hostname. Sub-path mounting (`agents`) was removed.
+WEB_VARIANTS = ("root",)
 
 _IMAGE_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$")
+
+#: A third-party image as a stack must name it: `name:version@sha256:<index digest>`.
+#: The name may carry a registry and port. The tag must start with a dotted
+#: version (16.16-alpine, 1.27.5-alpine, 9.18), so the digest is labelled with
+#: the release it is; a floating tag such as 16-alpine or latest is refused.
+_PINNED_RE = re.compile(
+    r"^[a-z0-9][a-z0-9._/:-]*:[0-9]+(?:\.[0-9]+)+[A-Za-z0-9._-]{0,100}@sha256:[0-9a-f]{64}$"
+)
 
 
 class ComposeError(Exception):
     """Raised when a stack cannot be rendered from this manifest."""
+
+
+def is_pinned(reference: object) -> bool:
+    """Whether a third-party image is named by version tag and digest together."""
+    return isinstance(reference, str) and _PINNED_RE.fullmatch(reference) is not None
 
 
 def image_placeholder(role: str) -> str:
@@ -124,26 +154,34 @@ def render(
     rendered = yaml.safe_load(yaml.safe_dump(document, sort_keys=False))
     for role, names in STACKS[stack].items():
         if role == "web" and variant is None:
-            raise ComposeError("the control-plane stack needs --variant: root or agents")
+            raise ComposeError("the control-plane stack needs --variant root")
         if role not in images:
             raise ComposeError(
                 f"the manifest carries no {role!r} artifact, and this stack runs "
                 f"{list(names)} from it"
             )
+        built = _built_images(services, role, names)
         for name in names:
-            service = services.get(name)
-            if service is None:
+            service = services[name]
+            follows_builder = (
+                "build" not in service
+                and service.get("image") in built
+                and service.get("pull_policy") == "never"
+            )
+            if (
+                "build" not in service
+                and not follows_builder
+                and service.get("image") != image_placeholder(role)
+            ):
                 raise ComposeError(
-                    f"service {name!r} is mapped to role {role!r} but the Compose file has "
-                    "no such service; the mapping and the stack have drifted apart"
-                )
-            if "build" not in service and service.get("image") != image_placeholder(role):
-                raise ComposeError(
-                    f"service {name!r} has neither a source build nor the recipe's {role!r} "
-                    "image placeholder; the mapping and the stack have drifted apart"
+                    f"service {name!r} has neither a source build, nor the image a {role!r} "
+                    "service builds with `pull_policy: never`, nor the recipe's "
+                    f"{role!r} image placeholder; the mapping and the stack have drifted apart"
                 )
             rendered["services"][name]["image"] = images[role]
             rendered["services"][name].pop("build", None)
+            if follows_builder:
+                rendered["services"][name].pop("pull_policy", None)
 
     leftovers = sorted(
         name
@@ -155,7 +193,46 @@ def render(
             f"these services still carry `build`, so the release recipe would depend on "
             f"source: {leftovers}. Add them to STACKS under the role that supplies them."
         )
+
+    unpinned = unpinned_third_party_images(rendered, stack)
+    if unpinned:
+        raise ComposeError(
+            f"a third-party image must be named by its version tag and the digest of its "
+            f"multi-architecture index, `name:tag@sha256:<digest>`; a tag alone deploys "
+            f"whatever it points to on the day: {unpinned}"
+        )
     return rendered
+
+
+def unpinned_third_party_images(document: Mapping[str, Any], stack: str) -> list[str]:
+    """Each service no release role supplies whose image is not pinned, and what it names."""
+    owned = {name for names in STACKS[stack].values() for name in names}
+    unpinned = []
+    for name, service in sorted((document.get("services") or {}).items()):
+        image = service.get("image") if isinstance(service, dict) else None
+        if name not in owned and not is_pinned(image):
+            unpinned.append(f"{name} runs {image!r}")
+    return unpinned
+
+
+def _built_images(services: Mapping[str, Any], role: str, names: Sequence[str]) -> set[str]:
+    """The images this role's own source builds name, which its followers may run.
+
+    Only a builder that names its image can be followed, and a follower must name
+    exactly that image: an image built by another role's service, or one nobody
+    here builds, is not this role's artifact.
+    """
+    built: set[str] = set()
+    for name in names:
+        service = services.get(name)
+        if service is None:
+            raise ComposeError(
+                f"service {name!r} is mapped to role {role!r} but the Compose file has "
+                "no such service; the mapping and the stack have drifted apart"
+            )
+        if "build" in service and service.get("image"):
+            built.add(service["image"])
+    return built
 
 
 def main(argv: Sequence[str] | None = None) -> int:

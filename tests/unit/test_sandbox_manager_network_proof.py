@@ -1,8 +1,10 @@
 """The sandbox manager's workspace routes stand on their admission's network proof.
 
-Opening a read, a terminal or an environment preparation is admitted by the
-supervisor, which proves the group network for that request. No route proves
-it again, and the commands an operation spawns stand on that proof.
+Opening a read or a terminal, or an environment preparation that runs a
+script, is admitted by the supervisor, which proves the group network for that
+request. No route proves it again, and the commands an operation spawns stand
+on that proof. A preparation already done for the running boot runs nothing
+and proves nothing.
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ async def test_workspace_routes_leave_the_network_proof_to_admission(monkeypatch
 
     supervisor.prepare_environment = prepare_environment  # type: ignore[attr-defined]
     monkeypatch.setattr(
-        "cloud_agent_host.sandbox_manager.read_retained_file",
+        "cloud_agent_host.manager_api.workspaces.read_retained_file",
         lambda *_args, **_kwargs: {"path": "", "kind": "directory", "entries": []},
     )
     app = _app(supervisor)

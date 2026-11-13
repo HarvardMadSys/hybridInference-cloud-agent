@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 import yaml
-from deploy.release import build_host_bundle, release_manifest as rm, smoke
+from deploy.release import artifact_compose, build_host_bundle, release_manifest as rm, smoke
 from scripts.ci_image_matrix import image_matrix
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -33,6 +33,7 @@ CI = REPO_ROOT / ".github/workflows/ci.yml"
 CONSOLE_DOCKERFILE = REPO_ROOT / "deploy/control-plane/Dockerfile"
 RUNNER_DOCKERFILE = REPO_ROOT / "deploy/host/Dockerfile.agent-runner"
 HOST_STACK = REPO_ROOT / "deploy/host/docker-compose.sandbox.yml"
+CONTROL_PLANE_STACK = REPO_ROOT / "deploy/control-plane/docker-compose.yml"
 WEB_DOCKERFILE = REPO_ROOT / "deploy/control-plane/Dockerfile.web"
 
 
@@ -481,9 +482,10 @@ def test_the_default_test_tier_runs_whatever_changed() -> None:
     gate, and left the failure to the next backend change.
     """
     jobs = workflow()["jobs"]
-    assert "if" not in jobs["test"], jobs["test"]["if"]
-    assert jobs["test"]["needs"] == "changes"
-    assert "test" in jobs["ci-gate"]["needs"]
+    for name in ("test", "test-docker"):
+        assert "if" not in jobs[name], jobs[name]["if"]
+        assert jobs[name]["needs"] == "changes"
+        assert name in jobs["ci-gate"]["needs"]
 
 
 def _git(repository: Path, *args: str) -> str:
@@ -548,6 +550,7 @@ SELECTS_NOTHING = {
     "web": "false",
     "docker": "false",
     "docs": "false",
+    "protocol": "false",
     "image_scope": "all",
 }
 SELECTS_EVERYTHING = {
@@ -555,6 +558,7 @@ SELECTS_EVERYTHING = {
     "web": "true",
     "docker": "true",
     "docs": "true",
+    "protocol": "true",
     "image_scope": "all",
 }
 
@@ -606,9 +610,15 @@ def test_a_rerun_of_a_released_commit_is_not_compared_with_its_own_release(
 
 
 def test_real_upload_limits_are_checked_by_compose_ci() -> None:
-    """Static caps also need a real nginx syntax/path/body-limit regression."""
+    """Static caps also need a real nginx syntax/path/body-limit regression.
+
+    On the nginx the edge runs, pinned: a floating tag would check the configs
+    against whatever that tag pointed to on the day of the run.
+    """
     check = step("Upload limits match encoded attachments", job="compose")
-    assert check["env"]["AGENT_UPLOAD_TEST_NGINX_IMAGE"] == "nginx:1.27.5-alpine"
+    edge = yaml.safe_load(CONTROL_PLANE_STACK.read_text())["services"]["edge"]["image"]
+    assert artifact_compose.is_pinned(edge), edge
+    assert check["env"]["AGENT_UPLOAD_TEST_NGINX_IMAGE"] == edge
     assert "docker --host=unix:///var/run/docker.sock pull" in check["run"]
     assert "pytest -q -m external tests/external/test_upload_edge_limits.py" in check["run"]
 
@@ -745,3 +755,25 @@ def test_the_job_logs_in_to_a_config_of_its_own() -> None:
     assert 'echo "DOCKER_CONFIG=${RUNNER_TEMP}/docker-config" >> "${GITHUB_ENV}"' in naming
     names = [str(s.get("name", "")) for s in workflow()["jobs"]["artifacts"]["steps"]]
     assert names.index("Name this cell's artifacts") < names.index("Log in to Docker Hub")
+
+
+#: Twice the slowest healthy image build seen (312s, the hosted sandbox).
+BUILD_TIMEOUT_MINUTES = 10
+
+
+@pytest.mark.parametrize("job", ["artifacts", "mcp"])
+def test_a_build_that_stops_making_progress_fails_into_its_retry(job: str) -> None:
+    """A hung build is bounded, and its bound is what sends it to the retry.
+
+    Hosted sandbox builds have hung for 27-35 minutes with nothing to end them
+    short of GitHub's six-hour job limit. A step's timeout fails the step, and
+    the first attempt's ``continue-on-error`` turns that failure into the
+    ``failure`` outcome the retry runs on; the retry is bounded the same way,
+    so a cell that hangs twice goes red instead of holding the pull request.
+    """
+    first = step("Build ${{ matrix.artifact.name }}", job=job)
+    retry = step("Build ${{ matrix.artifact.name }} (retry)", job=job)
+    assert first["name"] == "Build ${{ matrix.artifact.name }}"
+    assert first["id"] == "build" and first["continue-on-error"] is True
+    assert retry["if"] == "steps.build.outcome == 'failure'"
+    assert first["timeout-minutes"] == retry["timeout-minutes"] == BUILD_TIMEOUT_MINUTES

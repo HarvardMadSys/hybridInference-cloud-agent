@@ -11,7 +11,7 @@ import {
 import { listThreadQuestions } from '@/lib/api/questions';
 import { onAgentSessionsChanged } from '@/lib/api/agentSessionEvents';
 import { onAgentRecordsChanged, type AgentRecordsChange } from './agentPush';
-import { clearWorkspaceGitCache } from './workspaceGitCache';
+import { clearWorkspaceGitCache } from './workspace/workspaceGitCache';
 
 const AgentReadContext = createContext<AgentReadScope>({
   getAgentJob: (jobId) => getAgentJob(jobId),
@@ -37,8 +37,8 @@ const QuestionReadContext = createContext<QuestionReadScope>({
  *
  * Questions belong to a conversation's running turn, so only a change to one
  * of its turns, its deletion, or a gap in what the tab was told counts. A new
- * message moves the conversation and a publication moves its workspace, and
- * neither is a reason to cancel a read the host has already answered.
+ * message moves the conversation, and that is no reason to cancel a read the
+ * host has already answered.
  */
 function staleQuestionThreads(change: AgentRecordsChange): string[] | null {
   if (change.resync) return null;
@@ -62,12 +62,7 @@ export function AgentReadProvider({ userId, children }: { userId?: string; child
       for (const threadId of change.threadIds) questions.invalidate(threadId);
     });
     const records = onAgentRecordsChanged((change) => {
-      if (
-        change.resync ||
-        change.jobs.length > 0 ||
-        change.threads.length > 0 ||
-        change.publications.length > 0
-      ) {
+      if (change.resync || change.jobs.length > 0 || change.threads.length > 0) {
         reads.invalidate();
       }
       const threads = staleQuestionThreads(change);

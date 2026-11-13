@@ -12,8 +12,18 @@ import httpx
 import pytest
 from fastapi import HTTPException
 
-from cloud_agent.api import mcp_connections, mcp_relay
-from cloud_agent.mcp import catalog, host, oauth, protocol, refresh, sse, transports
+from cloud_agent.api import mcp_authorization, mcp_connections, mcp_relay
+from cloud_agent.domain.errors import Refused
+from cloud_agent.mcp import (
+    catalog,
+    host,
+    oauth,
+    oauth_authorization,
+    protocol,
+    refresh,
+    sse,
+    transports,
+)
 from cloud_agent.mcp.jsonrpc import decode, id_key
 from cloud_agent.mcp.models import AuthKind, AuthProfile, HeaderAuth
 from cloud_agent.mcp.net_policy import EgressPolicy, EndpointRejected, normalize_url
@@ -354,9 +364,9 @@ async def test_approved_dispatch_records_unknown_outcome_after_sse_limit(monkeyp
         )
         capability = SimpleNamespace(name="search")
         entry = (authorized, capability)
-        monkeypatch.setattr(mcp_relay, "_host_catalogue", AsyncMock(return_value={"tool": entry}))
-        monkeypatch.setattr(mcp_relay, "_refresh_catalogue_entry", AsyncMock(return_value=entry))
-        monkeypatch.setattr(mcp_relay, "_decide_call", AsyncMock(return_value=None))
+        monkeypatch.setattr(mcp_relay, "host_catalogue", AsyncMock(return_value={"tool": entry}))
+        monkeypatch.setattr(mcp_relay, "refresh_catalogue_entry", AsyncMock(return_value=entry))
+        monkeypatch.setattr(mcp_relay, "decide_call", AsyncMock(return_value=None))
         monkeypatch.setattr(mcp_relay, "_host_session", AsyncMock(return_value=session))
         built = host.McpHost()
         monkeypatch.setattr(mcp_relay, "_host", lambda: built)
@@ -422,9 +432,9 @@ async def test_approved_dispatch_records_unknown_outcome_after_a_malformed_reply
         )
         capability = SimpleNamespace(name="search")
         entry = (authorized, capability)
-        monkeypatch.setattr(mcp_relay, "_host_catalogue", AsyncMock(return_value={"tool": entry}))
-        monkeypatch.setattr(mcp_relay, "_refresh_catalogue_entry", AsyncMock(return_value=entry))
-        monkeypatch.setattr(mcp_relay, "_decide_call", AsyncMock(return_value=None))
+        monkeypatch.setattr(mcp_relay, "host_catalogue", AsyncMock(return_value={"tool": entry}))
+        monkeypatch.setattr(mcp_relay, "refresh_catalogue_entry", AsyncMock(return_value=entry))
+        monkeypatch.setattr(mcp_relay, "decide_call", AsyncMock(return_value=None))
         monkeypatch.setattr(mcp_relay, "_host_session", AsyncMock(return_value=session))
         built = host.McpHost()
         monkeypatch.setattr(mcp_relay, "_host", lambda: built)
@@ -531,12 +541,13 @@ async def test_oauth_posts_negotiate_identity_and_refuse_compression(monkeypatch
         client=oauth.ClientIdentity(client_id="client", registration="preregistered"),
     )
     with pytest.raises(
-        (HTTPException, TransportError, refresh.RefreshRefused), match="compressed response"
+        (HTTPException, Refused, TransportError, refresh.RefreshRefused),
+        match="compressed response",
     ):
         if operation == "registration":
-            await mcp_connections._post_json(None, token_request.url, {}, policy=policy)
+            await oauth_authorization.post_json(None, token_request.url, {}, policy=policy)
         elif operation == "token":
-            await mcp_connections._post_form(token_request, policy=policy)
+            await mcp_authorization._post_form(token_request, policy=policy)
         else:
             await refresh._post(token_request, policy=policy, fetcher=None)
     assert seen[0].headers["accept-encoding"] == "identity"

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from cloud_agent.admin_sandboxes import AdminSandbox, resource_usage_view
+from cloud_agent.schemas.admin_sandboxes import AdminSandbox, resource_usage_view
 from cloud_agent.storage._sql.rows import load_json
 
 
@@ -40,7 +40,7 @@ async def inventory_rows(
                g.resource_snapshot,g.resource_sampled_at,g.resource_received_at,
                members.member_count,members.active_attempt_count,
                g.created_at,g.last_activity_at,g.idle_deadline,g.updated_at,
-               h.last_heartbeat_at AS host_last_heartbeat_at
+               h.last_heartbeat_at AS host_last_heartbeat_at,h.status AS host_status
         FROM page g
         JOIN agent_threads t ON t.id=g.origin_thread_id AND t.user_id=g.user_id
         LEFT JOIN agent_runner_hosts h ON h.host=g.host

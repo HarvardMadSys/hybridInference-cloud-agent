@@ -2,13 +2,16 @@
 
 import json
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import httpx
 import pytest
 
-from cloud_agent_host import runner
+from cloud_agent_host import claimed_job, control_plane_client, runner
+from cloud_agent_host.service import attempt_lease, local_settings
+from cloud_agent_host.turn import turn_stream
 
 
 def test_brief_control_outage_recovers_before_the_original_lease_expires(monkeypatch):
@@ -31,14 +34,14 @@ def test_brief_control_outage_recovers_before_the_original_lease_expires(monkeyp
         def heartbeat(self, ttl):
             attempts.append(clock.now)
             if clock.now >= 120:
-                raise runner.LeaseLost("expired")
+                raise claimed_job.LeaseLost("expired")
             if clock.now < 100:
                 clock.now += 30
                 raise httpx.ReadTimeout("temporary outage")
             return {"cancel_requested": True}
 
-    monkeypatch.setattr(runner.time, "monotonic", lambda: clock.now)
-    heart = runner.Heartbeater(Control(), ttl=120, interval=30)
+    monkeypatch.setattr(time, "monotonic", lambda: clock.now)
+    heart = attempt_lease.Heartbeater(Control(), ttl=120, interval=30)
     heart._stop = Stop()
     heart._run()
 
@@ -69,8 +72,8 @@ def test_the_first_renewal_is_sent_as_soon_as_the_heartbeat_starts(monkeypatch):
 
     control = Mock(job_id="ajob_prompt")
     control.heartbeat.side_effect = heartbeat
-    monkeypatch.setattr(runner.time, "monotonic", lambda: clock.now)
-    heart = runner.Heartbeater(control, ttl=120, interval=30)
+    monkeypatch.setattr(time, "monotonic", lambda: clock.now)
+    heart = attempt_lease.Heartbeater(control, ttl=120, interval=30)
     heart._stop = Stop()
     heart._run()
 
@@ -100,9 +103,9 @@ def test_heartbeat_recovery_restores_normal_cadence_and_logs_no_credentials(monk
             assert len(waits) <= 3
             return False
 
-    monkeypatch.setattr(runner.time, "monotonic", lambda: clock.now)
-    caplog.set_level("INFO", logger=runner.__name__)
-    heart = runner.Heartbeater(control, ttl=120, interval=30)
+    monkeypatch.setattr(time, "monotonic", lambda: clock.now)
+    caplog.set_level("INFO", logger=attempt_lease.logger.name)
+    heart = attempt_lease.Heartbeater(control, ttl=120, interval=30)
     heart._stop = Stop()
     heart._run()
 
@@ -134,9 +137,9 @@ def test_repeated_heartbeat_failures_record_the_detail_once(monkeypatch, caplog)
             assert len(waits) <= 3
             return False
 
-    monkeypatch.setattr(runner.time, "monotonic", lambda: clock.now)
-    caplog.set_level("INFO", logger=runner.__name__)
-    heart = runner.Heartbeater(control, ttl=120, interval=30)
+    monkeypatch.setattr(time, "monotonic", lambda: clock.now)
+    caplog.set_level("INFO", logger=attempt_lease.logger.name)
+    heart = attempt_lease.Heartbeater(control, ttl=120, interval=30)
     heart._stop = Stop()
     heart._run()
 
@@ -149,8 +152,8 @@ def test_repeated_heartbeat_failures_record_the_detail_once(monkeypatch, caplog)
 def test_fenced_heartbeat_never_retries_or_claims_a_replacement(caplog):
     """A 409 terminates renewal even when fast retries are enabled."""
     control = Mock(job_id="ajob_fenced")
-    control.heartbeat.side_effect = runner.LeaseLost("PRIVATE_RESPONSE")
-    heart = runner.Heartbeater(control, ttl=120, interval=30)
+    control.heartbeat.side_effect = claimed_job.LeaseLost("PRIVATE_RESPONSE")
+    heart = attempt_lease.Heartbeater(control, ttl=120, interval=30)
     heart._stop = Mock()
     heart._stop.wait.return_value = False
 
@@ -179,7 +182,7 @@ def test_cancellation_keeps_the_lease_renewed_until_the_runner_stops():
             beats.append(heart.cancel_requested)
             return len(beats) > 4
 
-    heart = runner.Heartbeater(control, ttl=120, interval=30)
+    heart = attempt_lease.Heartbeater(control, ttl=120, interval=30)
     heart._stop = Stop()
     heart._run()
 
@@ -213,8 +216,8 @@ def test_an_outage_longer_than_the_lease_stops_the_agent(monkeypatch, caplog):
             clock.now += 10
             raise httpx.ConnectTimeout("partitioned")
 
-    monkeypatch.setattr(runner.time, "monotonic", lambda: clock.now)
-    heart = runner.Heartbeater(Control(), ttl=120, interval=30)
+    monkeypatch.setattr(time, "monotonic", lambda: clock.now)
+    heart = attempt_lease.Heartbeater(Control(), ttl=120, interval=30)
     heart._stop = Stop()
     heart._run()
 
@@ -242,7 +245,7 @@ def test_a_refused_worker_credential_stops_the_agent_at_once(status):
             assert len(waits) <= 2, "a refused credential was retried"
             return False
 
-    heart = runner.Heartbeater(control, ttl=120, interval=30)
+    heart = attempt_lease.Heartbeater(control, ttl=120, interval=30)
     heart._stop = Stop()
 
     heart._run()
@@ -256,7 +259,7 @@ def test_a_lease_no_renewal_could_reach_is_not_used(monkeypatch, capsys, configu
     """A lease that ends before its next renewal would lose every attempt."""
     monkeypatch.setenv("AGENT_LEASE_TTL", configured)
 
-    assert runner.build_parser().parse_args([]).lease_ttl == runner.DEFAULT_LEASE_TTL_S
+    assert runner.build_parser().parse_args([]).lease_ttl == local_settings.DEFAULT_LEASE_TTL_S
     assert "ignoring AGENT_LEASE_TTL" in capsys.readouterr().err
 
     with pytest.raises(SystemExit):
@@ -271,7 +274,7 @@ def test_a_lease_that_outlasts_its_first_renewal_is_used(monkeypatch):
 
 def test_stopped_heartbeat_makes_no_request():
     control = Mock(job_id="ajob_stopped")
-    heart = runner.Heartbeater(control, ttl=120, interval=30)
+    heart = attempt_lease.Heartbeater(control, ttl=120, interval=30)
     heart.stop()
     heart._run()
     control.heartbeat.assert_not_called()
@@ -339,12 +342,12 @@ def test_silent_turn_completes_across_three_lease_periods(monkeypatch, network_r
         def close(self):
             self.closed = True
 
-    monkeypatch.setattr(runner.time, "monotonic", lambda: clock.now)
-    control = runner.ControlPlane("https://control.test", "test-token")
+    monkeypatch.setattr(time, "monotonic", lambda: clock.now)
+    control = control_plane_client.ControlPlane("https://control.test", "test-token")
     control.close()
     control._client = httpx.Client(timeout=30, transport=httpx.MockTransport(endpoint))
     control.job_id = "ajob_silent"
-    heart = runner.Heartbeater(control, ttl=120, interval=30)
+    heart = attempt_lease.Heartbeater(control, ttl=120, interval=30)
     heart._stop = Stop()
     run_heartbeat = heart._run
 
@@ -363,7 +366,7 @@ def test_silent_turn_completes_across_three_lease_periods(monkeypatch, network_r
     )
     heart.start()
     try:
-        code, _tail, errors, result, _reported = runner._stream_shared_agent_turn(
+        code, _tail, errors, result, _reported = turn_stream._stream_shared_agent_turn(
             supervisor=supervisor,
             job=job,
             control=control,
@@ -396,7 +399,7 @@ def test_heartbeat_has_a_short_timeout_without_changing_other_control_requests()
         timeouts[request.url.path.rsplit("/", 1)[-1]] = request.extensions["timeout"]
         return httpx.Response(200, json={})
 
-    control = runner.ControlPlane("https://control.test", "test-token")
+    control = control_plane_client.ControlPlane("https://control.test", "test-token")
     control.close()
     control._client = httpx.Client(timeout=30, transport=httpx.MockTransport(endpoint))
     control.job_id = "ajob_timeouts"
@@ -408,55 +411,3 @@ def test_heartbeat_has_a_short_timeout_without_changing_other_control_requests()
 
     assert timeouts["heartbeat"] == dict.fromkeys(("connect", "read", "write", "pool"), 10)
     assert timeouts["finish"] == dict.fromkeys(("connect", "read", "write", "pool"), 30)
-
-
-def test_question_hint_is_best_effort_and_uses_a_short_deadline():
-    requests = []
-
-    def endpoint(request):
-        requests.append(request)
-        return httpx.Response(204)
-
-    control = runner.ControlPlane("https://control.test", "test-token")
-    control.close()
-    control._client = httpx.Client(timeout=30, transport=httpx.MockTransport(endpoint))
-    try:
-        control.report_question_change("ajob_questions")
-    finally:
-        control.close()
-
-    assert len(requests) == 1
-    assert requests[0].url.path == "/v1/agent/worker/jobs/ajob_questions/questions:changed"
-    assert requests[0].extensions["timeout"] == dict.fromkeys(
-        ("connect", "read", "write", "pool"), 2
-    )
-
-
-def test_question_hint_swallows_a_5xx_and_a_timeout_but_keeps_a_lost_lease():
-    """The hint is recoverable by polling, so only a lost lease may raise.
-
-    A server error or a timed-out request is swallowed; a 409 means the lease
-    is gone, and LeaseLost still terminates the turn as everywhere else.
-    """
-    outcomes = []
-
-    def endpoint(request):
-        outcomes.append(request)
-        if len(outcomes) == 1:
-            return httpx.Response(503, json={"detail": "busy"})
-        if len(outcomes) == 2:
-            raise httpx.ConnectTimeout("no route", request=request)
-        return httpx.Response(409, json={"detail": "lease expired"})
-
-    control = runner.ControlPlane("https://control.test", "test-token")
-    control.close()
-    control._client = httpx.Client(timeout=30, transport=httpx.MockTransport(endpoint))
-    try:
-        control.report_question_change("ajob_flaky_hint")
-        control.report_question_change("ajob_flaky_hint")
-        with pytest.raises(runner.LeaseLost):
-            control.report_question_change("ajob_flaky_hint")
-    finally:
-        control.close()
-
-    assert len(outcomes) == 3

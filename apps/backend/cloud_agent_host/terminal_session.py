@@ -21,8 +21,8 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException
 
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.logging_utils import get_logger
-from cloud_agent_host.sandbox import SandboxError
 from cloud_agent_shared.host_settings import SANDBOX_MANAGER_SETTING_KEYS, default_values
 from cloud_agent_shared.secret_redaction import SecretRedactor
 
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from cloud_agent_host.sandbox import TerminalProcess
+    from cloud_agent_host.container.sandbox import TerminalProcess
 
 #: Its records keep the sandbox manager's logger name, which they had before
 #: this module was split from it: a log selection by name must not lose them.
@@ -274,7 +274,7 @@ class _TerminalSession:
                 # A backend may report failure after a partially effective
                 # CONT. Best-effort STOP it again before preserving the
                 # logical suspension; callers must never treat an uncertain
-                # resume as an open publication/preparation barrier.
+                # resume as an open preparation barrier.
                 with contextlib.suppress(SandboxError, OSError):
                     self._process.suspend()
                 raise

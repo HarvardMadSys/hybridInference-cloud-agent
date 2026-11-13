@@ -3,8 +3,8 @@
 The gate for adding a version, and the check the sandbox Dockerfile's comment
 has been asking for since it was written.
 
-`runtimes.py` normalizes one event shape per runtime. Putting a version in a
-``*_EXTRA_VERSIONS`` list is a claim that it parses — and until now nothing
+`runtimes.py` normalizes one event shape per runtime. Pinning a version in the
+sandbox image is a claim that it parses — and until now nothing
 tested that against a real CLI: the contract fixtures under
 ``tests/fixtures/agent_runtime_streams/`` are hand-written, down to
 ``"claude_code_version": "synthetic"``. They pin *our* mapping against a shape
@@ -43,7 +43,7 @@ import shutil
 import pytest
 from tests.support.claude_cli import ClaudeCli, FakeAnthropicGateway
 
-from cloud_agent.thread_stats import summarize_thread
+from cloud_agent.domain.thread_stats import summarize_thread
 from cloud_agent_host.runtimes import ClaudeCodeRuntime
 
 pytestmark = pytest.mark.external
@@ -57,19 +57,16 @@ _STRUCTURAL = ("not json", "not an object", "unknown type")
 
 
 def _menu() -> list[str]:
-    """Every claude-code version the image offers, default first.
+    """The claude-code version the image holds: its reviewed pin.
 
     Read from the Dockerfile rather than listed here: this suite must cover
-    whatever the image was told to hold, including a version added an hour ago
+    whatever the image was told to hold, including a bump made an hour ago
     by someone who has not read this file.
     """
     dockerfile = _DOCKERFILE.read_text()
     default = re.search(r"^ARG CLAUDE_CODE_VERSION=(\S+)$", dockerfile, re.MULTILINE)
     assert default, "the sandbox Dockerfile no longer pins CLAUDE_CODE_VERSION"
-    extra = re.search(r"^ARG CLAUDE_CODE_EXTRA_VERSIONS=(\S*)$", dockerfile, re.MULTILINE)
-    versions = [default.group(1)]
-    versions += [part.strip() for part in (extra.group(1) if extra else "").split(",")]
-    return [version for version in versions if version]
+    return [default.group(1)]
 
 
 @pytest.fixture

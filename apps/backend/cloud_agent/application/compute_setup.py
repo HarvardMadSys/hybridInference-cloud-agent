@@ -16,11 +16,11 @@ import tarfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
 
 from cloud_agent.domain.compute import ComputeRefusal, fingerprint
+from cloud_agent.ports.errors import ConflictCode, StorageConflict
 from cloud_agent.ports.external.compute_provider import SshConnection
 from cloud_agent.providers.compute.sandbox_image import find_published_sandbox_image
 from cloud_agent.providers.compute.setup_tunnels import (
@@ -34,11 +34,14 @@ from cloud_agent_shared.sandbox_manager_compat import manager_environment
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from cloud_agent.compute_config import ComputeConfiguration, ComputeSecretResolver
-    from cloud_agent.compute_secrets import ComputeSecretStore
     from cloud_agent.ports.compute_resources import ComputeResourceRepository
+    from cloud_agent.providers.compute.compute_config import (
+        ComputeConfiguration,
+        ComputeSecretResolver,
+    )
+    from cloud_agent.providers.compute.compute_secrets import ComputeSecretStore
     from cloud_agent.providers.compute.setup_tunnels import SshTunnelSetup
-    from cloud_agent.schemas_compute import AutomaticDeploymentSetup, SetupMachine
+    from cloud_agent.schemas.compute import AutomaticDeploymentSetup, SetupMachine
 
 
 @dataclass(frozen=True)
@@ -81,10 +84,21 @@ _HostReleaseKey = tuple[str, int, int, int, int, str]
 _HOST_RELEASE_MEMO: dict[str, tuple[_HostReleaseKey, HostRelease]] = {}
 
 
+def _request_document(request: AutomaticDeploymentSetup) -> dict[str, Any]:
+    return request.model_dump(mode="json")
+
+
+class IncompleteHostBundle(ValueError):
+    """A safe host archive that lacks part of the Host recipe."""
+
+    def __init__(self) -> None:
+        super().__init__("incomplete")
+
+
 def validate_host_bundle(bundle: bytes) -> None:
     """Reject an unsafe or incomplete host archive.
 
-    Raises ``ValueError('invalid')`` or ``ValueError('incomplete')``.
+    Raises ``ValueError('invalid')`` or :class:`IncompleteHostBundle`.
     """
     try:
         with tarfile.open(fileobj=io.BytesIO(bundle), mode="r:*") as archive:
@@ -104,7 +118,7 @@ def validate_host_bundle(bundle: bytes) -> None:
     except (tarfile.TarError, OSError, ValueError) as exc:
         raise ValueError("invalid") from exc
     if not names >= _HOST_BUNDLE_FILES:
-        raise ValueError("incomplete")
+        raise IncompleteHostBundle
 
 
 def load_host_release(directory: Path, *, expected_sha: str) -> HostRelease:
@@ -251,15 +265,7 @@ class AutomaticComputeSetup:
         saved = await self.repository.provider_defaults("automatic_setup")
         request = saved.get("request")
         if not isinstance(request, dict):
-            try:
-                gateway_address = urlsplit(text_setting("gateway_base_url")).hostname or ""
-            except ValueError:
-                gateway_address = ""
             status["machine_defaults"] = {
-                "gateway": {
-                    "address": os.environ.get("AGENT_GATEWAY_SSH_HOST", "").strip()
-                    or gateway_address,
-                },
                 "control": {
                     "address": os.environ.get("AGENT_CONTROL_PLANE_SSH_HOST", "").strip(),
                 },
@@ -353,7 +359,6 @@ class AutomaticComputeSetup:
         endpoint: ControlPlaneEndpoint,
         profile_id: str,
         reverse_port: int,
-        gateway_hosts: str,
         control_hosts: str,
         sandbox_image: str | None = None,
     ) -> dict[str, Any]:
@@ -379,7 +384,6 @@ class AutomaticComputeSetup:
         files = {}
         public_keys = {}
         for role, prefix, machine, port, hosts in (
-            ("gateway", "AGENT_TUNNEL", request.gateway, request.gateway_port, gateway_hosts),
             ("mcp", "AGENT_MCP_TUNNEL", request.control, endpoint.mcp_port, control_hosts),
             (
                 "control",
@@ -396,7 +400,7 @@ class AutomaticComputeSetup:
             environment.update(
                 {
                     prefix
-                    + "_SSH_DESTINATION": f"{tunnel_username(profile_id, 'inference' if role == 'gateway' else role)}@{machine.address}",
+                    + "_SSH_DESTINATION": f"{tunnel_username(profile_id, role)}@{machine.address}",
                     prefix + "_SSH_PORT": str(machine.port),
                     prefix + "_SSH_KEY": f"{{deploy_root}}/.compute-secrets/{role}.key",
                     prefix
@@ -438,7 +442,6 @@ class AutomaticComputeSetup:
         request_fingerprint: str,
         slot: int,
         reserved: set[int],
-        gateway_hosts: str,
         control_hosts: str,
         sandbox_image: str | None = None,
     ) -> dict[str, Any]:
@@ -468,7 +471,6 @@ class AutomaticComputeSetup:
                 endpoint,
                 profile_id,
                 reverse_port,
-                gateway_hosts,
                 control_hosts,
                 sandbox_image,
             )
@@ -502,8 +504,8 @@ class AutomaticComputeSetup:
                         "profile:" + profile_id, "deployment_profile", json.dumps(assets)
                     ),
                 )
-            except ValueError as exc:
-                if str(exc) != "deployment_profile_exists":
+            except StorageConflict as exc:
+                if exc.code is not ConflictCode.DEPLOYMENT_PROFILE_EXISTS:
                     raise
                 # Another API replica reserved this route. Reuse its inputs
                 # only for the same request; another request keeps its route.
@@ -553,7 +555,7 @@ class AutomaticComputeSetup:
             raise ComputeRefusal(blocked["code"], blocked["message"], status=503)
         request_fingerprint = fingerprint(
             "automatic_setup",
-            {**request.model_dump(mode="json"), "release": release.sha, "bundle": release.digest},
+            {**_request_document(request), "release": release.sha, "bundle": release.digest},
         )
         all_profiles = await self.repository.list_deployment_profiles()
         checkpoints = {}
@@ -577,7 +579,6 @@ class AutomaticComputeSetup:
                     for _, row in sorted(checkpoints.items())
                 ]
             }
-        gateway = await self._connection(request.gateway)
         control = await self._connection(request.control)
         endpoint = await self.tunnels.discover_control_plane(control, release.sha)
         allowed = text_setting("sandbox_manager_url_allowed_hosts").strip()
@@ -587,21 +588,10 @@ class AutomaticComputeSetup:
                 "The detected control-plane bridge address must be included in the sandbox manager host allowlist.",
                 status=422,
             )
-        gateway_identity = await self.tunnels.check_gateway(gateway, request.gateway_port)
-        if gateway_identity == endpoint.machine_identity and request.gateway_port in {
-            endpoint.main_port,
-            endpoint.mcp_port,
-        }:
-            raise ComputeRefusal(
-                "automatic_listener_conflict",
-                "The gateway must use a different port from the control-plane API and MCP listeners on the same machine.",
-                status=422,
-            )
         await self.repository.set_provider_defaults(
             "automatic_setup",
-            {"request": request.model_dump(mode="json"), "source_commit": release.sha},
+            {"request": _request_document(request), "source_commit": release.sha},
         )
-        gateway_hosts = await self.resolver.resolve(gateway.known_hosts_ref or "")
         control_hosts = await self.resolver.resolve(control.known_hosts_ref or "")
         reserved = await self._reserved_ports(endpoint.gateway_ip)
         reserved.update({endpoint.main_port, endpoint.mcp_port})
@@ -628,7 +618,6 @@ class AutomaticComputeSetup:
                     request_fingerprint,
                     slot,
                     reserved,
-                    gateway_hosts,
                     control_hosts,
                     sandbox_image,
                 )
@@ -651,9 +640,6 @@ class AutomaticComputeSetup:
                 )
             )
             keys = assets["public_keys"]
-            await self.tunnels.provision_gateway(
-                gateway, keys["gateway"], request.gateway_port, row["id"]
-            )
             await self.tunnels.provision_control(
                 control,
                 keys["mcp"],

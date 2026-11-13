@@ -18,9 +18,9 @@ from tests.unit.test_chat_group_network import (
     _world,
 )
 
-from cloud_agent_host.chat_sandbox import CHAT_NAMESPACE_LABEL, CHAT_NETWORK_LABEL
+from cloud_agent_host.container.chat_sandbox import CHAT_NAMESPACE_LABEL, CHAT_NETWORK_LABEL
 from cloud_agent_host.environment_tests import environment_run_spec
-from cloud_agent_host.shared_session_supervisor import SharedChatSessionSupervisor
+from cloud_agent_host.supervisor.shared_session_supervisor import SharedChatSessionSupervisor
 
 
 def test_a_stale_orphan_bridge_and_its_exceptions_are_pruned(monkeypatch):
@@ -29,7 +29,7 @@ def test_a_stale_orphan_bridge_and_its_exceptions_are_pruned(monkeypatch):
     name, _ = _group_bridge(manager, docker, orphan, age_s=3600)
     manager._network_lifecycle._attach_relays(name)
     bridge = manager._network_lifecycle._network().bridge_name(name)
-    guard.relays[bridge] = {("10.240.9.3", 8080)}
+    guard.relays[bridge] = {("10.240.9.3", 8000)}
 
     manager.network.prune_orphan_networks([])
 
@@ -156,7 +156,7 @@ def test_prune_reads_whose_bridge_it_is_from_the_listing_it_is_given(monkeypatch
     docker.add_sandbox(live_spec, running=True)
     live, live_network = _group_bridge(manager, docker, live_spec, age_s=3600)
     docker.connect(live_network["Id"], "sandbox-container", [])
-    listed = [manager._require(live_spec)]
+    listed = [manager.exact.require(live_spec)]
     docker.calls.clear()
 
     manager.network.prune_orphan_networks([live_spec], listed)
@@ -188,7 +188,7 @@ def test_a_running_environment_runs_bridge_is_not_an_orphan(monkeypatch, caplog)
         supervisor.start()
         supervisor.close()
 
-    assert docker.names_on(name) == {"relay-gateway", "relay-mcp", "sandbox-container"}
+    assert docker.names_on(name) == {"relay-mcp", "sandbox-container"}
     assert "chat_network_prune_failed" not in caplog.text
 
 
@@ -206,6 +206,6 @@ def test_one_bridge_that_cannot_be_pruned_leaves_the_others_to_be_pruned(monkeyp
     with caplog.at_level(logging.WARNING):
         manager.network.prune_orphan_networks([])
 
-    assert docker.names_on(held_name) == {"relay-gateway", "relay-mcp", "stranger"}
+    assert docker.names_on(held_name) == {"relay-mcp", "stranger"}
     assert docker.network(orphan_name) is None
     assert "chat_network_prune_failed" in caplog.text

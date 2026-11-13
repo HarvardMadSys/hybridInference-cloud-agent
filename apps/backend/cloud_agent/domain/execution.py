@@ -7,11 +7,15 @@ them, and neither owns them.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 @dataclass(frozen=True, slots=True)
 class JobStreamState:
-    """The current turn state and publication URL an event stream needs."""
+    """The current turn state and pull-request URL an event stream needs."""
 
     state: str
     published_pr_url: str | None
@@ -26,6 +30,29 @@ SUCCEEDED = "succeeded"
 FAILED = "failed"
 CANCELLED = "cancelled"
 TERMINAL_STATES = (SUCCEEDED, FAILED, CANCELLED)
+
+#: The state a new turn is created in. A Fork's copies of its source's turns
+#: are created already settled, in the terminal state each source turn reached.
+INITIAL_STATE = QUEUED
+
+#: For each state, the states the store's writes can move a turn to from it.
+#: It is what the statements do today: ``tests/unit/test_job_state_transitions.py``
+#: names every statement that writes ``agent_jobs.state`` and requires this
+#: table to be exactly the union of what they can do. ``waiting`` is not here:
+#: ``0005_queued_follow_ups`` retired it, and the schema no longer accepts it.
+JOB_STATE_TRANSITIONS: Mapping[str, frozenset[str]] = {
+    QUEUED: frozenset({RUNNING, FAILED, CANCELLED}),
+    RUNNING: frozenset({QUEUED, SUCCEEDED, FAILED, CANCELLED}),
+    SUCCEEDED: frozenset(),
+    FAILED: frozenset(),
+    CANCELLED: frozenset(),
+}
+
+
+def job_state_change_allowed(old: str, new: str) -> bool:
+    """Whether a write that moves a turn from ``old`` to ``new`` is one the store makes."""
+    return old == new or new in JOB_STATE_TRANSITIONS.get(old, frozenset())
+
 
 # Attempt lifecycle.
 ATTEMPT_RUNNING = "running"

@@ -11,6 +11,13 @@ import hashlib
 import json
 from typing import TYPE_CHECKING
 
+from cloud_agent.domain.host_pool import HOST_DISABLED, SILENT_HOST_HANDOVER_SECONDS
+from cloud_agent.domain.sandbox_group import (
+    DELETED_GROUP_STATES,
+    DeletionState,
+    GroupState,
+    sql_list,
+)
 from cloud_agent_shared.sandbox_restore import PULLABLE_IMAGE_PATTERN
 
 if TYPE_CHECKING:
@@ -53,6 +60,8 @@ HOST_COLUMN_NAMES = (
     "settings_applied",
     "settings_local",
     "sandbox_archive_settings_applied_revision",
+    # What the host says it uses for configuration that is not a number.
+    "config_reports",
 )
 
 
@@ -138,17 +147,13 @@ LIVE_ATTEMPT_HOST = """EXISTS (
 #: reads that name for it: no foreign key ties it or its checkpoint's host to
 #: the host row, and the cold claim, the restore it hands out and the
 #: confirmation of the restored container do not look at either.
-HOST_RETAINED_GROUP = "g.deletion_state <> 'deleted' AND g.state <> 'cold'"
+HOST_RETAINED_GROUP = (
+    f"g.deletion_state <> {DeletionState.DELETED.sql} AND g.state <> {GroupState.COLD.sql}"
+)
 
 
-#: The deletion states of a group whose deletion is in progress or done. A
-#: deletion that failed before its archive (``failed``) kept the container,
-#: and the group serves its chats as one never asked to be deleted: it is
-#: counted, moved out, handed over and lost with its machine like any other.
-DELETED_GROUP_STATES = ("pending", "archived", "deleted")
-
-#: :data:`DELETED_GROUP_STATES` as an SQL list.
-DELETED_GROUP_STATES_SQL = "(" + ", ".join(f"'{state}'" for state in DELETED_GROUP_STATES) + ")"
+#: :data:`~cloud_agent.domain.sandbox_group.DELETED_GROUP_STATES` as an SQL list.
+DELETED_GROUP_STATES_SQL = sql_list(*DELETED_GROUP_STATES)
 
 #: Group ``g`` has no deletion in progress or done, as the claim reads it.
 UNDELETED_GROUP_SQL = f"g.deletion_state NOT IN {DELETED_GROUP_STATES_SQL}"
@@ -298,7 +303,7 @@ async def lock_hosts_for_revocation(conn: Any, hosts: list[str]) -> None:
 #: turn in flight. Every hand-over, and every count of what a hand-over would
 #: leave behind, uses this one condition.
 COVERED_GROUP_SQL = f"""(
-    g.state = 'stopped'
+    g.state = {GroupState.STOPPED.sql}
     AND {UNDELETED_GROUP_SQL}
     AND g.stop_requested_at IS NULL
     AND EXISTS (
@@ -338,12 +343,6 @@ GROUP_TURN_CLAIMED_SQL = """EXISTS (
     WHERE claimed.sandbox_id = g.id AND j.state = 'running'
 )"""
 
-#: How long a Host may stay silent before another Host may take its covered
-#: stopped groups. Far longer than ``offline``: a network blip or a restart
-#: must not move anything, but a machine that died should not keep its chats
-#: waiting for a return that never comes.
-SILENT_HOST_HANDOVER_SECONDS = 1800
-
 #: A stopped group ``g`` of a Host silent that long, which another Host may take
 #: at its claim: its checkpoint covers it, and no turn of its chats is running.
 #: Nothing changes until such a claim, so a Host that returns first, or is the
@@ -372,7 +371,7 @@ async def take_silent_host_group(conn: Any, *, sandbox_id: str, claimant: str) -
     taken = await conn.fetchval(
         f"""
         UPDATE agent_sandboxes g
-        SET state = 'cold', restore_attempts = 0, restore_attempt_id = NULL,
+        SET state = {GroupState.COLD.sql}, restore_attempts = 0, restore_attempt_id = NULL,
             idle_deadline = NULL, updated_at = NOW()
         WHERE g.id = $1 AND g.host IS DISTINCT FROM $2 AND {SILENT_HOST_GROUP_SQL}
         RETURNING TRUE
@@ -412,7 +411,7 @@ async def release_covered_sandboxes(
     rows = await conn.fetch(
         f"""
         UPDATE agent_sandboxes g
-        SET state = 'cold', restore_attempts = 0, restore_attempt_id = NULL,
+        SET state = {GroupState.COLD.sql}, restore_attempts = 0, restore_attempt_id = NULL,
             idle_deadline = NULL, updated_at = NOW()
         WHERE g.host = ANY($1::text[])
           AND ($2::text[] IS NULL OR g.id = ANY($2::text[]))
@@ -440,12 +439,12 @@ async def release_late_covered_sandboxes(conn: Any) -> list[str]:
     hosts = [
         str(row["host"])
         for row in await conn.fetch(
-            """
+            f"""
             SELECT h.host FROM agent_runner_hosts h
             WHERE h.credential_hash IS NULL AND h.status = 'disabled'
               AND EXISTS (
                   SELECT 1 FROM agent_sandboxes g
-                  WHERE g.host = h.host AND g.state = 'stopped'
+                  WHERE g.host = h.host AND g.state = {GroupState.STOPPED.sql}
                     AND g.restore_checkpoint_id IS NOT NULL
               )
             ORDER BY h.host
@@ -470,7 +469,7 @@ RESTORE_POINT_SQL = """EXISTS (
 #: Release counts on no container for it (``_retirement_impact``); the
 #: container it left behind is removed before the inventory is taken
 #: (``SUPERSEDED_CONTAINER_SQL``).
-HANDED_OVER_GROUP_SQL = f"(g.state = 'cold' AND {RESTORE_POINT_SQL})"
+HANDED_OVER_GROUP_SQL = f"(g.state = {GroupState.COLD.sql} AND {RESTORE_POINT_SQL})"
 
 #: Whether the container that host ``$1`` holds for group ``g`` under
 #: generation ``x.generation`` and Docker id ``x.container_id`` may be removed
@@ -494,20 +493,26 @@ HANDED_OVER_GROUP_SQL = f"(g.state = 'cold' AND {RESTORE_POINT_SQL})"
 #: A group being deleted belongs to its deletion. One whose deletion
 #: completed (``lost`` and ``deleted``) keeps nothing.
 SUPERSEDED_CONTAINER_SQL = f"""(
-    g.deletion_state = 'deleted'
+    g.deletion_state = {DeletionState.DELETED.sql}
     OR (
-        g.state <> 'lost'
-        AND g.deletion_state NOT IN ('pending', 'archived')
+        g.state <> {GroupState.LOST.sql}
+        AND g.deletion_state NOT IN {sql_list(DeletionState.PENDING, DeletionState.ARCHIVED)}
         AND (
             g.generation > x.generation
             OR (
-                g.state = 'cold' AND g.host = $1 AND g.generation = x.generation
+                g.state = {GroupState.COLD.sql} AND g.host = $1 AND g.generation = x.generation
                 AND (g.container_id IS NULL OR g.container_id = x.container_id)
             )
         )
         AND (
-            (g.state NOT IN ('cold', 'restoring') AND g.container_id IS NOT NULL)
-            OR (g.state IN ('cold', 'restoring') AND {RESTORE_POINT_SQL})
+            (
+                g.state NOT IN {sql_list(GroupState.COLD, GroupState.RESTORING)}
+                AND g.container_id IS NOT NULL
+            )
+            OR (
+                g.state IN {sql_list(GroupState.COLD, GroupState.RESTORING)}
+                AND {RESTORE_POINT_SQL}
+            )
         )
     )
 )"""
@@ -666,6 +671,24 @@ RECLAIMED_HOST_SQL = """EXISTS (
       AND reclaimed_machine.observed_state = 'terminated'
       AND (reclaimed.last_heartbeat_at IS NULL
            OR reclaimed.last_heartbeat_at < NOW() - make_interval(secs => {quiet}))
+)"""
+
+
+#: Whether host ``{host}`` is gone: no longer registered (forgotten), removed
+#: from the pool (``disabled``, a sink: its credential was revoked), or silent
+#: for :data:`SILENT_HOST_HANDOVER_SECONDS`. ``{host}`` names the host column
+#: or parameter.
+#:
+#: An administrator may delete a ``cold`` group that still names such a host
+#: without asking it anything. That is a rule for when to stop waiting for the
+#: host, not a fence: a ``cold`` group lives in its checkpoint, nothing starts
+#: it on that host, and a container the host may still hold for a deleted group
+#: is removable should it ever report again (``SUPERSEDED_CONTAINER_SQL``).
+GONE_HOST_SQL = f"""NOT EXISTS (
+    SELECT 1 FROM agent_runner_hosts present
+    WHERE present.host = {{host}} AND present.status <> '{HOST_DISABLED}'
+      AND COALESCE(present.last_heartbeat_at, present.first_seen_at)
+          >= NOW() - make_interval(secs => {SILENT_HOST_HANDOVER_SECONDS})
 )"""
 
 

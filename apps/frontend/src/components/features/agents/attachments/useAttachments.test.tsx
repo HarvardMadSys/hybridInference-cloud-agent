@@ -31,6 +31,10 @@ function file(name: string, size = 4) {
   return new File(['x'.repeat(size)], name);
 }
 
+function image(name = 'image.png') {
+  return new File(['pixels'], name, { type: 'image/png' });
+}
+
 function saved(id: number): AttachmentApi {
   return { id, path: 'file.txt', size_bytes: 4, content_type: 'text/plain' };
 }
@@ -40,7 +44,11 @@ beforeEach(() => {
   vi.mocked(deleteAttachment).mockResolvedValue(undefined);
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  // Restored even when an assertion fails, so a stubbed URL never leaks.
+  vi.unstubAllGlobals();
+});
 
 describe('useAttachments reservation ownership', () => {
   it.each(['remove', 'reset'] as const)(
@@ -245,5 +253,114 @@ describe('uploads a composer leaves behind', () => {
 
     if (deletes) expect(deleteAttachment).toHaveBeenCalledExactlyOnceWith(1, { keepalive: true });
     else expect(deleteAttachment).not.toHaveBeenCalled();
+  });
+
+  it('gives a pasted image a local preview it revokes when the file is discarded', async () => {
+    let made = 0;
+    const created = vi.fn<(blob: Blob) => string>(() => `blob:${(made += 1)}`);
+    const revoked = vi.fn();
+    vi.stubGlobal('URL', { createObjectURL: created, revokeObjectURL: revoked });
+    vi.mocked(uploadAttachment).mockResolvedValueOnce(saved(1));
+    const { result } = renderHook(() => useAttachments(t, limits), { wrapper });
+
+    await act(async () => result.current.add([image()]));
+
+    expect(created).toHaveBeenCalledOnce();
+    expect(result.current.entries[0]!.previewUrl).toBe('blob:1');
+    // The preview does not change what is sent: still the staged upload id.
+    expect(result.current.ids).toEqual([1]);
+
+    act(() => result.current.remove(result.current.entries[0]!.key));
+    expect(revoked).toHaveBeenCalledExactlyOnceWith('blob:1');
+  });
+
+  it('revokes every live preview on reset, and leaves plain files without one', async () => {
+    let made = 0;
+    const created = vi.fn<(blob: Blob) => string>(() => `blob:${(made += 1)}`);
+    const revoked = vi.fn();
+    vi.stubGlobal('URL', { createObjectURL: created, revokeObjectURL: revoked });
+    vi.mocked(uploadAttachment).mockResolvedValue(saved(1));
+    const bounds = { ...limits, max_files: 10 };
+    const { result } = renderHook(() => useAttachments(t, bounds), { wrapper });
+
+    await act(async () => result.current.add([image(), file('notes.txt')]));
+
+    expect(created).toHaveBeenCalledOnce();
+    expect(result.current.entries.map((row) => row.previewUrl)).toEqual(['blob:1', undefined]);
+
+    act(() => result.current.reset());
+    expect(revoked).toHaveBeenCalledExactlyOnceWith('blob:1');
+  });
+
+  it('revokes a preview when the server refuses the upload, and on unmount', async () => {
+    let made = 0;
+    const created = vi.fn<(blob: Blob) => string>(() => `blob:${(made += 1)}`);
+    const revoked = vi.fn();
+    vi.stubGlobal('URL', { createObjectURL: created, revokeObjectURL: revoked });
+    const refused = deferredUpload();
+    vi.mocked(uploadAttachment)
+      .mockReturnValueOnce(refused.promise)
+      .mockResolvedValueOnce(saved(2));
+    const { result, unmount } = renderHook(() => useAttachments(t, { ...limits, max_files: 5 }), {
+      wrapper,
+    });
+
+    await act(async () => result.current.add([image('a.png'), image('b.png')]));
+    await act(async () => refused.reject(new Error('quota exceeded')));
+
+    expect(result.current.entries).toMatchObject([
+      { path: 'a.png', status: 'rejected', error: 'quota exceeded', previewUrl: undefined },
+      { path: 'b.png', status: 'ready', previewUrl: 'blob:2' },
+    ]);
+    expect(revoked).toHaveBeenCalledExactlyOnceWith('blob:1');
+
+    unmount();
+    expect(revoked).toHaveBeenCalledTimes(2);
+    expect(revoked).toHaveBeenLastCalledWith('blob:2');
+  });
+
+  it('makes no preview for an image that was rejected', () => {
+    const created = vi.fn<(blob: Blob) => string>(() => 'blob:rejected');
+    const revoked = vi.fn();
+    vi.stubGlobal('URL', { createObjectURL: created, revokeObjectURL: revoked });
+    const { result } = renderHook(() => useAttachments(t, { ...limits, max_files: 0 }), {
+      wrapper,
+    });
+
+    act(() => result.current.add([image()]));
+
+    expect(result.current.entries).toMatchObject([
+      { path: 'image.png', status: 'rejected', error: 'attach.errorTooMany' },
+    ]);
+    expect(result.current.entries[0]!.previewUrl).toBeUndefined();
+    // Admission is decided first, so a refused file never holds a handle.
+    expect(created).not.toHaveBeenCalled();
+    expect(revoked).not.toHaveBeenCalled();
+  });
+
+  it('makes no preview for an image inside a picked folder, which shows as the folder', async () => {
+    const created = vi.fn<(blob: Blob) => string>(() => 'blob:folder');
+    vi.stubGlobal('URL', { createObjectURL: created, revokeObjectURL: vi.fn() });
+    vi.mocked(uploadAttachment).mockResolvedValue(saved(1));
+    const nested = image('a.png');
+    Object.defineProperty(nested, 'webkitRelativePath', { value: 'shots/a.png' });
+    const { result } = renderHook(() => useAttachments(t, limits), { wrapper });
+
+    await act(async () => result.current.add([nested]));
+
+    expect(result.current.entries).toMatchObject([{ path: 'shots/a.png', status: 'ready' }]);
+    expect(result.current.entries[0]!.previewUrl).toBeUndefined();
+    expect(created).not.toHaveBeenCalled();
+  });
+
+  it('falls back to a chip when the browser cannot make object URLs', async () => {
+    vi.stubGlobal('URL', {});
+    vi.mocked(uploadAttachment).mockResolvedValueOnce(saved(1));
+    const { result } = renderHook(() => useAttachments(t, limits), { wrapper });
+
+    await act(async () => result.current.add([image()]));
+
+    expect(result.current.entries[0]!.previewUrl).toBeUndefined();
+    expect(result.current.ids).toEqual([1]);
   });
 });

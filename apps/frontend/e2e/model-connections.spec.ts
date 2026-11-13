@@ -1,20 +1,9 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './network-change';
 
 import { chatOnly, connectionView } from './modelConnectionFixtures';
 
-test.beforeEach(async ({ page, request }) => {
+test.beforeEach(async ({ request }) => {
   expect((await request.post('/__fixture/reset')).ok()).toBe(true);
-  await page.route('**/api/v1/agent/model-preference', (route) =>
-    route.fulfill({
-      json: {
-        default_model: null,
-        last_model: 'fixture-model',
-        effective_model: 'fixture-model',
-        deployment_default: null,
-        models: ['fixture-model'],
-      },
-    }),
-  );
 });
 
 test.afterEach(async ({ request }) => {
@@ -56,7 +45,7 @@ for (const viewport of [
       saved = { ...saved!, ...submitted, updated_at: '2026-10-28' };
       await route.fulfill({ json: saved });
     });
-    await page.goto('/settings/my-settings');
+    await page.goto('/settings/models');
     await page.getByRole('button', { name: 'Add connection', exact: true }).click();
     await page.getByLabel('Connection name', { exact: true }).fill('Personal inference');
     await page.getByLabel('Base URL', { exact: true }).fill('https://api.example.com/custom/v1');

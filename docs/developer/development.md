@@ -52,7 +52,7 @@ Choose the package based on who should own the behavior you are changing:
 
 | Package | Owns |
 |---|---|
-| [`cloud_agent/`](../../apps/backend/cloud_agent/) | Control plane: HTTP APIs, admission and scheduling, persistence, Gateway adapters, and publication. |
+| [`cloud_agent/`](../../apps/backend/cloud_agent/) | Control plane: HTTP APIs, accounts and admission, scheduling, persistence, and the MCP and GitHub relays. |
 | [`cloud_agent_host/`](../../apps/backend/cloud_agent_host/) | Host execution: claims, retained sandboxes, workspace/session sandbox manager, and Agent CLI adapters. |
 | [`cloud_agent_shared/`](../../apps/backend/cloud_agent_shared/) | Protocol versions, capability names, shared payloads and errors, profiling collection, and shared Git/archive algorithms. |
 
@@ -71,12 +71,12 @@ relative to `apps/backend/`.
 |---|---|
 | Job or conversation HTTP behavior | `cloud_agent/api/jobs.py`, `catalog.py`, `turns.py`, or `threads.py`. `api/routes.py` mounts every agent surface listed in `SURFACE_ROUTERS`. |
 | Request or response validation | The owning module in `cloud_agent/schemas/`; public imports use `cloud_agent.schemas`. |
-| A new caller of task creation | `cloud_agent/application/job_admission.py`; `api/service_jobs.py` is an existing caller. |
-| Workspace files, terminals, or Git views | `cloud_agent/api/workspace.py` and `sandbox_manager_client.py`; host handling is in `cloud_agent_host/sandbox_manager.py`. |
-| A query or persistent field | The relevant `cloud_agent/ports/` interface and `storage/` implementation, plus an additive revision under `migrations/versions/` for schema changes. |
+| A new caller of task creation | `cloud_agent/application/job_admission.py`; `api/jobs.py` is an existing caller. |
+| Workspace files, terminals, or Git views | `cloud_agent/api/workspace.py` and `sandbox_manager/sandbox_manager_client.py`; host handling is in `cloud_agent_host/manager_api/workspaces.py` and `terminals.py`, which `sandbox_manager.py` assembles into the app. |
+| A query or persistent field | The relevant `cloud_agent/ports/` interface and `storage/` implementation, plus an additive revision under `apps/backend/migrations/versions/` for schema changes. |
 | Compute-resource lifecycle | `cloud_agent/application/compute_resources.py`, `compute_reconcile.py`, `workers/compute_resources.py`, and `providers/compute/`. |
-| Host claims or worker HTTP calls | `cloud_agent_host/claimed_job.py`, `control_plane_client.py`, and the orchestration in `runner.py`. |
-| Retained-container values or lifecycle | `cloud_agent_host/chat_sandbox_models.py` for value types; `chat_sandbox.py` for Docker lifecycle. |
+| Host claims or worker HTTP calls | `cloud_agent_host/claimed_job.py`, `control_plane_client.py`, and the orchestration in `service/host_service.py` and `turn/turn_child.py`. |
+| Retained-container values or lifecycle | `cloud_agent_host/container/chat_sandbox_models.py` for value types; `container/chat_sandbox.py` for Docker lifecycle. |
 | CLI behavior or version compatibility | `cloud_agent_host/runtimes/` and `drivers.py`; discovery facts are in `cloud_agent_shared/runtime_catalog.py`, shared pins in `shared_protocol.py`, image pins in `deploy/sandbox/Dockerfile.agent-sandbox`. |
 | Browser UI or a BFF route | `apps/frontend/src/`; browser API clients are in `src/lib/api/agents/`, job-page components and hooks in `components/features/agents/job-detail/`. |
 
@@ -108,10 +108,11 @@ checkout can still fail in production. Follow these boundaries:
   control plane both consume them. The
   [import-boundary tests](../../tests/unit/test_import_boundary.py) enforce both
   directions of the service boundary.
-- The Gateway is reached over HTTP only. Use the contracts in
-  `gateway_contracts/`; do not import `serving.*`, access the Gateway database,
-  or use its `API_KEY_SECRET` or `JWT_SECRET_KEY`. This service uses its own
-  `AGENT_CONTROL_TOKEN_SECRET` and `AGENT_SESSION_SECRET`.
+- Nothing depends on the HybridInference Gateway: do not import `serving.*`,
+  access its database, or use its `API_KEY_SECRET` or `JWT_SECRET_KEY`. This
+  service uses its own `AGENT_CONTROL_TOKEN_SECRET`,
+  `AGENT_LOCAL_SESSION_SECRET` and `AGENT_SETTINGS_ENCRYPTION_KEY`, and every
+  model call goes to the owner's own model connection.
 
 Bootstrap owns cross-component wiring. MCP session lifecycle lives in
 `mcp/runtime.py`, and eager send-now handoff task lifecycle lives in
@@ -124,8 +125,8 @@ or owning service.
 Changes to sandbox networking, credential scope, or isolation also need review
 against [the security boundaries in AGENTS.md](../../AGENTS.md#7-security-boundaries--do-not-relax-without-review).
 Keep MCP tool calls on the MCP-only listener and long-lived credentials out of
-sandboxes. Inference spend remains subject to Gateway per-user quota; there is
-no per-task dollar budget.
+sandboxes. The owner's provider keeps its key's quota and bill; there is no
+per-task dollar budget and no local quota.
 
 ## Run the relevant checks
 
@@ -184,8 +185,9 @@ both server-only and runtime-site-config build guards.
 
 Each run saves logs in a fresh gitignored `.local-ci/<tier>.XXXXXX` directory.
 Set `CI_LOG_DIR` to choose an output directory. This local gate excludes external
-regressions, rolling upgrades, Gitleaks, Docker release-image builds, and Kata
-qualification; those remain part of the wider hosted CI gate.
+regressions, rolling upgrades, mixed-version protocol checks, Gitleaks, Docker
+release-image builds, and Kata qualification; those remain part of the wider
+hosted CI gate.
 
 Every pull request, from a fork or from a branch of this repository, runs on
 disposable GitHub-hosted VMs: ARM64 artifacts use `ubuntu-24.04-arm`, and
@@ -257,7 +259,7 @@ make check PYTEST_WORKERS=0
 Use markers to select the test tier you need. For example, `tests/servers/`
 contains HTTP-level tests that do not require a deployed server. Tests marked
 `external` list their prerequisites in the test module; these may include
-Docker, a real CLI, or a configured Gateway. CI runs selected external checks
+Docker, a real CLI, or a model provider. CI runs selected external checks
 in addition to the default tier.
 
 If you change the database, run `make test-db-local`. It needs only Docker. It
@@ -342,19 +344,14 @@ iterate on fixture/spec changes after a successful root build, use
 
 The `make ci-frontend` target runs the checks above, including browser recovery.
 Hosted CI also
-builds and smoke-tests both the root and `/agents` web variants when image
-changes are selected. See
+builds and smoke-tests the web image when image changes are selected. See
 [CONTRIBUTING.md](../../CONTRIBUTING.md#continuous-integration) for the wider CI gate.
 
 ## Changing an API
 
-`gateway_contracts/` contains two different kinds of HTTP contract:
-
-- `*.openapi.yaml` describes the Gateway APIs this service consumes. When a
-  client starts reading a new field or calling a new endpoint, verify the
-  corresponding Gateway source and update the document in the same PR.
-- `agent-control-plane.openapi.json` records the API this service publishes.
-  An intentional API change requires a reviewed snapshot update in the same PR.
+`apps/backend/openapi.json` records the API this service
+publishes, and the web client's contract tests check its requests against it.
+An intentional API change requires a reviewed snapshot update in the same PR.
 
 Regenerate the control-plane snapshot from the repository root:
 
@@ -365,21 +362,21 @@ from pathlib import Path
 
 from cloud_agent.app import create_app
 
-Path("gateway_contracts/agent-control-plane.openapi.json").write_text(
+Path("apps/backend/openapi.json").write_text(
     json.dumps(create_app().openapi(), sort_keys=True, indent=2, ensure_ascii=False) + "\n",
     encoding="utf-8",
 )
 PY
 
-uv run pytest -q tests/unit/test_api_surface_contract.py tests/unit/test_contracts.py
+uv run pytest -q tests/unit/test_api_surface_contract.py
 ```
 
 Review the generated diff and explain any compatibility implications. The
 surface tests also reject duplicate registrations and overlaps between the
 agent surface routers. A snapshot update records a change; the behavioral tests
 and review establish whether it is compatible. The
-[contract guide](../../gateway_contracts/README.md) explains what these checks can
-verify and what still needs comparison with Gateway source.
+[contract guide](api-contracts.md) has the one-line regeneration
+command.
 
 ## Packaging and documentation
 
@@ -391,10 +388,10 @@ images, and its classifier tests derive shared package paths from the
 Dockerfiles.
 
 Schema changes use explicit additive Alembic revisions. The current chain
-starts at `migrations/versions/0001_schema_baseline.py`; keep schema creation out
+starts at `apps/backend/migrations/versions/0001_schema_baseline.py`; keep schema creation out
 of service startup. There is no SQLAlchemy model metadata for autogeneration.
-For databases stamped with the pre-baseline chain, follow
-[the rebuild runbook](operations.md#rebuilding-the-agent-database).
+A database from before the independent-accounts release is archived, not
+upgraded; see [the cutover](upgrade-notes.md#independent-accounts-cutover).
 
 Update the guide that owns any changed configuration, command, or behavior:
 

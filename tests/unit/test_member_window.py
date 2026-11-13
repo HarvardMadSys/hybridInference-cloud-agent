@@ -21,7 +21,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from guest_serializer import run_serializer
 from guest_window_counters import run_chooser
 
-from cloud_agent_host.member_resources import (
+from cloud_agent_host.observe.member_resources import (
     EXIT_COUNTER_CPU,
     EXIT_COUNTER_IO,
     MEMBER_WINDOW_SOURCE,
@@ -861,7 +861,7 @@ class TestProductionChainRegressions:
         )
 
     def reduce(self, payload: bytes, *, opened_ns: int | None = None):
-        from cloud_agent_host.member_resources import reduce_window
+        from cloud_agent_host.observe.member_resources import reduce_window
 
         origin = self.OPENED_NS if opened_ns is None else opened_ns
         samples = parse_window_samples(
@@ -922,7 +922,7 @@ class TestProductionChainRegressions:
             boot_id=BOOT,
             opened_guest_mono_ns=self.OPENED_NS,
         )
-        from cloud_agent_host.member_resources import reduce_window
+        from cloud_agent_host.observe.member_resources import reduce_window
 
         snapshot = reduce_window(
             uid=11001,
@@ -960,7 +960,7 @@ class TestTaskNumberReuse:
     def test_a_reused_tid_produces_two_exits_with_their_own_totals(self) -> None:
         import json as _json
 
-        from cloud_agent_host.member_resources import exit_events_from_journal
+        from cloud_agent_host.observe.member_resources import exit_events_from_journal
 
         lines = [
             {"kind": "fork", "pid": 50, "tgid": 50, "mono_ns": 10_000_000, "uid": 11001},

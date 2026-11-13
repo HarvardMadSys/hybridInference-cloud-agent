@@ -26,17 +26,7 @@ from cloud_agent.api.deps import (
     get_storage,
     require_store,
 )
-from cloud_agent.entitlement import RepoNotAllowed, repos_for_user, require_entitled_repo
-from cloud_agent.github_app import (
-    GitHubAppError,
-    RepositoryCreationError,
-    UserAuthorizationRevoked,
-)
-from cloud_agent.github_user_token import (
-    UserTokenUnavailable,
-    forget_revoked_token,
-    user_access_token,
-)
+from cloud_agent.api.errors import typed_error
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.mcp.registry import resolve_connection
 from cloud_agent.schemas import (
@@ -53,7 +43,22 @@ from cloud_agent.schemas import (
     SourceControlRepository,
 )
 from cloud_agent.settings import setting_env
-from cloud_agent.source_control import (
+from cloud_agent.source_control.entitlement import (
+    RepoNotAllowed,
+    repos_for_user,
+    require_entitled_repo,
+)
+from cloud_agent.source_control.github_app import (
+    GitHubAppError,
+    RepositoryCreationError,
+    UserAuthorizationRevoked,
+)
+from cloud_agent.source_control.github_user_token import (
+    UserTokenUnavailable,
+    forget_revoked_token,
+    user_access_token,
+)
+from cloud_agent.source_control.source_control import (
     GitLabOAuthClient,
     OAuthStateError,
     SourceControlError,
@@ -62,7 +67,7 @@ from cloud_agent.source_control import (
     github_connect_configured,
     issue_oauth_state,
 )
-from cloud_agent.source_control_runtime import (  # noqa: TC001 — FastAPI resolves them.
+from cloud_agent.source_control.source_control_runtime import (  # noqa: TC001 — FastAPI resolves them.
     GitHubAppState,
     LoadStatus,
 )
@@ -103,17 +108,12 @@ def _oauth_error(exc: Exception) -> HTTPException:
     else:
         message = "The source-control authorization could not be completed. Please try again."
         error_type = "source_control_connect_failed"
-    return HTTPException(
-        status_code=400,
-        detail={"error": {"type": error_type, "message": message}},
-    )
+    return typed_error(400, error_type, message)
 
 
 def _repository_error(status: int, error_type: str, message: str) -> HTTPException:
     """Build a stable creation error containing no upstream credential material."""
-    return HTTPException(
-        status_code=status, detail={"error": {"type": error_type, "message": message}}
-    )
+    return typed_error(status, error_type, message)
 
 
 @router.post("/repositories", response_model=CreateGitHubRepositoryResponse, status_code=201)
@@ -206,8 +206,8 @@ async def create_github_repository(
             result.repo, user_id, store=source_control, app_credentials=app_credentials
         )
         # An operator allowlist can authorize a repository without the App
-        # covering it. The new workspace also needs that coverage for checkout
-        # and publication; failure here cannot undo the successful creation.
+        # covering it. The new workspace also needs that coverage for checkout;
+        # failure here cannot undo the successful creation.
         await app_credentials.installation_id_for(result.repo)
     except Exception:
         # Creation already succeeded. A failed status lookup must leave a
@@ -288,7 +288,7 @@ async def _complete_github_connection(
     # one sent them back to a Connect button they had just pressed.
     # The token is kept — encrypted, in this service only — because which
     # repositories the user may work on is asked of GitHub as them, long after
-    # this request: the publisher and the goal controller check again.
+    # this request: the GitHub relay and the goal controller check again.
     cipher = app_credentials.cipher
     await account_store.connect_github_account(
         user_id=user_id,
@@ -418,7 +418,7 @@ async def _source_control_providers(
             connected=github_connected,
             connect_url=github_connect_url,
             manage_url=github_manage_url,
-            capabilities=["Agent checkout", "branch discovery", "draft PR publishing"],
+            capabilities=["Agent checkout", "branch discovery", "pull requests as you"],
             accounts=[
                 SourceControlAccount(
                     id=str(grant["installation_id"]),
@@ -765,15 +765,7 @@ async def connect_github(
     """
     job_store = _require_store(store)
     if app_credentials is None:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": {
-                    "type": "unavailable",
-                    "message": "No GitHub App is configured for this deployment.",
-                }
-            },
-        )
+        raise typed_error(503, "unavailable", "No GitHub App is configured for this deployment.")
     try:
         return await _connect_github_for_user(
             body=body,
@@ -831,10 +823,7 @@ async def list_repo_branches(
             repo, user["user_id"], store=job_store.source_control, app_credentials=app_credentials
         )
     except RepoNotAllowed as exc:
-        raise HTTPException(
-            status_code=403,
-            detail={"error": {"type": "repo_not_allowed", "message": str(exc)}},
-        ) from exc
+        raise typed_error(403, "repo_not_allowed", str(exc)) from exc
     if app_credentials is None:
         return RepoBranchesResponse()
     try:

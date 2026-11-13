@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useT } from '@/components/providers';
-import { AccountMenu } from '@/components/features/agents/AccountMenu';
+import { AccountMenu } from '@/components/features/agents/sidebar/AccountMenu';
 import { PaneResizer } from '@/components/features/agents/PaneResizer';
 import type { ResizablePane } from '@/components/features/agents/useResizablePane';
 import { HelpIcon } from './icons';
@@ -14,6 +14,16 @@ const ITEMS = [
     href: SETTINGS_PATHS.profile,
     label: 'settings.title',
     icon: 'M4 7h9m4 0h3M4 17h3m4 0h9M13 4v6M7 14v6',
+  },
+  {
+    href: SETTINGS_PATHS.account,
+    label: 'security.title',
+    icon: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM12 13a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM6.6 18.2a6 6 0 0 1 10.8 0',
+  },
+  {
+    href: SETTINGS_PATHS.models,
+    label: 'settings.models.title',
+    icon: 'M7 5h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2ZM9.5 9.5h5v5h-5zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3',
   },
   {
     href: SETTINGS_PATHS.memory,
@@ -72,14 +82,14 @@ export function SettingsSidebar({
   const pathname = usePathname();
   if (collapsed) return null;
   const itemClass = (current: boolean) =>
-    `ui-focus-ring flex min-h-10 items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors [@media(pointer:coarse)]:min-h-11 ${current ? 'bg-surface-hover font-medium text-foreground' : 'text-muted hover:bg-surface-hover hover:text-foreground'}`;
+    `ui-focus-ring flex min-h-10 items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors [@media(pointer:coarse)]:min-h-11 ${current ? 'bg-surface-raised font-medium text-foreground shadow-xs ring-1 ring-inset ring-border/80 [&>svg]:text-accent' : 'text-muted hover:bg-surface-hover hover:text-foreground'}`;
   return (
     <>
       <aside
         id="agents-sidebar"
         aria-label={t('settings.navigation')}
         style={{ width: pane.width }}
-        className="flex min-h-0 shrink-0 flex-col border-r border-border/70 bg-surface-muted"
+        className="flex min-h-0 shrink-0 flex-col bg-surface-muted"
       >
         <div className="flex items-center gap-1 px-3 pb-3 pt-4">
           <Link
@@ -101,9 +111,7 @@ export function SettingsSidebar({
           {headerAction}
         </div>
         <nav aria-label={t('settings.navigation')} className="min-h-0 flex-1 overflow-y-auto px-3">
-          <p className="px-3 pb-3 pt-2 text-xs font-medium text-muted">
-            {t('settings.navigation')}
-          </p>
+          <p className="ui-section-label px-3 pb-2.5 pt-2">{t('settings.navigation')}</p>
           <div className="space-y-1">
             {ITEMS.map(({ href, label, icon }) => (
               <Link

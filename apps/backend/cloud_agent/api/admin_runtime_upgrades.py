@@ -4,7 +4,7 @@
 with the progress of any update in flight; ``POST`` starts one, to the latest
 release or any other the version list offers. ``GET …/{runtime}/versions``
 lists those. Rolling back is the existing ``PUT /admin/agent/runtime-versions``,
-which also replaces the update. See :mod:`cloud_agent.runtime_upgrades` for how an update completes.
+which also replaces the update. See :mod:`cloud_agent.application.runtime_upgrades` for how an update completes.
 """
 
 from __future__ import annotations
@@ -15,10 +15,11 @@ from typing import TYPE_CHECKING, Protocol
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from cloud_agent.api.deps import get_client_ip, get_storage, log_admin_action, verify_admin_access
-from cloud_agent.runtime_upgrades import (
+from cloud_agent.application.runtime_upgrades import (
     RegistryClient,
     default_version,
     is_newer,
+    registry_lagging_hosts,
     update_runtimes,
     upgrade_state,
 )
@@ -102,7 +103,10 @@ async def _snapshot(store: _UpgradeStorage, registry: RegistryClient) -> Runtime
                 ),
             )
         )
-    return RuntimeUpgradesResponse(runtimes=items)
+    # Shown before anyone presses Update, which the same check would refuse.
+    return RuntimeUpgradesResponse(
+        runtimes=items, registry_waiting_on=registry_lagging_hosts(hosts)
+    )
 
 
 @router.get("/agent/runtime-upgrades", response_model=RuntimeUpgradesResponse)
@@ -154,6 +158,17 @@ async def request_runtime_upgrade(
     if definition is None:
         raise HTTPException(
             status_code=422, detail=f"{payload.runtime} cannot be updated from this page."
+        )
+    lagging = registry_lagging_hosts(await job_store.host_pool.list_runner_hosts())
+    if lagging:
+        # A version listed from the saved registry might not be one these
+        # servers can download, so no update starts until they all use it.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "These online servers do not yet report downloading from the saved "
+                "agent package registry: " + ", ".join(lagging[:10])
+            ),
         )
     published = await registry.has_version(definition.npm_package, payload.version)
     if published is False:

@@ -3,8 +3,7 @@
 This page is for developers changing the owner-facing web app. It records the
 rules each feature follows, the endpoints behind it and what only a real browser
 can check. How to use the app is user documentation, which belongs to a
-distribution; FreeInference's is the
-[Cloud Agents guide](https://doc.freeinference.org/agents.html).
+distribution; the app's Help link opens it (`AGENT_WEB_DOCS_URL`).
 
 ## Sidebar and conversation list
 
@@ -45,10 +44,16 @@ on GitHub, so the dialog keeps what was entered and does not retry by itself.
 ### Getting started
 
 An account with no conversations, archived ones included, sees a **Getting
-started** row: **Connect GitHub**, **Grant a repository**, then **Run your first
-task**. Connection and repository state come from `/config`, and the row is
-hidden when the deployment has no GitHub App configured. The sidebar, the
-new-task page and the conversation explanations share one first-run check,
+started** row: **Connect a model**, **Connect GitHub**, **Grant a repository**,
+then **Run your first task**. Model connection, GitHub connection and
+repository state come from `/config`. **Connect a model** is offered where the
+deployment lets owners add model connections, and is done once one of theirs
+has a model verified for some agent (`model_connection_required` is false);
+saving a connection in any tab of the same browser refreshes the row. The
+GitHub steps are left out while the deployment has no GitHub App or its App is
+unavailable, and the row is hidden when neither a model step nor GitHub is left
+to offer. The sidebar, the new-task page and the conversation explanations
+share one first-run check,
 `GET /v1/agent/conversations?include_archived=true&limit=2`, which refreshes on
 page changes until two conversations exist. **Skip** hides the row per account
 in the current browser, with an **Undo** notice; the settings page brings it
@@ -81,8 +86,8 @@ index, applies the page boundary, and only then reads the latest turn for that
 page; keyset pagination does not make the query constant-time across all of an
 owner's conversations. `/jobs` keeps its separate semantics.
 
-Sources: [`AgentsSidebar.tsx`](../../apps/frontend/src/components/features/agents/AgentsSidebar.tsx),
-[`sidebarPreferences.ts`](../../apps/frontend/src/components/features/agents/sidebarPreferences.ts),
+Sources: [`AgentsSidebar.tsx`](../../apps/frontend/src/components/features/agents/sidebar/AgentsSidebar.tsx),
+[`sidebarPreferences.ts`](../../apps/frontend/src/components/features/agents/sidebar/sidebarPreferences.ts),
 [`catalog.py`](../../apps/backend/cloud_agent/api/catalog.py) and
 [`conversation_queries.py`](../../apps/backend/cloud_agent/storage/repositories/conversation_queries.py).
 
@@ -193,9 +198,9 @@ several turns:
 The design and its sizing measurements are in the
 [turn navigation design](../agents/specs/2026-09-11-conversation-turn-navigation-design.zh.md).
 Sources: [`JobDetail.tsx`](../../apps/frontend/src/components/features/agents/JobDetail.tsx),
-[`TurnNavigator.tsx`](../../apps/frontend/src/components/features/agents/TurnNavigator.tsx),
-[`conversationTurnNavigation.ts`](../../apps/frontend/src/components/features/agents/conversationTurnNavigation.ts)
-and [`useConversationScroll.ts`](../../apps/frontend/src/components/features/agents/useConversationScroll.ts).
+[`TurnNavigator.tsx`](../../apps/frontend/src/components/features/agents/conversation/TurnNavigator.tsx),
+[`conversationTurnNavigation.ts`](../../apps/frontend/src/components/features/agents/conversation/conversationTurnNavigation.ts)
+and [`useConversationScroll.ts`](../../apps/frontend/src/components/features/agents/conversation/useConversationScroll.ts).
 
 ## Tool approvals
 
@@ -351,20 +356,19 @@ download limit is refused rather than saved in part. See
   eight per chat. The sandbox installs them before the first prompt, and a
   failed installation stops startup as a task error. Selections persist with
   the chat and are inherited by Fork.
-- **Prompt rewriting.** See
-  [Draft prompt rewriting](operations.md#draft-prompt-rewriting).
 - **Review.** Starts an independent code-review subagent in a workspace tab,
   covering every change since the conversation's original base, current
   workspace changes included, and instructed not to edit files. It needs an
   available native Fork, so it cannot start from an archived chat or one whose
   context was lost. Selecting it again reopens the chat's existing review.
 - **Watch PR and merge.** Starts a follow-up in the same chat that watches
-  checks and reviews, fixes failures and feedback, and merges once the current
-  head meets the required checks and reviews; repository rules decide what may
-  merge without a person. It keeps unsent composer text and attachments, and
-  starts only while no chat sharing the workspace has active work or waiting
-  messages. The agent needs source-control tools that read checks and reviews,
-  mark drafts ready and merge: the GitHub preset with a token holding Contents
-  and Pull requests read and write. A connection to `/mcp/readonly` must be
-  reconnected with the preset. Watching ends with the turn's timeout, and a turn
-  that made fixes ends so the platform can publish them.
+  checks and reviews, fixes failures and feedback and pushes the fixes to the
+  pull request's branch, and merges once the current head meets the required
+  checks and reviews; repository rules decide what may merge without a person.
+  It keeps unsent composer text and attachments, and starts only while no chat
+  sharing the workspace has active work or waiting messages. The agent works
+  as the owner through the GitHub relay, with git and `gh api` REST calls, so
+  the owner needs a connected GitHub account that may push to the repository.
+  `gh` commands that use GraphQL are refused, and GitHub marks a draft ready
+  only through GraphQL, so the agent asks the owner to do that and never
+  merges a draft. Watching ends with the turn's timeout.

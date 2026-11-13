@@ -22,10 +22,16 @@ OUTPUT_QUEUE_ITEMS = 4
 _T = TypeVar("_T")
 
 
+def byte_chunks(pipe: IO[str]) -> Iterator[bytes]:
+    """Read a pipe in bounded chunks of the bytes it carries, before any decoding."""
+    while data := os.read(pipe.fileno(), OUTPUT_CHUNK_BYTES):
+        yield data
+
+
 def text_chunks(pipe: IO[str]) -> Iterator[str]:
     """Read pipes without readline's unlimited accumulation before a newline."""
     decoder = codecs.getincrementaldecoder("utf-8")("replace")
-    while data := os.read(pipe.fileno(), OUTPUT_CHUNK_BYTES):
+    for data in byte_chunks(pipe):
         chunk = decoder.decode(data)
         if chunk:
             yield chunk
@@ -73,6 +79,8 @@ class TextTail:
 
     def append(self, text: str) -> None:
         """Append diagnostic text while trimming older bytes."""
+        if not text:
+            return
         chunk = text.encode("utf-8", "replace")[-self.limit :]
         with self._lock:
             self._chunks.append(chunk)

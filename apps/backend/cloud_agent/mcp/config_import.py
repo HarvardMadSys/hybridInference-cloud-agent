@@ -20,8 +20,8 @@ parser that assumes one produces confident nonsense on the others:
     TOML, where a remote server names its transport by carrying a ``url``.
 
 The output is a :class:`ImportDraft` per server, carrying what the user must
-still decide: the run location, whether a detected secret is kept, and which
-local paths the server would be given. Nothing here talks to a network, spawns
+still decide: whether a detected secret is kept, and which local paths the
+server names that a chat cannot reach. Nothing here talks to a network, spawns
 a process, or reads a file.
 """
 
@@ -38,15 +38,13 @@ from cloud_agent.mcp.models import (
     AuthKind,
     HeaderAuth,
     LaunchSpec,
-    Mount,
     Transport,
 )
 
-#: Where an imported entry says it should run. Imported configuration never
-#: chooses a location on its own: a ``command`` from somebody's laptop means
-#: "their machine", and reading that as the control plane's own filesystem is
-#: the mistake the design calls out by name.
-DraftLocation = Literal["remote", "managed-worker", "user-connector"]
+#: Where an imported entry runs, decided by its shape: an address is a remote
+#: service and a command is a program in each chat's sandbox. A ``command``
+#: from somebody's laptop never runs on the control plane's own filesystem.
+DraftLocation = Literal["remote", "sandbox"]
 
 _SECRET_NAME = re.compile(
     r"authorization|authentication|\bauth\b|token|secret|key|password|passwd|credential"
@@ -121,8 +119,8 @@ class ImportDraft:
     auth_kind: AuthKind = AuthKind.NONE
     header_auth: HeaderAuth = field(default_factory=HeaderAuth)
     secrets: tuple[ImportSecret, ...] = ()
-    #: Local paths the server's arguments name. On a managed worker these are
-    #: mounts to approve; on a connector they are paths on the user's machine.
+    #: Local paths the server's arguments name: paths on the user's machine,
+    #: which a chat's sandbox cannot reach. Shown, never mounted.
     paths: tuple[str, ...] = ()
     #: The command runner, when the entry starts a package. Kept so the launch
     #: plan can pin a version rather than resolving ``latest`` every start.
@@ -314,23 +312,19 @@ def _draft(
         paths = _paths(args)
         if paths:
             warnings.append(
-                "this server's arguments name local paths; choose where it runs before saving"
+                "this server's arguments name paths on your computer, which a chat cannot reach"
             )
         runner = command.rsplit("/", 1)[-1].lower()
         ecosystem = _PACKAGE_RUNNERS.get(runner)
-        if ecosystem:
-            warnings.append(
-                f"{runner} resolves a package at start; the platform pins the version it installs"
-            )
         return ImportDraft(
             label=name,
             transport=Transport.STDIO,
-            # Never inferred as the control plane's own host: an imported
-            # command is the user's, so it starts on their connector until
-            # they say otherwise.
-            location="user-connector",
+            # A command runs where the agent runs: in each chat's sandbox.
+            location="sandbox",
             launch=LaunchSpec(command=command, args=args, env=env),
-            auth_kind=AuthKind.STATIC if env_secrets else AuthKind.NONE,
+            # Its keys are environment values, sealed with the launch, not a
+            # header the platform sends: there is nothing to sign in to.
+            auth_kind=AuthKind.NONE,
             secrets=env_secrets,
             paths=paths,
             package_runner=runner if ecosystem else None,
@@ -480,7 +474,7 @@ def _is_secret_name(name: str) -> bool:
 
 
 def _paths(args: Iterable[str]) -> tuple[str, ...]:
-    """Local paths an argument vector names, for the mount decision."""
+    """Local paths an argument vector names, to warn that a chat cannot reach them."""
     found: list[str] = []
     pending_flag = False
     for arg in args:
@@ -504,25 +498,10 @@ def _paths(args: Iterable[str]) -> tuple[str, ...]:
     return tuple(seen)
 
 
-def mounts_for(paths: Sequence[str], *, target_root: str = "/workspace/mcp") -> tuple[Mount, ...]:
-    """Turn approved paths into read-only mounts for a managed worker."""
-    mounts: list[Mount] = []
-    for index, path in enumerate(paths):
-        mounts.append(
-            Mount(
-                source=path,
-                target=f"{target_root.rstrip('/')}/{index}",
-                read_only=True,
-            )
-        )
-    return tuple(mounts)
-
-
 __all__ = [
     "ImportDraft",
     "ImportError_",
     "ImportResult",
     "ImportSecret",
-    "mounts_for",
     "parse_import",
 ]

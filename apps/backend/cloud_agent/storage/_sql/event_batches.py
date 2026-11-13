@@ -12,12 +12,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from cloud_agent.storage._sql.attempts import lock_live_attempt
 from cloud_agent.storage._sql.events import insert_event
-from cloud_agent.storage._sql.ledger import (
-    REQUEST_ATTEMPT_LEDGER_REFRESH_SQL,
-    carries_model_usage,
-)
+from cloud_agent.storage._sql.fences import lock_live_attempt
+from cloud_agent.storage._sql.incidents import ADVANCE_INCIDENT_CURSOR_SQL
+from cloud_agent.storage._sql.ledger import NOTIFY_JOB_USAGE_SQL, carries_model_usage
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -51,6 +49,12 @@ async def append_attempt_events(
             await conn.execute(
                 "UPDATE agent_attempts SET terminal_ready = FALSE WHERE id = $1", attempt_id
             )
+        elif phase == "turn_started":
+            # The runner writes this once the sandbox manager has dispatched the
+            # prompt, not at ``started`` (the container), before which the
+            # workspace, uploads and runtime may still fail: only now is what
+            # the prompt told of the sandbox's incidents told.
+            await conn.execute(ADVANCE_INCIDENT_CURSOR_SQL, attempt_id)
         event_ids.append(
             await insert_event(
                 conn,
@@ -62,8 +66,7 @@ async def append_attempt_events(
             )
         )
     if any(carries_model_usage(event_type, payload) for event_type, payload, _ in events):
-        # A model call just finished: read its usage now rather than when a
-        # page next asks, so every open tab is pushed the total. A second
-        # request in one transaction would schedule nothing earlier.
-        await conn.execute(REQUEST_ATTEMPT_LEDGER_REFRESH_SQL, attempt_id)
+        # A model call's usage just arrived: push it to the owner's open tabs
+        # when this commits, rather than leave them to their next read.
+        await conn.execute(NOTIFY_JOB_USAGE_SQL, job_id)
     return event_ids

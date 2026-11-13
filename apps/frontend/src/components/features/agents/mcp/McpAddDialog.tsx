@@ -9,6 +9,7 @@ import { McpCatalogBrowser } from './McpCatalogBrowser';
 import { McpServerIcon } from './McpServerIcon';
 import {
   createMcpConnection,
+  type CreateMcpConnectionRequest,
   type McpAuthKind,
   type McpConnectionApi,
   type McpTemplateApi,
@@ -48,17 +49,7 @@ export function McpAddDialog({
     setSaving(true);
     setError(null);
     try {
-      const connection = await createMcpConnection({
-        label: selected.label,
-        transport: selected.transport,
-        location: 'remote',
-        url: selected.url,
-        auth_kind: authKind,
-        template: selected.name,
-        ...(authKind === 'static'
-          ? { secret: secret.trim(), header_name: 'Authorization', header_scheme: 'Bearer' }
-          : {}),
-      });
+      const connection = await createMcpConnection(connectionRequest(selected, authKind, secret));
       setSecret('');
       onAdded([connection]);
     } catch (cause: unknown) {
@@ -112,7 +103,11 @@ export function McpAddDialog({
       </div>
       {selected ? (
         <div className="mt-5 border-t border-gray-100 pt-4 dark:border-white/10">
-          {selected.name !== 'github' ? (
+          {selected.launch ? (
+            <p className="break-all font-mono text-xs text-gray-500 dark:text-gray-400">
+              {[selected.launch.command, ...selected.launch.args].join(' ')}
+            </p>
+          ) : selected.name !== 'github' ? (
             <p className="break-all text-xs text-gray-500 dark:text-gray-400">{selected.url}</p>
           ) : null}
           {selected.documentation_url ? (
@@ -190,9 +185,7 @@ export function McpAddDialog({
             </label>
           ) : (
             <p className="mt-3 text-sm text-gray-600 dark:text-gray-400">
-              {selected.name === 'github'
-                ? 'We’ll open GitHub so you can sign in and review access, then bring you back here. No token or app setup needed.'
-                : `Sign in to ${selected.label} to choose what your agents can access.`}
+              {signInHint(selected, authKind)}
             </p>
           )}
           {selected.name === 'github' && !selected.browser_sign_in_available ? (
@@ -320,4 +313,46 @@ export function McpAddDialog({
       </div>
     </div>
   );
+}
+
+/** What adding a preset sends: a sandbox preset is a pinned stdio server with no secret. */
+function connectionRequest(
+  selected: McpTemplateApi,
+  authKind: McpAuthKind,
+  secret: string,
+): CreateMcpConnectionRequest {
+  if (selected.location === 'sandbox' && selected.launch) {
+    return {
+      label: selected.label,
+      transport: 'stdio',
+      location: 'sandbox',
+      launch: { ...selected.launch, env: {} },
+      auth_kind: 'none',
+      template: selected.name,
+    };
+  }
+  const credential =
+    authKind === 'static'
+      ? { secret: secret.trim(), header_name: 'Authorization', header_scheme: 'Bearer' }
+      : {};
+  return {
+    label: selected.label,
+    transport: selected.transport,
+    location: 'remote',
+    url: selected.url,
+    auth_kind: authKind,
+    template: selected.name,
+    ...credential,
+  };
+}
+
+function signInHint(selected: McpTemplateApi, authKind: McpAuthKind): string {
+  if (selected.location === 'sandbox') {
+    return 'Runs inside each chat’s sandbox, next to the agent, where it can open the task’s own localhost app. Nothing to sign in to.';
+  }
+  if (authKind === 'none') return `${selected.label} needs no sign-in.`;
+  if (selected.name === 'github') {
+    return 'We’ll open GitHub so you can sign in and review access, then bring you back here. No token or app setup needed.';
+  }
+  return `Sign in to ${selected.label} to choose what your agents can access.`;
 }

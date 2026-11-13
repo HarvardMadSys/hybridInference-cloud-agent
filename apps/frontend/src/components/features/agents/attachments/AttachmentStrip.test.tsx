@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, render, screen } from '@testing-library/react';
+import { useState } from 'react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { AttachmentStrip, groupAttachments } from './AttachmentStrip';
@@ -72,6 +73,154 @@ describe('AttachmentStrip', () => {
     expect(screen.getByText('10 B')).toBeInTheDocument();
     expect(screen.queryByText('uploading…')).not.toBeInTheDocument();
     expect(screen.queryByText(warning)).not.toBeInTheDocument();
+  });
+
+  it('draws an image as a thumbnail above the text instead of a file chip', () => {
+    render(
+      <AttachmentStrip
+        entries={[
+          entry({ key: '1', path: 'pasted-image-a.png', previewUrl: 'blob:shot' }),
+          entry({ key: '2', path: 'notes.md' }),
+        ]}
+        onRemove={vi.fn()}
+      />,
+    );
+    const image = screen.getByRole('img', { name: 'pasted-image-a.png' });
+    expect(image).toHaveAttribute('src', 'blob:shot');
+    // The generated upload name is not repeated as a chip label.
+    expect(screen.queryByText('pasted-image-a.png')).not.toBeInTheDocument();
+    // An ordinary file keeps its chip, in the same list.
+    expect(screen.getByText('notes.md')).toBeInTheDocument();
+  });
+
+  it('draws pictures as one row and file chips as another, in their own order', () => {
+    render(
+      <AttachmentStrip
+        entries={[
+          entry({ key: '1', path: 'one.png', previewUrl: 'blob:1' }),
+          entry({ key: '2', path: 'notes.md' }),
+          entry({ key: '3', path: 'two.png', previewUrl: 'blob:2' }),
+          entry({ key: '4', path: 'broken.png', previewUrl: 'blob:broken' }),
+        ]}
+        onRemove={vi.fn()}
+      />,
+    );
+    fireEvent.error(screen.getByRole('img', { name: 'broken.png' }));
+    const [pictures, files] = screen.getAllByRole('list');
+    expect(
+      within(pictures!)
+        .getAllByRole('img')
+        .map((image) => image.getAttribute('alt')),
+    ).toEqual(['one.png', 'two.png']);
+    // An image that could not be decoded joins the files, as a chip.
+    expect(within(files!).getByText('notes.md')).toBeInTheDocument();
+    expect(within(files!).getByText('broken.png')).toBeInTheDocument();
+  });
+
+  it('falls back to the file chip when the image cannot be decoded', () => {
+    render(
+      <AttachmentStrip
+        entries={[entry({ key: '1', path: 'broken.png', previewUrl: 'blob:broken' })]}
+        onRemove={vi.fn()}
+      />,
+    );
+    fireEvent.error(screen.getByRole('img', { name: 'broken.png' }));
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
+    // The entry itself is untouched: it is still attached and still sends.
+    expect(screen.getByText('broken.png')).toBeInTheDocument();
+    expect(screen.getByText('10 B')).toBeInTheDocument();
+  });
+
+  it('drops an image back to a chip when its upload failed', () => {
+    render(
+      <AttachmentStrip
+        entries={[
+          entry({ key: '1', path: 'rejected.png', status: 'rejected', error: 'over 5 MB' }),
+        ]}
+        onRemove={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
+    expect(screen.getByText('over 5 MB')).toBeInTheDocument();
+  });
+
+  it('names each thumbnail removal button after its file', () => {
+    const removed = vi.fn();
+    render(
+      <AttachmentStrip
+        entries={[entry({ key: '1', path: 'shot.png', previewUrl: 'blob:shot' })]}
+        onRemove={removed}
+      />,
+    );
+    const button = screen.getByRole('button', { name: 'Remove shot.png' });
+    // Reachable and operable from the keyboard.
+    button.focus();
+    expect(button).toHaveFocus();
+    fireEvent.click(button);
+    expect(removed).toHaveBeenCalledExactlyOnceWith('1');
+  });
+
+  it('shows upload progress over the thumbnail until the file lands', () => {
+    const { rerender } = render(
+      <AttachmentStrip
+        entries={[entry({ key: '1', path: 'shot.png', status: 'uploading', previewUrl: 'blob:s' })]}
+        onRemove={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('uploading…')).toBeInTheDocument();
+    rerender(
+      <AttachmentStrip
+        entries={[entry({ key: '1', path: 'shot.png', previewUrl: 'blob:s' })]}
+        onRemove={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText('uploading…')).not.toBeInTheDocument();
+  });
+
+  it('announces upload progress on a thumbnail, not only draws it', () => {
+    render(
+      <AttachmentStrip
+        entries={[entry({ key: '1', path: 'shot.png', status: 'uploading', previewUrl: 'blob:s' })]}
+        onRemove={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('uploading…').closest('[aria-hidden="true"]')).toBeNull();
+  });
+
+  it('keeps keyboard focus in the composer after a removal', () => {
+    function Composer() {
+      const [entries, setEntries] = useState([
+        entry({ key: '1', path: 'one.png', previewUrl: 'blob:1' }),
+        entry({ key: '2', path: 'notes.md' }),
+        entry({ key: '3', path: 'three.png', previewUrl: 'blob:3' }),
+      ]);
+      return (
+        <div>
+          <AttachmentStrip
+            entries={entries}
+            onRemove={(key) => setEntries((old) => old.filter((row) => row.key !== key))}
+          />
+          <textarea aria-label="Message" />
+        </div>
+      );
+    }
+    render(<Composer />);
+    const press = (name: string) => {
+      const button = screen.getByRole('button', { name });
+      button.focus();
+      fireEvent.click(button);
+    };
+
+    // Pictures come first, then file chips. The item that takes the removed
+    // one's place gets focus...
+    press('Remove one.png');
+    expect(screen.getByRole('button', { name: 'Remove three.png' })).toHaveFocus();
+    // ...or the one before it, when the last was removed...
+    press('Remove notes.md');
+    expect(screen.getByRole('button', { name: 'Remove three.png' })).toHaveFocus();
+    // ...and the message box once nothing is attached.
+    press('Remove three.png');
+    expect(screen.getByRole('textbox', { name: 'Message' })).toHaveFocus();
   });
 
   it('removes every file of a folder when its chip is dismissed', () => {

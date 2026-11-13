@@ -16,7 +16,7 @@ import tarfile
 
 import pytest
 
-from cloud_agent_host.sandbox import SandboxError
+from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_shared.git.source_archive import _normalize_source_member, build_source_archive
 from cloud_agent_shared.git.source_cancellation import source_entries
 

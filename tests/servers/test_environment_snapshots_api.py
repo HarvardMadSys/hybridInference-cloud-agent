@@ -11,7 +11,7 @@ from httpx import ASGITransport, AsyncClient
 
 from cloud_agent.api import environments
 from cloud_agent.api._owner_auth import require_agent_owner
-from cloud_agent.api.deps import get_agent_app_credentials, get_gateway_client, get_storage
+from cloud_agent.api.deps import get_agent_app_credentials, get_owner_directory, get_storage
 from cloud_agent_shared.environment import BoundEnvironment
 
 pytestmark = pytest.mark.asyncio
@@ -23,7 +23,7 @@ def _app(store) -> FastAPI:
     app.dependency_overrides[get_storage] = lambda: store
     app.dependency_overrides[require_agent_owner] = lambda: {"user_id": "alice"}
     app.dependency_overrides[get_agent_app_credentials] = lambda: None
-    app.dependency_overrides[get_gateway_client] = lambda: SimpleNamespace(
+    app.dependency_overrides[get_owner_directory] = lambda: SimpleNamespace(
         agent_access=AsyncMock(return_value={"user_id": "alice", "allowed": True})
     )
     app.dependency_overrides[environments.verify_claiming_host] = lambda: {
@@ -74,7 +74,8 @@ async def test_a_rebuild_freezes_the_current_configuration_and_replaces_old_snap
     store = SimpleNamespace(environments=environments_repo, environment_snapshots=snapshots)
     monkeypatch.setattr(environments, "_entitled", AsyncMock())
     monkeypatch.setattr(
-        "cloud_agent.environment_source.resolve_test_commit", AsyncMock(return_value="c" * 40)
+        "cloud_agent.environments.environment_source.resolve_test_commit",
+        AsyncMock(return_value="c" * 40),
     )
     async with AsyncClient(transport=ASGITransport(app=_app(store)), base_url="http://t") as http:
         response = await http.post("/v1/agent/environments/env/snapshot", json={})
@@ -89,7 +90,7 @@ async def test_a_rebuild_freezes_the_current_configuration_and_replaces_old_snap
 
 
 async def test_an_owner_deletes_only_their_own_environments_snapshots():
-    from cloud_agent.environments import EnvironmentNotFound
+    from cloud_agent.environments.environments import EnvironmentNotFound
 
     environments_repo = SimpleNamespace(
         get_environment=AsyncMock(
@@ -118,7 +119,8 @@ async def test_a_team_environments_snapshots_are_its_editors_to_throw_away(monke
     store = SimpleNamespace(environments=environments_repo, environment_snapshots=snapshots)
     monkeypatch.setattr(environments, "_entitled", AsyncMock())
     monkeypatch.setattr(
-        "cloud_agent.environment_source.resolve_test_commit", AsyncMock(return_value="c" * 40)
+        "cloud_agent.environments.environment_source.resolve_test_commit",
+        AsyncMock(return_value="c" * 40),
     )
     async with AsyncClient(transport=ASGITransport(app=_app(store)), base_url="http://t") as http:
         deleted = await http.delete("/v1/agent/environments/env/snapshot")
@@ -146,7 +148,8 @@ def _claimed(monkeypatch, run, snapshots):
     )
     monkeypatch.setattr(environments, "_entitled", AsyncMock())
     monkeypatch.setattr(
-        "cloud_agent.environment_source.read_repository_token", AsyncMock(return_value=None)
+        "cloud_agent.environments.environment_source.read_repository_token",
+        AsyncMock(return_value=None),
     )
     monkeypatch.setattr(environments, "require_agent_access", AsyncMock())
     return SimpleNamespace(environments=environments_repo, environment_snapshots=snapshots)

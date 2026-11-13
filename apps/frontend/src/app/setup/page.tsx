@@ -20,8 +20,8 @@ export default function SetupPage() {
     <main className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-5">
       <h1 className="text-lg font-semibold text-gray-900 dark:text-gray-50">Administrator setup</h1>
       <p className="mt-3 text-sm text-gray-600 dark:text-gray-300">
-        Configure the deployment before Gateway sign-in is available. Use the administrator recovery
-        token supplied when this service was deployed.
+        Configure sign-in for this deployment. Use the administrator recovery token supplied when
+        this service was deployed.
       </p>
       <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
         The token is kept only while this page is open. Reloading or locking setup clears access.

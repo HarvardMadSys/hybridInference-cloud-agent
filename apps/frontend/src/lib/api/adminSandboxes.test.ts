@@ -85,6 +85,28 @@ describe('admin sandbox inventory client', () => {
     });
   });
 
+  it('deletes a cold sandbox that has no container without naming one', async () => {
+    const response = {
+      sandbox: { state: 'lost', deletion_state: 'deleted', container_id: null },
+      members: [],
+      observed_at: 'now',
+    };
+    const fetch = vi
+      .spyOn(client, 'fetchWithAuth')
+      .mockResolvedValue(new Response(JSON.stringify(response), { status: 202 }));
+    const reviewed = {
+      generation: 3,
+      container_id: null,
+      last_activity_at: '2026-10-10T09:59:00Z',
+    };
+
+    expect(await deleteAdminSandbox('sandbox/one', reviewed, undefined, false, true)).toEqual(
+      response,
+    );
+    expect(fetch.mock.calls[0][1]).toBe('/admin/agent/sandboxes/sandbox%2Fone/delete?discard=true');
+    expect(JSON.parse(String(fetch.mock.calls[0][2]?.body))).toEqual(reviewed);
+  });
+
   it('marks a server-verified running-state deletion with the force query', async () => {
     const response = {
       sandbox: { state: 'stopped', deletion_state: 'pending', deletion_request_id: 'request-one' },

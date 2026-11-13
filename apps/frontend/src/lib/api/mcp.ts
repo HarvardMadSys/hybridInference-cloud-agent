@@ -23,8 +23,12 @@ const API_BASE = config.apiBase;
 /** How the platform speaks to one server. */
 export type McpTransport = 'streamable-http' | 'http-sse' | 'stdio';
 
-/** Where a stdio server actually runs. */
-export type McpLocation = 'remote' | 'managed-worker' | 'user-connector';
+/**
+ * Where a server runs, decided by what was added: `remote` for an address,
+ * `sandbox` for a command, which runs inside each chat's own sandbox, next to
+ * the agent (one pinned package).
+ */
+export type McpLocation = 'remote' | 'sandbox';
 
 /** How a connection authenticates to its server. */
 export type McpAuthKind = 'none' | 'static' | 'oauth';
@@ -76,6 +80,9 @@ export interface McpTemplateApi {
   notes: string[];
   documentation_url?: string;
   browser_sign_in_available?: boolean;
+  /** A sandbox preset: a pinned stdio server run in each chat's sandbox, no URL. */
+  location?: McpLocation;
+  launch?: { command: string; args: string[] };
 }
 
 /** Public metadata from the official MCP Registry, never an installed connection. */
@@ -113,7 +120,6 @@ export interface McpConnectionApi {
   error_kind: McpConnectionErrorKind;
   error_detail: string | null;
   account_label: string | null;
-  connector_id: number | null;
   has_credential: boolean;
   secret_hint: string | null;
   expires_at: string | null;
@@ -253,6 +259,8 @@ export function validateMcpAuthorizationUrl(value: string): string {
 /** One session's selection for one connection. */
 export interface McpBindingApi {
   connection_id: number;
+  /** `sandbox`: a program that runs with the agent; its calls are not held for approval. */
+  location?: McpLocation;
   connection_label: string;
   alias: string;
   enabled: boolean;
@@ -413,9 +421,8 @@ export async function previewMcpImport(
 /**
  * Save a paste the user has already seen.
  *
- * `locations` overrides the run location per draft, which is the one decision
- * the paste cannot make for the user: a colleague's snippet says nothing about
- * whether this deployment may run a local process for it.
+ * `locations` names where each draft runs, as its preview placed it, so the
+ * save stores what the user confirmed.
  */
 export async function saveMcpImport(
   text: string,

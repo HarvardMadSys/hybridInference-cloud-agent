@@ -24,7 +24,7 @@
 # whole script first, which would switch public services ahead of the host.
 #
 #   prepare           build or pull the images. Replaces nothing.
-#   prepare-database  start Postgres, migrate, check the identity namespace,
+#   prepare-database  start Postgres, check the account namespace, migrate,
 #                     and on a cold machine start the API and MCP relay the
 #                     host's readiness probe needs. Migrations stay
 #                     backwards-compatible with the API that is still running,
@@ -97,49 +97,8 @@ esac
   || die "SHARED_READY_TIMEOUT must be a positive integer (got '${SHARED_READY_TIMEOUT}')"
 
 cd "${DEPLOY_ROOT}" 2>/dev/null || die "${DEPLOY_ROOT} does not exist"
-[ -f .env ] || die ".env is missing from ${DEPLOY_ROOT} — it holds this deployment's secrets and is deliberately not in git"
-
-# Compute credentials are write-only in Admin and encrypted before they reach
-# Postgres. Make that surface usable without asking an operator to invent one
-# more secret, while keeping the key outside the database it protects. The
-# persistent .env is deliberately untracked and survives both source and
-# artifact upgrades. Never replace a non-empty value: doing so would orphan
-# every saved SSH key and provider token.
-ensure_compute_secret_key() {
-  local configured="" generated="" temporary=""
-  configured="$(grep -E '^AGENT_COMPUTE_SECRET_KEY=' .env 2>/dev/null | tail -1 | cut -d= -f2- || true)"
-  configured="${configured%\"}"; configured="${configured#\"}"
-  configured="${configured%\'}"; configured="${configured#\'}"
-  if [ -n "${configured}" ]; then
-    return 0
-  fi
-
-  generated="${AGENT_COMPUTE_SECRET_KEY:-}"
-  if [ -n "${generated}" ]; then
-    [[ "${generated}" =~ ^[A-Za-z0-9_+=./-]{32,}$ ]] \
-      || die "AGENT_COMPUTE_SECRET_KEY must be at least 32 dotenv-safe bytes"
-  else
-    command -v openssl >/dev/null 2>&1 \
-      || die "openssl is required to generate AGENT_COMPUTE_SECRET_KEY"
-    generated="$(openssl rand -hex 32)"
-  fi
-
-  temporary="$(mktemp "${DEPLOY_ROOT}/.env.compute-key.XXXXXX")"
-  chmod 600 "${temporary}"
-  awk -v replacement="AGENT_COMPUTE_SECRET_KEY=${generated}" '
-    BEGIN { written = 0 }
-    /^AGENT_COMPUTE_SECRET_KEY=/ {
-      if (!written) { print replacement; written = 1 }
-      next
-    }
-    { print }
-    END { if (!written) print replacement }
-  ' .env > "${temporary}"
-  mv "${temporary}" .env
-  log "generated and persisted the compute credential encryption key"
-}
-
-ensure_compute_secret_key
+# A .env is optional. It holds only the overrides this deployment chose; the
+# keys live in their own volume (see the `keys` service).
 
 if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
   source "$SCRIPT_DIR/../release/artifact_env.sh"
@@ -201,7 +160,7 @@ else
   log "checkout now at ${NOW}"
 fi
 
-# Read one value from the deployment's persistent, untracked .env.
+# Read one value from the deployment's persistent, untracked .env, if it has one.
 from_env() {
   local value
   if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
@@ -217,6 +176,21 @@ from_env() {
   value="${value%\'}"; value="${value#\'}"
   printf '%s' "$value"
 }
+
+# Configuration for the removed Gateway sign-in, admission and inference is
+# refused before anything is pulled, migrated or replaced. Compose would drop
+# these from the containers' environment without a word, so the deployment
+# would start as if they were never set; the control plane refuses them too.
+for retired in AGENT_AUTH_MODE AGENT_GATEWAY_URL AGENT_SESSION_REDIRECT_URI \
+  AGENT_WEB_GATEWAY_URL AGENT_WEB_FEATURE_RAG AGENT_GATEWAY_SSH_HOST \
+  GATEWAY_AUTHORIZE_URL GATEWAY_BASE_URL \
+  GATEWAY_GRANT_BASE_PATH GATEWAY_GRANT_BINDING_ID GATEWAY_GRANT_DISPATCH_TOKEN \
+  GATEWAY_ISSUER GATEWAY_JWKS_URL IDENTITY_ALLOWED_REDIRECTS IDENTITY_ISSUER \
+  IDENTITY_JWT_PRIVATE_KEY IDENTITY_JWT_RETIRING_PUBLIC_KEYS \
+  AGENT_ONCALL_DISPATCH_TOKEN AGENT_ONCALL_USER_ID; do
+  [[ -z "$(from_env "$retired")" ]] \
+    || die "remove ${retired} from this deployment's .env: Cloud Agent no longer supports Gateway sign-in or Gateway inference (see docs/developer/upgrade-notes.md#independent-accounts-cutover)"
+done
 
 # The target API uses the same exact generation as the deployment waiter when
 # deciding whether a replica may materialize a new retained group. Export it
@@ -253,7 +227,9 @@ compose() {
       run) shift; set -- run --pull never "$@" ;;
     esac
   fi
-  local command=(docker compose -p "${COMPOSE_PROJECT}" --env-file .env -f "${COMPOSE_FILE}")
+  local command=(docker compose -p "${COMPOSE_PROJECT}")
+  [ ! -f .env ] || command+=(--env-file .env)
+  command+=(-f "${COMPOSE_FILE}")
   if [[ -n "${AGENT_COMPUTE_DIRECTORY:-$(from_env AGENT_COMPUTE_DIRECTORY)}" ]]; then
     command+=(-f "$SCRIPT_DIR/docker-compose.compute.yml")
   fi
@@ -286,6 +262,38 @@ compose() {
 # to create, retain or garbage-collect — and the build cache stays in the
 # daemon, where the next deploy can reuse it.
 export BUILDX_CONFIG="${DEPLOY_ROOT}/.buildx"
+
+# A new installation's keys are not this script's business any more: the
+# Compose `keys` service stores, keeps or generates them in the agent-keys
+# volume before anything that needs one starts, and refuses to invent one where
+# data may depend on it (apps/backend/cloud_agent/deployment/deployment_keys.py).
+# A value this deployment's .env still sets is stored there on the next start.
+
+# The value Compose resolves for one variable: this process's environment, then
+# .env with its interpolation applied, so `NAME=${OTHER:-}` reads as empty. An
+# artifact deployment resolved its environment with Compose already.
+resolved_value() {
+  local line resolved
+  if [[ "$AGENT_DEPLOY_MODE" == "artifacts" ]]; then
+    from_env "$1"
+    return 0
+  fi
+  # Through the same Compose files as every other call, the private override
+  # last, so this reads what the deployment itself would.
+  resolved="$(compose config --environment)" \
+    || die "Compose could not resolve this deployment's configuration"
+  while IFS= read -r line; do
+    if [[ "${line%%=*}" == "$1" ]]; then
+      printf '%s' "${line#*=}"
+      return 0
+    fi
+  done <<< "${resolved}"
+}
+
+# The web app is served at the root of its hostname. A value left from when it
+# could be mounted under a prefix would now be ignored without a word.
+[ -z "$(resolved_value AGENT_WEB_BASE_PATH)" ] \
+  || die "AGENT_WEB_BASE_PATH is set, but mounting the web app under a path prefix was removed; serve it on its own hostname and delete the line from ${DEPLOY_ROOT}/.env"
 
 # Ports come from .env when set; these defaults match the compose file.  The
 # control-plane port is needed before the compatibility fence only on a true
@@ -396,15 +404,15 @@ if runs_phase prepare-database; then
   # plain detached `up` returns as soon as the container has started, which can
   # still let Alembic race Postgres initialization on a fresh volume.
   compose up -d --wait --wait-timeout "${HEALTH_TIMEOUT}" postgres
+  # Check the account boundary before the database is migrated, read-only and
+  # on whatever schema it has: a Gateway-era database is refused before
+  # anything changes it, and is left as it was. A refusal here also leaves the
+  # running API and relay intact.
+  log "checking that the Agent database is empty or holds Cloud Agent accounts"
+  compose run --rm --no-deps control-plane \
+    python -m cloud_agent.deployment.identity_namespace --check
   log "migrating deployment database"
   compose run --rm --no-deps migrate
-
-  # Check the identity boundary before bootstrapping or replacing either listener.
-  # Historical data is never adopted by CD: an operator must first acknowledge
-  # its original issuer. A refusal here leaves the running API and relay intact.
-  log "checking the Agent database identity issuer"
-  compose run --rm --no-deps control-plane \
-    python -m cloud_agent.identity_namespace --check
 
 fi
 
@@ -456,7 +464,7 @@ ensure_bootstrap_listeners() {
   fi
   if [ "${#missing[@]}" -gt 0 ]; then
     log "starting missing target services for parallel host readiness: ${missing[*]}"
-    # Host readiness probes both fixed sandbox relays. Starting only the API on
+    # Host readiness probes the MCP relay and the API. Starting only the API on
     # a clean machine, or assuming MCP is running merely because the API is,
     # deadlocks deployment: the host cannot publish its exact-SHA marker while
     # the full compose up that would start the missing service is fenced on that
@@ -510,7 +518,7 @@ if [[ -n "${AGENT_DEPLOY_DRAINING_HOST:-}" ]]; then
   READINESS_MODE_ARGS=(--draining-host "${AGENT_DEPLOY_DRAINING_HOST}")
 fi
 WATCH_READINESS=1 compose run --rm --no-deps ${READINESS_ARGS[@]+"${READINESS_ARGS[@]}"} control-plane \
-  python -m cloud_agent.deploy_readiness \
+  python -m cloud_agent.deployment.deploy_readiness \
     --timeout-seconds "${SHARED_READY_TIMEOUT}" \
     --expected-deployment-sha "${SHA}" \
     ${READINESS_MODE_ARGS[@]+"${READINESS_MODE_ARGS[@]}"}
@@ -535,16 +543,9 @@ fi
 export AGENT_WEB_DEPLOYED_AT
 compose up -d --remove-orphans
 
-# The web app is mounted under a base path, so `/` is a 404 by design and a
-# health check pointed at it fails every deploy of a working app. Checked
-# against the running staging host: `/` → 404, `/agents` → 200, `/agents/` →
-# 308. The un-slashed form is the one to probe.
-WEB_BASE_PATH="$(from_env AGENT_WEB_BASE_PATH)"
-WEB_BASE_PATH="${WEB_BASE_PATH%/}"
-
 wait_for "control plane" "http://127.0.0.1:${CP_PORT}/healthz"
 wait_for "MCP relay"     "http://127.0.0.1:${MCP_PORT}/healthz"
-wait_for "web"           "http://127.0.0.1:${WEB_PORT}${WEB_BASE_PATH:-/}"
+wait_for "web"           "http://127.0.0.1:${WEB_PORT}/"
 if grep -qx edge <<<"${ACTIVE_SERVICES}"; then
   wait_for "edge web route" "http://127.0.0.1:${EDGE_PORT}/"
   wait_for "edge API route" "http://127.0.0.1:${EDGE_PORT}/api/healthz"

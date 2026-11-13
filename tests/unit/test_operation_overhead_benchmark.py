@@ -23,7 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from cloud_agent_host.shared_session_supervisor import (
+from cloud_agent_host.supervisor.shared_session_state import (
     SharedSessionDescriptor,
     SharedSessionLease,
 )

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import gc
 
-from cloud_agent_host import install_locks
-from cloud_agent_host.install_locks import install_lock
+from cloud_agent_host.member_setup import install_locks
+from cloud_agent_host.member_setup.install_locks import install_lock
 
 
 def test_one_container_has_one_lock_and_another_container_its_own() -> None:

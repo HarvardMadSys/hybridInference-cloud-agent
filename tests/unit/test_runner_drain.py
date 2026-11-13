@@ -32,18 +32,18 @@ def test_sigterm_sets_the_flag_and_does_not_kill_the_process() -> None:
         """
         import os, signal, sys, time
         sys.path.insert(0, os.environ["HOST_PKG"])
-        from cloud_agent_host import runner
+        from cloud_agent_host.service import runner_stop
 
-        runner._drain_on_sigterm()
+        runner_stop.drain_on_sigterm()
         os.kill(os.getpid(), signal.SIGTERM)
 
         # The handler runs on the main thread at the next bytecode boundary.
         for _ in range(100):
-            if runner._STOPPING.is_set():
+            if runner_stop.STOPPING.is_set():
                 break
             time.sleep(0.01)
 
-        print("STOPPING" if runner._STOPPING.is_set() else "NOT_SET")
+        print("STOPPING" if runner_stop.STOPPING.is_set() else "NOT_SET")
         sys.exit(0)
         """
     )
@@ -73,24 +73,24 @@ def test_sigterm_during_preflight_does_not_kill_the_turn_child() -> None:
         """
         import io, os, signal, sys, time
         sys.path.insert(0, os.environ["HOST_PKG"])
-        from cloud_agent_host import runner
+        from cloud_agent_host.service import runner_stop
+        from cloud_agent_host.turn import turn_child
 
         class Backend:
             def preflight(self):
                 os.kill(os.getpid(), signal.SIGTERM)
                 for _ in range(100):
-                    if runner._STOPPING.is_set():
+                    if runner_stop.STOPPING.is_set():
                         break
                     time.sleep(0.01)
                 print("PREFLIGHT_SURVIVED", flush=True)
 
-        runner.build_backend_from_env = Backend
+        turn_child.build_backend_from_env = Backend
         read_fd, write_fd = os.pipe()
         sys.stdin = io.StringIO("")
-        code = runner._serve_turn(
+        code = turn_child._serve_turn(
             handover_fd=write_fd,
             base_url="http://control",
-            gateway_url="http://gateway",
             worker_id="runner-a",
             lease_ttl=120.0,
             agent_timeout_s=3600.0,
@@ -124,11 +124,11 @@ def test_sigint_is_left_alone() -> None:
     people: SIGTERM from docker, which is already waiting out its grace
     period, and SIGINT from somebody at a keyboard.
     """
-    from cloud_agent_host import runner
+    from cloud_agent_host.service import runner_stop
 
     before = signal.getsignal(signal.SIGINT)
     try:
-        runner._drain_on_sigterm()
+        runner_stop.drain_on_sigterm()
         assert signal.getsignal(signal.SIGINT) is before
     finally:
         signal.signal(signal.SIGINT, before)

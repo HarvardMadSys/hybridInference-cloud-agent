@@ -38,15 +38,14 @@ prepare_artifact_deployment() {
   fi
 
   if [[ "$stack" == "control-plane" ]]; then
+    # Only the root web image is built; sub-path mounting was removed.
     variant="$(artifact_env_value AGENT_WEB_VARIANT)"
-    if [[ -z "$variant" ]]; then
-      base_path="$(artifact_env_value AGENT_WEB_BASE_PATH)"
-      case "$base_path" in
-        "") variant=root ;;
-        /agents) variant=agents ;;
-        *) die "AGENT_WEB_BASE_PATH must select the root or agents web variant" ;;
-      esac
-    fi
+    variant="${variant:-root}"
+    [[ "$variant" == root ]] \
+      || die "AGENT_WEB_VARIANT=${variant}: only the root web image is built (sub-path mounting was removed)"
+    base_path="$(artifact_env_value AGENT_WEB_BASE_PATH)"
+    [[ -z "$base_path" ]] \
+      || die "AGENT_WEB_BASE_PATH=${base_path}: sub-path mounting was removed; delete the line"
     arguments+=(--variant "$variant")
     render_arguments+=(--variant "$variant")
   fi

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from cloud_agent.capacity_protocol import CAPACITY_HISTORY_RETENTION_S
+from cloud_agent.schemas.capacity_protocol import CAPACITY_HISTORY_RETENTION_S
 
 
 class HostCapacityRepository(Protocol):
@@ -30,7 +30,7 @@ class HostCapacityRepository(Protocol):
     ) -> int:
         """Delete one bounded batch of history older than the retention window.
 
-        Bounded because this runs beside the reaper and the publisher on the
+        Bounded because this runs beside the reaper and the maintenance loops on the
         same database: an unbounded ``DELETE`` after a control-plane outage
         would hold locks for as long as it took to remove the backlog, and the
         work it delayed is recovering jobs.
