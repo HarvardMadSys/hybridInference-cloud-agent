@@ -21,6 +21,7 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import JSONResponse, PlainTextResponse
 
+from cloud_agent.api._database_unavailable import DatabaseUnavailableGuard
 from cloud_agent.api._parameters import refuse_unstorable_parameters
 from cloud_agent.api._sensitive_routes import no_store
 from cloud_agent.api.errors import install_domain_errors
@@ -302,6 +303,10 @@ def create_app() -> FastAPI:
     # admits it from any page on the same site. Machine callers send bearers
     # and pass untouched; see the module for the exact rule.
     app.add_middleware(_cross_site.CrossSiteWriteGuard)
+    # Outermost, so it sees what every route and the guard above let escape:
+    # the database out of reach (a restart, a pooled connection the server
+    # just ended) is a 503 with Retry-After rather than the catch-all's 500.
+    app.add_middleware(DatabaseUnavailableGuard)
     app.include_router(routes.router)
     app.include_router(usage.router)
     app.include_router(owner_usage.router)
@@ -437,6 +442,8 @@ def create_mcp_app() -> FastAPI:
         **_NO_DOCS,
     )
     app.include_router(mcp_relay.router)
+    # A tool call that meets a database restart is one for the agent to retry.
+    app.add_middleware(DatabaseUnavailableGuard)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -474,4 +481,6 @@ def create_github_relay_app() -> FastAPI:
         **_NO_DOCS,
     )
     app.include_router(github_relay.router)
+    # git and gh are answered in the relay's own refusal shape.
+    app.add_middleware(DatabaseUnavailableGuard, answer=github_relay.database_unavailable_response)
     return app

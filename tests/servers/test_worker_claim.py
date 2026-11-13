@@ -24,6 +24,7 @@ from tests.support.storage import AllCapabilities, EmptyAttachments
 
 from cloud_agent.accounts.directory import OwnerDirectoryError
 from cloud_agent.api import routes as agent_jobs_router, worker as agent_worker
+from cloud_agent.api._database_unavailable import RETRY_AFTER_SECONDS
 from cloud_agent.api.deps import (
     get_agent_app_credentials,
     get_owner_directory,
@@ -423,6 +424,8 @@ async def test_an_unexpected_failure_after_the_claim_hands_the_job_back(
 
     assert response.status_code == 503
     assert response.json()["detail"]["error"]["type"] == "claim_failed"
+    # A database restart can be what failed it: the host is told when to retry.
+    assert response.headers["retry-after"] == str(RETRY_AFTER_SECONDS)
     assert store.released == [(_JOB, _ATTEMPT)]
     assert store.release_reasons == ["claim_failed"]
     assert store.retry_delays == [30]
