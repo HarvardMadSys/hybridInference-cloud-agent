@@ -504,7 +504,17 @@ services:
   # Enable with `COMPOSE_PROFILES=edge` (or `--profile edge`). Loopback by default, like every other published port here: the tunnel is on this host.
   edge:
     profiles: [edge]
-    image: nginx:1.27.5-alpine
+    # Each third-party image here (this one, pgAdmin's, Postgres's) is named by
+    # its version tag and the digest of its multi-architecture index. The digest
+    # decides what runs, on an ARM64 control plane and an x86_64 machine alike;
+    # the tag says what that is. A tag alone runs whatever this machine's copy
+    # of it points to, and an artifact deployment pulls every tag again on each
+    # deploy, so a new upstream build could replace a service in the middle of
+    # an unrelated deploy. Change both together: `docker buildx imagetools
+    # inspect <name>:<tag>` prints the index digest, and the platforms it lists
+    # must still include linux/arm64 and linux/amd64. A release refuses a
+    # third-party image named any other way (deploy/release/artifact_compose.py).
+    image: nginx:1.27.5-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
     volumes:
       - ${AGENT_EDGE_CONFIG_FILE:-./edge.nginx.conf}:/etc/nginx/conf.d/default.conf:ro
     ports:
@@ -558,7 +568,11 @@ services:
   # database here sets AGENT_POSTGRES_DB to that one too, or all of them stay
   # on the database it left; the `keys` service warns while the two differ.
   postgres:
-    image: postgres:16-alpine
+    # Pinned like the edge's image (see there). Named `postgres:16-alpine`, it
+    # took a deployment from 16.15 to 16.16 during an unrelated deploy; a new
+    # PostgreSQL now arrives only with a release that changes this line, and
+    # docs/developer/upgrade-notes.md says when one does.
+    image: postgres:16.16-alpine@sha256:0adbf25a9e96d38823bb813f3ac0ed41fadb665c88f1df7fe6dbfb060cbdc106
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${AGENT_POSTGRES_USER:-cloudagent}

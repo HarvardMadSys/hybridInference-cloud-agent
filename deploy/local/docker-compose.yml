@@ -42,9 +42,10 @@ services:
   # Re-open the generated one-time host token on each local stack start. The
   # lasting credential lives in the Docker volume below, so a normal restart
   # does not spend it again. These are generated local values, never production
-  # credentials.
+  # credentials. Its psql comes from the image the `postgres` service runs, the
+  # pinned one in deploy/control-plane/docker-compose.yml.
   local-bootstrap:
-    image: postgres:16-alpine
+    image: postgres:16.16-alpine@sha256:0adbf25a9e96d38823bb813f3ac0ed41fadb665c88f1df7fe6dbfb060cbdc106
     restart: "no"
     environment:
       PGHOST: postgres
