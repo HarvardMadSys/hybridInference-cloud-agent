@@ -152,6 +152,7 @@ _SHUTDOWN_TASK_ATTRS: tuple[str, ...] = (
     "compute_resource_task",
     "account_access_task",
     "account_broadcast_task",
+    "account_provisioning_task",
     "notification_listener_task",
 )
 

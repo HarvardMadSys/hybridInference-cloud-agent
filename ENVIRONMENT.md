@@ -83,7 +83,7 @@ across restarts. The inventory below records built-in defaults and the
 environment names used for an initial import. Once a setting is registered, the
 service no longer reads it continuously from `.env`.
 
-Run `alembic upgrade head` (through `0115_mcp_retire_dead_locations`) before
+Run `alembic upgrade head` (through `0116_account_provisioning`) before
 starting this release; the [upgrade notes](docs/developer/upgrade-notes.md)
 say what each recent migration changes. The main control-plane listener then
 initializes the settings document once from its existing environment. The
@@ -347,6 +347,9 @@ encrypted and never shown again. See [accounts](docs/developer/local-accounts.md
 | `AGENT_TENCENT_SMS_REGION` / `AGENT_TENCENT_SMS_SDK_APP_ID` / `AGENT_TENCENT_SMS_SIGN_NAME` / `AGENT_TENCENT_SMS_TEMPLATE_ID` | NEW. The Tencent SMS application, its approved signature and its approved template, which takes the code and its lifetime in minutes. Region defaults to `ap-guangzhou`. |
 | `AGENT_TURNSTILE_SITE_KEY` / `AGENT_TURNSTILE_SECRET_KEY` | NEW. Cloudflare Turnstile for sign-up and phone codes. With no secret key nothing is checked; with one, a missing or rejected token, or no answer from Cloudflare, refuses. |
 | `AGENT_LOCAL_ADMIN_EMAILS` | NEW. Comma-separated, as HybridInference's `ADMIN_EMAILS`: an account whose **proven** email is listed is approved and made an administrator when it signs in. Proven means a link sent to the address was followed (verification, address change or password reset) or the operator created the account, never an address accepted while verification is off. The list stays in charge: withdrawing a listed account's administration or access is refused until the address is removed from it. |
+| `AGENT_LOCAL_INFERENCE_PROVISIONING_ENABLED` | NEW. Off by default. On: an account approved for Agent use is emailed an invitation to set a password on the connected inference service, which issues it a scoped API key for the agent models. Only accounts approved after this is first switched on are invited; invite earlier accounts with `python -m cloud_agent.accounts.provision_backfill`. When Agent access ends, the scoped key is revoked. |
+| `AGENT_LOCAL_INFERENCE_PROVISIONING_API_URL` / `AGENT_LOCAL_INFERENCE_PROVISIONING_WEB_URL` | NEW. The inference service's API and web origins. Invitation mail links to `<web>/agent-invite` with the one-time token in the fragment. |
+| `AGENT_LOCAL_INFERENCE_PROVISIONING_DISPATCH_TOKEN` | NEW. Secret. The shared token the inference service requires on its internal invitation endpoints (its `GATEWAY_GRANT_DISPATCH_TOKEN`). Stored encrypted; never shown again. |
 | `AGENT_LOCAL_TERMS_TEXT` | NEW. Plain-text Terms of Service shown at `/terms` and in the sign-up consent when `AGENT_LOCAL_TERMS_URL` is empty. Deployment Terms [site content files](#site-content-files) replace both settings, which Admin then shows read-only. |
 | `AGENT_LOCAL_SESSION_TTL_DAYS` | NEW. Lifetime of a new sign-in, default 30 days, never extended by use. |
 | `AGENT_LOCAL_LOGIN_RATE_LIMIT_PER_15MIN` / `AGENT_LOCAL_LOGIN_ACCOUNT_RATE_LIMIT_PER_15MIN` / `AGENT_LOCAL_LOGIN_RATE_LIMIT_PER_HOUR_PER_IP` | NEW. Sign-in windows: per account per address (5, also a recognized browser's own window), per account from every address (50, counting only attempts the per-address windows let through) and per address (20 an hour). |

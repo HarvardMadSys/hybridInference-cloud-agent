@@ -8,6 +8,9 @@ transaction ownership it has here.
 
 from __future__ import annotations
 
+from cloud_agent.storage.repositories.account_provisioning import (
+    PostgresAccountProvisioningRepository,
+)
 from cloud_agent.storage.repositories.accounts import PostgresLocalAccountRepository
 from cloud_agent.storage.repositories.agent_memory import PostgresAgentMemoryRepository
 from cloud_agent.storage.repositories.attachments import PostgresAttachmentRepository
@@ -65,6 +68,7 @@ from cloud_agent.storage.repositories.web_search import PostgresWebSearchReposit
 from cloud_agent.storage.repositories.work_insights import PostgresWorkInsightsRepository
 
 __all__ = [
+    "PostgresAccountProvisioningRepository",
     "PostgresAgentMemoryRepository",
     "PostgresAttachmentRepository",
     "PostgresAttemptCommands",

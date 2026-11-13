@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-12 08:45-0500\n"
+"POT-Creation-Date: 2026-11-13 05:35-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -38,7 +38,7 @@ msgstr "启动本次发布之前"
 #: ../developer/upgrade-notes.md:11
 msgid ""
 "Before starting this release, run `alembic upgrade head` through "
-"`0115_mcp_retire_dead_locations`. The supported deployment scripts run "
+"`0116_account_provisioning`. The supported deployment scripts run "
 "migrations before replacing the API; every migration listed here is "
 "additive and safe under the running previous release unless it says "
 "otherwise. The few transitions that need stopped writers are listed in "
@@ -46,7 +46,7 @@ msgid ""
 "#applying-migrations-that-are-not-backwards-compatible)."
 msgstr ""
 "启动本次发布之前，先运行 `alembic upgrade head`，升级到 "
-"`0115_mcp_retire_dead_locations`。官方支持的部署脚本会在替换 API "
+"`0116_account_provisioning`。官方支持的部署脚本会在替换 API "
 "之前执行迁移；除非下面特别说明，这里列出的每个迁移都只做增量修改，上一个发布还在运行时执行也是安全的。少数需要先停掉写入操作的迁移，列在[执行不向后兼容的迁移](operations.md"
 "#applying-migrations-that-are-not-backwards-compatible)中。"
 
@@ -700,6 +700,25 @@ msgstr "迁移"
 #: ../developer/upgrade-notes.md
 msgid "What it changes"
 msgstr "改了什么"
+
+#: ../developer/upgrade-notes.md
+msgid "`0116_account_provisioning`"
+msgstr "`0116_account_provisioning`"
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds `agent_account_provisioning` (one invitation-lifecycle row per "
+"account for the connected inference service) and "
+"`agent_account_provisioning_activation` (when provisioning was first "
+"enabled, so only later approvals are invited automatically). Nothing "
+"reads them before this release, so the previous release runs unchanged "
+"beside it. A downgrade drops both tables."
+msgstr ""
+"新增 `agent_account_provisioning`（每个账号一行的邀请生命周期记录，"
+"用于所连的推理服务）和 `agent_account_provisioning_activation`"
+"（首次开启开通功能的时间，因此只有之后的批准会被自动邀请）。"
+"本版本之前没有任何代码读取这两张表，上一个发布可原样并行运行。"
+"降级会删除这两张表。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0115_mcp_retire_dead_locations`"
@@ -1520,7 +1539,7 @@ msgid ""
 "Existing queued jobs remain immediately eligible."
 msgstr "新增 `agent_jobs.claim_retry_at`，worker 的认领查询要用到它。已经在排队的任务仍可立即被认领。"
 
-#: ../developer/upgrade-notes.md:391
+#: ../developer/upgrade-notes.md:392
 msgid ""
 "Older revisions that need a maintenance window are listed in [applying "
 "migrations that are not backwards-compatible](operations.md#applying-"
@@ -1532,11 +1551,11 @@ msgstr ""
 "backwards-compatible)中。独立账号版本之前的数据库，无论处于哪条迁移链，都不会被升级；见[切换说明"
 "](#independent-accounts-cutover)。"
 
-#: ../developer/upgrade-notes.md:396
+#: ../developer/upgrade-notes.md:397
 msgid "When you add a migration"
 msgstr "新增迁移时"
 
-#: ../developer/upgrade-notes.md:398
+#: ../developer/upgrade-notes.md:399
 msgid ""
 "Add a row to the table above in the same pull request, saying what an "
 "operator upgrading a live deployment needs to know: what existing rows it"
