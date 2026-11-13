@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, date, datetime
@@ -101,11 +102,19 @@ class _Store:
 class _Provider:
     """The provider, answering every request as scripted and recording what it got."""
 
-    def __init__(self, status: int = 200, body: Any = None, *, fail: bool = False) -> None:
+    def __init__(
+        self,
+        status: int = 200,
+        body: Any = None,
+        *,
+        fail: bool = False,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.requests: list[httpx.Request] = []
         self.bodies: list[bytes] = []
         self.status, self.fail = status, fail
         self.body = body if body is not None else {"id": "answer"}
+        self.headers = headers or {}
 
     async def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -115,13 +124,43 @@ class _Provider:
         # A stream, as from the network: the relay streams it back unread.
         return httpx.Response(
             self.status,
-            headers={"content-type": "application/json", "x-request-id": "req_1"},
+            headers={
+                "content-type": "application/json",
+                "x-request-id": "req_1",
+                **self.headers,
+            },
             stream=httpx.ByteStream(json.dumps(self.body).encode()),
         )
 
 
 def _placeholder(generation: int = 2) -> str:
     return mint_residency_model_token(thread_id="athr_1", residency_generation=generation)
+
+
+def _upstream(handle: Any) -> httpx.AsyncClient:
+    """The listener's own client, dialling ``handle`` in place of the network."""
+    return model_relay.relay_client(httpx.MockTransport(handle))
+
+
+def _app(
+    store: _Store | None,
+    upstream: httpx.AsyncClient,
+    *,
+    slots: model_relay.Slots | None = None,
+    guard: Any = None,
+) -> FastAPI:
+    app = FastAPI()
+    app.include_router(model_relay.router)
+    app.dependency_overrides[get_storage] = lambda: store
+    app.dependency_overrides[model_relay.get_relay_client] = lambda: upstream
+    held = slots or model_relay.Slots()
+    app.dependency_overrides[model_relay.get_slots] = lambda: held
+
+    async def allowed(_base_url: str) -> None:
+        return None
+
+    app.dependency_overrides[model_relay.get_endpoint_guard] = lambda: guard or allowed
+    return app
 
 
 async def _send(
@@ -133,30 +172,110 @@ async def _send(
     bearer: str | None = "",
     slots: model_relay.Slots | None = None,
     guard: Any = None,
+    upstream: httpx.AsyncClient | None = None,
     **kwargs: Any,
 ) -> httpx.Response:
-    app = FastAPI()
-    app.include_router(model_relay.router)
-    app.dependency_overrides[get_storage] = lambda: store
-    upstream = httpx.AsyncClient(transport=httpx.MockTransport(provider.handle))
-    app.dependency_overrides[model_relay.get_relay_client] = lambda: upstream
-    held = slots or model_relay.Slots()
-    app.dependency_overrides[model_relay.get_slots] = lambda: held
-
-    async def allowed(_base_url: str) -> None:
-        return None
-
-    app.dependency_overrides[model_relay.get_endpoint_guard] = lambda: guard or allowed
+    """One request to the relay; ``upstream`` is a client several requests share."""
+    client = upstream or _upstream(provider.handle)
+    app = _app(store, client, slots=slots, guard=guard)
     headers = dict(kwargs.pop("headers", {}))
     if bearer is not None:
         headers.setdefault("Authorization", f"Bearer {bearer or _placeholder()}")
     if method == "POST" and "json" not in kwargs and "content" not in kwargs:
         kwargs["json"] = {"model": "model-1", "messages": [{"role": "user", "content": "hi"}]}
     try:
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://relay") as client:
-            return await client.request(method, path, headers=headers, **kwargs)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://relay") as caller:
+            return await caller.request(method, path, headers=headers, **kwargs)
     finally:
-        await upstream.aclose()
+        if upstream is None:
+            await client.aclose()
+
+
+class _Caller:
+    """One CLI's connection to the relay, driven by hand so that it can leave.
+
+    ``spec_version`` is the ASGI version the server speaks. Up to 2.3 (what
+    uvicorn speaks) a streamed response is told its caller left; from 2.4 it
+    finds out when its next send fails.
+    """
+
+    def __init__(self, app: FastAPI, *, spec_version: str = "2.3") -> None:
+        body = json.dumps({"model": "model-1", "messages": []}).encode()
+        self._unread = [{"type": "http.request", "body": body, "more_body": False}]
+        self._tells = spec_version == "2.3"
+        self.left = asyncio.Event()
+        self.sent: list[dict[str, Any]] = []
+        self.heard = asyncio.Event()
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": spec_version},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": "/v1/chat/completions",
+            "raw_path": b"/v1/chat/completions",
+            "query_string": b"",
+            "root_path": "",
+            "server": ("relay", 80),
+            "client": ("192.0.2.1", 40000),
+            "headers": [
+                (b"host", b"relay"),
+                (b"authorization", f"Bearer {_placeholder()}".encode()),
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        }
+        self.call = asyncio.ensure_future(app(scope, self._receive, self._send))
+
+    async def _receive(self) -> dict[str, Any]:
+        if self._unread:
+            return self._unread.pop(0)
+        if not self._tells:
+            await asyncio.Event().wait()
+        await self.left.wait()
+        return {"type": "http.disconnect"}
+
+    async def _send(self, message: dict[str, Any]) -> None:
+        if self.left.is_set():
+            # Dropped, as uvicorn does, or refused, as ASGI 2.4 has it.
+            if self._tells:
+                return
+            raise OSError("the caller has left")
+        self.sent.append(message)
+        if message["type"] == "http.response.body" and message.get("body"):
+            self.heard.set()
+
+    async def ended(self) -> BaseException | None:
+        """Wait for the relay to finish with this request; what it raised, if anything."""
+        done, _ = await asyncio.wait({self.call}, timeout=5)
+        assert done, "the relay is still serving a caller that left"
+        return self.call.exception()
+
+
+class _OpenStream(httpx.AsyncByteStream):
+    """An answer that has begun and says nothing more until it is told to."""
+
+    def __init__(self, *, then: BaseException | bytes | None = None) -> None:
+        self.go = asyncio.Event()
+        self.closed = False
+        self._then = then
+
+    async def __aiter__(self):
+        yield b"data: first\n\n"
+        await self.go.wait()
+        if isinstance(self._then, BaseException):
+            raise self._then
+        if self._then:
+            yield self._then
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def _slots_held(slots: model_relay.Slots) -> int:
+    return slots.held(("user", _CONNECTION, "user_1")) + slots.held(
+        ("model", _CONNECTION, "model-1")
+    )
 
 
 # -- what is forwarded -----------------------------------------------------------
@@ -228,6 +347,17 @@ async def test_the_provider_answers_and_errors_are_relayed_as_they_are() -> None
     assert response.json() == {"error": {"message": "context_length_exceeded"}}
     # The provider served it, so it counts.
     assert store.used == 1 and store.refunds == 0
+
+
+async def test_a_cookie_one_answer_sets_goes_out_with_no_later_request() -> None:
+    """Every owner's requests share one client, which keeps nothing between them."""
+    store = _Store()
+    provider = _Provider(headers={"set-cookie": "session=first-caller; Path=/"})
+    async with _upstream(provider.handle) as upstream:
+        first = await _send(store, provider, upstream=upstream)
+        second = await _send(store, provider, upstream=upstream)
+    assert first.status_code == second.status_code == 200
+    assert [request.headers.get("cookie") for request in provider.requests] == [None, None]
 
 
 # -- who may use it --------------------------------------------------------------
@@ -494,6 +624,90 @@ async def test_every_ending_gives_its_slots_back(provider) -> None:
     await _send(store, provider, slots=slots)
     assert slots.held(("user", _CONNECTION, "user_1")) == 0
     assert slots.held(("model", _CONNECTION, "model-1")) == 0
+
+
+async def test_a_caller_that_leaves_before_the_answer_ends_its_request() -> None:
+    """A stopped turn's request is not waited on, at the provider or in the caps."""
+    store, slots = _Store(), model_relay.Slots()
+    reached, abandoned = asyncio.Event(), asyncio.Event()
+
+    async def silent(request: httpx.Request) -> httpx.Response:
+        reached.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            abandoned.set()
+            raise
+        raise AssertionError("unreachable")
+
+    async with _upstream(silent) as upstream:
+        caller = _Caller(_app(store, upstream, slots=slots))
+        await asyncio.wait_for(reached.wait(), 5)
+        assert _slots_held(slots) == 2 and not caller.call.done()
+
+        caller.left.set()
+        assert await caller.ended() is None
+    assert abandoned.is_set()
+    assert _slots_held(slots) == 0
+    # The provider had the request, so it stays counted.
+    assert store.used == 1 and store.refunds == 0
+
+
+async def test_a_caller_that_stays_is_answered_however_long_the_provider_takes() -> None:
+    store, slots = _Store(), model_relay.Slots()
+    reached, answer = asyncio.Event(), asyncio.Event()
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        reached.set()
+        await answer.wait()
+        return httpx.Response(200, stream=httpx.ByteStream(b'{"id": "answer"}'))
+
+    async with _upstream(slow) as upstream:
+        caller = _Caller(_app(store, upstream, slots=slots))
+        await asyncio.wait_for(reached.wait(), 5)
+        answer.set()
+        assert await caller.ended() is None
+    assert caller.sent[0]["status"] == 200
+    assert json.loads(b"".join(m.get("body", b"") for m in caller.sent[1:])) == {"id": "answer"}
+    assert _slots_held(slots) == 0
+
+
+@pytest.mark.parametrize("spec_version", ["2.3", "2.4"])
+async def test_a_caller_that_leaves_mid_answer_closes_the_providers_stream(spec_version) -> None:
+    store, slots = _Store(), model_relay.Slots()
+    stream = _OpenStream(then=b"data: more\n\n")
+
+    async def streaming(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
+
+    async with _upstream(streaming) as upstream:
+        caller = _Caller(_app(store, upstream, slots=slots), spec_version=spec_version)
+        await asyncio.wait_for(caller.heard.wait(), 5)
+        assert _slots_held(slots) == 2 and not stream.closed
+
+        caller.left.set()
+        if spec_version == "2.4":
+            # Nothing tells this server; its next send is what fails.
+            stream.go.set()
+        await caller.ended()
+    assert stream.closed
+    assert _slots_held(slots) == 0
+
+
+async def test_an_answer_the_provider_breaks_off_is_closed_and_gives_its_slots_back() -> None:
+    store, slots = _Store(), model_relay.Slots()
+    stream = _OpenStream(then=httpx.ReadError("connection reset"))
+
+    async def streaming(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream)
+
+    async with _upstream(streaming) as upstream:
+        caller = _Caller(_app(store, upstream, slots=slots))
+        await asyncio.wait_for(caller.heard.wait(), 5)
+        stream.go.set()
+        assert isinstance(await caller.ended(), httpx.ReadError)
+    assert stream.closed
+    assert _slots_held(slots) == 0
 
 
 async def test_a_spent_allowance_found_at_the_count_gives_its_slots_back() -> None:

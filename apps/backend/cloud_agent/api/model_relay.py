@@ -32,23 +32,29 @@ owner and per model, are kept in this process.
 
 **Nothing of a request or an answer is stored or logged.** A request body is
 read once to find the model it names and forwarded unchanged; an answer is
-streamed back as it arrives, the provider's errors included.
+streamed back as it arrives, the provider's errors included. The client every
+request is forwarded with keeps no cookie from one answer to the next.
+
+**A caller that leaves ends its request.** A stopped turn's CLI closes its
+connection; from then on the provider is no longer waited for, and the
+request's slots are free, whether or not an answer had begun.
 
 See ``docs/agents/specs/2026-11-12-platform-model-relay.zh-CN.md``.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections import Counter
 from dataclasses import dataclass, field
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from starlette.background import BackgroundTask
 
 from cloud_agent.api.deps import get_storage
 from cloud_agent.application.model_connection_check import guard_base_url
@@ -67,8 +73,10 @@ from cloud_agent.tokens import InvalidAgentToken, parse_residency_model_token
 from cloud_agent_shared.shared_protocol import is_residency_model_credential
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Coroutine
     from datetime import date
+
+    from starlette.types import Receive, Scope, Send
 
     from cloud_agent.ports import OperatorModelRepository
 
@@ -101,6 +109,9 @@ MAX_BODY_BYTES = 32 * 1024 * 1024
 #: Upstream answers after which a counted request is taken back: the provider
 #: did not serve it, and the CLI will send it again.
 _REFUNDED_STATUSES = frozenset({429, 500, 502, 503, 504, 529})
+#: Logged for a request whose caller left before the provider answered. Nobody
+#: reads the response.
+_CALLER_LEFT = 499
 
 #: The Anthropic error type a refusal of each status is answered as.
 _ANTHROPIC_TYPES = {
@@ -182,13 +193,20 @@ def get_endpoint_guard() -> Callable[[str], Awaitable[None]]:
     return guard_base_url
 
 
-def relay_client() -> httpx.AsyncClient:
-    """The client the relay forwards with: pinned dials, no proxy, no redirects, no cookies."""
+def relay_client(transport: httpx.AsyncBaseTransport | None = None) -> httpx.AsyncClient:
+    """The client the relay forwards with: pinned dials, no proxy, no redirects, no cookies.
+
+    One client forwards every owner's requests, so it keeps nothing between
+    them. Left to itself it would store a cookie an answer set and send it
+    with the next request to that host, another owner's included.
+    ``transport`` replaces the pinned dial in a test.
+    """
     return httpx.AsyncClient(
-        transport=pinned_transport(),
+        transport=transport if transport is not None else pinned_transport(),
         follow_redirects=False,
         trust_env=False,
         timeout=_UPSTREAM_TIMEOUT,
+        cookies=CookieJar(policy=DefaultCookiePolicy(allowed_domains=[])),
     )
 
 
@@ -510,29 +528,95 @@ async def _forward(
         timeout=_UPSTREAM_TIMEOUT,
     )
 
-    async def close() -> None:
-        admitted.release()
-        await answer.aclose()
+    async def close_client() -> None:
         if http is None:
             await client.aclose()
 
     try:
-        answer = await client.send(upstream, stream=True, follow_redirects=False)
+        answer = await _unless_left(
+            request, client.send(upstream, stream=True, follow_redirects=False)
+        )
     except httpx.HTTPError:
-        if http is None:
-            await client.aclose()
+        await close_client()
         raise unreachable from None
+    except BaseException:
+        await close_client()
+        raise
+    if answer is None:
+        # The request stays counted: the provider had it, and may bill for it.
+        admitted.release()
+        await close_client()
+        return Response(status_code=_CALLER_LEFT)
+
+    async def close() -> None:
+        admitted.release()
+        try:
+            await answer.aclose()
+        finally:
+            await close_client()
+
     try:
         await _settle(admitted, answer.status_code)
-    except _Refused:
+    except BaseException:
         await close()
         raise
-    return StreamingResponse(
-        _released_with(answer.aiter_raw(), admitted),
-        status_code=answer.status_code,
-        headers=_downstream_headers(answer),
-        background=BackgroundTask(close),
-    )
+    return _Relayed(answer, on_end=close)
+
+
+async def _left(request: Request) -> None:
+    """Return once the caller's connection has closed."""
+    while (await request.receive())["type"] != "http.disconnect":
+        pass
+
+
+async def _unless_left(
+    request: Request, sending: Coroutine[Any, Any, httpx.Response]
+) -> httpx.Response | None:
+    """The provider's answer to ``sending``, or ``None`` once the caller has left.
+
+    Until there is a response to stream, nothing else watches the caller's
+    connection. A provider can take minutes to begin an answer, and a turn
+    stopped meanwhile would go on holding its owner's and its model's slots
+    until the provider answered or the read timed out. Cancelling the send
+    closes the provider's connection, which is all a provider is ever told.
+    """
+    answer = asyncio.ensure_future(sending)
+    left = asyncio.ensure_future(_left(request))
+    try:
+        await asyncio.wait({answer, left}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        # Reached when this request is itself cancelled, too.
+        left.cancel()
+        if not answer.done():
+            answer.cancel()
+        await asyncio.wait({answer, left})
+    return None if answer.cancelled() else answer.result()
+
+
+class _Relayed(StreamingResponse):
+    """A provider's answer streamed back, and closed however that ends.
+
+    Starlette stops pulling a body when its caller leaves, a send fails or
+    its task is cancelled, and runs a background task only when nothing was
+    raised. The provider's connection and the request's slots are given back
+    here in every case.
+    """
+
+    def __init__(self, answer: httpx.Response, *, on_end: Callable[[], Awaitable[None]]) -> None:
+        """Stream ``answer`` as it was received; ``on_end`` runs once it is over."""
+        super().__init__(
+            answer.aiter_raw(),
+            status_code=answer.status_code,
+            headers=_downstream_headers(answer),
+        )
+        self._on_end = on_end
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Send the response, then close what it held."""
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self._on_end()
 
 
 async def _settle(admitted: _Admitted, status: int) -> None:
@@ -564,15 +648,6 @@ async def _settle(admitted: _Admitted, status: int) -> None:
         await admitted.store.operator_models.mark_operator_key_refused(
             connection_id=connection_id, refused=False
         )
-
-
-async def _released_with(stream: AsyncIterator[bytes], admitted: _Admitted) -> AsyncIterator[bytes]:
-    """Relay ``stream``, giving the in-flight slots back when it ends or its client leaves."""
-    try:
-        async for chunk in stream:
-            yield chunk
-    finally:
-        admitted.release()
 
 
 def _log(
