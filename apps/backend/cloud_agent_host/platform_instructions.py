@@ -65,8 +65,8 @@ def _instructions_without_relay(launch: ResidentLaunch, *, coauthor_trailer: boo
         "`git push`, and `gh` cannot authenticate. Do not fetch the base to "
         "compare; review and edit the local checkout.",
         "",
-        "Your commits are authored by that user already (GIT_AUTHOR_* is set); do "
-        "not change the author.",
+        "Your commits are authored by the user who owns this conversation "
+        "(GIT_AUTHOR_* is set); do not change the author.",
         *_coauthor_lines(launch, coauthor_trailer=coauthor_trailer),
     ]
     return "\n".join(lines) + "\n"

@@ -169,6 +169,70 @@ def test_a_new_checkout_keeps_the_parent_and_pins_the_base_branch(
     assert _git("branch", "--show-current", cwd=workdir).strip() == "agent/athr_example"
 
 
+class _FixtureHead:
+    """Claim the fixture's tip. ``None`` is a real claim with no sha."""
+
+
+def _checkout(
+    remote: tuple[str, str, str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    base_ref: str | None,
+    base_sha: str | _FixtureHead | None = _FixtureHead(),
+) -> Path:
+    base, repo, _first, head = remote
+    monkeypatch.setattr(source_preparation, "repo_clone_base_url", lambda **_kwargs: base)
+    job = ClaimedJob(
+        job_id="ajob_1",
+        thread_id="athr_example",
+        attempt_id=1,
+        attempt_no=1,
+        repo=repo,
+        base_sha=head if isinstance(base_sha, _FixtureHead) else base_sha,
+        task_prompt="review",
+        runtime="claude-code",
+        model="m",
+        worker_token="w",
+        base_ref=base_ref,
+    )
+    workdir = tmp_path / "job"
+    workdir.mkdir()
+    prefetch = GitSourcePrefetch.__new__(GitSourcePrefetch)
+    prefetch._job = job
+    prefetch._max_bytes = 1 << 20
+    prefetch._check_out(str(workdir), threading.Event())
+    return workdir
+
+
+def test_a_base_name_that_collides_with_the_workspace_branch_is_not_pinned(
+    tmp_path: Path, remote, monkeypatch
+):
+    """``refs/heads/agent`` would stop ``git checkout -B agent/<thread>``."""
+    workdir = _checkout(remote, tmp_path, monkeypatch, base_ref="agent")
+
+    assert _git("branch", "--show-current", cwd=workdir).strip() == "agent/athr_example"
+    refs = _git("for-each-ref", "--format=%(refname)", "refs/heads", cwd=workdir)
+    assert refs.split() == ["refs/heads/agent/athr_example"]
+
+
+def test_a_base_name_under_the_workspace_branch_is_not_pinned(tmp_path: Path, remote, monkeypatch):
+    workdir = _checkout(remote, tmp_path, monkeypatch, base_ref="agent/athr_example/extra")
+
+    assert _git("branch", "--show-current", cwd=workdir).strip() == "agent/athr_example"
+    refs = _git("for-each-ref", "--format=%(refname)", "refs/heads", cwd=workdir)
+    assert refs.split() == ["refs/heads/agent/athr_example"]
+
+
+def test_a_named_base_without_a_pinned_commit_is_not_labeled(tmp_path: Path, remote, monkeypatch):
+    """No claim sha means the fetch is the default branch, not ``release``."""
+    workdir = _checkout(remote, tmp_path, monkeypatch, base_sha=None, base_ref="release")
+
+    refs = _git("for-each-ref", "--format=%(refname)", "refs/heads", cwd=workdir)
+    assert "refs/heads/release" not in refs.split()
+    assert _git("branch", "--show-current", cwd=workdir).strip() == "agent/athr_example"
+
+
 def test_an_unusable_base_name_is_left_unpinned(tmp_path: Path, remote):
     base, repo, _first, head = remote
     workdir = tmp_path / "job"

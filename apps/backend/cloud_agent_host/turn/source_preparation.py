@@ -590,17 +590,27 @@ def repo_clone_base_url(
     return base.rstrip("/")
 
 
+def _branch_refs_conflict(left: str, right: str) -> bool:
+    """Git stores one branch as a file, so neither name can be a path prefix of the other."""
+    a = left.strip("/")
+    b = right.strip("/")
+    return bool(a) and bool(b) and (a == b or b.startswith(f"{a}/") or a.startswith(f"{b}/"))
+
+
 def pin_base_branch(
     workdir: str,
     base_ref: str | None,
     commit: str,
     *,
+    output_branch: str | None = None,
     stop: threading.Event | None = None,
 ) -> None:
     """Point ``base_ref`` at ``commit`` so the sandbox can diff without fetching.
 
     A name git would refuse is skipped and the checkout continues: the
-    conversation still has its commit. A name git accepts but cannot be
+    conversation still has its commit. A name that would occupy the workspace
+    branch (``agent/<thread>``, or a directory prefix of it) is skipped for
+    the same reason: git cannot store both. A name git accepts but cannot be
     updated fails the checkout, rather than leaving a review with no base.
     """
     # ``--branch`` takes the name as its next argument, so a leading ``-``
@@ -608,6 +618,8 @@ def pin_base_branch(
     # The update-ref argument is ``refs/heads/<name>``, which cannot start
     # with ``-`` either.
     if not base_ref or base_ref.startswith("-") or not _COMMIT_SHA.fullmatch(commit):
+        return
+    if output_branch is not None and _branch_refs_conflict(base_ref, output_branch):
         return
     checked = _run_git(["check-ref-format", "--branch", base_ref], cwd=workdir, stop=stop)
     if checked.returncode != 0:
@@ -753,7 +765,17 @@ class GitSourcePrefetch(SourcePrefetch):
             stop=stop,
         )
         check_source_stop(stop)
-        pin_base_branch(workdir, self._job.base_ref, base_sha, stop=stop)
+        # Without a claim sha the fetch is the repository default, so the
+        # requested name would point at the wrong commit. A name git cannot
+        # store beside ``agent/<thread>`` is left unpinned inside pin_base_branch.
+        if self._job.base_sha:
+            pin_base_branch(
+                workdir,
+                self._job.base_ref,
+                base_sha,
+                output_branch=branch_name_for(self._job.thread_id),
+                stop=stop,
+            )
         checkout_output_branch(workdir, self._job.thread_id, stop=stop)
         return base_sha
 

@@ -135,6 +135,7 @@ def test_the_instructions_say_facts_and_no_way_of_working(monkeypatch):
     monkeypatch.delenv("AGENT_SANDBOX_GITHUB_RELAY_CA_FILE", raising=False)
     local = platform_instructions(launch, coauthor_trailer=True)
     assert "GitHub credentials are not available in this environment" in local
+    assert "the user who owns this conversation" in local
     assert "`git branch` lists it" in local
     assert "gh api repos/owner/repo/pulls" not in local
     assert "`Co-Authored-By: Bot <b@x>`" in local
