@@ -130,7 +130,7 @@ beforeEach(() => {
     configured: true,
     enabled: true,
     checks_per_hour: 20,
-    max_models: 8,
+    max_models: 16,
     connections: [connection],
   });
 });

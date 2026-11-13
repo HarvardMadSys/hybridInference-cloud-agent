@@ -17716,7 +17716,7 @@
             "items": {
               "type": "string"
             },
-            "maxItems": 32,
+            "maxItems": 64,
             "title": "Models",
             "type": "array"
           },
@@ -17760,7 +17760,7 @@
             "type": "boolean"
           },
           "max_models": {
-            "default": 8,
+            "default": 16,
             "title": "Max Models",
             "type": "integer"
           }
@@ -17864,7 +17864,7 @@
                 "items": {
                   "type": "string"
                 },
-                "maxItems": 32,
+                "maxItems": 64,
                 "type": "array"
               },
               {
@@ -18192,7 +18192,7 @@
             "items": {
               "type": "string"
             },
-            "maxItems": 32,
+            "maxItems": 64,
             "title": "Models",
             "type": "array"
           },
@@ -18322,7 +18322,7 @@
                 "items": {
                   "type": "string"
                 },
-                "maxItems": 32,
+                "maxItems": 64,
                 "type": "array"
               },
               {
@@ -18453,6 +18453,7 @@
           },
           "user_concurrency": {
             "default": 4,
+            "description": "Requests one owner may have in flight at once. Counted by each model relay process on its own requests.",
             "title": "User Concurrency",
             "type": "integer"
           }
@@ -18469,7 +18470,7 @@
         "type": "object"
       },
       "OperatorModelLimit": {
-        "description": "The default allowance of one model, and its deployment-wide concurrency cap.",
+        "description": "The default allowance of one model, and its cap on requests in flight across owners.",
         "properties": {
           "global_concurrency": {
             "anyOf": [
@@ -18482,6 +18483,7 @@
                 "type": "null"
               }
             ],
+            "description": "Requests to this model in flight across all owners. Counted by each model relay process on its own requests: a deployment that runs several relay processes allows this many in each.",
             "title": "Global Concurrency"
           },
           "user_daily_requests": {
@@ -18516,6 +18518,7 @@
                 "type": "null"
               }
             ],
+            "description": "Requests to this model in flight across all owners. Counted by each model relay process on its own requests: a deployment that runs several relay processes allows this many in each.",
             "title": "Global Concurrency"
           },
           "model": {
@@ -31557,7 +31560,7 @@
     },
     "/admin/agent/operator-model-connections/{connection_id}/limits": {
       "put": {
-        "description": "Set one model's default allowance and its deployment-wide concurrency cap.",
+        "description": "Set one model's default allowance and its cap on requests in flight across owners.",
         "operationId": "set_limit_admin_agent_operator_model_connections__connection_id__limits_put",
         "parameters": [
           {

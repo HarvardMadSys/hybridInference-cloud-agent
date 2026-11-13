@@ -86,6 +86,13 @@ class ClaimedJob:
     # Read-only, single-repo, short-lived: what the runner clones with. Never
     # put in .git/config or the sandbox environment.
     clone_token: str | None = None
+    # The branch this conversation started from. The claim carries it in
+    # metadata under ``_agent_base_ref`` (``cloud_agent.schemas.jobs``);
+    # the column stores only the pinned commit, because a branch moves.
+    # None when the conversation named none, or the claim predates sending
+    # metadata. The checkout pins the name locally: a shallow clone has no
+    # remote-tracking branch to diff against.
+    base_ref: str | None = None
     parent_job_id: str | None = None
     turn_no: int = 1
     # MCP connection aliases this job was granted. Aliases only: the runner
@@ -155,6 +162,7 @@ class ClaimedJob:
             reasoning_effort=body.get("reasoning_effort"),
             worker_token=body["worker_token"],
             clone_token=body.get("clone_token") or None,
+            base_ref=_claim_base_ref(body.get("metadata")),
             mcp_bindings=list(body.get("mcp_bindings") or []),
             sandbox_mcp_servers=parse_sandbox_mcp_servers(body.get("sandbox_mcp_servers")),
             runtime_version=body.get("runtime_version") or None,
@@ -173,6 +181,34 @@ class ClaimedJob:
         return (
             {"context_injections": list(self.context_injections)} if self.context_injections else {}
         )
+
+
+# The control plane stores the branch the owner picked here. Duplicated rather
+# than imported: this package does not depend on the control plane.
+_BASE_REF_METADATA_KEY = "_agent_base_ref"
+_MAX_BASE_REF_CHARS = 256
+
+
+def _claim_base_ref(metadata: Any) -> str | None:
+    """The conversation's base branch, or ``None`` when the claim names none.
+
+    Shape is checked properly when the branch is pinned (``git
+    check-ref-format``). This only drops a value that cannot be a branch
+    name, so a forged or stale metadata entry cannot reach git's argv.
+    """
+    if not isinstance(metadata, dict):
+        return None
+    ref = metadata.get(_BASE_REF_METADATA_KEY)
+    if not isinstance(ref, str):
+        return None
+    # Reject before stripping: a trailing newline is a control character,
+    # and strip() would otherwise turn it into a normal branch name.
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in ref):
+        return None
+    ref = ref.strip()
+    if not ref or len(ref) > _MAX_BASE_REF_CHARS:
+        return None
+    return ref
 
 
 #: Platform injection records one claim carries, and the fields each may hold.

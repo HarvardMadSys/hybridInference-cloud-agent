@@ -101,8 +101,9 @@ LOCAL_TOKEN = re.compile(r"[0-9a-f]{64}")
 #: ``claude-sonnet@2025``); nothing that could leave a config value.
 MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}")
 #: Per connection. A new key or Base URL re-verifies every model in the save
-#: that makes it, so this bounds one save's provider calls.
-MAX_MODELS = 8
+#: that makes it, so this bounds one save's provider calls. Sixteen still fits
+#: in one owner's hourly check budget.
+MAX_MODELS = 16
 #: Longer than any provider key seen in practice, short enough to bound every
 #: config file and environment it is written into.
 MAX_API_KEY_CHARS = 4096

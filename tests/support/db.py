@@ -11,7 +11,18 @@ will be wrong. ``CASCADE`` empties whatever references the named tables.
 from __future__ import annotations
 
 import asyncio
+import warnings
+from datetime import timedelta
 from typing import Any
+
+#: How long another session may stay mid-transaction before the reset treats it
+#: as left over. Statements in this suite take well under a second; one this old
+#: belongs to a test that was interrupted, normally by pytest-timeout (300s).
+LEFTOVER_SESSION_AGE = timedelta(seconds=60)
+
+
+class LeftoverSessionWarning(UserWarning):
+    """The reset terminated a database session that outlived its test."""
 
 
 async def backdate_measurement_arrival(pool: Any, *, moment: Any) -> None:
@@ -44,8 +55,67 @@ async def assert_pool_idle(pool: Any, message: str = "", *, timeout: float = 3) 
         await asyncio.sleep(0.005)
 
 
-async def reset_agent_tables(conn: Any) -> None:
-    """Empty every ``agent_*`` table and re-seed the policy singleton."""
+async def end_leftover_sessions(
+    conn: Any, *, older_than: timedelta = LEFTOVER_SESSION_AGE
+) -> list[int]:
+    """Terminate other sessions on this database still mid-transaction, and report each.
+
+    pytest-timeout fails a test without stopping the statement it was waiting
+    for: the test's task stays pending on the event loop, and PostgreSQL goes
+    on executing. The reset that runs next then queues its ``TRUNCATE`` behind
+    that statement, or deadlocks with it. In CI on 2026-11-13 a 100,000-row
+    ``INSERT`` that was still running when its test timed out did the latter,
+    which turned one failure into a failure and a teardown error, and left no
+    trace of why the ``INSERT`` had run for five minutes.
+
+    So a session that has been busy for longer than ``older_than`` is reported
+    first, with what it was waiting on and which sessions blocked it, and then
+    terminated, which releases its locks. Idle sessions hold none and are left
+    alone, as are younger ones: a statement that is merely slow finishes, and
+    the ``TRUNCATE`` waits for it as before. Returns the terminated process IDs.
+    """
+    leftovers = await conn.fetch(
+        r"""
+        SELECT pid, state, wait_event_type, wait_event,
+               pg_blocking_pids(pid) AS blocked_by,
+               date_trunc('second', clock_timestamp() - COALESCE(xact_start, query_start)) AS busy,
+               left(regexp_replace(query, '\s+', ' ', 'g'), 300) AS query
+        FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND pid <> pg_backend_pid()
+          AND backend_type = 'client backend'
+          AND state <> 'idle'
+          AND clock_timestamp() - COALESCE(xact_start, query_start) > $1
+        ORDER BY pid
+        """,
+        older_than,
+    )
+    for row in leftovers:
+        if row["wait_event_type"]:
+            waiting = f"waiting on {row['wait_event_type']}/{row['wait_event']}"
+        else:
+            waiting = "not waiting"
+        blockers = ", ".join(str(pid) for pid in row["blocked_by"]) or "no session"
+        warnings.warn(
+            LeftoverSessionWarning(
+                f"reset terminated session {row['pid']}, {row['state']} for {row['busy']}, "
+                f"{waiting}, blocked by {blockers}: {row['query']}"
+            ),
+            stacklevel=2,
+        )
+        await conn.fetchval("SELECT pg_terminate_backend($1, 5000)", row["pid"])
+    return [row["pid"] for row in leftovers]
+
+
+async def reset_agent_tables(
+    conn: Any, *, leftover_after: timedelta = LEFTOVER_SESSION_AGE
+) -> None:
+    """Empty every ``agent_*`` table and re-seed the policy singleton.
+
+    Sessions busy for longer than ``leftover_after`` are ended first; see
+    :func:`end_leftover_sessions`.
+    """
+    await end_leftover_sessions(conn, older_than=leftover_after)
     rows = await conn.fetch(
         "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename LIKE 'agent\\_%'"
     )

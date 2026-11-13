@@ -62,6 +62,10 @@ if TYPE_CHECKING:  # pragma: no cover - annotations only, and they are strings
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+#: The control plane's stack, whose `postgres` service is the database the
+#: control check migrates: the pinned image a deployment runs, not a second name.
+CONTROL_PLANE_COMPOSE = REPO_ROOT / "deploy/control-plane/docker-compose.yml"
+
 #: The runtime label namespace the sandbox image writes and the host reads.
 SMOKE_RUN_LABEL = "io.hybridinference.smoke.run"
 
@@ -452,7 +456,7 @@ def verify_control(image: str, *, suffix: str, keep: bool) -> list[str]:
         # handles is a network left behind on a shared runner.
         try:
             postgres.start(
-                "postgres:16-alpine",
+                deployed_postgres_image(),
                 env={
                     "POSTGRES_USER": "cloudagent",
                     "POSTGRES_PASSWORD": "smoke",
@@ -509,6 +513,20 @@ def verify_control(image: str, *, suffix: str, keep: bool) -> list[str]:
         network.remove()
         if not keep:
             _drop_image(image)
+
+
+def deployed_postgres_image() -> str:
+    """The Postgres image the control-plane stack runs, as that file pins it.
+
+    Read rather than named again here: this check used to start
+    `postgres:16-alpine`, which migrated whatever minor version that tag
+    pointed to that day, not necessarily the one a deployment of this
+    release runs.
+    """
+    import yaml
+
+    stack = yaml.safe_load(CONTROL_PLANE_COMPOSE.read_text())
+    return str(stack["services"]["postgres"]["image"])
 
 
 def _control_environment(dsn: str) -> dict[str, str]:

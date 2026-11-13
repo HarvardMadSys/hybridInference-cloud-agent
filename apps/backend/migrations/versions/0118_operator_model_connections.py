@@ -13,14 +13,14 @@ key), by an id with its own prefix.
 
 See ``docs/agents/specs/2026-11-12-platform-model-relay.zh-CN.md``.
 
-Revision ID: 0116_operator_model_connections
-Revises: 0115_mcp_retire_dead_locations
+Revision ID: 0118_operator_model_connections
+Revises: 0117_connection_model_limit
 """
 
 from alembic import op
 
-revision = "0116_operator_model_connections"
-down_revision = "0115_mcp_retire_dead_locations"
+revision = "0118_operator_model_connections"
+down_revision = "0117_connection_model_limit"
 branch_labels = None
 depends_on = None
 

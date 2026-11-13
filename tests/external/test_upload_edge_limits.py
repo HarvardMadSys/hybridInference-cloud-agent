@@ -1,8 +1,9 @@
 """Exercise shipped nginx routes against local mocks on an isolated Docker network.
 
-Pull nginx:1.27.5-alpine before selecting this external tier, or set
-AGENT_UPLOAD_TEST_NGINX_IMAGE to an already available nginx image. No live
-deployment, credential, or external HTTP endpoint is used.
+The default image is the one the control plane's edge runs, as
+deploy/control-plane/docker-compose.yml pins it. Pull it before selecting this
+external tier, or set AGENT_UPLOAD_TEST_NGINX_IMAGE to an already available
+nginx image. No live deployment, credential, or external HTTP endpoint is used.
 """
 
 from __future__ import annotations
@@ -18,12 +19,21 @@ from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 
 from cloud_agent.attachments.models import MAX_ATTACHMENT_FILE_BYTES
 
 pytestmark = pytest.mark.external
 REPO_ROOT = Path(__file__).resolve().parents[2]
-IMAGE = os.environ.get("AGENT_UPLOAD_TEST_NGINX_IMAGE", "nginx:1.27.5-alpine")
+
+
+def _edge_image() -> str:
+    """The nginx the control plane's edge runs, pinned in its Compose file."""
+    stack = yaml.safe_load((REPO_ROOT / "deploy/control-plane/docker-compose.yml").read_text())
+    return str(stack["services"]["edge"]["image"])
+
+
+IMAGE = os.environ.get("AGENT_UPLOAD_TEST_NGINX_IMAGE") or _edge_image()
 CASES = [
     ("deploy/control-plane/edge.nginx.conf", "/api", 80),
     ("deploy/local/nginx.conf", "/api", 8088),

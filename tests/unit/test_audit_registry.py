@@ -184,6 +184,8 @@ _DECLARED_AFTER_0114 = {
     "agent.operator_model_connection.set_limit",
     "agent.operator_model_user_limit.set",
     "agent.operator_model_user_limit.clear",
+    "agent.local_account.provision_invite",
+    "agent.local_account.provision_revoke",
 }
 
 

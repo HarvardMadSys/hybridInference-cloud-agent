@@ -153,6 +153,8 @@ _DECLARED: tuple[AuditAction, ...] = (
             "transfer_team",
             "setup_admin",
             "import",
+            "provision_invite",
+            "provision_revoke",
         )
     ),
     # An account changing itself.

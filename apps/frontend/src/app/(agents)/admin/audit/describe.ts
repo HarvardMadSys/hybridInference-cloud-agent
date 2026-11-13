@@ -207,6 +207,8 @@ const ACCOUNT: Record<string, (who: string) => string> = {
   transfer_team: (who) => `Handed ${who}'s team to another member`,
   setup_admin: (who) => `Created the first administrator, ${who}`,
   import: (who) => `Imported ${who} from another service, approved`,
+  provision_invite: (who) => `Invited ${who} to set up its inference account`,
+  provision_revoke: (who) => `Revoked ${who}'s inference account key`,
   signup: (who) => `${who} signed up`,
   password_set: (who) => `${who} set a password`,
   password_change: (who) => `${who} changed its password`,
@@ -293,7 +295,7 @@ const PROVIDED_SENTENCES: Record<string, Sentence> = {
       daily === 0
         ? 'only accounts given their own allowance'
         : `${allowance(details.user_daily_requests)} per account`;
-    const flight = cap === null ? '' : `, at most ${cap} in flight across the deployment`;
+    const flight = cap === null ? '' : `, at most ${cap} in flight across accounts`;
     return `Set the default allowance for ${providedModel(details)}: ${who}${flight}`;
   },
   'agent.operator_model_user_limit.set': (details, _host, _definitions, entry) =>

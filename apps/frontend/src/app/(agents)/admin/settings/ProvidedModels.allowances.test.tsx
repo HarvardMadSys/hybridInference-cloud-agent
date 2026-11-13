@@ -105,7 +105,7 @@ describe('default allowances', () => {
     render(<ProvidedModelsSettings />);
     const house = await card();
     expect(limitRow(house, 'house-fast')).toHaveTextContent(
-      '1,500 requests per account per day. At most 8 in flight across the deployment.',
+      '1,500 requests per account per day. At most 8 in flight across accounts.',
     );
     expect(limitRow(house, 'house-open')).toHaveTextContent(
       'Unlimited requests per account per day.',
@@ -139,7 +139,7 @@ describe('default allowances', () => {
     fireEvent.change(within(row).getByLabelText('Requests per day'), {
       target: { value: '1500' },
     });
-    fireEvent.change(within(row).getByLabelText(/^Deployment-wide requests in flight/), {
+    fireEvent.change(within(row).getByLabelText(/^Requests in flight across accounts/), {
       target: { value: '8' },
     });
     fireEvent.click(within(row).getByRole('button', { name: 'Save the allowance for house-fast' }));
@@ -212,7 +212,7 @@ describe('default allowances', () => {
     expect(row).toHaveTextContent('Enter whole numbers: 1 to 10,000,000 requests per day');
     fireEvent.change(within(row).getByLabelText('Requests per day'), { target: { value: '10' } });
     expect(save).toBeEnabled();
-    fireEvent.change(within(row).getByLabelText(/^Deployment-wide requests in flight/), {
+    fireEvent.change(within(row).getByLabelText(/^Requests in flight across accounts/), {
       target: { value: '2000' },
     });
     expect(save).toBeDisabled();

@@ -1,4 +1,4 @@
-"""``0116_operator_model_connections`` against a real database.
+"""``0118_operator_model_connections`` against a real database.
 
 It only adds tables. What Postgres settles is its downgrade: it refuses while
 a provided connection exists or anything names one, drops the tables once
@@ -17,8 +17,8 @@ from tests.support.migrations import REPO, apply_migrations, downgrade_to
 
 pytestmark = pytest.mark.dbtest
 
-_BEFORE = "0115_mcp_retire_dead_locations"
-_THIS = "0116_operator_model_connections"
+_BEFORE = "0117_connection_model_limit"
+_THIS = "0118_operator_model_connections"
 _ID = "oconn_" + "9" * 32
 _TABLES = (
     "agent_operator_model_connections",
