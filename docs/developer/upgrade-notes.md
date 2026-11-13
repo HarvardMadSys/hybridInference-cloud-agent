@@ -86,6 +86,32 @@ such a deployment:
    from another database with no session connected to the archive. Its
    contents do not change; record the new name with its dump and keys.
 
+## Postgres and the edge run pinned images
+
+The control plane's Compose file now names the bundled `postgres` service's
+image and the optional `edge`'s by version tag and multi-architecture index
+digest, as it already named pgAdmin's:
+`postgres:16.16-alpine@sha256:0adbf25a…` and
+`nginx:1.27.5-alpine@sha256:65645c7b…`. They were named by tag alone
+(`postgres:16-alpine`, `nginx:1.27.5-alpine`), so a deployment ran whatever its
+machine's copy of the tag pointed to, and an artifact deployment pulls every
+image again on each deploy: a new upstream build could restart Postgres on
+another minor version during an unrelated deploy. A new Postgres or nginx now
+comes only with a release that changes the pin, and this page says when one
+does.
+
+The first deploy of this release recreates `postgres`, and `edge` where its
+profile is enabled, once, because the image they name changed. Postgres is
+unavailable for the few seconds its restart takes, as at any deploy that
+changes its configuration. A deployment already on PostgreSQL 16.16 keeps that
+version. Check before deploying with `docker exec
+"${COMPOSE_PROJECT:?}-postgres-1" postgres --version`: a deployment on an
+earlier 16.x moves to 16.16 in that restart, and one that has already pulled a
+later 16.x moves back to it. A minor release keeps the data directory's
+format, so neither needs a dump or restore, but read the PostgreSQL release
+notes between the two versions for any step they ask for. The edge stays on
+nginx 1.27.5, and pgAdmin's pin is unchanged.
+
 ## The audit log names who acted on whom
 
 **Admin → Audit log** now names the administrator and the account of each

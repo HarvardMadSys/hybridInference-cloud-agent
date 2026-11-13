@@ -43,7 +43,9 @@ import httpx
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
+from starlette.datastructures import Headers
 
+from cloud_agent.api._database_unavailable import RETRY_AFTER_SECONDS
 from cloud_agent.api.deps import get_agent_app_credentials, get_http_client, get_storage
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import text_setting
@@ -70,6 +72,8 @@ from cloud_agent_shared.shared_protocol import is_residency_github_credential
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+    from starlette.types import Scope
 
     from cloud_agent.ports import GitHubRelayRepository, SourceControlRepository
     from cloud_agent.source_control.github_user_token import LiveUserToken
@@ -111,6 +115,14 @@ def _refusal(host: str, status: int, message: str) -> Response:
     if host == API_HOST:
         return JSONResponse({"message": message}, status_code=status)
     return Response(message + "\n", status_code=status, media_type="text/plain")
+
+
+def database_unavailable_response(scope: Scope) -> Response:
+    """The relay's answer while its database is out of reach: a refusal to retry."""
+    host = (Headers(scope=scope).get("host") or "").split(":", 1)[0].lower()
+    response = _refusal(host, 503, "GitHub is briefly unavailable here. Try again shortly.")
+    response.headers["Retry-After"] = str(RETRY_AFTER_SECONDS)
+    return response
 
 
 def _pkt(text: str) -> bytes:

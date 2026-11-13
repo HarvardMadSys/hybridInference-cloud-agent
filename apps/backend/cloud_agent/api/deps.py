@@ -37,6 +37,7 @@ from cloud_agent.accounts.directory import (
     LocalOwnerDirectory,
     OwnerDirectoryError,
 )
+from cloud_agent.api._database_unavailable import RETRY_AFTER_SECONDS
 from cloud_agent.api.errors import AgentConfigurationError, typed_error
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import number_setting, setting_env
@@ -295,6 +296,7 @@ async def resolve_agent_access(
     raise HTTPException(
         status_code=503,
         detail="Cannot confirm Agent access; try again shortly.",
+        headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
     )
 
 
@@ -482,7 +484,10 @@ async def _read_local_session(
             extra={"event": "agent_local_session_unavailable"},
         )
         raise HTTPException(
-            status_code=503, detail="Cannot confirm your session; try again shortly."
+            status_code=503,
+            detail="Cannot confirm your session; try again shortly.",
+            # The same retry hint as every other answer a database restart gets.
+            headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
         ) from None
     if owner is None or not may_sign_in(owner.account):
         return None

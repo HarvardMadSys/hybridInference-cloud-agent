@@ -34,6 +34,7 @@ from cloud_agent.accounts.policy import (
 )
 from cloud_agent.accounts.sms import configured_sender
 from cloud_agent.accounts.tokens import rate_limit_key
+from cloud_agent.api._database_unavailable import RETRY_AFTER_SECONDS
 from cloud_agent.api._sensitive_routes import SensitiveRoute
 from cloud_agent.api.deps import get_client_ip, get_storage, require_store
 from cloud_agent.api.errors import (
@@ -399,7 +400,12 @@ async def enforce_rate_limits(request: Request, rules: Iterable[RateRule]) -> No
             exc_info=True,
             extra={"event": "agent_local_rate_limit_unavailable"},
         )
-        raise typed_error(503, "unavailable", "Sign-in is temporarily unavailable.") from None
+        raise typed_error(
+            503,
+            "unavailable",
+            "Sign-in is temporarily unavailable.",
+            **{"Retry-After": str(RETRY_AFTER_SECONDS)},
+        ) from None
     if wait > 0:
         raise typed_error(
             429,
