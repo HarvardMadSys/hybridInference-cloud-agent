@@ -111,6 +111,11 @@ CALL_TIMEOUT_S = 1500.0
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 BROWSER_PLACEHOLDER = "${CLOUD_AGENT_BROWSER_CDP}"
 BROWSER_LAUNCHER = "/usr/local/bin/cloud-agent-browser"
+#: How long ``cloud-agent-browser start`` may take. More than a start that
+#: fails keeps a client (READY_TIMEOUT_S and two STOP_TIMEOUT_S there: the
+#: start's own stop, and one under way when the client asked), so the
+#: browser's own reason reaches the agent instead of this timeout.
+BROWSER_START_TIMEOUT_S = 90.0
 #: The commands a sandbox server may start with, as the host's launch policy
 #: allows them (cloud_agent.mcp.launch). Checked again here: nothing else
 #: runs, whatever an admission says.
@@ -507,7 +512,7 @@ def browser_endpoint() -> str:
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
-            timeout=90,
+            timeout=BROWSER_START_TIMEOUT_S,
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
