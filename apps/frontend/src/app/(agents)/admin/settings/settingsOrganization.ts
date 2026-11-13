@@ -213,15 +213,6 @@ const SETTING_GROUPS: SettingGroup[] = [
     ],
   },
   {
-    title: 'Inference provisioning',
-    keys: [
-      'accounts.inference_provisioning_enabled',
-      'accounts.inference_provisioning_api_url',
-      'accounts.inference_provisioning_web_url',
-      'accounts.inference_provisioning_dispatch_token',
-    ],
-  },
-  {
     title: 'Phone sign-in',
     keys: [
       'accounts.sms_enabled',

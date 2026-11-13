@@ -328,51 +328,6 @@ ACCOUNT_SETTINGS: tuple[Setting, ...] = (
         env="AGENT_TENCENT_SES_TEMPLATE_NOTICE",
         description=_SES_TEMPLATE,
     ),
-    # ── Inference provisioning ───────────────────────────────────────────
-    Setting(
-        "accounts.inference_provisioning_enabled",
-        "Provision inference accounts for approved users",
-        CATEGORY,
-        False,
-        kind="boolean",
-        env="AGENT_LOCAL_INFERENCE_PROVISIONING_ENABLED",
-        description="When on, an account approved for Agent use is emailed an invitation to set a "
-        "password on the connected inference service, which issues it a scoped API key for the "
-        "agent models. Only accounts approved after this is first switched on are invited; "
-        "existing accounts are invited only by the operator backfill command. When an account's "
-        "Agent access ends, its scoped key there is revoked. This service never sees the "
-        "password the user sets or the key that is issued.",
-    ),
-    Setting(
-        "accounts.inference_provisioning_api_url",
-        "Inference provisioning API URL",
-        CATEGORY,
-        "",
-        env="AGENT_LOCAL_INFERENCE_PROVISIONING_API_URL",
-        url=True,
-        description="The inference service's API origin, called with the dispatch token to mint "
-        "and revoke invitation tokens.",
-    ),
-    Setting(
-        "accounts.inference_provisioning_web_url",
-        "Inference provisioning web URL",
-        CATEGORY,
-        "",
-        env="AGENT_LOCAL_INFERENCE_PROVISIONING_WEB_URL",
-        url=True,
-        description="The inference service's web origin. Invitation mail links to its "
-        "/agent-invite page with the one-time token in the link fragment.",
-    ),
-    Setting(
-        "accounts.inference_provisioning_dispatch_token",
-        "Inference provisioning dispatch token",
-        CATEGORY,
-        "",
-        env="AGENT_LOCAL_INFERENCE_PROVISIONING_DISPATCH_TOKEN",
-        secret=True,
-        description="The shared token the inference service requires on its internal invitation "
-        "endpoints; the same value that service is configured with.",
-    ),
     # ── Phone sign-in ────────────────────────────────────────────────────
     Setting(
         "accounts.sms_enabled",
