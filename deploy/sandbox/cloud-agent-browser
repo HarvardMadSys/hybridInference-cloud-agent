@@ -66,6 +66,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -76,8 +77,21 @@ WORKSPACE = "/workspace"
 #: How long Chromium runs with no client before it stops. The service stays,
 #: and the next client gets a fresh Chromium on the same profile.
 DEFAULT_IDLE_S = 900.0
-#: Chromium must answer its first command within this, or start fails.
-READY_TIMEOUT_S = 30.0
+#: How long one start waits for Chromium's first answer, counted from when it
+#: began: the sandbox probe and a fallback to --no-sandbox come out of it too.
+#: A first start on a cold, busy machine is slow: on 4-CPU CI runners Chromium
+#: was still starting at 30 s. A start that fails ends within this plus a
+#: STOP_TIMEOUT_S for the Chromium it stops last, and a client never waits for
+#: more than one start (:meth:`Daemon._ensure_browser`). A stop holds up the
+#: whole service, so a client that asks during one (the end of another start,
+#: a member's stop, an idle stop, a crash) waits for it first: at most this
+#: plus two STOP_TIMEOUT_S from when it asks, and the moment a killed Chromium
+#: takes to be reaped. The MCP gateway allows ``start`` more than that
+#: (BROWSER_START_TIMEOUT_S in cloud-agent-mcp), so a start that fails still
+#: says why.
+READY_TIMEOUT_S = 60.0
+#: How long a Chromium that is told to stop has to exit before it is killed.
+STOP_TIMEOUT_S = 5.0
 #: One CDP message, in either direction. Full-page screenshots of long pages
 #: run to tens of megabytes; nothing legitimate comes near this.
 MAX_MESSAGE_BYTES = 128 * 1024 * 1024
@@ -130,6 +144,10 @@ CHROMIUM_FLAGS = (
 
 class BrowserError(Exception):
     """A failure this command reports on stderr with exit status 1."""
+
+
+class ChromiumExited(BrowserError):
+    """Chromium ended before it answered, as one that cannot use its sandbox does."""
 
 
 #: The most an incident journal holds; its oldest lines go first.
@@ -257,11 +275,28 @@ def write_shared(path: str, data: str) -> None:
     tmp = f"{path}.{os.getpid()}.tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640)
     try:
-        os.fchmod(fd, 0o640)
-        os.write(fd, data.encode())
-    finally:
-        os.close(fd)
-    os.replace(tmp, path)
+        try:
+            os.fchmod(fd, 0o640)
+            os.write(fd, data.encode())
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        # A full disk fails the write. Left behind, this file would fail every
+        # later write's O_EXCL open, long after the disk had room again.
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def log_line(message: str) -> None:
+    """Add a line to the service's log, its stderr, if the disk takes it.
+
+    The log is in the state directory, beside the record, so a full disk
+    refuses both. Neither may keep a start from answering its clients.
+    """
+    with contextlib.suppress(OSError):
+        print(f"cloud-agent-browser: {message}", file=sys.stderr, flush=True)
 
 
 def service_owner(paths: Paths) -> int | None:
@@ -665,8 +700,8 @@ def probe_user_namespaces() -> bool:
     (``kernel.apparmor_restrict_unprivileged_userns``) ``unshare --user``
     succeeds, but the namespace has no capabilities, and Chromium's sandbox
     then aborts with "No usable sandbox". Mapping a user into it is what that
-    restriction refuses, so that is what is probed. A launch that still fails
-    sandboxed falls back too (:meth:`Daemon._ensure_browser`).
+    restriction refuses, so that is what is probed. A Chromium that still exits
+    sandboxed falls back too (:meth:`Daemon._start_browser`).
     """
     try:
         result = subprocess.run(
@@ -908,7 +943,8 @@ class Daemon:
         self.couriers: dict[int, Courier] = {}
         self.courier_joined: asyncio.Event | None = None
         self.mux = self._new_mux(None)
-        self._launch_lock: asyncio.Lock | None = None
+        #: The start under way, which every client that asks meanwhile waits on.
+        self._starting: asyncio.Task[bool] | None = None
         self._version_id: int | None = None
         self._version_ready: asyncio.Future[dict[str, Any]] | None = None
         self._staging_count = 0
@@ -1129,10 +1165,14 @@ class Daemon:
                 preexec_fn=lambda: _child_setup(to_chrome_r, from_chrome_w),
                 close_fds=False,
             )
-        except OSError as exc:
+        except BaseException as exc:
+            # Whatever failed: a preexec_fn that fails raises SubprocessError,
+            # and each start a client retries would leak two more descriptors.
             os.close(to_chrome_w)
             os.close(from_chrome_r)
-            raise BrowserError(f"cannot start {CHROMIUM}: {exc}") from exc
+            if isinstance(exc, OSError):
+                raise BrowserError(f"cannot start {CHROMIUM}: {exc}") from exc
+            raise
         finally:
             os.close(log)
             os.close(to_chrome_r)
@@ -1176,52 +1216,87 @@ class Daemon:
                     signal=-status if status is not None and status < 0 else None,
                 )
 
-    async def _launch(self) -> None:
+    async def _launch(self, deadline: float) -> None:
+        """Start Chromium, and wait until ``deadline`` (the loop's clock) for its first answer."""
         loop = asyncio.get_running_loop()
         reader = await self._start_chromium(loop)
         self.mux = self._new_mux(self.browser_writer)
-        self.pump = loop.create_task(self._pump_browser(reader, self.mux))
-        self._version_ready = loop.create_future()
+        pump = self.pump = loop.create_task(self._pump_browser(reader, self.mux))
+        ready = self._version_ready = loop.create_future()
         self._version_id = self.mux.internal("Browser.getVersion")
-        done, _ = await asyncio.wait(
-            {self._version_ready, self.pump},
-            timeout=READY_TIMEOUT_S,
+        await asyncio.wait(
+            {ready, pump},
+            timeout=max(0.0, deadline - loop.time()),
             return_when=asyncio.FIRST_COMPLETED,
         )
-        if self._version_ready not in done or "result" not in self._version_ready.result():
-            raise BrowserError("Chromium did not answer; see " + self.paths.log)
+        if ready.done() and "result" in ready.result():
+            return
+        if pump.done() and not pump.cancelled():
+            # Only Chromium closing its pipe ends the pump on its own; a stop cancels it.
+            raise ChromiumExited(f"Chromium exited before it answered; see {self.paths.log}")
+        if not ready.done():
+            raise BrowserError(
+                f"Chromium did not answer within {READY_TIMEOUT_S:g} s; see {self.paths.log}"
+            )
+        raise BrowserError(f"Chromium did not answer; see {self.paths.log}")
 
     async def _ensure_browser(self) -> bool:
-        """Start Chromium unless it runs; False (and the reason logged) if it cannot."""
-        assert self._launch_lock is not None
-        async with self._launch_lock:
+        """Start Chromium unless it runs; False (and the reason logged) if it cannot.
+
+        One start at a time. A client that asks while one is under way takes
+        that start's outcome, and does not start another after it fails, so
+        no client waits for more than one start (READY_TIMEOUT_S says how
+        long). Nor does it join a run that a stop or a crash ended before the
+        client resumed.
+        """
+        if self._starting is None:
             if self.browser_running:
                 return True
+            self._starting = asyncio.get_running_loop().create_task(self._start_browser())
+        # A client that goes away does not cancel the start the others wait on.
+        return await asyncio.shield(self._starting) and self.browser_running
+
+    async def _start_browser(self) -> bool:
+        """One start: Chromium answering within READY_TIMEOUT_S, sandboxed if it can be.
+
+        The log and the record are best effort here. Both are in the state
+        directory, and a full disk must neither stop a Chromium that answered
+        nor keep the reason from the clients of one that did not.
+        """
+        loop = asyncio.get_running_loop()
+        began = loop.time()
+        deadline = began + READY_TIMEOUT_S
+        try:
             self._close_browser(None)
             try:
-                try:
-                    await self._launch()
-                except BrowserError:
-                    if not (self.sandboxed and ALLOW_UNSANDBOXED):
-                        raise
-                    # The probe can pass where the sandbox still cannot work:
-                    # Chromium aborts with "No usable sandbox" under some
-                    # namespace policies. Fall back once, for this service.
-                    self._close_browser(None)
-                    self.sandboxed = False
-                    print(
-                        "cloud-agent-browser: Chromium could not start sandboxed (see the "
-                        "log above); starting it with --no-sandbox",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    await self._launch()
-            except BrowserError as exc:
-                print(f"cloud-agent-browser: {exc}", file=sys.stderr, flush=True)
+                await self._launch(deadline)
+            except ChromiumExited:
+                if not (self.sandboxed and ALLOW_UNSANDBOXED):
+                    raise
+                # The probe can pass where the sandbox still cannot work:
+                # Chromium aborts with "No usable sandbox" under some
+                # namespace policies. Fall back once, for this service, in
+                # what is left of this start's time. Only an exit says
+                # that; a Chromium that is slow is as slow without one.
                 self._close_browser(None)
-                self.last_error = str(exc)
-                self._publish()
-                return False
+                self.sandboxed = False
+                left = deadline - loop.time()
+                if left <= 0:
+                    # Its stop took the rest. One launched now would only be
+                    # stopped at once, a second stop past the deadline for the
+                    # clients to wait for. With time left, however little, one
+                    # is launched: stopped at the deadline, that is the start's
+                    # one stop past it.
+                    log_line(
+                        "Chromium could not start sandboxed (see the log above); no time "
+                        "is left to start it with --no-sandbox, so the next start will"
+                    )
+                    raise
+                log_line(
+                    "Chromium could not start sandboxed (see the log above); starting it "
+                    f"with --no-sandbox, {left:.1f} s left"
+                )
+                await self._launch(deadline)
             assert self._version_ready is not None
             result = self._version_ready.result()["result"]
             self.version = {
@@ -1232,14 +1307,30 @@ class Daemon:
             }
             self.last_error = ""
             self.last_active = time.monotonic()
-            print(
-                f"cloud-agent-browser: chromium started: {self.version['Browser']}"
-                f"{'' if self.sandboxed else ' (--no-sandbox)'}",
-                file=sys.stderr,
-                flush=True,
+            log_line(
+                f"chromium started in {loop.time() - began:.1f} s: "
+                f"{self.version['Browser']}{'' if self.sandboxed else ' (--no-sandbox)'}"
             )
-            self._publish()
+            self._update_record()
             return True
+        except Exception as exc:
+            reason = str(exc)
+            if not isinstance(exc, BrowserError):
+                # Not a failure a start foresees: no file descriptor left for
+                # the pipe, a preexec_fn that failed. The log gets its
+                # traceback, and every client waiting on this start a reason.
+                # Let through, it would leave their connections open on 3.11.
+                with contextlib.suppress(OSError):  # the log may be full
+                    traceback.print_exc()
+                reason = f"cannot start Chromium: {type(exc).__name__}: {exc}; see {self.paths.log}"
+            self._close_browser(None)
+            # After the stop, which its clients wait for too.
+            log_line(f"chromium did not start in {loop.time() - began:.1f} s: {reason}")
+            self.last_error = reason
+            self._update_record()
+            return False
+        finally:
+            self._starting = None
 
     def _close_browser(self, reason: str | None) -> None:
         """End the current Chromium run, and every client connected to it."""
@@ -1285,7 +1376,12 @@ class Daemon:
             )
             return
         if not await self._ensure_browser():
-            await self._respond(writer, b"503 Service Unavailable", self.last_error.encode())
+            # A start that succeeded leaves no error, though its run may have ended since.
+            reason = (
+                self.last_error
+                or f"Chromium stopped before this client was connected; see {self.paths.log}"
+            )
+            await self._respond(writer, b"503 Service Unavailable", reason.encode())
             return
         key = request["headers"].get("sec-websocket-key", "")
         writer.write(
@@ -1390,6 +1486,8 @@ class Daemon:
             await asyncio.sleep(min(30.0, max(1.0, self.idle_s / 4)))
             if (
                 self.chromium is not None
+                # One still starting has no client yet, but one is waiting for it.
+                and self._starting is None
                 and not self.peers
                 and time.monotonic() - self.last_active > self.idle_s
             ):
@@ -1407,7 +1505,6 @@ class Daemon:
         loop = asyncio.get_running_loop()
         self.stopping = asyncio.Event()
         self.courier_joined = asyncio.Event()
-        self._launch_lock = asyncio.Lock()
         for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             loop.add_signal_handler(signum, self._stop, signal.Signals(signum).name)
         server = None
@@ -1480,6 +1577,13 @@ class Daemon:
         }
         write_shared(self.paths.record, json.dumps(record))
 
+    def _update_record(self) -> None:
+        """:meth:`_publish` for a start's outcome: a full disk leaves the record stale."""
+        try:
+            self._publish()
+        except OSError as exc:
+            log_line(f"cannot update {self.paths.record}: {exc}")
+
     def _unpublish(self) -> None:
         record = read_record(self.paths)
         if record is not None and record.get("pid") == os.getpid():
@@ -1493,7 +1597,7 @@ class Daemon:
             return
         process.terminate()
         try:
-            process.wait(timeout=5)
+            process.wait(timeout=STOP_TIMEOUT_S)
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()

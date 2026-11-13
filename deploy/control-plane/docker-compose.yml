@@ -579,6 +579,10 @@ services:
       PGADMIN_CONFIG_SERVER_MODE: "True"
       PGADMIN_CONFIG_PROXY_X_PROTO_COUNT: "1"
       PGADMIN_CONFIG_SESSION_COOKIE_SECURE: ${AGENT_PGADMIN_COOKIE_SECURE:-True}
+      # The bundled server definition's database and user, which the entrypoint
+      # fills in on pgAdmin's first start: the postgres service's own below.
+      AGENT_POSTGRES_USER: ${AGENT_POSTGRES_USER:-cloudagent}
+      AGENT_POSTGRES_DB: ${AGENT_POSTGRES_DB:-cloudagent}
     volumes:
       - agent-pgadmin:/var/lib/pgadmin
       - agent-pgadmin-bootstrap:/run/cloud-agent/pgadmin-bootstrap:ro
@@ -597,6 +601,12 @@ services:
       start_period: 60s
       retries: 6
 
+  # AGENT_POSTGRES_DB is the database on this server that AGENT_DATABASE_URL
+  # uses. A new volume creates it and a new installation's URL names it; the
+  # healthcheck, pgAdmin's bundled server and the documented backup, drain and
+  # undrain commands open it. A deployment that moves the URL to another
+  # database here sets AGENT_POSTGRES_DB to that one too, or all of them stay
+  # on the database it left; the `keys` service warns while the two differ.
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped

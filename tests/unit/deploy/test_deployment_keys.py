@@ -22,7 +22,13 @@ from urllib.parse import unquote, urlsplit
 import pytest
 
 from cloud_agent.deployment import deployment_keys as keys_module
-from cloud_agent.deployment.deployment_keys import KeysRefused, export, main, prepare
+from cloud_agent.deployment.deployment_keys import (
+    KeysRefused,
+    database_mismatch,
+    export,
+    main,
+    prepare,
+)
 from cloud_agent.deployment.key_files import fill_environment
 
 REPO = Path(__file__).resolve().parents[3]
@@ -347,6 +353,82 @@ def test_a_refusal_exits_non_zero_with_its_reason(
 
     assert main(["--keys-dir", str(keys), "--database-dir", str(database)]) == 1
     assert "already holds a database" in capsys.readouterr().err
+
+
+#: The independent-accounts cutover's new database on the bundled server.
+_MOVED = "postgresql://cloudagent:moved-secret@postgres:5432/cloudagent_accounts"
+
+
+def test_a_connection_to_another_bundled_database_is_named_with_its_fix() -> None:
+    """The healthcheck, pgAdmin and the backup would stay on the database it left."""
+    warning = database_mismatch({}, _MOVED)
+
+    assert "uses the bundled database cloudagent_accounts" in warning
+    assert "but AGENT_POSTGRES_DB is cloudagent" in warning
+    assert "Set AGENT_POSTGRES_DB=cloudagent_accounts" in warning
+    assert "moved-secret" not in warning
+
+
+@pytest.mark.parametrize(
+    ("environment", "url"),
+    [
+        # A new installation's defaults.
+        ({}, "postgresql://cloudagent:p@postgres:5432/cloudagent"),
+        # A deployment that moved both.
+        ({"AGENT_POSTGRES_DB": "cloudagent_accounts"}, _MOVED),
+        ({"AGENT_POSTGRES_DB": "agent db"}, "postgresql://u:p@postgres/agent%20db?sslmode=disable"),
+        # No database in the connection opens the one named after its user.
+        ({}, "postgresql://cloudagent:p@postgres:5432"),
+        ({"AGENT_POSTGRES_DB": "agents"}, "postgresql://agents:p@postgres/"),
+        # With a database elsewhere the bundled one serves nothing.
+        ({}, "postgresql://agent:p@db.example.org:5432/agent"),
+        ({}, ""),
+    ],
+)
+def test_a_connection_the_bundled_tools_follow_is_not_warned_about(
+    environment: dict[str, str], url: str
+) -> None:
+    assert database_mismatch(environment, url) == ""
+
+
+def test_a_generated_connection_uses_the_database_postgres_db_names(
+    volumes: tuple[Path, Path],
+) -> None:
+    keys, database = volumes
+    environment = {"AGENT_POSTGRES_DB": "agentdb"}
+
+    prepare(environment, keys, database)
+
+    assert database_mismatch(environment, _stored(keys)[_URL]) == ""
+
+
+def test_the_service_warns_at_every_start_while_the_databases_differ(
+    volumes: tuple[Path, Path], capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keys, database = volumes
+    _existing_database(database)
+    for name in (*keys_module.STORED, "AGENT_POSTGRES_USER", "AGENT_POSTGRES_DB"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(_URL, _MOVED)
+    monkeypatch.setenv(_SESSION, "s" * 40)
+    monkeypatch.setenv(_ROOT, "r" * 40)
+    arguments = ["--keys-dir", str(keys), "--database-dir", str(database)]
+
+    assert main(arguments) == 0
+    output = capsys.readouterr()
+    assert "[keys] WARNING: AGENT_DATABASE_URL uses the bundled database cloudagent_accounts" in (
+        output.err
+    )
+    assert "moved-secret" not in output.out + output.err
+
+    # Its .env line deleted, the stored connection still names the moved database.
+    monkeypatch.delenv(_URL)
+    assert main(arguments) == 0
+    assert "Set AGENT_POSTGRES_DB=cloudagent_accounts" in capsys.readouterr().err
+
+    monkeypatch.setenv("AGENT_POSTGRES_DB", "cloudagent_accounts")
+    assert main(arguments) == 0
+    assert "WARNING" not in capsys.readouterr().err
 
 
 def test_export_writes_env_lines_that_restore_the_keys(volumes: tuple[Path, Path]) -> None:

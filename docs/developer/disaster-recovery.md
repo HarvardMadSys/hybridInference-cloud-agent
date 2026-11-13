@@ -110,6 +110,12 @@ safe. Follow [retained Docker storage](operations.md#retained-docker-storage-on-
      > "${BACKUP_DIRECTORY}/agent.dump"
    ```
 
+   It dumps `POSTGRES_DB`, the database `AGENT_POSTGRES_DB` names, which is
+   this deployment's only while `AGENT_DATABASE_URL` uses that database too.
+   The `keys` service checks this at every start: before relying on the dump,
+   confirm that `docker compose logs keys` for this project shows no
+   `AGENT_POSTGRES_DB` warning.
+
    Capture configuration and the stopped host storage into that same set using
    the approved encrypted backup tooling. Transfer it off-node, record hashes,
    and verify the archive and dump are readable before treating it as usable.
@@ -134,6 +140,9 @@ native-session restore.
 2. Verify the selected set's hashes and decryption material. Restore into an
    isolated database first, using compatible Postgres and the selected release.
    Restore the matching configuration/root keys before starting a listener.
+   A deployment that then serves a restored database on the bundled `postgres`
+   service sets `AGENT_POSTGRES_DB` to its name along with
+   `AGENT_DATABASE_URL`, so its backups and maintenance commands open it too.
    A restored database must be bound to the account system; a Gateway-era one
    is refused and stays an archive
    ([old databases](operations.md#preserving-an-old-chain-database)). Do not

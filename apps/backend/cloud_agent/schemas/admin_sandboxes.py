@@ -148,6 +148,10 @@ class AdminSandbox(BaseModel):
     idle_deadline: datetime | None = None
     updated_at: datetime
     host_last_heartbeat_at: datetime | None = None
+    #: The status of the host this sandbox names; ``None`` once no host of that
+    #: name is registered. A ``cold`` sandbox can be deleted without its host
+    #: once that host is ``disabled``, unregistered or silent for 30 minutes.
+    host_status: str | None = None
     #: The kind of this sandbox's newest incident within 24 hours, listed only.
     last_incident: str | None = Field(None, max_length=64)
     last_incident_at: datetime | None = None
@@ -257,6 +261,21 @@ class AdminSandboxStopRequest(BaseModel):
 
     generation: int = Field(ge=1)
     container_id: str = Field(min_length=1, max_length=256)
+    last_activity_at: datetime
+
+
+class AdminSandboxDeleteRequest(BaseModel):
+    """The exact sandbox and activity the administrator reviewed for deletion.
+
+    ``container_id`` may be ``None`` only for a ``cold`` sandbox, which lives in
+    its checkpoint and may have no container at all; every other deletion
+    names the exact container its host removes.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    generation: int = Field(ge=1)
+    container_id: str | None = Field(min_length=1, max_length=256)
     last_activity_at: datetime
 
 

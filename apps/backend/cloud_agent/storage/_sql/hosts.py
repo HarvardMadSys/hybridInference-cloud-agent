@@ -11,6 +11,7 @@ import hashlib
 import json
 from typing import TYPE_CHECKING
 
+from cloud_agent.domain.host_pool import HOST_DISABLED, SILENT_HOST_HANDOVER_SECONDS
 from cloud_agent.domain.sandbox_group import (
     DELETED_GROUP_STATES,
     DeletionState,
@@ -342,12 +343,6 @@ GROUP_TURN_CLAIMED_SQL = """EXISTS (
     WHERE claimed.sandbox_id = g.id AND j.state = 'running'
 )"""
 
-#: How long a Host may stay silent before another Host may take its covered
-#: stopped groups. Far longer than ``offline``: a network blip or a restart
-#: must not move anything, but a machine that died should not keep its chats
-#: waiting for a return that never comes.
-SILENT_HOST_HANDOVER_SECONDS = 1800
-
 #: A stopped group ``g`` of a Host silent that long, which another Host may take
 #: at its claim: its checkpoint covers it, and no turn of its chats is running.
 #: Nothing changes until such a claim, so a Host that returns first, or is the
@@ -676,6 +671,24 @@ RECLAIMED_HOST_SQL = """EXISTS (
       AND reclaimed_machine.observed_state = 'terminated'
       AND (reclaimed.last_heartbeat_at IS NULL
            OR reclaimed.last_heartbeat_at < NOW() - make_interval(secs => {quiet}))
+)"""
+
+
+#: Whether host ``{host}`` is gone: no longer registered (forgotten), removed
+#: from the pool (``disabled``, a sink: its credential was revoked), or silent
+#: for :data:`SILENT_HOST_HANDOVER_SECONDS`. ``{host}`` names the host column
+#: or parameter.
+#:
+#: An administrator may delete a ``cold`` group that still names such a host
+#: without asking it anything. That is a rule for when to stop waiting for the
+#: host, not a fence: a ``cold`` group lives in its checkpoint, nothing starts
+#: it on that host, and a container the host may still hold for a deleted group
+#: is removable should it ever report again (``SUPERSEDED_CONTAINER_SQL``).
+GONE_HOST_SQL = f"""NOT EXISTS (
+    SELECT 1 FROM agent_runner_hosts present
+    WHERE present.host = {{host}} AND present.status <> '{HOST_DISABLED}'
+      AND COALESCE(present.last_heartbeat_at, present.first_seen_at)
+          >= NOW() - make_interval(secs => {SILENT_HOST_HANDOVER_SECONDS})
 )"""
 
 

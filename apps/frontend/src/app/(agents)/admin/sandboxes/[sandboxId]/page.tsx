@@ -20,6 +20,13 @@ import { getErrorMessage } from '@/lib/utils/errors';
 import { AdminNavigation } from '../../AdminNavigation';
 import { formatBytes } from '../present';
 import {
+  discardBlockedReason,
+  discardConfirmation,
+  discardDescription,
+  notStoppedReason,
+  observedAt,
+} from '../sandboxActions';
+import {
   accessDenied,
   AdminRequired,
   BUTTON,
@@ -30,6 +37,27 @@ import {
 
 const PAGE_SIZE = 200;
 const DELETE_POLL_MS = 3_000;
+
+/** What the administrator confirms before a deletion of `sandbox` is requested. */
+function deletionConfirmation(
+  sandbox: AdminSandbox,
+  memberCount: number,
+  { discard, force, resume }: { discard: boolean; force: boolean; resume: boolean },
+): string {
+  const sessions = `${memberCount} ${memberCount === 1 ? 'session' : 'sessions'}`;
+  if (resume)
+    return `Resume the existing deletion request for sandbox ${sandbox.id}, shared by ${sessions}? Its original archive/discard choice and any verified archive receipt will be retained.`;
+  const verification = force
+    ? `Verify the exact retained container shared by ${sessions} is stopped or dead, and idle. The server refuses if that exact container is still running or has activity; this action does not stop a running container. `
+    : '';
+  const discarded = discardConfirmation(
+    sandbox,
+    sessions,
+    `Permanently delete sandbox ${sandbox.id}, shared by ${sessions}, without uploading it to S3? Workspace files and native session history on the host will be destroyed and cannot be restored. Live native resume will no longer be available. Chat history and the lifecycle audit remain. Container deletion cannot be undone.`,
+  );
+  const archived = `Archive to S3 and permanently delete sandbox ${sandbox.id}, shared by ${sessions}? Workspace files and native session history will be uploaded to S3 and verified before the retained container is deleted. Live native resume will no longer be available. Chat history and the lifecycle audit remain. Container deletion cannot be undone.`;
+  return verification + (discard ? discarded : archived);
+}
 
 function eventTime(event: AdminSandboxTrajectoryEvent): number {
   const parsed = Date.parse(event.created_at);
@@ -225,6 +253,7 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
   }
 
   const sandbox = trajectory?.sandbox;
+  const serverNow = observedAt(trajectory?.observed_at);
   const checkpoint = trajectory?.latest_checkpoint ?? null;
   const memberCount =
     trajectory?.member_history_count ?? trajectory?.members.length ?? sandbox?.member_count ?? 0;
@@ -254,25 +283,20 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
       : deletionComplete
         ? 'This sandbox has already been deleted.'
         : sandbox.state !== 'stopped' && sandbox.state !== 'running'
-          ? 'Wait for the host to confirm a clean stop before deleting this sandbox.'
+          ? notStoppedReason(sandbox, 'deleting', serverNow)
           : (idleBlocked ??
             (sandbox.generation == null || !sandbox.container_id
               ? 'The retained container identity is unavailable.'
               : null));
+  const discardBlocked = discardBlockedReason(sandbox, deleteBlocked, null, idleBlocked, serverNow);
 
   async function requestDeletion(discard = false) {
-    if (!sandbox || deleteBlocked || actionRequest.current) return;
-    const sessions = `${memberCount} ${memberCount === 1 ? 'session' : 'sessions'}`;
-    const verification = forceDelete
-      ? `Verify the exact retained container shared by ${sessions} is stopped or dead, and idle. ` +
-        'The server refuses if that exact container is still running or has activity; this action does not stop a running container. '
-      : '';
-    const confirmation = deletionRetryExhausted
-      ? `Resume the existing deletion request for sandbox ${sandbox.id}, shared by ${sessions}? Its original archive/discard choice and any verified archive receipt will be retained.`
-      : verification +
-        (discard
-          ? `Permanently delete sandbox ${sandbox.id}, shared by ${sessions}, without uploading it to S3? Workspace files and native session history on the host will be destroyed and cannot be restored. Live native resume will no longer be available. Chat history and the lifecycle audit remain. Container deletion cannot be undone.`
-          : `Archive to S3 and permanently delete sandbox ${sandbox.id}, shared by ${sessions}? Workspace files and native session history will be uploaded to S3 and verified before the retained container is deleted. Live native resume will no longer be available. Chat history and the lifecycle audit remain. Container deletion cannot be undone.`);
+    if (!sandbox || (discard ? discardBlocked : deleteBlocked) || actionRequest.current) return;
+    const confirmation = deletionConfirmation(sandbox, memberCount, {
+      discard,
+      force: forceDelete,
+      resume: deletionRetryExhausted,
+    });
     if (!window.confirm(confirmation)) return;
 
     const controller = new AbortController();
@@ -285,7 +309,7 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
     try {
       const reviewed = {
         generation: sandbox.generation!,
-        container_id: sandbox.container_id!,
+        container_id: sandbox.container_id,
         last_activity_at: sandbox.last_activity_at,
       };
       const next = await deleteAdminSandbox(
@@ -505,7 +529,7 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
                   </button>
                   <button
                     type="button"
-                    disabled={deleting || deleteBlocked !== null || deletionRetryExhausted}
+                    disabled={deleting || discardBlocked !== null || deletionRetryExhausted}
                     onClick={() => void requestDeletion(true)}
                     className="rounded-lg border border-red-300 px-3 py-1.5 text-sm font-medium text-red-700 transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-600 disabled:cursor-not-allowed disabled:opacity-40 dark:border-red-500/40 dark:text-red-300 dark:hover:bg-red-500/10"
                   >
@@ -516,8 +540,10 @@ function SandboxTrajectory({ sandboxId }: { sandboxId: string }) {
                 </div>
               </div>
               <p className="mt-3 text-xs leading-relaxed text-gray-500 dark:text-gray-400">
-                Delete without archive destroys the host copy. It does not upload workspace files or
-                native session history.
+                {discardDescription(
+                  sandbox,
+                  'Delete without archive destroys the host copy. It does not upload workspace files or native session history.',
+                )}
               </p>
               {deleteBlocked && (
                 <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">{deleteBlocked}</p>

@@ -360,13 +360,15 @@ Concurrent setup attempts cannot replace the first credentials. The private
 `agent-pgadmin` during deployments. pgAdmin mounts the bootstrap volume read-only.
 
 Sign in with the pgAdmin email and password you chose. The initial server
-definition points to `postgres:5432`, database/user `cloudagent`. Enter the
-deployment's PostgreSQL password when connecting. If the database name or user
-differs, supply a custom `AGENT_PGADMIN_SERVERS_FILE` before initialization, or
-edit the connection in pgAdmin. Database passwords are not preloaded or exposed
-in the dashboard. Saved accounts and connections persist in the separate
-`agent-pgadmin` volume. Setup does not reset an existing account, including on a
-container restart. Manage later accounts and password changes in pgAdmin.
+definition points to `postgres:5432`, with the database `AGENT_POSTGRES_DB`
+names and the user `AGENT_POSTGRES_USER` names (`cloudagent` unless the
+deployment sets them). Enter the deployment's PostgreSQL password when
+connecting. pgAdmin imports that definition only at its first setup, so after
+changing either variable, edit the connection in pgAdmin to match. Database
+passwords are not preloaded or exposed in the dashboard. Saved accounts and
+connections persist in the separate `agent-pgadmin` volume. Setup does not
+reset an existing account, including on a container restart. Manage later
+accounts and password changes in pgAdmin.
 
 For the HTTP-only local stack, use `AGENT_PGADMIN_COOKIE_SECURE=False` alongside
 the existing local Agent-cookie setting. Keep the default `True` for HTTPS.
@@ -665,6 +667,24 @@ checks for this provider-confirmed outcome. That recovery makes no host call and
 does not consume another retry; it requires the same provider termination and
 10-minute silence conditions.
 
+A `cold` sandbox lives only in its
+[checkpoint](#restoring-a-removed-hosts-sandboxes), so it never stops and has no
+container to archive: **Archive to S3 and delete** refuses it. **Delete without
+archive** deletes it at once, with no host call and no deletion worker, once the
+host it still names is gone: removed from the pool, forgotten, or silent for 30
+minutes. One transaction marks the sandbox `lost` and deleted, marks its chats'
+native context lost, fails their queued turns, and retires its checkpoint
+receipts (`superseded`); its trajectory and audit record `checkpoint_only`. The
+checkpoint objects stay in S3 under the bucket's lifecycle and retention rules,
+as archives do; the control plane does not delete objects. A failed restore can
+leave a cold sandbox with no container at all; it is deleted the same way.
+Until its host is gone, the details say so: the next message to one of its chats
+restores it, and **Remove stale entry** hides it once that host has not reported
+for 90 seconds. A host claiming one of its turns to restore it at the same
+moment wins, and the deletion changes nothing; a deletion that commits first
+leaves no turn to restore. Should a removed host come back, a container it kept
+for a deleted sandbox is removable as superseded.
+
 One deletion worker handles requests one at a time, in the order they became
 due. Only transient failures retry automatically, with exponential backoff from
 one minute to one hour; retries stop after eight claims or 24 hours from the
@@ -747,7 +767,9 @@ eligible entries. Stop, archive-and-delete, deletion without an archive,
 inventory removal, and inventory restoration use the same checks as individual
 controls. Up to four requests run at once, and each result is reported
 separately. A stop or deletion result means the request was accepted; host
-completion is still asynchronous. Failed or skipped entries remain selected
+completion is still asynchronous, except for a cold sandbox's deletion, which is
+done when accepted. Every skipped entry says why, and the confirmation counts
+them. Failed or skipped entries remain selected
 for a new explicit review. Expired reviews and changed containers are refused,
 without automatically retrying a new container identity. No batch feature flag
 or additional migration is required.
@@ -2507,7 +2529,9 @@ credential and any deployment drain fence are left to the removal flow.
 A `cold` group does not keep its old host from being forgotten, by **Forget**
 or by permanently removing the server: it no longer needs that machine. It
 keeps naming the host it last ran on until a claim moves it to the claiming
-host. Every other undeleted group still blocks forgetting.
+host. Every other undeleted group still blocks forgetting. Once that host is
+gone, **Delete without archive** deletes a `cold` group at once, without any
+host (see [sandbox inventory](#sandbox-inventory-resource-usage-and-controls)).
 
 The next turn of any chat in a `cold` group is claimed by any host that
 advertises `sandbox-restore-v1` with archives enabled, except the host that
@@ -3109,14 +3133,19 @@ The runner holds no database connection — its heartbeats are HTTP calls to the
 control plane — so stopping the control plane, the MCP relay and the web tier
 leaves the database with no writer.
 
+The `psql` commands below run in the bundled Postgres container and open its
+`POSTGRES_DB`, the database `AGENT_POSTGRES_DB` names. That must be the one
+`AGENT_DATABASE_URL` uses ([database settings](../../ENVIRONMENT.md#database)).
+
 1. Drain the hosts, keep the generated `cloudagent-undrain-*.sql`, and wait for
    two counts to reach zero. Neither can be settled once the writers stop, so
    both are waited out here, as in step 1 of the rebuild above:
 
    ```bash
-   docker exec cloudagent-postgres-1 psql -U cloudagent -d cloudagent -Atc \
-     "SELECT count(*) FROM agent_attempts WHERE status = 'running'; \
-      SELECT count(*) FROM agent_session_forks WHERE state IN ('preparing', 'materialized')"
+   docker exec -i cloudagent-postgres-1 sh -c 'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At' <<'SQL'
+   SELECT count(*) FROM agent_attempts WHERE status = 'running';
+   SELECT count(*) FROM agent_session_forks WHERE state IN ('preparing', 'materialized');
+   SQL
    ```
 
    A fork still `preparing` or `materialized` is one its coordinator has not
@@ -3148,7 +3177,8 @@ leaves the database with no writer.
    claim:
 
    ```bash
-   docker exec -i cloudagent-postgres-1 psql -U cloudagent -d cloudagent -v ON_ERROR_STOP=1 < cloudagent-undrain-$(date +%F).sql
+   docker exec -i cloudagent-postgres-1 sh -c 'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1' \
+     < cloudagent-undrain-$(date +%F).sql
    deploy/control-plane/deploy.sh "${AGENT_DEPLOYMENT_SHA}"
    ```
 
