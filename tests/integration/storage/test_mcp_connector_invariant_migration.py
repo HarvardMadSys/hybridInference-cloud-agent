@@ -20,7 +20,7 @@ pytestmark = pytest.mark.dbtest
 _BEFORE = "0057_admin_sandbox_trajectory"
 _THIS = "0058_mcp_connector_invariant"
 _NEXT = "0059_counter_constraints"
-_HEAD = "0115_mcp_retire_dead_locations"
+_HEAD = "0116_account_provisioning"
 _OWNER = "user-owner"
 _OTHER = "user-other"
 _PRESERVED_AUTHORIZED_AT = datetime(2001, 2, 3, 4, 5, 6, tzinfo=UTC)
@@ -113,7 +113,11 @@ def test_mcp_connector_invariant_revision_follows_trajectory_merge() -> None:
         script.get_revision("0114_admin_audit_attribution").down_revision
         == "0113_sandbox_incidents"
     )
-    assert script.get_revision(_HEAD).down_revision == "0114_admin_audit_attribution"
+    assert (
+        script.get_revision("0115_mcp_retire_dead_locations").down_revision
+        == "0114_admin_audit_attribution"
+    )
+    assert script.get_revision(_HEAD).down_revision == "0115_mcp_retire_dead_locations"
     assert script.get_revision("0109_local_account_parity").down_revision == "0108_local_accounts"
     assert script.get_revision("0108_local_accounts").down_revision == (
         "0107_attempt_context_profiles"
