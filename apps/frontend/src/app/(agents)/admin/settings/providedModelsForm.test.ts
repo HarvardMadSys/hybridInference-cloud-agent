@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { translate } from '@/lib/i18n/translate';
+import { OPERATOR_MAX_MODELS } from '@/lib/api/adminOperatorModels';
 import { APIError } from '@/lib/utils/errors';
 
 import {
@@ -69,15 +70,17 @@ describe('the provided connection form', () => {
     expect(providedFieldProblems({ ...filled, key: '' }, false)).toEqual({});
   });
 
-  it('allows a name of 64 characters and eight models, as the server does, and no more', () => {
+  it('allows a name of 64 characters and as many models as the server does, and no more', () => {
     const ids = (count: number) => Array.from({ length: count }, (_, index) => `model-${index}`);
     expect(providedFieldProblems({ ...filled, name: 'n'.repeat(64) }, true)).toEqual({});
     expect(providedFieldProblems({ ...filled, name: 'n'.repeat(65) }, true)).toEqual({
       name: true,
     });
     const many = { ...filled, default_model: '' };
-    expect(providedFieldProblems({ ...many, models: ids(8) }, true)).toEqual({});
-    expect(providedFieldProblems({ ...many, models: ids(9) }, true)).toEqual({ models: true });
+    expect(providedFieldProblems({ ...many, models: ids(OPERATOR_MAX_MODELS) }, true)).toEqual({});
+    expect(providedFieldProblems({ ...many, models: ids(OPERATOR_MAX_MODELS + 1) }, true)).toEqual({
+      models: true,
+    });
   });
 
   it('creates with what was typed, sending null for what was left out', () => {
