@@ -80,6 +80,20 @@ export function allowanceOf(
   return { limit, used, remaining, exhausted: remaining === 0, resetsAt: source.resets_at };
 }
 
+/**
+ * When the next of the provided sources' counts starts over, in epoch
+ * milliseconds; `null` when none lies ahead of `now`.
+ */
+export function nextAllowanceReset(
+  config: AgentConfigApi | null,
+  now: number = Date.now(),
+): number | null {
+  const ahead = providedSources(config)
+    .map((source) => Date.parse(source.resets_at))
+    .filter((reset) => Number.isFinite(reset) && reset > now);
+  return ahead.length > 0 ? Math.min(...ahead) : null;
+}
+
 /** A provided model's allowance by its source id; `null` for any other choice. */
 export function providedAllowance(
   config: AgentConfigApi | null,

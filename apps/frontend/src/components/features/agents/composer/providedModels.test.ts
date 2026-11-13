@@ -8,6 +8,7 @@ import {
   isProvidedId,
   leadingProvidedSource,
   modelSetupRequired,
+  nextAllowanceReset,
   providedAllowance,
   providedSources,
   resetTime,
@@ -140,6 +141,31 @@ describe('whether the owner must add a connection of their own', () => {
       expect(hasRunnableProvidedModel(loaded)).toBe(false);
       expect(modelSetupRequired(loaded)).toBe(true);
     }
+  });
+});
+
+describe('when the next count starts over', () => {
+  const at = (iso: string) => Date.parse(iso);
+  const sources = [
+    providedSource({ a: [1, 1] }, { id: 'oconn_a', resets_at: '2026-11-13T00:00:00Z' }),
+    providedSource({ b: [1, 1] }, { id: 'oconn_b', resets_at: '2026-11-14T00:00:00Z' }),
+    providedSource({ c: [1, 1] }, { id: 'oconn_c', resets_at: 'soon' }),
+  ];
+
+  it('is the earliest reset still ahead', () => {
+    const loaded = config({ provided_sources: sources });
+    expect(nextAllowanceReset(loaded, at('2026-11-12T23:59:59Z'))).toBe(at('2026-11-13T00:00:00Z'));
+    // One that has passed is no longer waited for.
+    expect(nextAllowanceReset(loaded, at('2026-11-13T00:00:00Z'))).toBe(at('2026-11-14T00:00:00Z'));
+    expect(nextAllowanceReset(loaded, at('2026-11-14T00:00:00Z'))).toBeNull();
+  });
+
+  it('is nothing where no provided source is on offer', () => {
+    const now = at('2026-11-12T12:00:00Z');
+    expect(nextAllowanceReset(null, now)).toBeNull();
+    expect(nextAllowanceReset(config(), now)).toBeNull();
+    const off = config({ provided_sources: sources, model_connections_enabled: false });
+    expect(nextAllowanceReset(off, now)).toBeNull();
   });
 });
 

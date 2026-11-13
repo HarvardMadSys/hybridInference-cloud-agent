@@ -12,6 +12,7 @@ import {
   type ModelChoice,
 } from './modelSource';
 import { providedAllowance, resetTime } from './providedModels';
+import { useAllowanceReset } from './useAllowanceReset';
 
 /** The pick a draft kept, with its source; see `NewTaskDraft`. */
 interface DraftedPick {
@@ -61,10 +62,11 @@ export function useComposerModel(drafted: DraftedPick | null, runtime: string) {
   }, []);
   const listed = useMemo(() => listedChoices(config, runtime), [config, runtime]);
   // What can run now: a provided model used up for today is listed, not offered.
-  const offered = useMemo(
-    () => listed.filter((option) => !isUsedUp(config, option)),
-    [config, listed],
-  );
+  // Worked out on every draw, as the picker's own options are: it depends on
+  // the clock, and a list kept from before the day's count started over would
+  // hold Run for a model the picker shows as back.
+  useAllowanceReset(config);
+  const offered = listed.filter((option) => !isUsedUp(config, option));
   let choice = NO_MODEL;
   let unavailable: ModelChoice | null = null;
   for (const candidate of [chosen, resolved]) {
