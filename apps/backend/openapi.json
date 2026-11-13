@@ -17716,7 +17716,7 @@
             "items": {
               "type": "string"
             },
-            "maxItems": 32,
+            "maxItems": 64,
             "title": "Models",
             "type": "array"
           },
@@ -17760,7 +17760,7 @@
             "type": "boolean"
           },
           "max_models": {
-            "default": 8,
+            "default": 16,
             "title": "Max Models",
             "type": "integer"
           }
@@ -17864,7 +17864,7 @@
                 "items": {
                   "type": "string"
                 },
-                "maxItems": 32,
+                "maxItems": 64,
                 "type": "array"
               },
               {

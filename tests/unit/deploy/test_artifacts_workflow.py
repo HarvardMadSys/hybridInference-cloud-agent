@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 import yaml
-from deploy.release import build_host_bundle, release_manifest as rm, smoke
+from deploy.release import artifact_compose, build_host_bundle, release_manifest as rm, smoke
 from scripts.ci_image_matrix import image_matrix
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -33,6 +33,7 @@ CI = REPO_ROOT / ".github/workflows/ci.yml"
 CONSOLE_DOCKERFILE = REPO_ROOT / "deploy/control-plane/Dockerfile"
 RUNNER_DOCKERFILE = REPO_ROOT / "deploy/host/Dockerfile.agent-runner"
 HOST_STACK = REPO_ROOT / "deploy/host/docker-compose.sandbox.yml"
+CONTROL_PLANE_STACK = REPO_ROOT / "deploy/control-plane/docker-compose.yml"
 WEB_DOCKERFILE = REPO_ROOT / "deploy/control-plane/Dockerfile.web"
 
 
@@ -609,9 +610,15 @@ def test_a_rerun_of_a_released_commit_is_not_compared_with_its_own_release(
 
 
 def test_real_upload_limits_are_checked_by_compose_ci() -> None:
-    """Static caps also need a real nginx syntax/path/body-limit regression."""
+    """Static caps also need a real nginx syntax/path/body-limit regression.
+
+    On the nginx the edge runs, pinned: a floating tag would check the configs
+    against whatever that tag pointed to on the day of the run.
+    """
     check = step("Upload limits match encoded attachments", job="compose")
-    assert check["env"]["AGENT_UPLOAD_TEST_NGINX_IMAGE"] == "nginx:1.27.5-alpine"
+    edge = yaml.safe_load(CONTROL_PLANE_STACK.read_text())["services"]["edge"]["image"]
+    assert artifact_compose.is_pinned(edge), edge
+    assert check["env"]["AGENT_UPLOAD_TEST_NGINX_IMAGE"] == edge
     assert "docker --host=unix:///var/run/docker.sock pull" in check["run"]
     assert "pytest -q -m external tests/external/test_upload_edge_limits.py" in check["run"]
 

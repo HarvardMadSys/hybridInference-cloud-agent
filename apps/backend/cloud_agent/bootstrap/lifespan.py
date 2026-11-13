@@ -64,6 +64,15 @@ DATABASE_SESSION_SETTINGS = {"jit": "off"}
 
 #: The connections the control plane holds open to its database: asyncpg's own
 #: default, written down so that changing it is a decision.
+#:
+#: It is the floor as well as the ceiling. Since asyncpg 0.32 the pool reopens,
+#: in the background, any connection that closes under it -- all of them, after
+#: a database restart -- and a connection the server ends while it sits idle
+#: gives its slot back. Before 0.32 a statement that met such a connection kept
+#: its slot taken for good (MagicStack/asyncpg#1324), so every restart could
+#: leave the pool smaller, until it had nothing left to hand out. There is no
+#: ping on acquire: a connection asyncpg has seen close is replaced anyway, and
+#: a ping is the round trip per repository call that `_release_as_is` saves.
 DATABASE_POOL_SIZE = 10
 
 
@@ -152,6 +161,7 @@ _SHUTDOWN_TASK_ATTRS: tuple[str, ...] = (
     "compute_resource_task",
     "account_access_task",
     "account_broadcast_task",
+    "account_provisioning_task",
     "notification_listener_task",
 )
 

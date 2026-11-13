@@ -329,7 +329,7 @@ async def test_a_verified_create_stores_its_facts_and_only_the_keys_ciphertext(p
     assert listed.headers["Cache-Control"] == "no-store"
     assert listed.json()["configured"] is True
     assert listed.json()["checks_per_hour"] == check.CHECKS_PER_HOUR
-    assert listed.json()["max_models"] == 8
+    assert listed.json()["max_models"] == 16
     assert _KEY not in listed.text
 
 
@@ -433,7 +433,7 @@ async def test_a_taken_name_or_too_many_models_is_refused_before_any_check(provi
     provider.calls.clear()
     async with await _client(_settings_app(store)) as client:
         taken = await client.post(PATH, json={**_CREATE, "name": "MY PROVIDER"})
-        many = await client.post(PATH, json={**_CREATE, "models": [f"m{i}" for i in range(9)]})
+        many = await client.post(PATH, json={**_CREATE, "models": [f"m{i}" for i in range(17)]})
     assert taken.status_code == 409 and many.status_code == 422
     assert provider.calls == []
 

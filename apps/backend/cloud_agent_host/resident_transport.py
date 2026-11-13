@@ -12,7 +12,7 @@ import contextlib
 import hashlib
 import json
 import secrets
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
@@ -35,6 +35,7 @@ from cloud_agent_host.drivers import (
     TurnInput,
     TurnResult,
 )
+from cloud_agent_host.github_relay_env import relay_configured
 from cloud_agent_host.launch.environment import EnvironmentFacet
 from cloud_agent_host.launch.facet import PrepareContext
 from cloud_agent_host.launch.facets import PREPARE_ORDER, facet_differences, launch_facets
@@ -585,11 +586,17 @@ class ResidentTransportFactory:
         )
         base_env.update(launch.facet(InferenceFacet).env())
         # Only the residency's GitHub relay placeholder may authenticate gh and
-        # git. Do not fall back to a credential inherited from a custom host
-        # backend.
+        # git, and only when this host sends github.com to the relay. Without
+        # that, GitHub itself rejects the placeholder, including a public
+        # repository that would have been reachable with no credential. Do not
+        # fall back to a token inherited from a custom host backend. The
+        # owner's author identity still applies.
         base_env.pop("GH_TOKEN", None)
         base_env.pop("GITHUB_TOKEN", None)
-        base_env.update(launch.facet(GitHubRelayFacet).env())
+        github = launch.facet(GitHubRelayFacet)
+        if github.credential and not relay_configured():
+            github = replace(github, credential="")
+        base_env.update(github.env())
         if launch.runtime_version:
             base_env["PATH"] = (
                 f"{runtime_bin_dir(runtime_id, launch.runtime_version)}:{base_env['PATH']}"

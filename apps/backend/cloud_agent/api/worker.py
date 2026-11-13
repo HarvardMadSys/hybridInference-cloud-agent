@@ -30,6 +30,7 @@ from cloud_agent.api._body_limits import (
     payload_too_large,
     read_bounded_body,
 )
+from cloud_agent.api._database_unavailable import RETRY_AFTER_SECONDS
 from cloud_agent.api._sensitive_routes import no_store, no_store_exception
 from cloud_agent.api._workspace_access import _workspace_id, _workspace_not_ready
 from cloud_agent.api.deps import (
@@ -446,6 +447,9 @@ async def worker_claim(
             if released
             else "This job's claim could not be prepared or returned to the "
             "queue; its lease decides what happens next.",
+            # A database restart can fail a store read here too: the same retry
+            # hint as every other answer a restart gets.
+            **{"Retry-After": str(RETRY_AFTER_SECONDS)},
         ) from exc
     if isinstance(outcome, ClaimRefusal):
         # The refusal has already released or ended its claim.

@@ -13,7 +13,11 @@ authors = [{ name = "HarvardMadSys" }]
 dependencies = [
     # 1.16 is the first release that reads `[tool.alembic]` below.
     "alembic>=1.16.0",
-    "asyncpg>=0.30.0",
+    # 0.32 is the first release whose pool outlives a database restart: a
+    # connection the server ended while it sat idle gives its slot back
+    # instead of holding it forever, and the pool reopens closed connections
+    # in the background (`create_database_pool`).
+    "asyncpg>=0.32.0",
     "boto3>=1.40.0",
     # Alembic's driver, and a runtime dependency because a deploy runs
     # migrations. The service itself talks asyncpg; alembic goes through

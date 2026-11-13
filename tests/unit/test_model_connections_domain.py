@@ -75,9 +75,9 @@ def test_names_and_models_are_normalized_and_bounded():
         "gpt-4.1",
         "openai/gpt-4.1",
     ]
-    assert len(clean_models([f"m{i}" for i in range(8)])) == 8
-    # Eight at most: a new key or Base URL re-verifies every model in one save.
-    for bad in ([], ["bad model"], ["x" * 201], [f"m{i}" for i in range(9)]):
+    assert len(clean_models([f"m{i}" for i in range(16)])) == 16
+    # Sixteen at most: a new key or Base URL re-verifies every model in one save.
+    for bad in ([], ["bad model"], ["x" * 201], [f"m{i}" for i in range(17)]):
         with pytest.raises(ModelConnectionInvalid):
             clean_models(bad)
 

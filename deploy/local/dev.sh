@@ -116,8 +116,10 @@ local_default_dns_server() {
   # is by construction one a container can reach: Colima's VM forwarder,
   # Docker Desktop's, or a Linux host's upstream behind systemd-resolved. A
   # loopback or IPv6 answer is not one a sandbox can use, and no answer at all
-  # falls back to a public resolver.
-  detected=$(docker run --rm --network bridge --entrypoint awk postgres:16-alpine \
+  # falls back to a public resolver. The image is the stack's own pinned
+  # Postgres, which this stack pulls anyway.
+  detected=$(docker run --rm --network bridge --entrypoint awk \
+    postgres:16.16-alpine@sha256:0adbf25a9e96d38823bb813f3ac0ed41fadb665c88f1df7fe6dbfb060cbdc106 \
     '/^nameserver [0-9]+[.][0-9]+[.][0-9]+[.][0-9]+$/ && $2 !~ /^127[.]/ { print $2; exit }' \
     /etc/resolv.conf 2>/dev/null) || detected=
   printf '%s\n' "${detected:-1.1.1.1}"

@@ -664,14 +664,32 @@ jobs:
               # with fsync on, 10ms with it off, across 329 tests. The
               # container is deleted with the job; there is nothing to lose.
               await conn.execute("ALTER SYSTEM SET fsync = off")
+              # What a hung test leaves behind. pytest-timeout reports where the
+              # test was waiting, not what the server was doing, and this
+              # container's log, printed when the job ends, is the only record
+              # of the server's side. A lock wait longer than deadlock_timeout
+              # (1s) is logged with the sessions holding the lock, and a
+              # statement slower than 5s with its duration. Bind parameters are
+              # left out: some tests bind megabytes.
+              await conn.execute("ALTER SYSTEM SET log_lock_waits = on")
+              await conn.execute("ALTER SYSTEM SET log_min_duration_statement = '5s'")
+              await conn.execute("ALTER SYSTEM SET log_parameter_max_length = 0")
               await conn.execute("SELECT pg_reload_conf()")
               # The reload is asynchronous. Confirm it landed before pytest
-              # opens its own connections, or the saving disappears silently.
+              # opens its own connections, or the settings disappear silently.
+              wanted = {
+                  "fsync": "off",
+                  "log_lock_waits": "on",
+                  "log_min_duration_statement": "5s",
+                  "log_parameter_max_length": "0",
+              }
               for _ in range(50):
-                  if await conn.fetchval("SHOW fsync") == "off":
+                  shown = {name: await conn.fetchval(f"SHOW {name}") for name in wanted}
+                  if shown == wanted:
                       break
                   await asyncio.sleep(0.1)
-              print("fsync:", await conn.fetchval("SHOW fsync"))
+              for name, value in shown.items():
+                  print(f"{name}:", value)
               # One database per xdist worker. The fixtures already derive their
               # name from PYTEST_XDIST_WORKER and each runs its own
               # `alembic upgrade head`; the service container creates only the
@@ -1877,7 +1895,8 @@ jobs:
       - name: Upload limits match encoded attachments through nginx
         timeout-minutes: 5
         env:
-          AGENT_UPLOAD_TEST_NGINX_IMAGE: nginx:1.27.5-alpine
+          # The image the edge runs, as deploy/control-plane/docker-compose.yml pins it.
+          AGENT_UPLOAD_TEST_NGINX_IMAGE: nginx:1.27.5-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
         run: |
           set -euo pipefail
           docker --host=unix:///var/run/docker.sock pull "${AGENT_UPLOAD_TEST_NGINX_IMAGE}"

@@ -22,6 +22,16 @@ and loses its `pull_policy`, because a release pulls the image it deploys rather
 than finding it built. A service with no `build` whose image is neither the
 recipe's placeholder nor its builder's is still refused.
 
+Every other service runs a third-party image (Postgres, the edge's nginx,
+pgAdmin), and the release keeps it as the source names it, so the source must
+name it the way the manifest names ours: by digest — the digest of the image's
+multi-architecture index, with the version tag beside it for people. A tag
+alone deploys whatever that tag points to on the day, which is how a database
+once changed minor version in the middle of an unrelated deploy, so a stack
+that names one any other way is refused. Whether the digest really is an index
+carrying both architectures is a registry question, checked when the pin
+changes rather than here.
+
 Comments do not survive the round trip through YAML, which is why the generated
 file is written next to the recipe's own README rather than published as a
 document — the annotated source stays the place to read about a service.
@@ -71,9 +81,22 @@ WEB_VARIANTS = ("root",)
 
 _IMAGE_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$")
 
+#: A third-party image as a stack must name it: `name:version@sha256:<index digest>`.
+#: The name may carry a registry and port. The tag must start with a dotted
+#: version (16.16-alpine, 1.27.5-alpine, 9.18), so the digest is labelled with
+#: the release it is; a floating tag such as 16-alpine or latest is refused.
+_PINNED_RE = re.compile(
+    r"^[a-z0-9][a-z0-9._/:-]*:[0-9]+(?:\.[0-9]+)+[A-Za-z0-9._-]{0,100}@sha256:[0-9a-f]{64}$"
+)
+
 
 class ComposeError(Exception):
     """Raised when a stack cannot be rendered from this manifest."""
+
+
+def is_pinned(reference: object) -> bool:
+    """Whether a third-party image is named by version tag and digest together."""
+    return isinstance(reference, str) and _PINNED_RE.fullmatch(reference) is not None
 
 
 def image_placeholder(role: str) -> str:
@@ -177,7 +200,26 @@ def render(
             f"these services still carry `build`, so the release recipe would depend on "
             f"source: {leftovers}. Add them to STACKS under the role that supplies them."
         )
+
+    unpinned = unpinned_third_party_images(rendered, stack)
+    if unpinned:
+        raise ComposeError(
+            f"a third-party image must be named by its version tag and the digest of its "
+            f"multi-architecture index, `name:tag@sha256:<digest>`; a tag alone deploys "
+            f"whatever it points to on the day: {unpinned}"
+        )
     return rendered
+
+
+def unpinned_third_party_images(document: Mapping[str, Any], stack: str) -> list[str]:
+    """Each service no release role supplies whose image is not pinned, and what it names."""
+    owned = {name for names in STACKS[stack].values() for name in names}
+    unpinned = []
+    for name, service in sorted((document.get("services") or {}).items()):
+        image = service.get("image") if isinstance(service, dict) else None
+        if name not in owned and not is_pinned(image):
+            unpinned.append(f"{name} runs {image!r}")
+    return unpinned
 
 
 def _built_images(services: Mapping[str, Any], role: str, names: Sequence[str]) -> set[str]:

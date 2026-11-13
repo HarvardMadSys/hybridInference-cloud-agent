@@ -9,7 +9,7 @@ this page. The deployment order itself, and how to roll back, are in
 ## Before starting this release
 
 Before starting this release, run `alembic upgrade head` through
-`0116_operator_model_connections`. The supported deployment scripts run migrations
+`0118_operator_model_connections`. The supported deployment scripts run migrations
 before replacing the API; every migration listed here is additive and safe
 under the running previous release unless it says otherwise. The few
 transitions that need stopped writers are listed in
@@ -71,7 +71,7 @@ with no setup, within a daily request allowance per model
 connections work as before, and nothing changes for a deployment that adds no
 provided connection.
 
-`0116_operator_model_connections` only adds tables. The feature needs two new
+`0118_operator_model_connections` only adds tables. The feature needs two new
 services, both behind the `model-relay` Compose profile: `model-relay` on the
 control plane and `model-tunnel` on each host, with
 `AGENT_SANDBOX_MODEL_RELAY_URL` set there. Roll hosts first, as usual. A host
@@ -106,6 +106,32 @@ such a deployment:
    for example `ALTER DATABASE cloudagent RENAME TO cloudagent_archive`, run
    from another database with no session connected to the archive. Its
    contents do not change; record the new name with its dump and keys.
+
+## Postgres and the edge run pinned images
+
+The control plane's Compose file now names the bundled `postgres` service's
+image and the optional `edge`'s by version tag and multi-architecture index
+digest, as it already named pgAdmin's:
+`postgres:16.16-alpine@sha256:0adbf25a…` and
+`nginx:1.27.5-alpine@sha256:65645c7b…`. They were named by tag alone
+(`postgres:16-alpine`, `nginx:1.27.5-alpine`), so a deployment ran whatever its
+machine's copy of the tag pointed to, and an artifact deployment pulls every
+image again on each deploy: a new upstream build could restart Postgres on
+another minor version during an unrelated deploy. A new Postgres or nginx now
+comes only with a release that changes the pin, and this page says when one
+does.
+
+The first deploy of this release recreates `postgres`, and `edge` where its
+profile is enabled, once, because the image they name changed. Postgres is
+unavailable for the few seconds its restart takes, as at any deploy that
+changes its configuration. A deployment already on PostgreSQL 16.16 keeps that
+version. Check before deploying with `docker exec
+"${COMPOSE_PROJECT:?}-postgres-1" postgres --version`: a deployment on an
+earlier 16.x moves to 16.16 in that restart, and one that has already pulled a
+later 16.x moves back to it. A minor release keeps the data directory's
+format, so neither needs a dump or restore, but read the PostgreSQL release
+notes between the two versions for any step they ask for. The edge stays on
+nginx 1.27.5, and pgAdmin's pin is unchanged.
 
 ## The audit log names who acted on whom
 
@@ -355,7 +381,9 @@ Newest first.
 
 | Migration | What it changes |
 |---|---|
-| `0116_operator_model_connections` | Adds the models a deployment provides: `agent_operator_model_connections` (endpoint, encrypted key, models and their verification), `agent_operator_model_limits` (each model's default daily request allowance and concurrency cap), `agent_operator_model_user_limits` (one account's own allowance), `agent_operator_model_usage` (requests the model relay accepted per account, model and UTC day) and `agent_operator_connection_residencies` (which revision a member's process started on). Only new tables; a turn names a provided connection in the existing `model_connection_id` columns. The previous release runs beside it. A downgrade refuses while any provided connection exists or any turn or waiting message names one ([A deployment can provide models](#a-deployment-can-provide-models)). |
+| `0118_operator_model_connections` | Adds the models a deployment provides: `agent_operator_model_connections` (endpoint, encrypted key, models and their verification), `agent_operator_model_limits` (each model's default daily request allowance and concurrency cap), `agent_operator_model_user_limits` (one account's own allowance), `agent_operator_model_usage` (requests the model relay accepted per account, model and UTC day) and `agent_operator_connection_residencies` (which revision a member's process started on). Only new tables; a turn names a provided connection in the existing `model_connection_id` columns. The previous release runs beside it. A downgrade refuses while any provided connection exists or any turn or waiting message names one ([A deployment can provide models](#a-deployment-can-provide-models)). |
+| `0117_connection_model_limit` | Raises `agent_model_connections_models_check` from eight model ids to sixteen, under the same constraint name and the table lock it takes first. No row is rewritten. The previous release runs beside it: it still refuses a seventeenth id in the application, and the wider check accepts the eight it already stored. A downgrade restores the eight-model check and fails while any connection lists more than eight. |
+| `0116_account_provisioning` | Adds `agent_account_provisioning` (one invitation-lifecycle row per account for the connected inference service) and `agent_account_provisioning_activation` (when provisioning was first enabled, so only later approvals are invited automatically). Nothing reads them before this release, so the previous release runs unchanged beside it. A downgrade drops both tables. |
 | `0115_mcp_retire_dead_locations` | Moves every MCP connection stored at `managed-worker` or `user-connector` to `sandbox`, with its launch, credentials and connector link unchanged; moves its `config_revision` and `authorization_epoch` on by one, as a location edit does; and clears a failing diagnosis (an `error` status becomes `draft`). It then narrows `agent_mcp_connections_location_check` to `remote` and `sandbox`, under the table lock it took first, so no removed value lands in between. No row is deleted. The previous release runs beside it, except that its writes of a removed location are refused. A downgrade restores the four-location constraint; moved rows stay `sandbox` ([MCP servers run in two places](#mcp-servers-run-in-two-places)). |
 | `0114_admin_audit_attribution` | Gives `agent_admin_audit_log` its attribution: `actor_type`, generated from `actor_id`, and `actor_label`, `target_type`, `target_id`, `target_label`, `subject_label`, `outcome`, `reason` and `correlation_id`, backfilled from the rows' own actions and details and the current account names; and two tables, `agent_admin_audit_outcomes` (a requested sandbox deletion's final result) and `agent_admin_audit_write_failures`. It deletes the Servers page's polling reads and connection checks, and turns the sandbox deletion worker's per-step rows into one result per request, deleting those rows; a worker row that names no request is kept. Adding the generated column rewrites the table under a brief lock. The previous release keeps writing and reading the original columns unchanged, and its rows are classified by the generated column. A downgrade drops the columns and the two tables; deleted rows are not restored, and the deletion steps remain in `agent_sandbox_events`. |
 | `0113_sandbox_incidents` | Makes sandbox incidents idempotent and tracks what each chat's agent was told: a unique index on `agent_sandbox_events (sandbox_id, details->>'incident_id')` for `incident.*` rows, and two tables, `agent_thread_incident_cursors` and `agent_attempt_incident_marks`. A trigger on `agent_thread_sandbox_memberships` starts a chat's cursor when it joins or moves sandbox, and every existing membership gets one. The previous release never reads them and no existing row has an `incident.*` type, so it runs unchanged beside it; its membership inserts only start cursors. A downgrade drops the triggers, the tables and the index; incident rows stay. |

@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 import yaml
-from deploy.release import build_recipe as br
+from deploy.release import artifact_compose as ac, build_recipe as br
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -138,6 +138,33 @@ def test_the_extracted_recipe_renders_a_release_compose_without_a_checkout(
         assert rendered["services"]["web"]["image"] == next(
             a["image"] for a in manifest()["artifacts"] if a.get("variant") == "root"
         )
+
+
+@pytest.mark.parametrize(
+    ("stack", "compose", "variant"),
+    [
+        ("control-plane", "deploy/control-plane/docker-compose.yml", "root"),
+        ("host", "deploy/host/docker-compose.sandbox.yml", None),
+    ],
+)
+def test_a_packaged_stack_deploys_every_image_by_digest(
+    stack: str, compose: str, variant: str | None
+) -> None:
+    """The file a release deploys leaves no image to whatever a tag means that day.
+
+    The release's own images come from the manifest; every other image is the
+    recipe's, so the recipe must carry it pinned by version tag and digest.
+    """
+    with tarfile.open(fileobj=io.BytesIO(br.build(REPO_ROOT)), mode="r:gz") as archive:
+        member = archive.extractfile(f"recipe/{compose}")
+        assert member is not None
+        template = yaml.safe_load(member)
+    images = ac.images_from_manifest(manifest(), variant)
+
+    deployed = ac.render(template, stack, images, variant)["services"]
+    for name, service in deployed.items():
+        image = service["image"]
+        assert image in images.values() or ac.is_pinned(image), f"{name} deploys {image!r}"
 
 
 def test_the_extracted_recipe_can_prepare_a_storage_verdict_without_a_checkout(

@@ -33,6 +33,16 @@ RELAY_CA_FILE_ENV = "AGENT_SANDBOX_GITHUB_RELAY_CA_FILE"
 _MAX_CA_BYTES = 64 * 1024
 
 
+def relay_configured() -> bool:
+    """Whether this host sends ``github.com`` to the GitHub relay.
+
+    The same signal the egress rules use: :data:`RELAY_CA_FILE_ENV` is set.
+    A member's placeholder credential authenticates only then. Without it,
+    ``github.com`` is the public host, which refuses that placeholder.
+    """
+    return bool((os.environ.get(RELAY_CA_FILE_ENV) or "").strip())
+
+
 def relay_ca_pem() -> str | None:
     """This deployment's relay CA certificate, or ``None`` with no relay configured."""
     path = (os.environ.get(RELAY_CA_FILE_ENV) or "").strip()
