@@ -590,6 +590,49 @@ def repo_clone_base_url(
     return base.rstrip("/")
 
 
+def _branch_refs_conflict(left: str, right: str) -> bool:
+    """Git stores one branch as a file, so neither name can be a path prefix of the other."""
+    a = left.strip("/")
+    b = right.strip("/")
+    return bool(a) and bool(b) and (a == b or b.startswith(f"{a}/") or a.startswith(f"{b}/"))
+
+
+def pin_base_branch(
+    workdir: str,
+    base_ref: str | None,
+    commit: str,
+    *,
+    output_branch: str | None = None,
+    stop: threading.Event | None = None,
+) -> None:
+    """Point ``base_ref`` at ``commit`` so the sandbox can diff without fetching.
+
+    A name git would refuse is skipped and the checkout continues: the
+    conversation still has its commit. A name that would occupy the workspace
+    branch (``agent/<thread>``, or a directory prefix of it) is skipped for
+    the same reason: git cannot store both. A name git accepts but cannot be
+    updated fails the checkout, rather than leaving a review with no base.
+    """
+    # ``--branch`` takes the name as its next argument, so a leading ``-``
+    # would be parsed as an option. Those names are not branches anyway.
+    # The update-ref argument is ``refs/heads/<name>``, which cannot start
+    # with ``-`` either.
+    if not base_ref or base_ref.startswith("-") or not _COMMIT_SHA.fullmatch(commit):
+        return
+    if output_branch is not None and _branch_refs_conflict(base_ref, output_branch):
+        return
+    checked = _run_git(["check-ref-format", "--branch", base_ref], cwd=workdir, stop=stop)
+    if checked.returncode != 0:
+        return
+    pinned = _run_git(
+        ["update-ref", "--no-deref", f"refs/heads/{base_ref}", commit],
+        cwd=workdir,
+        stop=stop,
+    )
+    if pinned.returncode != 0:
+        raise WorktreeError(f"could not pin base branch {base_ref}: {pinned.stderr.strip()[:200]}")
+
+
 def checkout_output_branch(
     workdir: str, branch_id: str, *, stop: threading.Event | None = None
 ) -> str:
@@ -707,16 +750,32 @@ class GitSourcePrefetch(SourcePrefetch):
         if self._job.repo is None:
             # Nothing to clone and nothing to publish, so no output branch.
             return prepare_temporary_worktree(workdir=workdir, stop=stop)
+        # Depth 2 keeps the parent, so ``git show`` is this commit's diff
+        # rather than the whole tree. The base branch is pinned afterwards:
+        # the fetch records no remote-tracking branch, and the only local
+        # branch the checkout then creates is ``agent/<thread>``.
         base_sha = prepare_worktree(
             workdir=workdir,
             repo=self._job.repo,
             base_sha=self._job.base_sha,
             clone_token=self._job.clone_token,
             remote_base=repo_clone_base_url(clone_token=self._job.clone_token),
+            depth=2,
             max_bytes=self._max_bytes,
             stop=stop,
         )
         check_source_stop(stop)
+        # Without a claim sha the fetch is the repository default, so the
+        # requested name would point at the wrong commit. A name git cannot
+        # store beside ``agent/<thread>`` is left unpinned inside pin_base_branch.
+        if self._job.base_sha:
+            pin_base_branch(
+                workdir,
+                self._job.base_ref,
+                base_sha,
+                output_branch=branch_name_for(self._job.thread_id),
+                stop=stop,
+            )
         checkout_output_branch(workdir, self._job.thread_id, stop=stop)
         return base_sha
 

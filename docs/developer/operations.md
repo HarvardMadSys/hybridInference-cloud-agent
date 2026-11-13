@@ -1646,7 +1646,11 @@ needs the App.
 Without the App and the relay, agents cannot push or open pull requests: jobs
 still run, and their changes stay in the retained workspace, where the owner
 can read them in the Git pane or download them as an archive. There is no
-static-token fallback; `AGENT_GITHUB_TOKEN` is no longer read.
+static-token fallback; `AGENT_GITHUB_TOKEN` is no longer read. A host with no
+relay also withholds the placeholder from the sandbox, so `git` and `gh` do
+not present a token GitHub would reject. The workspace is a shallow checkout
+of the pinned commit and its parent, and the conversation's base branch is a
+local branch at that commit, so a review can diff without fetching.
 
 ## Running self-hosted
 

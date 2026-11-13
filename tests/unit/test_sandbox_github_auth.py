@@ -21,6 +21,12 @@ from cloud_agent_host.resident_transport import ResidentLaunch, ResidentTranspor
 _PLACEHOLDER = "agh.payload.signature"
 
 
+@pytest.fixture(autouse=True)
+def _relay_configured(monkeypatch):
+    """These tests are the relay-on path, unless one turns the relay off."""
+    monkeypatch.setenv("AGENT_SANDBOX_GITHUB_RELAY_CA_FILE", "/ca.pem")
+
+
 def _context(runtime_id="claude-code", **changes):
     calls = []
     inherited = {"GH_TOKEN": "host-account-token", "GITHUB_TOKEN": "host-other-token"}
@@ -83,6 +89,23 @@ def test_github_authentication_is_in_the_members_process_environment(runtime_id)
     assert calls[0]["env"]["GIT_AUTHOR_NAME"] == "octo"
     assert calls[0]["env"]["GIT_COMMITTER_EMAIL"] == "7+octo@users.noreply.github.com"
     assert calls[0]["env"]["FREEINFERENCE_GIT_COAUTHOR"].startswith("FreeInference <")
+
+
+def test_without_a_relay_the_placeholder_is_not_presented_to_github(monkeypatch):
+    """A placeholder sent to the public github.com is rejected, so it is withheld."""
+    monkeypatch.delenv("AGENT_SANDBOX_GITHUB_RELAY_CA_FILE", raising=False)
+    context, calls, _ = _context()
+    context.spawn_live(["claude", "-p"], context.base_env)
+
+    env = calls[0]["env"]
+    assert "GH_TOKEN" not in env
+    assert "GITHUB_TOKEN" not in env
+    assert env["GIT_AUTHOR_NAME"] == "octo"
+    assert env["GIT_CONFIG_COUNT"] == "1"
+    text = calls[0]["argv"][-1]
+    assert "GitHub credentials are not available in this environment" in text
+    assert "`git branch` lists it" in text
+    assert "gh api repos/owner/repo/pulls" not in text
 
 
 def test_a_sibling_or_credentialless_launch_never_reuses_a_hosts_or_peers_token():
