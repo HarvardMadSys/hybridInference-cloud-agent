@@ -4235,7 +4235,7 @@ and the owner SSH servers entry in [AGENTS.md](../../AGENTS.md) §7.
 
 An owner adds their own inference endpoint under **Settings → My settings →
 Personal model connections** (`/settings/my-settings`): a name, a Base URL,
-an API key and up to eight model ids. **Verify and save** verifies every model
+an API key and up to sixteen model ids. **Verify and save** verifies every model
 before anything is stored, and Cloud Agent works out which APIs each model
 serves. The models then appear in the composer, for the agents that can use
 them; they are the only models anything runs on. A turn runs on the owner's
@@ -4326,8 +4326,8 @@ and the owner model connections entry in [AGENTS.md](../../AGENTS.md) §7.
   save answers `409 model_connection_changed`. A rename, removing models,
   enabling or disabling makes no provider call. The request carries the
   normalized endpoint, key and models it commits, so nothing a client sends
-  can stand in for a verification. At most eight models per connection keep
-  one save to at most 48 provider requests and two waves of four models.
+  can stand in for a verification. At most sixteen models per connection keep
+  one save to at most 96 provider requests and four waves of four models.
   Verification has a 240-second overall deadline; exceeding it answers
   `504 model_connection_verification_timeout` without writing anything. The
   deployment edge permits this duration; any additional proxy must permit it
