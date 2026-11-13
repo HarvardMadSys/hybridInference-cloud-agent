@@ -9,7 +9,7 @@ this page. The deployment order itself, and how to roll back, are in
 ## Before starting this release
 
 Before starting this release, run `alembic upgrade head` through
-`0116_account_provisioning`. The supported deployment scripts run migrations
+`0117_connection_model_limit`. The supported deployment scripts run migrations
 before replacing the API; every migration listed here is additive and safe
 under the running previous release unless it says otherwise. The few
 transitions that need stopped writers are listed in
@@ -360,6 +360,7 @@ Newest first.
 
 | Migration | What it changes |
 |---|---|
+| `0117_connection_model_limit` | Raises `agent_model_connections_models_check` from eight model ids to sixteen, under the same constraint name and the table lock it takes first. No row is rewritten. The previous release runs beside it: it still refuses a seventeenth id in the application, and the wider check accepts the eight it already stored. A downgrade restores the eight-model check and fails while any connection lists more than eight. |
 | `0116_account_provisioning` | Adds `agent_account_provisioning` (one invitation-lifecycle row per account for the connected inference service) and `agent_account_provisioning_activation` (when provisioning was first enabled, so only later approvals are invited automatically). Nothing reads them before this release, so the previous release runs unchanged beside it. A downgrade drops both tables. |
 | `0115_mcp_retire_dead_locations` | Moves every MCP connection stored at `managed-worker` or `user-connector` to `sandbox`, with its launch, credentials and connector link unchanged; moves its `config_revision` and `authorization_epoch` on by one, as a location edit does; and clears a failing diagnosis (an `error` status becomes `draft`). It then narrows `agent_mcp_connections_location_check` to `remote` and `sandbox`, under the table lock it took first, so no removed value lands in between. No row is deleted. The previous release runs beside it, except that its writes of a removed location are refused. A downgrade restores the four-location constraint; moved rows stay `sandbox` ([MCP servers run in two places](#mcp-servers-run-in-two-places)). |
 | `0114_admin_audit_attribution` | Gives `agent_admin_audit_log` its attribution: `actor_type`, generated from `actor_id`, and `actor_label`, `target_type`, `target_id`, `target_label`, `subject_label`, `outcome`, `reason` and `correlation_id`, backfilled from the rows' own actions and details and the current account names; and two tables, `agent_admin_audit_outcomes` (a requested sandbox deletion's final result) and `agent_admin_audit_write_failures`. It deletes the Servers page's polling reads and connection checks, and turns the sandbox deletion worker's per-step rows into one result per request, deleting those rows; a worker row that names no request is kept. Adding the generated column rewrites the table under a brief lock. The previous release keeps writing and reading the original columns unchanged, and its rows are classified by the generated column. A downgrade drops the columns and the two tables; deleted rows are not restored, and the deletion steps remain in `agent_sandbox_events`. |

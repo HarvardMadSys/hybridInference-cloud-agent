@@ -1,7 +1,7 @@
 """Owner routes for their own model connections.
 
 A connection is the owner's own inference endpoint: a name, a Base URL, an
-API key and up to eight model ids. Which APIs each model is reached on is
+API key and up to sixteen model ids. Which APIs each model is reached on is
 found by verifying it, and verification happens before anything is saved:
 creating a connection, and an edit that changes its key or Base URL or adds
 models, verifies the models it would list inside the same request and writes

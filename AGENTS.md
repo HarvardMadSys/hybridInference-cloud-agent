@@ -326,7 +326,7 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   reads back. See the
   [SSH server design](docs/agents/specs/2026-10-15-user-ssh-servers-design.zh-CN.md).
 - **Owner model connections (2026-10-27).** An owner may add their own
-  inference endpoint (Base URL, API key, up to eight model ids) and run
+  inference endpoint (Base URL, API key, up to sixteen model ids) and run
   their own tasks on it; it is the only way anything runs, and they pay the
   provider. It is
   private to them: never shared with a team, never reachable through another

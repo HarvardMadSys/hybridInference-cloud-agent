@@ -39,7 +39,7 @@ vi.mock('@/lib/api/skills', () => ({ listSkills: vi.fn() }));
 vi.mock('@/lib/api/userProfile', () => ({ getUserProfile: vi.fn(), saveUserProfile: vi.fn() }));
 // The Models page lists personal model connections; this deployment offers none.
 vi.mock('@/lib/api/modelConnections', () => ({
-  MAX_MODELS: 8,
+  MAX_MODELS: 16,
   listModelConnections: () =>
     Promise.resolve({ configured: true, enabled: false, connections: [] }),
 }));

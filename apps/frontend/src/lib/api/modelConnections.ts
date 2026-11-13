@@ -89,7 +89,7 @@ export interface ModelConnectionList {
 }
 
 /** The server's per-connection limit, when an older answer does not say. */
-export const MAX_MODELS = 8;
+export const MAX_MODELS = 16;
 
 /** A save refused because a model could not be verified: nothing was stored. */
 export const VERIFICATION_FAILED = 'model_connection_verification_failed';
