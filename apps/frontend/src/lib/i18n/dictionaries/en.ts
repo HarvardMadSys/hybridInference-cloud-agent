@@ -536,8 +536,7 @@ export const en = {
   'settings.expandNavigation': 'Expand settings navigation',
   'settings.personalDescription': 'Manage your profile and notifications.',
   'settings.models.title': 'Models',
-  'settings.models.description':
-    'Your personal model connections: the provider API keys and models your tasks run on.',
+  'settings.models.description': 'The models your tasks can run on.',
   'settings.plugins': 'Plugins & MCPs',
   'settings.pluginsDescription':
     'Connect MCP servers and manage the skills available to your agents.',

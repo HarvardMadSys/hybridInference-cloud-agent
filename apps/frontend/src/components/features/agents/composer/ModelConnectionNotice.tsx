@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useT } from '@/components/providers';
 import type { AgentConfigApi } from '@/lib/api/agents';
-import { SETTINGS_PATHS } from '@/components/features/settings/navigation';
+import { MODEL_CONNECTIONS_HREF } from '@/components/features/settings/navigation';
 import { leadingProvidedSource, modelSetupRequired } from './providedModels';
 
 /**
@@ -31,7 +31,7 @@ export function ModelConnectionNotice({ config }: { config: AgentConfigApi | nul
       <p className="text-sm leading-6 text-muted">{description}</p>
       {enabled ? (
         <Link
-          href={SETTINGS_PATHS.models}
+          href={MODEL_CONNECTIONS_HREF}
           className="ui-button ui-button-secondary inline-flex min-h-11 max-w-full items-center whitespace-normal"
         >
           {t('modelSource.setupAction')}

@@ -29,7 +29,7 @@ describe('ModelConnectionNotice', () => {
     expect(screen.getByRole('status')).toHaveTextContent('Connect your model to start a task');
     expect(screen.getByRole('link', { name: 'Set up a model connection' })).toHaveAttribute(
       'href',
-      '/settings/models',
+      '/settings/models#settings-connections',
     );
   });
 

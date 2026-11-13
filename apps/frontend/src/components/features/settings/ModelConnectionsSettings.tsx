@@ -11,9 +11,28 @@ import {
 import { ModelConnectionCard } from './ModelConnectionCard';
 import { ModelConnectionForm } from './ModelConnectionForm';
 import { ConnectionOps, type Operate, type Settlement } from './connectionOps';
+import { ChevronIcon } from './icons';
+import { MODEL_CONNECTIONS_ANCHOR } from './navigation';
 import { announceModelConnectionsChanged } from '../agents/composer/modelConnectionEvents';
 
-export function ModelConnectionsSettings() {
+/**
+ * Whether the section's body is drawn. A folded section opens from its
+ * heading, and arrives open when the address names it: that is how a link
+ * meaning "set up your own connection" lands on the form's side of the fold.
+ */
+function useFold(folded: boolean) {
+  const [open, setOpen] = useState(!folded);
+  const section = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (window.location.hash !== MODEL_CONNECTIONS_ANCHOR) return;
+    setOpen(true);
+    section.current?.scrollIntoView?.({ block: 'start' });
+  }, []);
+  return { open, toggle: () => setOpen((current) => !current), section };
+}
+
+/** The connections themselves: read when drawn, so a folded section asks for nothing. */
+function Connections() {
   const t = useT();
   const [data, setData] = useState<ModelConnectionList | null>(null);
   const [failed, setFailed] = useState(false);
@@ -81,13 +100,7 @@ export function ModelConnectionsSettings() {
   const available = Boolean(data?.configured && data.enabled);
   const maxModels = data?.max_models ?? MAX_MODELS;
   return (
-    <section
-      aria-labelledby="settings-connections"
-      className="ui-card mt-4 min-w-0 bg-surface p-4 sm:p-5"
-    >
-      <h2 id="settings-connections" className="text-base font-semibold">
-        {t('connections.title')}
-      </h2>
+    <>
       <p className="mt-1.5 max-w-2xl text-sm leading-6 text-muted">
         {t('connections.description')}
       </p>
@@ -154,6 +167,46 @@ export function ModelConnectionsSettings() {
           />
         ))}
       </div>
+    </>
+  );
+}
+
+/**
+ * The owner's own connections. `folded` is for a deployment that provides
+ * models: the section then starts as its heading alone.
+ */
+export function ModelConnectionsSettings({ folded = false }: { folded?: boolean }) {
+  const t = useT();
+  const { open, toggle, section } = useFold(folded);
+  return (
+    <section
+      ref={section}
+      aria-labelledby="settings-connections"
+      className="ui-card mt-4 min-w-0 scroll-mt-4 bg-surface p-4 sm:p-5"
+    >
+      <h2 id="settings-connections" className="text-base font-semibold">
+        {folded ? (
+          <button
+            type="button"
+            aria-expanded={open}
+            onClick={toggle}
+            className="ui-focus-ring -mx-2 -my-1.5 flex min-h-11 w-[calc(100%+1rem)] items-center gap-2 rounded-lg px-2 text-left hover:bg-surface-hover"
+          >
+            <ChevronIcon
+              className={`h-4 w-4 shrink-0 text-muted transition-transform ${open ? 'rotate-90' : ''}`}
+            />
+            {t('connections.title')}
+          </button>
+        ) : (
+          t('connections.title')
+        )}
+      </h2>
+      {open ? (
+        // Folded, the heading is a button that reaches past its own line.
+        <div className={folded ? 'pt-2' : undefined}>
+          <Connections />
+        </div>
+      ) : null}
     </section>
   );
 }

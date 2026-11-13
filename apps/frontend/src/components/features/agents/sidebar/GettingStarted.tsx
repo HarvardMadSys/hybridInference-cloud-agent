@@ -5,7 +5,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 
 import { useT } from '@/components/providers';
-import { SETTINGS_PATHS } from '@/components/features/settings/navigation';
+import { MODEL_CONNECTIONS_HREF } from '@/components/features/settings/navigation';
 
 import { NEW_TASK_PROMPT_ID, useFirstRun, type FirstRunStep } from '../firstRun';
 import { githubAccessUrl, leaveFor } from '../githubAccess';
@@ -250,7 +250,7 @@ export function GettingStarted() {
         ))}
       </div>
       {step.next === 'model' ? (
-        <Link href={SETTINGS_PATHS.models} className={ROW}>
+        <Link href={MODEL_CONNECTIONS_HREF} className={ROW}>
           {content}
         </Link>
       ) : step.next === 'task' ? (

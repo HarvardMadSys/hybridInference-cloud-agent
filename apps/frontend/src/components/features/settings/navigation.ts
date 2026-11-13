@@ -16,6 +16,12 @@ export const SETTINGS_PATHS = {
 /** Model connections lived in My Settings under this anchor before they had a page. */
 export const MODEL_CONNECTIONS_ANCHOR = '#settings-connections';
 
+/**
+ * Where a link that means "set up your own connection" goes. The anchor opens
+ * the section, which is folded where the deployment provides models.
+ */
+export const MODEL_CONNECTIONS_HREF = `${SETTINGS_PATHS.models}${MODEL_CONNECTIONS_ANCHOR}`;
+
 export function isSettingsPath(pathname: string): boolean {
   return (
     pathname === '/settings' || pathname.startsWith('/settings/') || pathname === '/integrations'

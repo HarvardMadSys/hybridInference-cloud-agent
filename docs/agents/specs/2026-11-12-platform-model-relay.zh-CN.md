@@ -277,7 +277,7 @@ RETURNING requests;
 
 ### 5.4 用户和管理员看到什么
 
-- **用户**：模型选择器里，平台模型显示今天还剩多少次；用完的模型不可选，并写明重置时间。Settings → Models 里有一张“由本部署提供”的卡片，列出每个模型的上限和今天的用量，没有可编辑的内容。
+- **用户**：模型选择器里，平台模型显示今天还剩多少次；用完的模型不可选，并写明重置时间。Settings → Models 最上面是一个没有标题的列表，只列模型名字，不说这些模型从哪来，没有可编辑的内容；上限和用量不在这里重复。部署提供了模型时，用户自己的模型连接折叠在列表下面，点标题展开，从“去设置连接”的链接进来时直接展开；部署没有提供模型时，页面和以前一样只有模型连接，不折叠。
 - **管理员**：平台连接的页面上设每个模型的默认值和并发；账号详情里设这个用户的单独上限；用量页多一张“平台模型”的表，按用户和模型列出每天的请求次数。这些次数是中继在 sandbox 之外数的，是准确的；token 仍然是 agent 自己报的数（`runtime_reported`）。
 
 ### 5.5 不做金额和 token
@@ -418,7 +418,7 @@ limits:
 
 **数据库**（`make test-db-local`）：迁移升级和降级拒绝；并发请求下计数不超过上限；绑定和失效的两种先后顺序；账号擦除后这个用户的上限和用量行都不在了；`scripts/check_rolling_upgrade.py` 通过。
 
-**前端**（`make ci-frontend`）：模型选择器的分组、剩余次数、用完后的状态；Settings 的只读卡片；管理页的默认值、单独上限和用量表；文案里没有写死的供应商名字。
+**前端**（`make ci-frontend`）：模型选择器的分组、剩余次数、用完后的状态；Settings 的只读列表和模型连接的折叠；管理页的默认值、单独上限和用量表；文案里没有写死的供应商名字。
 
 **端到端**（Playwright，沿用 `e2e/service.mjs` 的接口夹具）：新用户登录后不做任何设置就能开始任务；次数用完后新任务被拒绝并显示重置时间；管理员给他加次数后可以继续。
 
@@ -439,7 +439,7 @@ limits:
 - 控制面：迁移 `0116`；平台连接的解析、claim 和 residency（`application/model_connections.py`）；模型中继和它的 listener（`api/model_relay.py`、`create_model_relay_app`）；管理接口和审计（`api/admin_operator_models.py`）；`/v1/agent/config` 的 `provided_sources`；用量应答的 `source`。
 - 宿主机：`model-relay-v1` 能力；`relayed` 的启动把地址换成本机的模型中继；成员的 loopback 服务只在启动标明上游是模型中继时接受明文 HTTP。
 - 部署：控制面的 `model-relay` 服务和宿主机的 `model-tunnel`，都在 `model-relay` profile 后面。
-- 界面：模型选择器分组和剩余次数，Settings 的只读卡片，Admin → Settings → Models。
+- 界面：模型选择器分组和剩余次数，Settings 的只读列表和折叠的模型连接，Admin → Settings → Models。
 - 文档：AGENTS.md §2、§6、§7，SECURITY.md，README，ENVIRONMENT.md，运维和升级说明。
 
 和设计不同的地方：
