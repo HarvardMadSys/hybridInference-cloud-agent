@@ -59,7 +59,8 @@ Preserve all of the following privately:
   the `keys` service never replaces a root. Only when the environment's key is
   the one the settings were saved with, delete the stored file first:
   `docker run --rm --entrypoint rm -v "${COMPOSE_PROJECT:?}_agent-keys:/keys"
-  postgres:16-alpine /keys/AGENT_SETTINGS_ENCRYPTION_KEY`. Also keep both deployment roots' `.env`, where they have one,
+  postgres:16.16-alpine@sha256:0adbf25a9e96d38823bb813f3ac0ed41fadb665c88f1df7fe6dbfb060cbdc106 /keys/AGENT_SETTINGS_ENCRYPTION_KEY`,
+  with the Postgres image the deployment pins, so nothing new is pulled. Also keep both deployment roots' `.env`, where they have one,
   and mounted credential files: source-control and compute encryption keys,
   control/session signing secrets, sandbox manager credentials and GitHub App keys.
   Saved settings can hold some of these keys, but they still require the
