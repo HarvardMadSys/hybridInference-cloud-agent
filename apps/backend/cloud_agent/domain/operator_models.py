@@ -40,7 +40,8 @@ END_USER_TAG_CHARS = 24
 DEFAULT_USER_CONCURRENCY = 4
 
 _HEADER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,62}")
-#: Headers the relay writes or strips itself; an owner tag may not be one.
+#: Headers the relay writes, strips or passes on from the client; an owner tag
+#: may not be one.
 _RESERVED_HEADERS = frozenset(
     {
         "authorization",
@@ -51,8 +52,12 @@ _RESERVED_HEADERS = frozenset(
         "connection",
         "transfer-encoding",
         "cookie",
+        "accept",
+        "accept-encoding",
+        "user-agent",
         "anthropic-version",
         "anthropic-beta",
+        "openai-beta",
     }
 )
 

@@ -23,13 +23,23 @@ MAX_CONCURRENCY = 1024
 
 
 class OperatorModelLimit(BaseModel):
-    """The default allowance of one model, and its deployment-wide concurrency cap."""
+    """The default allowance of one model, and its cap on requests in flight across owners."""
 
     #: Requests each owner may send per UTC day; ``None`` is unlimited and
     #: ``0`` offers the model only to owners given an allowance of their own.
     user_daily_requests: int | None = Field(None, ge=0, le=MAX_DAILY_REQUESTS)
-    #: Requests in flight across all owners; ``None`` is unlimited.
-    global_concurrency: int | None = Field(None, ge=1, le=MAX_CONCURRENCY)
+    #: Requests in flight across all owners; ``None`` is unlimited. "Global" is
+    #: across owners, not across processes: see the description.
+    global_concurrency: int | None = Field(
+        None,
+        ge=1,
+        le=MAX_CONCURRENCY,
+        description=(
+            "Requests to this model in flight across all owners. Counted by each "
+            "model relay process on its own requests: a deployment that runs "
+            "several relay processes allows this many in each."
+        ),
+    )
 
 
 class OperatorModelConnectionView(BaseModel):
@@ -44,8 +54,14 @@ class OperatorModelConnectionView(BaseModel):
     enabled: bool = False
     #: The header each relayed request names its owner in, by an opaque tag.
     end_user_header: str | None = None
-    #: Requests one owner may have in flight at once.
-    user_concurrency: int = 4
+    #: Requests one owner may have in flight at once, in each relay process.
+    user_concurrency: int = Field(
+        4,
+        description=(
+            "Requests one owner may have in flight at once. Counted by each model "
+            "relay process on its own requests."
+        ),
+    )
     #: Each model's default allowance; a model absent here has none set yet,
     #: and the connection cannot be enabled until every model has one.
     limits: dict[str, OperatorModelLimit] = Field(default_factory=dict)

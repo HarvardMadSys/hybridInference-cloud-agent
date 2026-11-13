@@ -283,7 +283,7 @@ def _slots_held(slots: model_relay.Slots) -> int:
 
 async def test_a_running_turns_request_goes_out_with_the_deployments_key() -> None:
     store, provider = _Store(), _Provider()
-    response = await _send(store, provider, headers={"X-Stainless-Lang": "js"})
+    response = await _send(store, provider)
 
     assert response.status_code == 200 and response.json() == {"id": "answer"}
     assert response.headers["x-request-id"] == "req_1"
@@ -291,7 +291,6 @@ async def test_a_running_turns_request_goes_out_with_the_deployments_key() -> No
     assert str(sent.url) == "https://provider.example/v1/chat/completions"
     assert sent.headers["authorization"] == f"Bearer {_KEY}"
     assert "x-api-key" not in sent.headers
-    assert sent.headers["x-stainless-lang"] == "js"
     # The body is the CLI's own, byte for byte.
     assert json.loads(provider.bodies[0])["messages"] == [{"role": "user", "content": "hi"}]
     assert store.used == 1 and store.refunds == 0
@@ -314,6 +313,70 @@ async def test_an_anthropic_client_keeps_its_own_way_of_carrying_a_key() -> None
     assert str(sent.url) == "https://provider.example/v1/messages?beta=true"
     assert sent.headers["x-api-key"] == _KEY and "authorization" not in sent.headers
     assert sent.headers["anthropic-version"] == "2023-06-01"
+
+
+async def test_only_the_headers_an_agent_needs_seen_go_on_to_the_provider() -> None:
+    store, provider = _Store(), _Provider()
+    kept = {
+        "Accept": "text/event-stream",
+        "Accept-Encoding": "gzip",
+        "Content-Type": "application/json",
+        "User-Agent": "agent-cli/1.2",
+        "Anthropic-Version": "2023-06-01",
+        "Anthropic-Beta": "tools-2024-04-04",
+        "OpenAI-Beta": "responses=v1",
+    }
+    # Each of these would be the sandbox telling the provider what to do with
+    # the deployment's key, or who and where the request is from.
+    dropped = {
+        "OpenAI-Organization": "org-other",
+        "OpenAI-Project": "proj_other",
+        "Cookie": "session=abc",
+        "X-Forwarded-For": "203.0.113.9",
+        "Forwarded": "for=203.0.113.9",
+        "HTTP-Referer": "https://app.example",
+        "X-Title": "Another app",
+        "Idempotency-Key": "another-owners-request",
+        "Proxy-Authorization": "Basic abc",
+        "X-Stainless-Lang": "js",
+        "X-Anything-Else": "1",
+    }
+    response = await _send(store, provider, headers={**kept, **dropped})
+
+    assert response.status_code == 200
+    [sent] = provider.requests
+    for name, value in kept.items():
+        assert sent.headers[name] == value
+    for name in dropped:
+        assert name not in sent.headers
+    # Nothing else goes out than those, the key and what the relay's own
+    # connection to the provider says of itself.
+    assert set(sent.headers) == {name.lower() for name in kept} | {
+        "authorization",
+        "host",
+        "content-length",
+        "connection",
+    }
+
+
+async def test_a_client_that_names_no_encoding_is_answered_unencoded() -> None:
+    """The answer goes back as the provider encoded it, so it may not choose one unasked."""
+    store, provider = _Store(), _Provider()
+    seen: list[httpx.Request] = []
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return await provider.handle(request)
+
+    # Sent by hand: a test client adds an Accept-Encoding of its own.
+    upstream = _upstream(handle)
+    caller = _Caller(_app(store, upstream))
+    try:
+        await caller.ended()
+    finally:
+        await upstream.aclose()
+    [sent] = seen
+    assert sent.headers["accept-encoding"] == "identity"
 
 
 async def test_listing_models_and_counting_tokens_are_not_counted() -> None:
@@ -552,6 +615,58 @@ async def test_an_unreachable_provider_is_a_502_and_is_taken_back() -> None:
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "provider_unreachable"
     assert store.used == 0 and store.refunds == 1
+
+
+@pytest.mark.parametrize("error", [httpx.ConnectTimeout, httpx.ReadTimeout, httpx.RemoteProtocolError])
+async def test_a_provider_that_never_answers_is_a_502_and_is_taken_back(error) -> None:
+    store, slots = _Store(), model_relay.Slots()
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        raise error("no answer", request=request)
+
+    upstream = _upstream(handle)
+    try:
+        response = await _send(store, _Provider(), slots=slots, upstream=upstream)
+    finally:
+        await upstream.aclose()
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "provider_unreachable"
+    assert store.used == 0 and store.refunds == 1
+    assert _slots_held(slots) == 0
+
+
+async def test_a_failure_of_the_relays_own_before_sending_is_taken_back() -> None:
+    """The owner is not out a request the provider never saw."""
+    store, provider, slots = _Store(), _Provider(), model_relay.Slots()
+
+    async def broken(_base_url: str) -> None:
+        raise RuntimeError("the guard itself failed")
+
+    with pytest.raises(RuntimeError, match="the guard itself failed"):
+        await _send(store, provider, slots=slots, guard=broken)
+    assert provider.requests == []
+    assert store.used == 0 and store.refunds == 1
+    assert _slots_held(slots) == 0
+
+
+async def test_a_failure_after_the_provider_had_the_request_stays_counted() -> None:
+    """The provider may have served and billed it; only the slots come back."""
+    store, slots = _Store(), model_relay.Slots()
+    had: list[httpx.Request] = []
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        had.append(request)
+        raise RuntimeError("lost after sending")
+
+    upstream = _upstream(handle)
+    try:
+        with pytest.raises(RuntimeError, match="lost after sending"):
+            await _send(store, _Provider(), slots=slots, upstream=upstream)
+    finally:
+        await upstream.aclose()
+    assert len(had) == 1
+    assert store.used == 1 and store.refunds == 0
+    assert _slots_held(slots) == 0
 
 
 async def test_a_base_url_that_stopped_resolving_publicly_is_never_dialled() -> None:

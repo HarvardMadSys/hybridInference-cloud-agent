@@ -55,7 +55,7 @@ export const providedModelsEn = {
   'adminModels.form.noDefaultModel': 'None',
   'adminModels.form.userConcurrency': 'Requests in flight per account',
   'adminModels.form.userConcurrencyHint':
-    'How many requests one account may have running at once, from 1 to {max}.',
+    'How many requests one account may have running at once, from 1 to {max}. Each relay process counts its own.',
   'adminModels.form.header': 'End-user header (optional)',
   'adminModels.form.headerHint':
     'When set, each relayed request carries this header with an opaque tag for the account, so the provider can attribute or limit use per account. The tag is never an email address or an account id.',
@@ -72,7 +72,7 @@ export const providedModelsEn = {
     'The connection was saved, but it could not be made the default for new users: {reason}',
   'adminModels.limits.title': 'Default allowances',
   'adminModels.limits.description':
-    'What every account gets for each model unless it has an allowance of its own. An allowance counts requests the relay accepted per UTC day, not tokens or cost.',
+    'What every account gets for each model unless it has an allowance of its own. An allowance counts requests the relay accepted per UTC day, not tokens or cost. A cap on requests in flight is counted by each relay process: a deployment that runs several allows that many in each.',
   'adminModels.limits.allowance': 'Daily allowance',
   'adminModels.limits.choose': 'Choose…',
   'adminModels.limits.limited': 'A number of requests',
@@ -83,8 +83,8 @@ export const providedModelsEn = {
   'adminModels.limits.savedUnlimited': 'Unlimited requests per account per day.',
   'adminModels.limits.savedNamed': 'Offered only to accounts given their own allowance.',
   'adminModels.limits.savedLimited': '{count} requests per account per day.',
-  'adminModels.limits.savedWithCap': '{allowance} At most {count} in flight across the deployment.',
-  'adminModels.limits.globalConcurrency': 'Deployment-wide requests in flight (optional)',
+  'adminModels.limits.savedWithCap': '{allowance} At most {count} in flight across accounts.',
+  'adminModels.limits.globalConcurrency': 'Requests in flight across accounts (optional)',
   'adminModels.limits.noCap': 'No cap',
   'adminModels.limits.saveFor': 'Save the allowance for {model}',
   'adminModels.limits.invalid':
@@ -188,7 +188,8 @@ export const providedModelsZhCN: Record<keyof typeof providedModelsEn, string> =
   'adminModels.form.defaultModelHint': '没有历史记录的账号在可以使用它时，默认从这个模型开始。',
   'adminModels.form.noDefaultModel': '无',
   'adminModels.form.userConcurrency': '每个账号进行中的请求数',
-  'adminModels.form.userConcurrencyHint': '一个账号同时可以有多少个请求在进行，1 到 {max}。',
+  'adminModels.form.userConcurrencyHint':
+    '一个账号同时可以有多少个请求在进行，1 到 {max}。每个中继进程各自统计。',
   'adminModels.form.header': '用户标签请求头（可选）',
   'adminModels.form.headerHint':
     '设置后，每个中继请求都会带上这个请求头，值是代表该账号的不透明标签，服务商可以据此按账号归因或限额。标签不包含邮箱和账号 ID。',
@@ -203,7 +204,7 @@ export const providedModelsZhCN: Record<keyof typeof providedModelsEn, string> =
   'adminModels.form.defaultFailed': '连接已保存，但未能设为新用户的默认连接：{reason}',
   'adminModels.limits.title': '默认上限',
   'adminModels.limits.description':
-    '账号没有单独设置时，在每个模型上使用的上限。上限统计的是中继每个 UTC 日接受的请求次数，不是 token，也不是费用。',
+    '账号没有单独设置时，在每个模型上使用的上限。上限统计的是中继每个 UTC 日接受的请求次数，不是 token，也不是费用。进行中请求数的上限由每个中继进程各自统计：部署运行多个中继进程时，每个进程各允许这么多。',
   'adminModels.limits.allowance': '每日上限',
   'adminModels.limits.choose': '请选择…',
   'adminModels.limits.limited': '指定请求次数',
@@ -214,8 +215,8 @@ export const providedModelsZhCN: Record<keyof typeof providedModelsEn, string> =
   'adminModels.limits.savedUnlimited': '每个账号每天请求次数不限。',
   'adminModels.limits.savedNamed': '只提供给单独设置了上限的账号。',
   'adminModels.limits.savedLimited': '每个账号每天 {count} 次请求。',
-  'adminModels.limits.savedWithCap': '{allowance}全部署同时最多 {count} 个请求在进行。',
-  'adminModels.limits.globalConcurrency': '全部署进行中的请求数（可选）',
+  'adminModels.limits.savedWithCap': '{allowance}所有账号同时最多 {count} 个请求在进行。',
+  'adminModels.limits.globalConcurrency': '所有账号进行中的请求数（可选）',
   'adminModels.limits.noCap': '不限',
   'adminModels.limits.saveFor': '保存 {model} 的上限',
   'adminModels.limits.invalid':

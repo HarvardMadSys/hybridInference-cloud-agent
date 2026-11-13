@@ -23,12 +23,16 @@ nothing a request says changes it. Only the inference and listing paths an
 agent CLI calls under that URL are forwarded, matched whole
 (:func:`cloud_agent.domain.operator_models.relay_route`), and only for a model
 the connection lists. A credential that is not a placeholder is refused, not
-passed on: an owner's own key never comes this way.
+passed on: an owner's own key never comes this way. Of a request's headers
+only a short list goes on (``_FORWARDED_HEADERS``): a sandbox borrows the
+deployment's key, not what a header can make that key do.
 
 **Allowances are counted here, outside the sandbox.** One statement decides
 and counts a request (``count_request``); a request the provider never served
-(unreachable, 5xx, 429) is taken back. Two caps on requests in flight, per
-owner and per model, are kept in this process.
+(unreachable, 5xx, 429, or one that failed here before it was sent) is taken
+back. Two caps on requests in flight, per owner and per model, are kept in
+this process: a deployment that runs several relay processes has each count
+its own.
 
 **Nothing of a request or an answer is stored or logged.** A request body is
 read once to find the model it names and forwarded unchanged; an answer is
@@ -99,8 +103,23 @@ _HOP_HEADERS = frozenset(
         "content-length",
     }
 )
-#: Where a client may put its credential; both are replaced, never forwarded.
-_CREDENTIAL_HEADERS = frozenset({"authorization", "x-api-key"})
+#: The only headers of a client's request that go on to the provider, beside
+#: the key and the owner tag the relay writes itself. A provider reads some
+#: headers as instructions about the key: which organization or project to
+#: bill, which application a call is attributed to, where it claims to come
+#: from. A sandbox is lent the key's use, not that authority, so a header is
+#: forwarded only when an agent CLI needs the provider to see it.
+_FORWARDED_HEADERS = frozenset(
+    {
+        "accept",
+        "accept-encoding",
+        "content-type",
+        "user-agent",
+        "anthropic-version",
+        "anthropic-beta",
+        "openai-beta",
+    }
+)
 #: An answer can stream for minutes; a stalled connection still ends.
 _UPSTREAM_TIMEOUT = httpx.Timeout(connect=15.0, read=600.0, write=600.0, pool=15.0)
 #: The largest request body read and forwarded. A model request carries the
@@ -221,6 +240,9 @@ class _Admitted:
     keys: list[tuple[tuple[str, ...], int | None]] = field(default_factory=list)
     counted_day: date | None = None
     released: bool = False
+    #: Whether the request was handed to the provider, which may then have
+    #: served it whatever happened here afterwards.
+    sent: bool = False
 
     @property
     def connection(self) -> dict[str, Any]:
@@ -390,15 +412,16 @@ def _exhausted() -> _Refused:
 def _upstream_headers(
     request: Request, *, style: str, api_key: str, connection: dict[str, Any], user_id: str
 ) -> dict[str, str]:
-    """The client's headers with the deployment's key in place of the placeholder."""
+    """The headers the provider is sent: the client's few that matter, and the deployment's key."""
     tag_header = (connection.get("end_user_header") or "").lower()
     headers = {
         name: value
         for name, value in request.headers.items()
-        if name.lower() not in _HOP_HEADERS
-        and name.lower() not in _CREDENTIAL_HEADERS
-        and name.lower() != tag_header
+        if name.lower() in _FORWARDED_HEADERS and name.lower() != tag_header
     }
+    # The answer is streamed back as the provider encoded it, so the provider
+    # may use only an encoding the client asked for.
+    headers.setdefault("accept-encoding", "identity")
     if style == "x-api-key":
         headers["x-api-key"] = api_key
     else:
@@ -442,6 +465,10 @@ async def relay(
     except BaseException:
         if admitted is not None:
             admitted.release()
+            if not admitted.sent:
+                # Nothing reached the provider: the owner is not out a request
+                # for a failure of the relay's own.
+                await admitted.refund()
         raise
     _log(admitted, request, raw_path, response.status_code, started, None)
     return response
@@ -514,25 +541,26 @@ async def _forward(
     query = request.url.query
     target = raw_path + (f"?{query}" if query else "")
     client = http if http is not None else relay_client()
-    upstream = client.build_request(
-        request.method,
-        origin.copy_with(raw_path=target.encode("latin-1")),
-        headers=_upstream_headers(
-            request,
-            style=style,
-            api_key=api_key,
-            connection=connection,
-            user_id=str(admitted.caller["user_id"]),
-        ),
-        content=body if request.method == "POST" else None,
-        timeout=_UPSTREAM_TIMEOUT,
-    )
 
     async def close_client() -> None:
         if http is None:
             await client.aclose()
 
     try:
+        upstream = client.build_request(
+            request.method,
+            origin.copy_with(raw_path=target.encode("latin-1")),
+            headers=_upstream_headers(
+                request,
+                style=style,
+                api_key=api_key,
+                connection=connection,
+                user_id=str(admitted.caller["user_id"]),
+            ),
+            content=body if request.method == "POST" else None,
+            timeout=_UPSTREAM_TIMEOUT,
+        )
+        admitted.sent = True
         answer = await _unless_left(
             request, client.send(upstream, stream=True, follow_redirects=False)
         )

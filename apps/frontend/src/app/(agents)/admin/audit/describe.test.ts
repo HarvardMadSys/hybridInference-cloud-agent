@@ -449,7 +449,7 @@ describe('models the deployment provides', () => {
       'Set the default allowance for house-fast on provided model connection House: 1,500 requests a day per account',
     );
     expect(limit(null, 8)).toBe(
-      'Set the default allowance for house-fast on provided model connection House: unlimited requests a day per account, at most 8 in flight across the deployment',
+      'Set the default allowance for house-fast on provided model connection House: unlimited requests a day per account, at most 8 in flight across accounts',
     );
     expect(limit(0, null)).toBe(
       'Set the default allowance for house-fast on provided model connection House: only accounts given their own allowance',

@@ -293,7 +293,7 @@ const PROVIDED_SENTENCES: Record<string, Sentence> = {
       daily === 0
         ? 'only accounts given their own allowance'
         : `${allowance(details.user_daily_requests)} per account`;
-    const flight = cap === null ? '' : `, at most ${cap} in flight across the deployment`;
+    const flight = cap === null ? '' : `, at most ${cap} in flight across accounts`;
     return `Set the default allowance for ${providedModel(details)}: ${who}${flight}`;
   },
   'agent.operator_model_user_limit.set': (details, _host, _definitions, entry) =>

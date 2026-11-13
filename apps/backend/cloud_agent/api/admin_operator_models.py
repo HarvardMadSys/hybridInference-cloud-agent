@@ -581,7 +581,7 @@ async def set_limit(
     actor: str = Depends(verify_admin_access),
     store: _Storage | None = Depends(get_storage),
 ) -> OperatorModelConnectionView:
-    """Set one model's default allowance and its deployment-wide concurrency cap."""
+    """Set one model's default allowance and its cap on requests in flight across owners."""
     store = require_store(store)
     row = await _live(store, connection_id)
     written = await store.operator_models.set_operator_limit(
