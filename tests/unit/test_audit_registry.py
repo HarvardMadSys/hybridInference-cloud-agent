@@ -156,7 +156,11 @@ def _frozen_table() -> tuple[tuple[str, str, str | None, str | None, str | None,
 
 #: Declared after migration 0114 shipped. No row of theirs predates it, so its
 #: frozen copy has nothing to backfill for them and does not list them.
-_DECLARED_AFTER_0114 = {"agent.local_account.import"}
+_DECLARED_AFTER_0114 = {
+    "agent.local_account.import",
+    "agent.local_account.provision_invite",
+    "agent.local_account.provision_revoke",
+}
 
 
 def test_the_migration_backfills_exactly_what_the_registry_declares() -> None:

@@ -103,10 +103,15 @@ def account_tasks(
     from cloud_agent.accounts.delivery import DeliveryMailer
     from cloud_agent.workers.account_access import run_account_access_enforcement
     from cloud_agent.workers.account_broadcasts import run_account_broadcasts
+    from cloud_agent.workers.account_provisioning import run_account_provisioning
 
     return [
         ("account_access_task", run_account_access_enforcement(storage)),
         ("account_broadcast_task", run_account_broadcasts(storage, mailer or DeliveryMailer())),
+        (
+            "account_provisioning_task",
+            run_account_provisioning(storage, mailer or DeliveryMailer()),
+        ),
     ]
 
 

@@ -4,7 +4,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: HybridInference Cloud Agent \n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-11-12 22:08-0500\n"
+"POT-Creation-Date: 2026-11-13 06:28-0500\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: The HybridInference contributors\n"
 "Language: zh_CN\n"
@@ -38,7 +38,7 @@ msgstr "启动本次发布之前"
 #: ../developer/upgrade-notes.md:11
 msgid ""
 "Before starting this release, run `alembic upgrade head` through "
-"`0115_mcp_retire_dead_locations`. The supported deployment scripts run "
+"`0116_account_provisioning`. The supported deployment scripts run "
 "migrations before replacing the API; every migration listed here is "
 "additive and safe under the running previous release unless it says "
 "otherwise. The few transitions that need stopped writers are listed in "
@@ -46,7 +46,7 @@ msgid ""
 "#applying-migrations-that-are-not-backwards-compatible)."
 msgstr ""
 "启动本次发布之前，先运行 `alembic upgrade head`，升级到 "
-"`0115_mcp_retire_dead_locations`。官方支持的部署脚本会在替换 API "
+"`0116_account_provisioning`。官方支持的部署脚本会在替换 API "
 "之前执行迁移；除非下面特别说明，这里列出的每个迁移都只做增量修改，上一个发布还在运行时执行也是安全的。少数需要先停掉写入操作的迁移，列在[执行不向后兼容的迁移](operations.md"
 "#applying-migrations-that-are-not-backwards-compatible)中。"
 
@@ -214,12 +214,10 @@ msgid ""
 "deploy. A new Postgres or nginx now comes only with a release that "
 "changes the pin, and this page says when one does."
 msgstr ""
-"控制平面的 Compose 文件现在用版本标签加多架构索引摘要来指定自带 `postgres` 服务和可选的 `edge` "
-"服务的镜像，和 pgAdmin 的镜像原本的写法一样：`postgres:16.16-alpine@sha256:0adbf25a…` 和 "
-"`nginx:1.27.5-alpine@sha256:65645c7b…`。以前它们只写了标签（`postgres:16-alpine`、"
-"`nginx:1.27.5-alpine`），部署运行的是本机上这个标签当时指向的镜像，而产物部署每次部署都会重新拉取所有镜像："
-"上游的一次新构建，可能在一次毫不相关的部署中途，把 Postgres 换成另一个小版本重启。现在，新的 Postgres 或 "
-"nginx 只会随修改了固定值的版本到来，到时本页会写明。"
+"控制平面的 Compose 文件现在用版本标签加多架构索引摘要来指定自带 `postgres` 服务和可选的 `edge` 服务的镜像，和 "
+"pgAdmin 的镜像原本的写法一样：`postgres:16.16-alpine@sha256:0adbf25a…` 和 "
+"`nginx:1.27.5-alpine@sha256:65645c7b…`。以前它们只写了标签（`postgres:16-alpine`、`nginx:1.27.5-alpine`），部署运行的是本机上这个标签当时指向的镜像，而产物部署每次部署都会重新拉取所有镜像：上游的一次新构建，可能在一次毫不相关的部署中途，把"
+" Postgres 换成另一个小版本重启。现在，新的 Postgres 或 nginx 只会随修改了固定值的版本到来，到时本页会写明。"
 
 #: ../developer/upgrade-notes.md:103
 #, python-brace-format
@@ -236,13 +234,13 @@ msgid ""
 "PostgreSQL release notes between the two versions for any step they ask "
 "for. The edge stays on nginx 1.27.5, and pgAdmin's pin is unchanged."
 msgstr ""
-"这个版本的第一次部署会把 `postgres` 重建一次；`edge` 如果启用了它的 profile，也会重建一次，"
-"因为它们指定的镜像变了。和任何改动其配置的部署一样，Postgres 在重启的几秒钟里不可用。已经在 PostgreSQL "
-"16.16 上的部署会保持这个版本。部署之前先用 `docker exec "
+"这个版本的第一次部署会把 `postgres` 重建一次；`edge` 如果启用了它的 "
+"profile，也会重建一次，因为它们指定的镜像变了。和任何改动其配置的部署一样，Postgres 在重启的几秒钟里不可用。已经在 "
+"PostgreSQL 16.16 上的部署会保持这个版本。部署之前先用 `docker exec "
 "\"${COMPOSE_PROJECT:?}-postgres-1\" postgres --version` 查看：还在更早的 16.x "
-"上的部署，会在这次重启时升到 16.16；已经拉取过更新的 16.x 的部署，则会退回到 16.16。小版本之间数据目录的格式不变，"
-"所以两种情况都不需要转储和恢复，但要读一读这两个版本之间的 PostgreSQL 发布说明，看有没有要求的额外步骤。edge 仍是 nginx "
-"1.27.5，pgAdmin 的固定值没有变。"
+"上的部署，会在这次重启时升到 16.16；已经拉取过更新的 16.x 的部署，则会退回到 "
+"16.16。小版本之间数据目录的格式不变，所以两种情况都不需要转储和恢复，但要读一读这两个版本之间的 PostgreSQL "
+"发布说明，看有没有要求的额外步骤。edge 仍是 nginx 1.27.5，pgAdmin 的固定值没有变。"
 
 #: ../developer/upgrade-notes.md:115
 msgid "The audit log names who acted on whom"
@@ -748,6 +746,25 @@ msgstr "迁移"
 #: ../developer/upgrade-notes.md
 msgid "What it changes"
 msgstr "改了什么"
+
+#: ../developer/upgrade-notes.md
+msgid "`0116_account_provisioning`"
+msgstr "`0116_account_provisioning`"
+
+#: ../developer/upgrade-notes.md
+msgid ""
+"Adds `agent_account_provisioning` (one invitation-lifecycle row per "
+"account for the connected inference service) and "
+"`agent_account_provisioning_activation` (when provisioning was first "
+"enabled, so only later approvals are invited automatically). Nothing "
+"reads them before this release, so the previous release runs unchanged "
+"beside it. A downgrade drops both tables."
+msgstr ""
+"新增 `agent_account_provisioning`（每个账号一行的邀请生命周期记录，"
+"用于所连的推理服务）和 `agent_account_provisioning_activation`"
+"（首次开启开通功能的时间，因此只有之后的批准会被自动邀请）。"
+"本版本之前没有任何代码读取这两张表，上一个发布可原样并行运行。"
+"降级会删除这两张表。"
 
 #: ../developer/upgrade-notes.md
 msgid "`0115_mcp_retire_dead_locations`"
@@ -1568,7 +1585,7 @@ msgid ""
 "Existing queued jobs remain immediately eligible."
 msgstr "新增 `agent_jobs.claim_retry_at`，worker 的认领查询要用到它。已经在排队的任务仍可立即被认领。"
 
-#: ../developer/upgrade-notes.md:417
+#: ../developer/upgrade-notes.md:418
 msgid ""
 "Older revisions that need a maintenance window are listed in [applying "
 "migrations that are not backwards-compatible](operations.md#applying-"
@@ -1580,11 +1597,11 @@ msgstr ""
 "backwards-compatible)中。独立账号版本之前的数据库，无论处于哪条迁移链，都不会被升级；见[切换说明"
 "](#independent-accounts-cutover)。"
 
-#: ../developer/upgrade-notes.md:422
+#: ../developer/upgrade-notes.md:423
 msgid "When you add a migration"
 msgstr "新增迁移时"
 
-#: ../developer/upgrade-notes.md:424
+#: ../developer/upgrade-notes.md:425
 msgid ""
 "Add a row to the table above in the same pull request, saying what an "
 "operator upgrading a live deployment needs to know: what existing rows it"

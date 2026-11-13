@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from cloud_agent.storage.repositories import (
+    PostgresAccountProvisioningRepository,
     PostgresAgentMemoryRepository,
     PostgresAttachmentRepository,
     PostgresAttemptCommands,
@@ -83,6 +84,7 @@ if TYPE_CHECKING:
     import asyncpg
 
     from cloud_agent.ports import (
+        AccountProvisioningRepository,
         AgentMemoryRepository,
         AttachmentRepository,
         AttemptCommands,
@@ -194,6 +196,9 @@ class Storage:
         self.web_search: WebSearchRepository = PostgresWebSearchRepository(pool)
         #: Accounts and the work ended with them.
         self.local_accounts: LocalAccountRepository = PostgresLocalAccountRepository(pool)
+        self.account_provisioning: AccountProvisioningRepository = (
+            PostgresAccountProvisioningRepository(pool)
+        )
         self.owner_work: OwnerWorkTermination = PostgresOwnerWorkRepository(pool)
 
     def _admin_read_models(self, pool: asyncpg.Pool) -> None:

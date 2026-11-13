@@ -70,6 +70,16 @@
     "kind": "change"
   },
   {
+    "action": "agent.local_account.provision_invite",
+    "category": "accounts",
+    "kind": "change"
+  },
+  {
+    "action": "agent.local_account.provision_revoke",
+    "category": "accounts",
+    "kind": "change"
+  },
+  {
     "action": "agent.local_account.signup",
     "category": "accounts",
     "kind": "self_service"

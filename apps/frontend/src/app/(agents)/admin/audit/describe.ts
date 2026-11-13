@@ -207,6 +207,8 @@ const ACCOUNT: Record<string, (who: string) => string> = {
   transfer_team: (who) => `Handed ${who}'s team to another member`,
   setup_admin: (who) => `Created the first administrator, ${who}`,
   import: (who) => `Imported ${who} from another service, approved`,
+  provision_invite: (who) => `Invited ${who} to set up its inference account`,
+  provision_revoke: (who) => `Revoked ${who}'s inference account key`,
   signup: (who) => `${who} signed up`,
   password_set: (who) => `${who} set a password`,
   password_change: (who) => `${who} changed its password`,
