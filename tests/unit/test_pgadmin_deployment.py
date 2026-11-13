@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 import yaml
+from deploy.release.artifact_compose import is_pinned
 from deploy.release.build_recipe import build
 
 if TYPE_CHECKING:
@@ -53,7 +54,9 @@ def test_pgadmin_has_no_direct_public_port_or_database_password():
     )
     assert pgadmin["environment"]["PGADMIN_CONFIG_SERVER_MODE"] == "True"
     assert pgadmin["environment"]["PGADMIN_CONFIG_SESSION_COOKIE_SECURE"].endswith(":-True}")
-    assert "@sha256:" in pgadmin["image"]
+    # Its version tag and its multi-architecture index digest, like every
+    # third-party image the stack runs (test_artifact_compose.py holds them all).
+    assert is_pinned(pgadmin["image"]), pgadmin["image"]
 
 
 def test_release_recipe_preserves_pgadmin_and_its_server_definitions():
@@ -68,6 +71,7 @@ def test_release_recipe_preserves_pgadmin_and_its_server_definitions():
         service = yaml.safe_load(compose)["services"]["pgadmin"]
         assert service["profiles"] == ["pgadmin"]
         assert "build" not in service and "ports" not in service
+        assert is_pinned(service["image"]), "a release must not deploy whatever a tag means today"
         entrypoint = archive.extractfile("recipe/deploy/control-plane/pgadmin-entrypoint.py")
         assert entrypoint is not None
         assert b"/entrypoint.sh" in entrypoint.read()
@@ -160,3 +164,20 @@ def test_pgadmin_imports_the_filled_definition_at_its_first_start_only(
         # pgAdmin keeps the servers it already has; nothing is imported again.
         assert imported == mounted
         assert "PGADMIN_DEFAULT_PASSWORD_FILE" not in os.environ
+
+
+@pytest.mark.parametrize(
+    ("reference", "pinned"),
+    [
+        ("postgres:16.16-alpine@sha256:" + "a" * 64, True),
+        ("nginx:1.27.5-alpine@sha256:" + "b" * 64, True),
+        ("dpage/pgadmin4:9.18@sha256:" + "c" * 64, True),
+        ("registry.example:5000/postgres:16.16-alpine@sha256:" + "d" * 64, True),
+        ("postgres:16-alpine@sha256:" + "a" * 64, False),
+        ("postgres:latest@sha256:" + "a" * 64, False),
+        ("postgres:16.16-alpine", False),
+        ("postgres@sha256:" + "a" * 64, False),
+    ],
+)
+def test_a_pin_names_a_dotted_version_and_an_index_digest(reference: str, pinned: bool) -> None:
+    assert is_pinned(reference) is pinned
