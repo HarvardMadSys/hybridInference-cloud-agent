@@ -617,7 +617,9 @@ async def test_an_unreachable_provider_is_a_502_and_is_taken_back() -> None:
     assert store.used == 0 and store.refunds == 1
 
 
-@pytest.mark.parametrize("error", [httpx.ConnectTimeout, httpx.ReadTimeout, httpx.RemoteProtocolError])
+@pytest.mark.parametrize(
+    "error", [httpx.ConnectTimeout, httpx.ReadTimeout, httpx.RemoteProtocolError]
+)
 async def test_a_provider_that_never_answers_is_a_502_and_is_taken_back(error) -> None:
     store, slots = _Store(), model_relay.Slots()
 
