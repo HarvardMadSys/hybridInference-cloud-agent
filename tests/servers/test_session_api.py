@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import asyncpg
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
@@ -21,6 +22,7 @@ from cloud_agent.accounts.config import (
     LOCAL_SESSION_COOKIE_INSECURE,
 )
 from cloud_agent.api import session as session_router
+from cloud_agent.api._database_unavailable import RETRY_AFTER_SECONDS
 from cloud_agent.api.deps import get_owner_directory, get_storage
 
 pytestmark = pytest.mark.asyncio
@@ -87,7 +89,24 @@ async def test_me_says_503_when_the_account_cannot_be_read(
 ):
     client.cookies.set(LOCAL_SESSION_COOKIE, accounts.sign_in(_USER))
     owners.outage = True
-    assert (await client.get("/v1/session/me")).status_code == 503
+    response = await client.get("/v1/session/me")
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == str(RETRY_AFTER_SECONDS)
+
+
+async def test_me_says_503_and_when_to_retry_when_the_session_cannot_be_read(
+    client: AsyncClient, accounts: SessionAccounts, monkeypatch: pytest.MonkeyPatch
+):
+    """The database restarting under the session read: no answer, and when to ask again."""
+    client.cookies.set(LOCAL_SESSION_COOKIE, accounts.sign_in(_USER))
+
+    async def restarting(_session_hash: bytes) -> None:
+        raise asyncpg.CannotConnectNowError("the database system is starting up")
+
+    monkeypatch.setattr(accounts, "session_owner", restarting)
+    response = await client.get("/v1/session/me")
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == str(RETRY_AFTER_SECONDS)
 
 
 async def test_an_ended_session_is_a_401(client: AsyncClient, accounts: SessionAccounts):
