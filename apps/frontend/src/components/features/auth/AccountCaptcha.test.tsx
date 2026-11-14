@@ -63,6 +63,16 @@ function solve(token: string) {
 function fill(label: string | RegExp, value: string) {
   fireEvent.change(screen.getByLabelText(label), { target: { value } });
 }
+/**
+ * Agree in the Terms dialog sign-up opens by itself. The dialog is on screen
+ * before its effect finds the end of the text and enables Agree, and a click
+ * on the disabled button does nothing, so wait until Agree is offered.
+ */
+async function agreeToTerms() {
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Agree' })).toBeEnabled());
+  fireEvent.click(screen.getByRole('button', { name: 'Agree' }));
+  expect(screen.getByText('You agreed to the Terms of Service.')).toBeInTheDocument();
+}
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -157,7 +167,7 @@ describe('sign-up with Turnstile on', () => {
       .mockRejectedValueOnce(new Error('The check failed. Try again.'))
       .mockResolvedValueOnce({ ok: true });
     render(<SignupPage />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Agree' }));
+    await agreeToTerms();
     fill('How will you use Cloud Agent?', 'Thesis');
     fill('Email', 'ada@example.edu');
     fill('Password', 'Goodpass123');
@@ -178,7 +188,7 @@ describe('sign-up with Turnstile on', () => {
 
   it('keeps the phone form after a code, and asks for a new token to send again', async () => {
     render(<SignupPage />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Agree' }));
+    await agreeToTerms();
     fireEvent.click(screen.getByRole('tab', { name: 'Phone number' }));
     fill('Phone number', '13800138000');
     await waitFor(() => expect(challenges).toHaveLength(1));

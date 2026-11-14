@@ -76,6 +76,17 @@ function fillEmail() {
   fill('Password', 'Goodpass123');
   fill('Confirm password', 'Goodpass123');
 }
+/**
+ * The Terms dialog sign-up opens by itself, once it has finished opening. The
+ * dialog is on screen a render before its effects focus its text, listen for
+ * Escape and start watching for the end of the text, so wait for that focus.
+ */
+async function openedDialog() {
+  const shown = await screen.findByRole('dialog', { name: 'Terms of Service' });
+  const text = within(shown).getByRole('region', { name: 'Terms of Service text' });
+  await waitFor(() => expect(text).toHaveFocus());
+  return shown;
+}
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -95,7 +106,7 @@ afterEach(() => {
 describe('the Terms dialog on sign-up', () => {
   it('opens by itself, and offers Agree only once the end of the text is on screen', async () => {
     render(<SignupPage />);
-    expect(await screen.findByRole('dialog', { name: 'Terms of Service' })).toBeInTheDocument();
+    expect(await openedDialog()).toBeInTheDocument();
     const region = within(dialog()).getByRole('region', { name: 'Terms of Service text' });
     expect(region).toHaveFocus();
     expect(within(region).getByRole('heading', { name: '2.End.' })).toBeInTheDocument();
@@ -118,7 +129,7 @@ describe('the Terms dialog on sign-up', () => {
 
   it('keeps what was typed through closing and reopening, and closing never agrees', async () => {
     render(<SignupPage />);
-    await screen.findByRole('dialog', { name: 'Terms of Service' });
+    await openedDialog();
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(screen.queryByRole('dialog')).toBeNull();
     const opener = screen.getByRole('button', { name: 'Read and agree' });
@@ -160,7 +171,7 @@ describe('the Terms dialog on sign-up', () => {
 
   it('withdraws the agreement on Disagree, and a direct email submit then sends nothing', async () => {
     render(<SignupPage />);
-    await screen.findByRole('dialog', { name: 'Terms of Service' });
+    await openedDialog();
     reachEnd();
     fireEvent.click(agreeButton());
     fillEmail();
@@ -183,7 +194,7 @@ describe('the Terms dialog on sign-up', () => {
 
   it('sends no phone sign-up without the agreement or a full code, whatever submits', async () => {
     render(<SignupPage />);
-    await screen.findByRole('dialog', { name: 'Terms of Service' });
+    await openedDialog();
     fireEvent.keyDown(window, { key: 'Escape' });
     fireEvent.click(screen.getByRole('tab', { name: 'Phone number' }));
     fill('Phone number', '13800138000');
@@ -216,7 +227,7 @@ describe('the Terms dialog on sign-up', () => {
     window.turnstile = { render: () => 'widget-1', remove: () => undefined };
     vi.mocked(api.getAuthOptions).mockResolvedValue({ ...OPTIONS, turnstile_site_key: 'site' });
     render(<SignupPage />);
-    await screen.findByRole('dialog', { name: 'Terms of Service' });
+    await openedDialog();
     reachEnd();
     fireEvent.click(agreeButton());
     fillEmail();
@@ -234,7 +245,7 @@ describe('the Terms dialog on sign-up', () => {
     const sizes = vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(2000);
     vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(400);
     render(<SignupPage />);
-    await screen.findByRole('dialog', { name: 'Terms of Service' });
+    await openedDialog();
     const long = within(dialog()).getByRole('region', { name: 'Terms of Service text' });
     expect(agreeButton()).toBeDisabled();
     long.scrollTop = 900;
