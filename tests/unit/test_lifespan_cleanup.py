@@ -45,7 +45,6 @@ _EXPECTED_SHUTDOWN_TASKS = (
     "compute_resource_task",
     "account_access_task",
     "account_broadcast_task",
-    "account_provisioning_task",
     "notification_listener_task",
 )
 
@@ -362,10 +361,6 @@ def _prepare(
             "account_access_task",
         ),
         ("cloud_agent.workers.account_broadcasts.run_account_broadcasts", "account_broadcast_task"),
-        (
-            "cloud_agent.workers.account_provisioning.run_account_provisioning",
-            "account_provisioning_task",
-        ),
         ("cloud_agent.workers.capacity_history.prune_host_capacity_history", "capacity_task"),
         ("cloud_agent.deployment.operational_health.monitor_queue", "queue_monitor_task"),
         ("cloud_agent.mcp.runtime.maintain_host_sessions", "mcp_maintenance_task"),

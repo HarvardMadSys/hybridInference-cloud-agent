@@ -153,6 +153,8 @@ _DECLARED: tuple[AuditAction, ...] = (
             "transfer_team",
             "setup_admin",
             "import",
+            # Written while accounts were invited to a connected inference
+            # service; rows remain, so they still read as what they were.
             "provision_invite",
             "provision_revoke",
         )

@@ -68,7 +68,6 @@ MailKind = Literal[
     "email_changed",
     "account_deleted",
     "account_reclaimed",
-    "inference_invite",
     "broadcast",
 ]
 
@@ -184,18 +183,6 @@ def _notice_lines(kind: str, link: str, details: Mapping[str, str]) -> tuple[str
             f"Your {SITE_NAME} account now signs in with {details.get('new_email', '')} instead "
             "of this address, which no longer receives its password resets.",
             "If this wasn't you, contact the administrator at once.",
-        ]
-    if kind == "inference_invite":
-        return "Set up your inference account", [
-            f"Your {SITE_NAME} account has been approved, and with it comes an account on the "
-            "connected inference service, where the agent models live.",
-            "Set a password there to finish:",
-            link,
-            "This link will expire in 7 days and can be used once. It signs you in and shows "
-            "your API key once: paste that key into Cloud Agent under My settings → Model "
-            "connections to run agents on those models. The key works only for the agent "
-            "models, with your inference account's usual quota.",
-            "If you didn't expect this, you can safely ignore this email.",
         ]
     if kind == "account_reclaimed":
         return f"Your {SITE_NAME} account is yours again", [
