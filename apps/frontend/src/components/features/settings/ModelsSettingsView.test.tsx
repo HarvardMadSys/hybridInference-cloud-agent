@@ -1,14 +1,16 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { getAgentConfig, type AgentConfigApi } from '@/lib/api/agents';
 import { listModelConnections, type ModelConnection } from '@/lib/api/modelConnections';
 import { providedSource } from '@/test/connectionConfig';
 
+import { ModelConnectionsLink } from './ModelConnectionsLink';
 import { ModelsSettingsView } from './ModelsSettingsView';
+import { PROVIDED_WAIT_MS } from './ProvidedModelsCard';
 
 vi.mock('@/lib/api/agents', () => ({ getAgentConfig: vi.fn() }));
 vi.mock('@/lib/api/modelConnections', async (importOriginal) => ({
@@ -69,7 +71,10 @@ beforeEach(() => {
   });
   window.location.hash = '';
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 describe('the models a deployment provides, in Settings', () => {
   it('lists each by name and nothing else', async () => {
@@ -144,7 +149,11 @@ describe('the owner’s own connections, beneath provided models', () => {
     const heading = fold(section)!;
     expect(heading).toHaveAttribute('aria-expanded', 'false');
     expect(within(section).queryByText('My provider')).not.toBeInTheDocument();
-    // Folded, the section asks the server for nothing.
+    // The heading names what it opens, which is there before it is opened.
+    const body = document.getElementById(heading.getAttribute('aria-controls')!)!;
+    expect(section).toContainElement(body);
+    expect(body).not.toBeVisible();
+    // Never opened, the section asks the server for nothing.
     expect(listModelConnections).not.toHaveBeenCalled();
     expect(within(section).queryByRole('button', { name: 'Add connection' })).toBeNull();
 
@@ -155,7 +164,32 @@ describe('the owner’s own connections, beneath provided models', () => {
 
     fireEvent.click(heading);
     expect(heading).toHaveAttribute('aria-expanded', 'false');
-    expect(within(section).queryByText('My provider')).not.toBeInTheDocument();
+    expect(within(section).getByText('My provider')).not.toBeVisible();
+    expect(within(section).queryByRole('button', { name: 'Add connection' })).toBeNull();
+  });
+
+  it('keep a half-filled form through a fold, and read the list once', async () => {
+    providing(providedSource({ 'house-fast': [100, 1] }));
+    render(<ModelsSettingsView />);
+    const section = await connections();
+    const heading = fold(section)!;
+
+    fireEvent.click(heading);
+    fireEvent.click(await within(section).findByRole('button', { name: 'Add connection' }));
+    fireEvent.change(within(section).getByLabelText('Connection name'), {
+      target: { value: 'Half typed' },
+    });
+    fireEvent.change(within(section).getByLabelText('API key'), {
+      target: { value: 'sk-not-saved-yet' },
+    });
+
+    fireEvent.click(heading);
+    expect(within(section).getByLabelText('Connection name')).not.toBeVisible();
+    fireEvent.click(heading);
+
+    expect(within(section).getByLabelText('Connection name')).toHaveValue('Half typed');
+    expect(within(section).getByLabelText('API key')).toHaveValue('sk-not-saved-yet');
+    expect(listModelConnections).toHaveBeenCalledTimes(1);
   });
 
   it('arrive open from a link to them', async () => {
@@ -166,6 +200,43 @@ describe('the owner’s own connections, beneath provided models', () => {
     const section = await connections();
     await waitFor(() => expect(fold(section)).toHaveAttribute('aria-expanded', 'true'));
     expect(await within(section).findByText('My provider')).toBeInTheDocument();
+  });
+
+  it('open from such a link followed on the page itself', async () => {
+    providing(providedSource({ 'house-fast': [100, 1] }));
+    render(
+      <>
+        <ModelConnectionsLink>Set up a connection</ModelConnectionsLink>
+        <ModelsSettingsView />
+      </>,
+    );
+    const section = await connections();
+    expect(fold(section)).toHaveAttribute('aria-expanded', 'false');
+
+    // The router changes the fragment and remounts nothing; the test keeps
+    // jsdom from navigating, as the router does.
+    const link = screen.getByRole('link', { name: 'Set up a connection' });
+    expect(link).toHaveAttribute('href', '/settings/models#settings-connections');
+    link.addEventListener('click', (event) => event.preventDefault());
+    fireEvent.click(link);
+
+    expect(fold(section)).toHaveAttribute('aria-expanded', 'true');
+    expect(await within(section).findByText('My provider')).toBeVisible();
+
+    // Folded again, the same link opens it again though the address is unchanged.
+    fireEvent.click(fold(section)!);
+    fireEvent.click(link);
+    expect(fold(section)).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('open when the address comes to name them', async () => {
+    providing(providedSource({ 'house-fast': [100, 1] }));
+    render(<ModelsSettingsView />);
+    const section = await connections();
+    expect(fold(section)).toHaveAttribute('aria-expanded', 'false');
+
+    window.location.hash = '#settings-connections';
+    await waitFor(() => expect(fold(section)).toHaveAttribute('aria-expanded', 'true'));
   });
 
   it('come after the provided models', async () => {
@@ -218,16 +289,50 @@ describe('where nothing is provided', () => {
 });
 
 describe('until it is known what is provided', () => {
-  it('draws neither section, so the connections never fold under the reader', async () => {
+  function pending() {
     let answer!: (value: AgentConfigApi) => void;
     vi.mocked(getAgentConfig).mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    return (value: AgentConfigApi) => answer(value);
+  }
+
+  it('says it is loading and draws neither section, so the connections never fold under the reader', async () => {
+    const answer = pending();
     render(<ModelsSettingsView />);
 
     expect(screen.getByRole('heading', { level: 1, name: 'Models' })).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('Loading');
     expect(screen.queryByRole('region')).not.toBeInTheDocument();
     expect(listModelConnections).not.toHaveBeenCalled();
 
     answer(config({ provided_sources: [providedSource({ 'house-fast': [100, 1] })] }));
     expect(fold(await connections())).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('stops waiting, so a slow answer never keeps an owner from their own connections', async () => {
+    vi.useFakeTimers();
+    const answer = pending();
+    render(<ModelsSettingsView />);
+
+    await act(() => vi.advanceTimersByTimeAsync(PROVIDED_WAIT_MS - 1));
+    expect(screen.queryByRole('region')).not.toBeInTheDocument();
+
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    const section = screen.getByRole('region', { name: 'Personal model connections' });
+    expect(fold(section)).toBeNull();
+    expect(within(section).getByText('My provider')).toBeVisible();
+    expect(screen.queryByRole('region', { name: 'Available models' })).not.toBeInTheDocument();
+
+    // The answer still counts when it comes, and folds nothing under the reader.
+    fireEvent.click(within(section).getByRole('button', { name: 'Add connection' }));
+    answer(config({ provided_sources: [providedSource({ 'house-fast': [100, 1] })] }));
+    await act(() => vi.advanceTimersByTimeAsync(0));
+
+    expect(screen.getByRole('region', { name: 'Available models' })).toHaveTextContent(
+      'house-fast',
+    );
+    expect(fold(section)).toHaveAttribute('aria-expanded', 'true');
+    expect(within(section).getByLabelText('Connection name')).toBeVisible();
+    expect(listModelConnections).toHaveBeenCalledTimes(1);
   });
 });

@@ -5,24 +5,32 @@ import { useT } from '@/components/providers';
 import { getAgentConfig, type ProvidedModelSourceApi } from '@/lib/api/agents';
 import { providedSources } from '../agents/composer/providedModels';
 
+/** How long the page waits for `/config` before going on without it. */
+export const PROVIDED_WAIT_MS = 4000;
+
 /**
- * The provided sources that offer this owner a model. `null` until `/config`
- * answers; none where the deployment provides nothing, or when that cannot be
- * read (the composer says what went wrong).
+ * The provided sources that offer this owner a model. `null` while `/config`
+ * is awaited; none where the deployment provides nothing, when that cannot be
+ * read (the composer says what went wrong), or when the answer is slow enough
+ * that the page should not keep an owner from their own connections. A late
+ * answer still counts when it comes.
  */
 export function useProvidedSources(): ProvidedModelSourceApi[] | null {
   const [sources, setSources] = useState<ProvidedModelSourceApi[] | null>(null);
 
   useEffect(() => {
     let active = true;
+    const waited = window.setTimeout(() => setSources((known) => known ?? []), PROVIDED_WAIT_MS);
     void getAgentConfig()
       .then((config) => providedSources(config).filter((source) => source.models.length > 0))
       .catch(() => [])
       .then((found) => {
+        window.clearTimeout(waited);
         if (active) setSources(found);
       });
     return () => {
       active = false;
+      window.clearTimeout(waited);
     };
   }, []);
 

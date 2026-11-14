@@ -1,9 +1,8 @@
 'use client';
 
-import Link from 'next/link';
 import { useT } from '@/components/providers';
 import type { AgentConfigApi } from '@/lib/api/agents';
-import { MODEL_CONNECTIONS_HREF } from '@/components/features/settings/navigation';
+import { ModelConnectionsLink } from '@/components/features/settings/ModelConnectionsLink';
 import { leadingProvidedSource, modelSetupRequired } from './providedModels';
 
 /**
@@ -30,12 +29,9 @@ export function ModelConnectionNotice({ config }: { config: AgentConfigApi | nul
       </p>
       <p className="text-sm leading-6 text-muted">{description}</p>
       {enabled ? (
-        <Link
-          href={MODEL_CONNECTIONS_HREF}
-          className="ui-button ui-button-secondary inline-flex min-h-11 max-w-full items-center whitespace-normal"
-        >
+        <ModelConnectionsLink className="ui-button ui-button-secondary inline-flex min-h-11 max-w-full items-center whitespace-normal">
           {t('modelSource.setupAction')}
-        </Link>
+        </ModelConnectionsLink>
       ) : null}
     </div>
   );
