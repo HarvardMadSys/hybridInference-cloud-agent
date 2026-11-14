@@ -27,6 +27,11 @@ TurnSummaryWrite = Literal["stored", "duplicate", "conflict", "lease_lost"]
 class AttemptCommands(Protocol):
     """Port: the attempt lifecycle -- claim, heartbeat, transition, retire."""
 
+    async def notify_question_change(
+        self, *, job_id: str, attempt_id: int, lease_generation: int
+    ) -> bool:
+        """Wake a thread reader only while this attempt holds its live fence."""
+
     async def claim_job(
         self,
         *,

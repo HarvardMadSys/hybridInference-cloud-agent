@@ -16,12 +16,15 @@ from cloud_agent.storage.repositories.attempt_commands.claims import ClaimsMixin
 from cloud_agent.storage.repositories.attempt_commands.lifecycle import LifecycleMixin
 from cloud_agent.storage.repositories.attempt_commands.reaper import ReaperMixin
 from cloud_agent.storage.repositories.attempt_commands.reports import ReportsMixin
+from cloud_agent.storage.repositories.attempt_question_changes import AttemptQuestionChanges
 
 if TYPE_CHECKING:
     import asyncpg
 
 
-class PostgresAttemptCommands(ClaimsMixin, LifecycleMixin, ReportsMixin, ReaperMixin):
+class PostgresAttemptCommands(
+    ClaimsMixin, LifecycleMixin, ReportsMixin, ReaperMixin, AttemptQuestionChanges
+):
     """Claim, heartbeat, transition and reap -- every fenced write a worker makes."""
 
     def __init__(self, pool: asyncpg.Pool) -> None:

@@ -1,9 +1,11 @@
-"""A repository split into mixins exposes exactly the methods it had as one class.
+"""A repository split into mixins exposes its deliberate method set.
 
 Each class below was one module before it became a package of mixins, one per
-concern. The expected names are the methods its class body defined then, read
-from that module at commit ``3e0400ef7``, private ones included: a method lost
-in the split, or a helper that leaked into the class, changes the set.
+concern. The expected names start with the methods its class body defined at
+commit ``3e0400ef7``, private ones included. Intentional API additions are
+listed explicitly alongside that baseline; accidental losses or leaked
+helpers still change the set. ``notify_question_change`` is the fenced owner
+notification added for native question hints.
 """
 
 from __future__ import annotations
@@ -83,6 +85,7 @@ def test_the_attempt_commands_keep_their_methods() -> None:
         "append_events",
         "claim_job",
         "heartbeat",
+        "notify_question_change",
         "reap_expired",
         "record_attempt_resources",
         "record_attempt_turn_summary",

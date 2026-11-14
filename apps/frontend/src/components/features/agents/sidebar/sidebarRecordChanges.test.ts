@@ -11,6 +11,7 @@ function change(update: Partial<AgentRecordsChange>): AgentRecordsChange {
     usageValues: {},
     queues: [],
     mcp: [],
+    questionThreads: [],
     resync: false,
     ...update,
   };

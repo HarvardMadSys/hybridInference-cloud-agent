@@ -13,11 +13,33 @@ import pytest
 from tests.unit.test_live_sessions import _live, _LiveProcess, _turn_lines
 
 from cloud_agent_host.drivers import TurnInput
+from cloud_agent_host.question_change_signals import (
+    ChangeTrackedDict,
+    QuestionChangeTrackable,
+    question_change_frames,
+)
 from cloud_agent_host.runtimes import ClaudeCodeRuntime, CodexRuntime, KiloRuntime, OpencodeRuntime
 from cloud_agent_host.runtimes.live import driver_for
 from cloud_agent_shared.shared_protocol import INPUT_REFUSED, INPUT_TURN_ENDED
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures/agent_runtime_streams"
+
+
+def test_pending_question_mutations_coalesce_to_one_stream_frame():
+    class _Turn(QuestionChangeTrackable):
+        def __init__(self):
+            self._questions_lock = threading.Lock()
+            self._questions = ChangeTrackedDict()
+
+    turn = _Turn()
+    turn._questions["first"] = object()
+    turn._questions["second"] = object()
+
+    assert list(question_change_frames(turn)) == ['{"kind":"question_changed"}\n']
+    assert list(question_change_frames(turn)) == []
+
+    turn._questions.pop("first")
+    assert list(question_change_frames(turn)) == ['{"kind":"question_changed"}\n']
 
 
 def _fixture(runtime, kind="question"):

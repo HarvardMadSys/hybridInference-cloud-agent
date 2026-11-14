@@ -17,7 +17,7 @@ export interface QuestionPace {
 export interface QuestionReadScope {
   listThreadQuestions: (threadId: string, signal?: AbortSignal) => Promise<AgentQuestionsApi>;
   /** Drop cached snapshots and fence pending reads after a turn change or answer. */
-  invalidate: (threadId?: string) => void;
+  invalidate: (threadId?: string, refresh?: boolean) => void;
   /**
    * Call `read` on this tab's one clock for `threadId`: now, then on every
    * tick, while the consumer is due. The clock ticks as often as its most
@@ -77,7 +77,11 @@ function isDue(watcher: QuestionWatcher): boolean {
  * them while the tab is hidden. A clock exists while a consumer watches its
  * conversation and stops with the last one.
  */
-export function createQuestionClocks(): Pick<QuestionReadScope, 'watch'> {
+type QuestionClocks = Pick<QuestionReadScope, 'watch'> & {
+  refresh: (threadId: string) => void;
+};
+
+export function createQuestionClocks(): QuestionClocks {
   const clocks = new Map<string, QuestionClock>();
 
   function tick(clock: QuestionClock): void {
@@ -110,6 +114,10 @@ export function createQuestionClocks(): Pick<QuestionReadScope, 'watch'> {
   }
 
   return {
+    refresh: (threadId) => {
+      const clock = clocks.get(threadId);
+      if (clock) tick(clock);
+    },
     watch: (threadId, { intervalMs, whileHidden }, read) => {
       const watcher: QuestionWatcher = { intervalMs, whileHidden, read };
       let clock = clocks.get(threadId);
@@ -140,6 +148,7 @@ export function createQuestionClocks(): Pick<QuestionReadScope, 'watch'> {
  */
 export function createQuestionReadScope(): QuestionReadScope {
   const reads = new Map<string, QuestionRead>();
+  const clocks = createQuestionClocks();
   return {
     listThreadQuestions: (threadId, signal) => {
       if (signal?.aborted) {
@@ -173,15 +182,16 @@ export function createQuestionReadScope(): QuestionReadScope {
       }
       return withAbort(held.promise, signal);
     },
-    invalidate: (threadId) => {
+    invalidate: (threadId, refresh = false) => {
       if (threadId === undefined) {
         for (const held of reads.values()) held.controller.abort();
         reads.clear();
       } else {
         reads.get(threadId)?.controller.abort();
         reads.delete(threadId);
+        if (refresh) clocks.refresh(threadId);
       }
     },
-    ...createQuestionClocks(),
+    watch: clocks.watch,
   };
 }

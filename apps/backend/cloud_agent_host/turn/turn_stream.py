@@ -7,6 +7,7 @@ import queue
 import time
 from typing import TYPE_CHECKING, Any
 
+from cloud_agent_host import question_change_signals
 from cloud_agent_host.bounded_output import OutputPump, TextTail
 from cloud_agent_host.claimed_job import ClaimedJob, LeaseLost
 from cloud_agent_host.drivers import LINE
@@ -187,7 +188,9 @@ def _stream_shared_agent_turn(  # noqa: C901, PLR0912, PLR0915 complexity baseli
                 raise SandboxManagerError(502, str(exc)[:1000]) from exc
             if frame is None:
                 break
-            kind = frame.get("kind")
+            kind = question_change_signals.question_change_frame_kind(frame, control, job)
+            if kind is None:
+                continue
             if kind == "event":
                 raw_line = frame.get("raw_line")
                 if isinstance(raw_line, str):

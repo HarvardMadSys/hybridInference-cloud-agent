@@ -127,6 +127,14 @@ describe('the shell read scope', () => {
     read('thread-a');
     read('thread-b');
     act(() => {
+      receiveHint('question', 'thread-a');
+      vi.advanceTimersByTime(PUSH_BATCH_MS);
+    });
+    expect(pending('thread-a')).toBe(false);
+    expect(pending('thread-b')).toBe(true);
+    read('thread-a');
+    read('thread-b');
+    act(() => {
       receiveThreadChange({ id: 'thread-b', deleted: true });
       vi.advanceTimersByTime(PUSH_BATCH_MS);
     });
@@ -147,6 +155,6 @@ describe('the shell read scope', () => {
       vi.advanceTimersByTime(PUSH_BATCH_MS);
     });
     expect(pending('thread-a')).toBe(false);
-    expect(listThreadQuestions).toHaveBeenCalledTimes(6);
+    expect(listThreadQuestions).toHaveBeenCalledTimes(7);
   });
 });

@@ -65,6 +65,65 @@ def test_a_lease_an_event_upload_lost_ends_the_turn_at_once():
     ]
 
 
+def test_question_hint_is_best_effort_but_409_still_loses_the_lease():
+    outcomes = []
+
+    def endpoint(request):
+        outcomes.append(request)
+        if len(outcomes) == 1:
+            return httpx.Response(503, json={"detail": "busy"})
+        if len(outcomes) == 2:
+            raise httpx.ConnectTimeout("no route", request=request)
+        return httpx.Response(409, json={"detail": "lease expired"})
+
+    control = control_plane_client.ControlPlane("https://control.test", "token")
+    control.close()
+    control._client = httpx.Client(timeout=30, transport=httpx.MockTransport(endpoint))
+    try:
+        control.report_question_change("ajob_questions")
+        control.report_question_change("ajob_questions")
+        with pytest.raises(LeaseLost):
+            control.report_question_change("ajob_questions")
+    finally:
+        control.close()
+
+    assert len(outcomes) == 3
+    assert outcomes[0].url.path == "/v1/agent/worker/jobs/ajob_questions/questions:changed"
+    assert outcomes[0].extensions["timeout"] == dict.fromkeys(
+        ("connect", "read", "write", "pool"), 2.0
+    )
+
+
+def test_question_change_frame_only_reports_the_claimed_job():
+    class _QuestionControl(_Control):
+        def __init__(self):
+            super().__init__()
+            self.question_hints = []
+
+        def report_question_change(self, job_id):
+            self.question_hints.append(job_id)
+
+    control = _QuestionControl()
+    supervisor = _Supervisor(
+        [
+            {"kind": "question_changed"},
+            {"kind": "result", "status": "completed", "exit_code": 0},
+        ]
+    )
+    result = turn_stream._stream_shared_agent_turn(
+        supervisor=supervisor,
+        job=_JOB,
+        control=control,
+        heart=SimpleNamespace(cancel_requested=False, lease_lost=False),
+        lease_token="lease",
+        timeout_s=30,
+    )
+
+    assert result[0] == 0
+    assert control.question_hints == ["ajob_1"]
+    assert control.events == [("lifecycle", {"phase": "turn_started"})]
+
+
 def _uploaded_events(request: httpx.Request) -> list[dict[str, Any]]:
     """The events one upload carries: a batch's, or the one a single post sends."""
     body = json.loads(request.content)

@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from fastapi.concurrency import iterate_in_threadpool
 from fastapi.responses import StreamingResponse  # noqa: TC002 — FastAPI resolves it.
 
+from cloud_agent_host import question_change_signals
 from cloud_agent_host.bounded_output import OutputPump
 from cloud_agent_host.container.sandbox import SandboxError
 from cloud_agent_host.drivers import DriverError
@@ -198,6 +199,7 @@ def _turn_frames(
             checkpoint = _take_reported_checkpoint(owner, thread_id, turn)
             if checkpoint is not None:
                 yield _frame({"kind": "resource_checkpoint", "turn_resources": checkpoint})
+            yield from question_change_signals.question_change_frames(turn)
             try:
                 event = events.get(timeout=0.25)
             except queue.Empty:

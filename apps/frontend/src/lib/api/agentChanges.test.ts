@@ -47,6 +47,7 @@ describe('streamAgentChanges', () => {
         'event: job\ndata: {"id":"ajob_1","revision":3,"state":"succeeded"}\n\n',
         'event: usage\ndata: {"id":"ajob_1"}\n\n',
         'event: queue\ndata: {"id":"athr_1"}\n\n',
+        'event: question\ndata: {"id":"athr_1"}\n\n',
         // A kind this client does not know, such as an older server's
         // publication progress, is not a hint.
         'event: publication\ndata: {"id":"athr_1"}\n\n',
@@ -72,10 +73,11 @@ describe('streamAgentChanges', () => {
     expect(opts.onJob).toHaveBeenCalledWith({ id: 'ajob_1', revision: 3, state: 'succeeded' });
     expect(opts.onHint).toHaveBeenNthCalledWith(1, 'usage', 'ajob_1');
     expect(opts.onHint).toHaveBeenNthCalledWith(2, 'queue', 'athr_1');
-    expect(opts.onHint).toHaveBeenNthCalledWith(3, 'usage', 'ajob_2', {
+    expect(opts.onHint).toHaveBeenNthCalledWith(3, 'question', 'athr_1');
+    expect(opts.onHint).toHaveBeenNthCalledWith(4, 'usage', 'ajob_2', {
       ledger: { status: 'available' },
     });
-    expect(opts.onHint).toHaveBeenCalledTimes(3);
+    expect(opts.onHint).toHaveBeenCalledTimes(4);
     expect(opts.onDisconnect).toHaveBeenCalledTimes(1);
   });
 

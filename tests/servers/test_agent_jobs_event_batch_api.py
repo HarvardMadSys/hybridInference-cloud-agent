@@ -61,6 +61,33 @@ async def test_worker_batch_stores_events_in_order_and_answers_a_replay_with_the
     assert assistant == ["done"]
 
 
+async def test_worker_question_hint_is_thread_scoped_and_fenced(
+    client: AsyncClient, store: FakeStorage, monkeypatch
+):
+    job_id, auth = await _worker_auth(client)
+    hints = []
+
+    async def notify(*, job_id, attempt_id, lease_generation):
+        if not store._fenced(attempt_id, lease_generation):
+            return False
+        job = store.jobs[job_id]
+        hints.append((job["user_id"], job["thread_id"]))
+        return True
+
+    monkeypatch.setattr(store, "notify_question_change", notify, raising=False)
+
+    response = await client.post(f"/v1/agent/worker/jobs/{job_id}/questions:changed", headers=auth)
+
+    assert response.status_code == 204
+    expected = (store.jobs[job_id]["user_id"], store.jobs[job_id]["thread_id"])
+    assert hints == [expected]
+
+    store.live_fence = (101, 2)
+    stale = await client.post(f"/v1/agent/worker/jobs/{job_id}/questions:changed", headers=auth)
+    assert stale.status_code == 409
+    assert hints == [expected]
+
+
 async def test_worker_batch_is_refused_whole_once_the_lease_is_lost(
     client: AsyncClient, store: FakeStorage
 ):

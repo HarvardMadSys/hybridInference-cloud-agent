@@ -32,9 +32,9 @@ _T = TypeVar("_T")
 
 CHANNEL = "agent_owner_changes"
 #: Kinds the stream forwards as a hint, without reading anything: the tab reads
-#: that one thing again. ``usage`` and ``mcp`` name a job; ``queue`` names a
-#: conversation (migration ``0032``).
-HINT_KINDS = ("usage", "queue", "mcp")
+#: that one thing again. ``usage`` and ``mcp`` name a job; ``queue`` and
+#: ``question`` name a conversation.
+HINT_KINDS = ("usage", "queue", "mcp", "question")
 
 
 @dataclass

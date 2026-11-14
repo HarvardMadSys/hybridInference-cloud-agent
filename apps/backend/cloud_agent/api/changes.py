@@ -135,7 +135,7 @@ async def stream_owner_changes(
     ``thread`` carry the row's current values and its ``revision``, or
     ``{"id": ..., "deleted": true}`` once it is gone; ``usage`` carries the
     job's ``{"id": ..., "usage": ...}`` as ``GET /v1/agent/jobs/{id}/usage``
-    returns it; ``mcp`` (a job) and ``queue`` (a conversation) carry only
+    returns it; ``mcp`` (a job) and ``queue`` and ``question`` (a conversation) carry only
     ``{"id": ...}``: read that again. 404 where this
     process pushes nothing, which a tab treats as "keep reading on a clock".
     The stream ends after at most ``OWNER_STREAM_MAX_S`` (15 minutes); the tab

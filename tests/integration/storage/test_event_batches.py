@@ -116,6 +116,41 @@ async def test_a_batch_is_stored_in_order_in_one_transaction(store, pool):
     assert await _assistant_messages(pool, job["id"]) == ["Reading the failing test."]
 
 
+async def test_question_change_notifies_only_for_the_current_live_attempt(store, pool):
+    job, fence = await _claimed(store)
+    heard = await _listen(OWNER)
+    try:
+        assert not await store.attempt_commands.notify_question_change(
+            job_id=job["id"],
+            attempt_id=fence["attempt_id"],
+            lease_generation=fence["lease_generation"] + 1,
+        )
+        assert await heard.until_quiet(pool) == []
+
+        assert await store.attempt_commands.notify_question_change(job_id=job["id"], **fence)
+        payloads = await heard.until_quiet(pool)
+    finally:
+        await heard.connection.close()
+
+    assert [json.loads(payload) for payload in payloads] == [
+        {"user": job["user_id"], "kind": "question", "id": job["thread_id"]}
+    ]
+
+
+async def test_question_change_for_deleted_thread_is_a_noop_not_lease_loss(store, pool):
+    job, fence = await _claimed(store)
+    await pool.execute(
+        "UPDATE agent_threads SET deleted_at = clock_timestamp() WHERE id = $1",
+        job["thread_id"],
+    )
+    heard = await _listen(OWNER)
+    try:
+        assert await store.attempt_commands.notify_question_change(job_id=job["id"], **fence)
+        assert await heard.until_quiet(pool) == []
+    finally:
+        await heard.connection.close()
+
+
 async def test_a_batch_that_fails_part_way_stores_none_of_it(store, pool, monkeypatch):
     job, fence = await _claimed(store)
     original = event_batches.insert_event
