@@ -44,6 +44,11 @@ def _report(tmp_path: Path, *sources: str) -> Path:
             os.devnull,
             "--rootdir",
             str(tmp_path),
+            # Without it pytest also lists tmp_path's parents, and an entry there that this
+            # account may not follow (fs.protected_symlinks: another user's symlink in /tmp)
+            # becomes a collection error that drops the sample tests from the report.
+            "--confcutdir",
+            str(tmp_path),
             f"--junitxml={report}",
             *(str(module) for module in modules),
         ],
