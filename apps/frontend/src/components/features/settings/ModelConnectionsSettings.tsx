@@ -11,9 +11,50 @@ import {
 import { ModelConnectionCard } from './ModelConnectionCard';
 import { ModelConnectionForm } from './ModelConnectionForm';
 import { ConnectionOps, type Operate, type Settlement } from './connectionOps';
+import { ChevronIcon } from './icons';
+import { MODEL_CONNECTIONS_ANCHOR, MODEL_CONNECTIONS_REQUESTED } from './navigation';
 import { announceModelConnectionsChanged } from '../agents/composer/modelConnectionEvents';
 
-export function ModelConnectionsSettings() {
+const BODY_ID = 'settings-connections-body';
+
+/**
+ * Whether the section's body shows, and whether it has been drawn at all. A
+ * folded section opens from its heading, and when the address names it or a
+ * link asks for it: that is how "set up your own connection" lands on the
+ * form's side of the fold, on a page it navigates to and on one already
+ * drawn. Once drawn the body stays, hidden while folded, so folding loses
+ * neither a half-filled form nor a save still on its way.
+ */
+function useFold(folded: boolean) {
+  const [open, setOpen] = useState(!folded);
+  const [drawn, setDrawn] = useState(!folded);
+  const section = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const reveal = () => {
+      setOpen(true);
+      setDrawn(true);
+      section.current?.scrollIntoView?.({ block: 'start' });
+    };
+    const named = () => {
+      if (window.location.hash === MODEL_CONNECTIONS_ANCHOR) reveal();
+    };
+    named();
+    window.addEventListener('hashchange', named);
+    window.addEventListener(MODEL_CONNECTIONS_REQUESTED, reveal);
+    return () => {
+      window.removeEventListener('hashchange', named);
+      window.removeEventListener(MODEL_CONNECTIONS_REQUESTED, reveal);
+    };
+  }, []);
+  const toggle = () => {
+    setOpen((current) => !current);
+    setDrawn(true);
+  };
+  return { open, drawn, toggle, section };
+}
+
+/** The connections themselves: read when first drawn, so a section never opened asks nothing. */
+function Connections() {
   const t = useT();
   const [data, setData] = useState<ModelConnectionList | null>(null);
   const [failed, setFailed] = useState(false);
@@ -81,13 +122,7 @@ export function ModelConnectionsSettings() {
   const available = Boolean(data?.configured && data.enabled);
   const maxModels = data?.max_models ?? MAX_MODELS;
   return (
-    <section
-      aria-labelledby="settings-connections"
-      className="ui-card mt-4 min-w-0 bg-surface p-4 sm:p-5"
-    >
-      <h2 id="settings-connections" className="text-base font-semibold">
-        {t('connections.title')}
-      </h2>
+    <>
       <p className="mt-1.5 max-w-2xl text-sm leading-6 text-muted">
         {t('connections.description')}
       </p>
@@ -153,6 +188,46 @@ export function ModelConnectionsSettings() {
             }}
           />
         ))}
+      </div>
+    </>
+  );
+}
+
+/**
+ * The owner's own connections. `folded` is for a deployment that provides
+ * models: the section then starts as its heading alone. A section already
+ * open stays open if `folded` arrives late; it only gains the heading's fold.
+ */
+export function ModelConnectionsSettings({ folded = false }: { folded?: boolean }) {
+  const t = useT();
+  const { open, drawn, toggle, section } = useFold(folded);
+  return (
+    <section
+      ref={section}
+      aria-labelledby="settings-connections"
+      className="ui-card mt-4 min-w-0 scroll-mt-4 bg-surface p-4 sm:p-5"
+    >
+      <h2 id="settings-connections" className="text-base font-semibold">
+        {folded ? (
+          <button
+            type="button"
+            aria-expanded={open}
+            aria-controls={BODY_ID}
+            onClick={toggle}
+            className="ui-focus-ring -mx-2 -my-1.5 flex min-h-11 w-[calc(100%+1rem)] items-center gap-2 rounded-lg px-2 text-left hover:bg-surface-hover"
+          >
+            <ChevronIcon
+              className={`h-4 w-4 shrink-0 text-muted transition-transform ${open ? 'rotate-90' : ''}`}
+            />
+            {t('connections.title')}
+          </button>
+        ) : (
+          t('connections.title')
+        )}
+      </h2>
+      {/* Folded, the heading is a button that reaches past its own line. */}
+      <div id={BODY_ID} hidden={!open} className={folded ? 'pt-2' : undefined}>
+        {drawn ? <Connections /> : null}
       </div>
     </section>
   );

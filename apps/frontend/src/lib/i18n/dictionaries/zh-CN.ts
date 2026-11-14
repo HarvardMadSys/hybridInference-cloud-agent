@@ -512,7 +512,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'settings.expandNavigation': '展开设置导航',
   'settings.personalDescription': '管理你的个人资料和通知。',
   'settings.models.title': '模型',
-  'settings.models.description': '你的个人模型连接：任务运行所用的服务商 API key 和模型。',
+  'settings.models.description': '任务可以使用的模型。',
   'settings.plugins': '插件与 MCP',
   'settings.pluginsDescription': '连接 MCP 服务器，管理 Agent 可使用的技能。',
   'settings.integrations': '集成',

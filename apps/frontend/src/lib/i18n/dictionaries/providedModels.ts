@@ -1,21 +1,12 @@
-// Models a deployment provides: the read-only card an owner sees in
+// Models a deployment provides: the read-only list an owner sees in
 // Settings → Models (`provided.*`), and the Admin → Settings → Models section
 // where an administrator sets them up (`adminModels.*`). Nothing here names a
 // provider or a deployment: the connection's own name is the only name shown.
+// The owner's list says nothing of where its models come from: `provided.title`
+// is its accessible name, and is not drawn.
 
 export const providedModelsEn = {
-  'provided.title': 'Provided by this deployment',
-  'provided.description':
-    'Models this deployment offers you with no setup. Each has a daily request allowance, counted per model; an agent sends many requests in one turn. Nothing here can be changed.',
-  'provided.default': 'New tasks start here',
-  'provided.model': 'Model',
-  'provided.allowance': 'Daily allowance',
-  'provided.used': 'Used today',
-  'provided.left': 'Left today',
-  'provided.unlimited': 'Unlimited',
-  'provided.noneLeft': 'None until {time}',
-  'provided.resets': 'Counts are per UTC day and start over at {time}, your time.',
-  'provided.noModels': 'No model on this connection is offered to your account.',
+  'provided.title': 'Available models',
   'adminModels.tab': 'Models',
   'adminModels.title': 'Models this deployment provides',
   'adminModels.description':
@@ -142,18 +133,7 @@ export const providedModelsEn = {
 } as const;
 
 export const providedModelsZhCN: Record<keyof typeof providedModelsEn, string> = {
-  'provided.title': '由本部署提供',
-  'provided.description':
-    '本部署提供给你的模型，无需任何设置。每个模型有各自的每日请求次数上限；Agent 的一轮对话通常会发出很多次请求。这里的内容不可修改。',
-  'provided.default': '新任务默认使用',
-  'provided.model': '模型',
-  'provided.allowance': '每日上限',
-  'provided.used': '今日已用',
-  'provided.left': '今日剩余',
-  'provided.unlimited': '不限',
-  'provided.noneLeft': '已用完，{time} 重置',
-  'provided.resets': '次数按 UTC 日统计，将在你当地时间 {time} 重置。',
-  'provided.noModels': '此连接没有向你的账号开放的模型。',
+  'provided.title': '可用模型',
   'adminModels.tab': '模型',
   'adminModels.title': '本部署提供的模型',
   'adminModels.description':

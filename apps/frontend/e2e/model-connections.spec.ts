@@ -83,3 +83,71 @@ for (const viewport of [
     });
   });
 }
+
+test('personal connections fold beneath available models and keep a half-filled form', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('agents.locale', 'en');
+    localStorage.setItem('agents.theme', 'light');
+  });
+  await page.route('**/api/v1/agent/config', async (route) => {
+    const response = await route.fetch();
+    await route.fulfill({
+      response,
+      json: {
+        ...(await response.json()),
+        model_connections_enabled: true,
+        provided_sources: [
+          {
+            id: 'oconn_fixture',
+            name: 'Fixture models',
+            is_default: true,
+            default_model: 'fixture-provided',
+            models: ['fixture-provided'],
+            model_runtimes: { 'fixture-provided': ['codex'] },
+            allowances: { 'fixture-provided': { daily_requests: 100, used_today: 1 } },
+            resets_at: '2026-10-29T00:00:00Z',
+          },
+        ],
+      },
+    });
+  });
+  let reads = 0;
+  await page.route('**/api/v1/agent/model-connections', async (route) => {
+    reads += 1;
+    await route.fulfill({ json: { enabled: true, configured: true, connections: [] } });
+  });
+  await page.goto('/settings/models');
+
+  await expect(page.getByRole('region', { name: 'Available models', exact: true })).toContainText(
+    'fixture-provided',
+  );
+  const section = page.getByRole('region', { name: 'Personal model connections', exact: true });
+  const heading = section.getByRole('button', { name: 'Personal model connections', exact: true });
+  const key = page.getByLabel('API key', { exact: true });
+  await expect(heading).toHaveAttribute('aria-expanded', 'false');
+  // Never opened, the section has asked the server for nothing.
+  expect(reads).toBe(0);
+
+  await heading.click();
+  await section.getByRole('button', { name: 'Add connection', exact: true }).click();
+  await key.fill('browser-test-not-a-real-key');
+
+  await heading.click();
+  await expect(heading).toHaveAttribute('aria-expanded', 'false');
+  await expect(key).toBeHidden();
+  await heading.click();
+  await expect(key).toBeVisible();
+  await expect(key).toHaveValue('browser-test-not-a-real-key');
+  expect(reads).toBe(1);
+
+  // Folded again, an address that comes to name the section opens it.
+  await heading.click();
+  await expect(key).toBeHidden();
+  await page.evaluate(() => {
+    window.location.hash = '#settings-connections';
+  });
+  await expect(heading).toHaveAttribute('aria-expanded', 'true');
+  await expect(key).toHaveValue('browser-test-not-a-real-key');
+});

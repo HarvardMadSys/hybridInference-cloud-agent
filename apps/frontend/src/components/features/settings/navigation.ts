@@ -16,6 +16,24 @@ export const SETTINGS_PATHS = {
 /** Model connections lived in My Settings under this anchor before they had a page. */
 export const MODEL_CONNECTIONS_ANCHOR = '#settings-connections';
 
+/**
+ * Where a link that means "set up your own connection" goes. The anchor opens
+ * the section, which is folded where the deployment provides models.
+ */
+export const MODEL_CONNECTIONS_HREF = `${SETTINGS_PATHS.models}${MODEL_CONNECTIONS_ANCHOR}`;
+
+/**
+ * What such a link says to a Models page that is already drawn. Followed
+ * there, it changes the fragment and nothing else: the page does not remount,
+ * and the router's `pushState` fires no `hashchange`, so the address alone
+ * would leave a folded section folded.
+ */
+export const MODEL_CONNECTIONS_REQUESTED = 'settings.model-connections.requested';
+
+export function requestModelConnections() {
+  window.dispatchEvent(new Event(MODEL_CONNECTIONS_REQUESTED));
+}
+
 export function isSettingsPath(pathname: string): boolean {
   return (
     pathname === '/settings' || pathname.startsWith('/settings/') || pathname === '/integrations'

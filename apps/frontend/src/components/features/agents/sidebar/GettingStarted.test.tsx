@@ -157,7 +157,7 @@ describe('GettingStarted', () => {
     expect(await screen.findByRole('region', { name: 'Getting started' })).toHaveTextContent('0/4');
     expect(screen.getByRole('link', { name: 'Connect a model' })).toHaveAttribute(
       'href',
-      '/settings/models',
+      '/settings/models#settings-connections',
     );
     expect(screen.queryByText('Run your first task')).not.toBeInTheDocument();
   });
