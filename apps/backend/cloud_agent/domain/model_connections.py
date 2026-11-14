@@ -62,6 +62,10 @@ UnusableReason = Literal[
     "changed",
     "feature_disabled",
     "no_connection",
+    "provided_unavailable",
+    "provided_model_unavailable",
+    "allowance_none",
+    "allowance_exhausted",
 ]
 
 #: What the owner is told when a turn cannot run on its connection. Each names
@@ -103,7 +107,31 @@ UNUSABLE_MESSAGES: dict[str, str] = {
         "This task has no model connection, so it cannot run. Start a new task on a model "
         "from one of your own model connections."
     ),
+    # A model the deployment provides: its administrator's to fix, never the
+    # owner's, and never replaced by one of the owner's own connections.
+    "provided_unavailable": (
+        "This deployment no longer provides the model source this task ran on. "
+        "Choose another model."
+    ),
+    "provided_model_unavailable": (
+        "This deployment no longer provides that model for this agent. Choose another model."
+    ),
+    "allowance_none": (
+        "That model is not provided to your account on this deployment. Choose another "
+        "model, or ask the deployment administrator."
+    ),
+    "allowance_exhausted": (
+        "You have used today's requests for this model on this deployment. The count "
+        "starts over at 00:00 UTC. Choose another model, or continue then."
+    ),
 }
+
+#: What ``require_usable`` says of a model its connection cannot serve, which
+#: on a provided connection is the administrator's to fix and reads as one
+#: answer to the owner.
+PROVIDED_MODEL_REASONS: frozenset[str] = frozenset(
+    {"model_not_listed", "model_unverified", "protocol_unsupported"}
+)
 
 
 class ModelConnectionInvalid(ValueError):
@@ -318,6 +346,7 @@ def _require_offered(offer: EffortOffer | None, level: str) -> None:
 __all__ = [
     "FAILED",
     "MAX_NAME_CHARS",
+    "PROVIDED_MODEL_REASONS",
     "SUPPORTED",
     "UNSUPPORTED",
     "UNUSABLE_MESSAGES",

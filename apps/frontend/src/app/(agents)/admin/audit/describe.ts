@@ -235,9 +235,79 @@ const ACCOUNT_SENTENCES: Record<string, Sentence> = Object.fromEntries(
   ]),
 );
 
+/** A provided connection as an audit sentence names it: by the name recorded with the action. */
+function providedConnection(details: Details): string {
+  const name = text(details.name);
+  return name ? `provided model connection ${name}` : 'a provided model connection';
+}
+
+/** A daily request allowance: a number, none at all, or no limit. */
+function allowance(value: unknown): string {
+  const requests = count(value);
+  if (requests === null) return 'unlimited requests a day';
+  if (requests === 0) return 'no requests';
+  return `${requests.toLocaleString('en-US')} request${requests === 1 ? '' : 's'} a day`;
+}
+
+/** Which model of which provided connection an allowance is for. */
+function providedModel(details: Details): string {
+  const model = text(details.model) ?? 'a model';
+  return `${model} on ${providedConnection(details)}`;
+}
+
+/** The fields an edit changed, in the words the settings form uses. */
+const PROVIDED_FIELD_NAMES: Record<string, string> = {
+  name: 'name',
+  base_url: 'Base URL',
+  models: 'models',
+  default_model: 'default model',
+  is_default: 'default for new users',
+  end_user_header: 'end-user header',
+  user_concurrency: 'requests in flight per account',
+};
+
+/**
+ * Models the deployment provides, and each account's allowance on them. The
+ * key itself is never recorded: a rotation says only that it happened.
+ */
+const PROVIDED_SENTENCES: Record<string, Sentence> = {
+  'agent.operator_model_connection.create': (details) => {
+    const models = Array.isArray(details.models) ? details.models.length : null;
+    const listed = models === null ? '' : ` with ${models} model${models === 1 ? '' : 's'}`;
+    return `Added ${providedConnection(details)}${listed}, disabled`;
+  },
+  'agent.operator_model_connection.update': (details) => {
+    const changed = Array.isArray(details.changed) ? details.changed.map(String) : [];
+    const fields = changed.map((field) => PROVIDED_FIELD_NAMES[field] ?? field).join(', ');
+    return fields
+      ? `Changed ${providedConnection(details)}: ${fields}`
+      : `Changed ${providedConnection(details)}`;
+  },
+  'agent.operator_model_connection.rotate_key': (details) =>
+    `Replaced the API key of ${providedConnection(details)}`,
+  'agent.operator_model_connection.enable': (details) => `Enabled ${providedConnection(details)}`,
+  'agent.operator_model_connection.disable': (details) => `Disabled ${providedConnection(details)}`,
+  'agent.operator_model_connection.delete': (details) => `Deleted ${providedConnection(details)}`,
+  'agent.operator_model_connection.set_limit': (details) => {
+    const daily = count(details.user_daily_requests);
+    const cap = count(details.global_concurrency);
+    const who =
+      daily === 0
+        ? 'only accounts given their own allowance'
+        : `${allowance(details.user_daily_requests)} per account`;
+    const flight = cap === null ? '' : `, at most ${cap} in flight across accounts`;
+    return `Set the default allowance for ${providedModel(details)}: ${who}${flight}`;
+  },
+  'agent.operator_model_user_limit.set': (details, _host, _definitions, entry) =>
+    `Gave ${subject(entry)} ${allowance(details.daily_requests)} of ${providedModel(details)}`,
+  'agent.operator_model_user_limit.clear': (details, _host, _definitions, entry) =>
+    `Put ${subject(entry)} back on the default allowance for ${providedModel(details)}`,
+};
+
 /** The actions whose sentence depends on what was recorded with them. */
 const SENTENCES: Record<string, Sentence> = {
   ...ACCOUNT_SENTENCES,
+  ...PROVIDED_SENTENCES,
   'agent.local_login_events.purge': (details, _host, _definitions, entry) => {
     const days = count(details.older_than_days);
     const age = days === null ? '' : ` older than ${days} days`;

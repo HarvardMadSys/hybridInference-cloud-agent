@@ -317,6 +317,21 @@ describe('LedgerUsage with the owner change stream', () => {
   });
 });
 
+it('says a turn on a provided model spends the daily allowance, not the owner’s provider', async () => {
+  vi.mocked(getAgentJobUsage).mockResolvedValue({ ...usage(1200, 80), source: 'provided' });
+  await mount();
+  expect(screen.getByText(/a model this deployment provides/)).toBeInTheDocument();
+  expect(screen.getByText(/counts against your daily request allowance/)).toBeInTheDocument();
+  expect(screen.queryByText(/your provider bills it/)).not.toBeInTheDocument();
+  expect(screen.getByLabelText('Usage')).not.toHaveTextContent('$');
+});
+
+it('keeps saying the provider bills a turn that names its source as personal', async () => {
+  vi.mocked(getAgentJobUsage).mockResolvedValue({ ...usage(1200, 80), source: 'personal' });
+  await mount();
+  expect(screen.getByText(/your provider bills it/)).toBeInTheDocument();
+});
+
 it('names provider-owned billing before any usage response arrives', () => {
   render(<UsageView usage={null} />);
   expect(screen.getByText(/your provider bills it/)).toBeInTheDocument();

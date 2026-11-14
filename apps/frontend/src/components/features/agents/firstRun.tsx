@@ -14,6 +14,7 @@ import {
 import { getAgentConfig, listAgentConversations, type AgentConfigApi } from '@/lib/api/agents';
 
 import { MODEL_CONNECTIONS_CHANGED } from './composer/modelConnectionEvents';
+import { modelSetupRequired } from './composer/providedModels';
 
 // First-run guidance: who gets it, how far along they are, and where it may
 // speak — decided once, for the whole app.
@@ -23,8 +24,9 @@ import { MODEL_CONNECTIONS_CHANGED } from './composer/modelConnectionEvents';
 // not, since they are gone from that owner's history. Progress is not stored:
 // each step is read from what the owner has actually done, the model
 // connection, GitHub connection and repositories `/config` reports, then the
-// first conversation. Only Skip is remembered, per account in this browser,
-// and Settings can undo it.
+// first conversation. A model the deployment provides counts as the model
+// connection. Only Skip is remembered, per account in this browser, and
+// Settings can undo it.
 //
 // The sidebar's getting-started row, the new-task page and the conversation
 // page all read this one answer. Three places each asking for themselves would
@@ -46,11 +48,13 @@ export interface FirstRunStep {
  */
 export function firstRunSteps(config: AgentConfigApi): { id: FirstRunStepId; done: boolean }[] {
   const steps: { id: FirstRunStepId; done: boolean }[] = [];
-  // Every task runs on one of its owner's own model connections, so this comes
-  // first. Where the deployment does not let owners add one, the new-task page
-  // says so, and there is nothing to do here.
+  // Every task runs on a model connection, so this comes first. It is behind
+  // an owner who has one of their own that can run, and equally behind one the
+  // deployment provides a model to: there is nothing for them to add. Where the
+  // deployment does not let owners add one, the new-task page says so, and
+  // there is nothing to do here.
   if (config.model_connections_enabled === true) {
-    steps.push({ id: 'model', done: config.model_connection_required !== true });
+    steps.push({ id: 'model', done: !modelSetupRequired(config) });
   }
   // Nobody can connect while the deployment's App is down or absent. The
   // new-task page says which; a step that cannot be taken is left out.

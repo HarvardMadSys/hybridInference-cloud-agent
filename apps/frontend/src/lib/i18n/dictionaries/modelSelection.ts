@@ -1,9 +1,11 @@
 import { modelConnectionsEn, modelConnectionsZhCN } from './modelConnections';
 import { modelSourcesEn, modelSourcesZhCN } from './modelSources';
+import { providedModelsEn, providedModelsZhCN } from './providedModels';
 
 export const modelSelectionEn = {
   ...modelConnectionsEn,
   ...modelSourcesEn,
+  ...providedModelsEn,
   'settings.model.title': 'Default model',
   'settings.model.description':
     'Choose a model for new tasks. You can change it for any individual task.',
@@ -39,6 +41,7 @@ export const modelSelectionEn = {
 export const modelSelectionZhCN = {
   ...modelConnectionsZhCN,
   ...modelSourcesZhCN,
+  ...providedModelsZhCN,
   'settings.model.title': '默认模型',
   'settings.model.description': '设置新任务使用的模型，创建任务时仍可更改。',
   'settings.model.label': '默认模型',

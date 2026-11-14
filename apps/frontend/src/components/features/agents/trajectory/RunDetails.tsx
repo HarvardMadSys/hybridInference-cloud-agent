@@ -37,6 +37,7 @@ import {
   recordedCount,
 } from './StepDetailParts';
 import { formatDuration } from '../conversation/TurnFooter';
+import { usageSourceKey } from '../composer/providedModels';
 import type { AgentJob } from '../types';
 import { isOlderUsage, onAgentRecordsChanged } from '../agentPush';
 import { isRepositoryTooLarge, ownerFailureMessage } from '../adapt/jobState';
@@ -298,7 +299,7 @@ export function RunDetails({
         </h4>
         {error ? <p className="text-[11px] text-red-600 dark:text-red-400">{error}</p> : null}
         <DetailRows>
-          <DetailRow label="Cost">{t('modelSource.usageExternal')}</DetailRow>
+          <DetailRow label="Cost">{t(usageSourceKey(usage))}</DetailRow>
         </DetailRows>
         <DetailSection title="Reported by the runtime">
           <DetailRows>

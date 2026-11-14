@@ -35,6 +35,7 @@ from cloud_agent.schemas.resources import (  # noqa: TC001 — Pydantic resolves
 from cloud_agent.skills.models import (
     SelectedSkill,  # noqa: TC001 — Pydantic resolves annotations at runtime.
 )
+from cloud_agent_shared.model_connections import CONNECTION_ID_PATTERN
 from cloud_agent_shared.plugins import MAX_SANDBOX_PLUGINS, SandboxPlugin
 
 # Where a job's `base_ref` lives once it is persisted. The column stores the
@@ -80,7 +81,8 @@ MAX_JOB_METADATA_BYTES = 16 * 1024
 
 
 #: An owner model connection id; see ``cloud_agent_shared.model_connections``.
-MODEL_CONNECTION_ID_PATTERN = r"^mconn_[0-9a-f]{32}$"
+#: An owner's own connection (``mconn_``) or one the deployment provides (``oconn_``).
+MODEL_CONNECTION_ID_PATTERN = CONNECTION_ID_PATTERN
 _UUID_PATTERN = r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 
 

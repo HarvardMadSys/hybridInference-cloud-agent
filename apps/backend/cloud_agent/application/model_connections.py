@@ -12,7 +12,16 @@ must not reach a process still running on the old state -- a new key or Base
 URL, disabling or deleting -- releases every residency started under the old state and closes
 its process, the same way a chat deletion does.
 
-See ``docs/agents/specs/2026-10-27-user-model-connections.zh-CN.md``.
+**A turn may instead name a connection the deployment provides** (an
+``oconn_`` id). It is resolved here too, by the same predicate, with two
+differences. It is every admitted owner's, so what is read per owner is their
+allowance on the model, not the row. And its key never leaves the control
+plane: the claim carries no key and marks the access *relayed*, and the
+residency's credential is a placeholder only the model relay accepts
+(``api.model_relay``). Nothing falls back between the two kinds either.
+
+See ``docs/agents/specs/2026-10-27-user-model-connections.zh-CN.md`` and
+``docs/agents/specs/2026-11-12-platform-model-relay.zh-CN.md``.
 """
 
 from __future__ import annotations
@@ -27,20 +36,26 @@ from cloud_agent.crypto.credential_cipher import (
     CredentialCipher,
     CredentialCipherError,
 )
+from cloud_agent.crypto.domain_cipher import settings_root_key
 from cloud_agent.domain.errors import RefusalKind, Refused, Unavailable
 from cloud_agent.domain.execution import FAILED, RUNNING
 from cloud_agent.domain.model_connections import (
+    PROVIDED_MODEL_REASONS,
     ModelConnectionUnusable,
     is_connection_id,
     require_usable,
 )
+from cloud_agent.domain.operator_models import OPERATOR_CONNECTION_KEY_DOMAIN
 from cloud_agent.logging_utils import get_logger
 from cloud_agent.settings import setting_env
+from cloud_agent.tokens import mint_residency_model_token
 from cloud_agent_shared.model_connections import (
     MODEL_CONNECTION_CAPABILITY,
     MODEL_PROTOCOL_COMPAT_CAPABILITY,
+    MODEL_RELAY_CAPABILITY,
     ModelConnectionAccess,
     ProtocolPlan,
+    is_operator_connection_id,
 )
 
 if TYPE_CHECKING:
@@ -97,6 +112,24 @@ def model_connection_scan_cipher(secret: str | None = None) -> CredentialCipher:
     return CredentialCipher(material, domain=MODEL_CONNECTION_SCAN_DOMAIN)
 
 
+def operator_connection_cipher(secret: str | None = None) -> CredentialCipher:
+    """The cipher a provided connection's key is stored under.
+
+    Under the settings root key, like every other credential an administrator
+    saves for the deployment, and in a domain of its own. It also derives the
+    loopback tokens of members translated onto a provided connection.
+    """
+    material = secret if secret is not None else settings_root_key()
+    return CredentialCipher(material, domain=OPERATOR_CONNECTION_KEY_DOMAIN)
+
+
+def _turn_cipher(connection_id: str) -> CredentialCipher:
+    """The cipher of the kind of connection ``connection_id`` names."""
+    if is_operator_connection_id(connection_id):
+        return operator_connection_cipher()
+    return model_connection_cipher()
+
+
 def model_connections_enabled() -> bool:
     """Whether owners may add connections and start turns on them.
 
@@ -121,17 +154,70 @@ async def resolve_turn_connection(
     runtime: str,
     model: str,
     reasoning_effort: str | None = None,
+    admit: bool = False,
 ) -> tuple[dict[str, Any], ProtocolPlan]:
-    """The owner's connection for one turn and the plan it will run with, or refuse.
+    """The connection one turn runs on and the plan it will run with, or refuse.
 
-    Read scoped to ``user_id``: a connection id of somebody else's reads as
-    missing, which is the only answer a forged or shared id ever gets.
+    An owner's connection is read scoped to ``user_id``: a connection id of
+    somebody else's reads as missing, which is the only answer a forged or
+    shared id ever gets. A provided connection is everybody's; what is read
+    for ``user_id`` is their allowance on ``model``.
+
+    ``admit`` is for the moments a turn is accepted or handed to a host: there
+    a provided model whose allowance is used up for today refuses the turn. A
+    turn already starting (its residency, a Fork) is only refused a model that
+    is not offered to its owner at all.
     """
     if not is_connection_id(connection_id):
         raise ModelConnectionUnusable("not_found")
+    if is_operator_connection_id(connection_id):
+        return await _resolve_provided(
+            connections,
+            user_id=user_id,
+            connection_id=connection_id,
+            runtime=runtime,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            admit=admit,
+        )
     row = await connections.get_model_connection(user_id=user_id, connection_id=connection_id)
     plan = require_usable(row, runtime=runtime, model=model, reasoning_effort=reasoning_effort)
     assert row is not None
+    return row, plan
+
+
+async def _resolve_provided(
+    connections: ModelConnectionRepository,
+    *,
+    user_id: str,
+    connection_id: str,
+    runtime: str,
+    model: str,
+    reasoning_effort: str | None,
+    admit: bool,
+) -> tuple[dict[str, Any], ProtocolPlan]:
+    """A provided connection for one turn of ``user_id``, or the owner-facing refusal.
+
+    What an owner could fix on a connection of their own (enable it, list the
+    model, verify it) is here the administrator's, so those read as the
+    deployment no longer providing it.
+    """
+    row = await connections.operator_connection(connection_id=connection_id)
+    if row is None or row.get("deleted_at") is not None or not row.get("enabled"):
+        raise ModelConnectionUnusable("provided_unavailable")
+    try:
+        plan = require_usable(row, runtime=runtime, model=model, reasoning_effort=reasoning_effort)
+    except ModelConnectionUnusable as exc:
+        if exc.reason in PROVIDED_MODEL_REASONS:
+            raise ModelConnectionUnusable("provided_model_unavailable") from None
+        raise
+    allowance = await connections.operator_allowance(
+        connection_id=connection_id, user_id=user_id, model=model
+    )
+    if not allowance.offered:
+        raise ModelConnectionUnusable("allowance_none")
+    if admit and allowance.exhausted:
+        raise ModelConnectionUnusable("allowance_exhausted")
     return row, plan
 
 
@@ -174,8 +260,12 @@ def connection_access(
     A translated plan adds the member's loopback token (``translator_token``).
     Raises ``CredentialCipherError`` when the key cannot be decrypted, which is
     the deployment's problem rather than the owner's.
+
+    A provided connection hands over no key: the access is *relayed*, and its
+    stored key is not even decrypted here.
     """
     connection_id, revision = str(row["id"]), int(row["credential_revision"])
+    relayed = is_operator_connection_id(connection_id)
     token = ""
     if plan.translated:
         token = translator_token(
@@ -192,17 +282,19 @@ def connection_access(
         base_url=str(row["base_url"]),
         protocol=plan.upstream_protocol,
         client_protocol=plan.client_protocol if plan.translated else "",
-        api_key=cipher.decrypt(str(row["api_key_ciphertext"])),
+        api_key="" if relayed else cipher.decrypt(str(row["api_key_ciphertext"])),
         local_token=token,
+        relayed=relayed,
     )
 
 
 async def access_for_job(
     connections: ModelConnectionRepository,
     job: Mapping[str, Any],
-    cipher: CredentialCipher,
+    cipher: CredentialCipher | None = None,
     *,
     member: str | None = None,
+    admit: bool = False,
 ) -> ModelConnectionAccess | None:
     """The connection access a job's turn runs on; ``None`` when it names none.
 
@@ -211,7 +303,9 @@ async def access_for_job(
     ``job`` is a job row: its owner, runtime, model, effort and connection id
     are all re-read from it, never from a request. ``member`` is the thread
     whose process will hold it, when that is not the job's own (a Fork's new
-    member runs the source's turn settings under its own token).
+    member runs the source's turn settings under its own token). ``cipher`` is
+    the connection kind's own unless one is given; ``admit`` is
+    :func:`resolve_turn_connection`'s.
     """
     connection_id = job.get("model_connection_id")
     if not connection_id:
@@ -223,11 +317,12 @@ async def access_for_job(
         runtime=str(job["runtime"]),
         model=str(job["model"]),
         reasoning_effort=job.get("reasoning_effort"),
+        admit=admit,
     )
     return connection_access(
         row,
         plan,
-        cipher,
+        cipher if cipher is not None else _turn_cipher(str(connection_id)),
         user_id=str(job["user_id"]),
         thread_id=member or str(job["thread_id"]),
         model=str(job["model"]),
@@ -245,8 +340,17 @@ async def bind_residency_access(
     """Record which connection revision a residency's process runs on, if still current.
 
     The key's scan-only copy is kept with it, attributed to the residency's
-    sandbox group, before the key is handed to that group's CLI.
+    sandbox group, before the key is handed to that group's CLI. A relayed
+    access has no key to keep: only the revision is recorded.
     """
+    if access.relayed:
+        return await connections.bind_operator_residency(
+            user_id=user_id,
+            connection_id=access.connection_id,
+            revision=access.revision,
+            thread_id=thread_id,
+            generation=generation,
+        )
     return await connections.bind_residency(
         user_id=user_id,
         connection_id=access.connection_id,
@@ -333,12 +437,17 @@ async def claim_model_connection(
         await store.attempt_commands.release_claim(**fence, retry_after_seconds=30)
         raise waiting
     try:
-        access = await access_for_job(store.model_connections, claim, model_connection_cipher())
-        # A translated plan also needs a host that can run the helper; an
-        # older one gets the claim back rather than a turn it cannot launch.
+        access = await access_for_job(store.model_connections, claim, admit=True)
+        # A translated plan also needs a host that can run the helper, and a
+        # relayed one a host whose sandboxes reach the model relay; a host
+        # without gets the claim back rather than a turn it cannot launch.
         if access is None:
             raise ModelConnectionUnusable("not_found")
-        if access.plan.translated and MODEL_PROTOCOL_COMPAT_CAPABILITY not in capabilities:
+        needed = [
+            MODEL_PROTOCOL_COMPAT_CAPABILITY if access.plan.translated else None,
+            MODEL_RELAY_CAPABILITY if access.relayed else None,
+        ]
+        if any(capability and capability not in capabilities for capability in needed):
             await store.attempt_commands.release_claim(**fence, retry_after_seconds=30)
             raise waiting
         return access
@@ -373,18 +482,28 @@ async def _end_unusable(
 async def connection_residency_credential(
     store: _ResidencyStorage, job: Mapping[str, Any], *, row: Mapping[str, Any]
 ) -> ModelConnectionAccess:
-    """The key a residency on an owner connection runs on, bound to that residency.
+    """The credential a residency runs on, bound to that residency.
 
     ``job`` is the turn the residency serves; ``row`` the residency just
     established. The connection is checked again here, and its revision is
     stamped on the membership under the connection's lock: a change committed
     first refuses this, and one committed after finds and closes it.
+
+    On an owner connection the credential is the owner's key. On a provided
+    one it is this residency's model relay placeholder, answered in the same
+    ``api_key`` field so every caller hands it on the same way.
     """
-    access = await access_for_job(
-        store.model_connections, job, model_connection_cipher(), member=str(row["thread_id"])
-    )
+    access = await access_for_job(store.model_connections, job, member=str(row["thread_id"]))
     if access is None:
         raise ModelConnectionUnusable("not_found")
+    if access.relayed:
+        access = access.model_copy(
+            update={
+                "api_key": mint_residency_model_token(
+                    thread_id=str(row["thread_id"]), residency_generation=int(row["generation"])
+                )
+            }
+        )
     bound = await bind_residency_access(
         store.model_connections,
         user_id=str(job["user_id"]),
@@ -412,7 +531,8 @@ async def residency_credential(
     plan, while the turn was starting.
 
     The residency gets its connection's key: nothing stands between an owner
-    and their own provider. When the connection cannot serve it (or the turn
+    and their own provider. (On a provided connection it gets its model relay
+    placeholder instead.) When the connection cannot serve it (or the turn
     names none), the residency is released before anything holds a
     credential, and the turn -- ``fence`` names its attempt -- ends with the
     reason, as it would have at its claim.
@@ -457,6 +577,7 @@ __all__ = [
     "model_connection_scan_cipher",
     "model_connections_enabled",
     "new_connection_id",
+    "operator_connection_cipher",
     "residency_credential",
     "resolve_turn_connection",
     "translator_token",

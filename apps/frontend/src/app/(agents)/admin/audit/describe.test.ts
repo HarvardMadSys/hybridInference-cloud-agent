@@ -370,6 +370,119 @@ describe('describeResult', () => {
   });
 });
 
+describe('models the deployment provides', () => {
+  const connection = { connection_id: 'oconn_0123456789abcdef0123456789abcdef', name: 'House' };
+  const account = {
+    target_type: 'account',
+    target_user_id: 'u-22222222-3333',
+    subject_label: 'ada',
+  };
+
+  it('says a connection was added disabled, with how many models', () => {
+    expect(
+      describeAuditEntry(
+        entry('agent.operator_model_connection.create', {
+          ...connection,
+          base_url: 'https://api.example.com/v1',
+          models: ['house-fast', 'house-deep'],
+        }),
+      ),
+    ).toBe('Added provided model connection House with 2 models, disabled');
+    expect(
+      describeAuditEntry(
+        entry('agent.operator_model_connection.create', { ...connection, models: ['one'] }),
+      ),
+    ).toBe('Added provided model connection House with 1 model, disabled');
+  });
+
+  it('names what an edit changed, in the form’s words', () => {
+    expect(
+      describeAuditEntry(
+        entry('agent.operator_model_connection.update', {
+          ...connection,
+          changed: ['base_url', 'is_default', 'user_concurrency'],
+        }),
+      ),
+    ).toBe(
+      'Changed provided model connection House: Base URL, default for new users, requests in flight per account',
+    );
+    expect(describeAuditEntry(entry('agent.operator_model_connection.update', connection))).toBe(
+      'Changed provided model connection House',
+    );
+  });
+
+  it('says a key was replaced without ever showing one', () => {
+    const sentence = describeAuditEntry(
+      entry('agent.operator_model_connection.rotate_key', { ...connection, api_key: '[redacted]' }),
+    );
+    expect(sentence).toBe('Replaced the API key of provided model connection House');
+    expect(sentence).not.toContain('redacted');
+  });
+
+  it('says a connection was enabled, disabled or deleted', () => {
+    expect(describeAuditEntry(entry('agent.operator_model_connection.enable', connection))).toBe(
+      'Enabled provided model connection House',
+    );
+    expect(describeAuditEntry(entry('agent.operator_model_connection.disable', connection))).toBe(
+      'Disabled provided model connection House',
+    );
+    expect(describeAuditEntry(entry('agent.operator_model_connection.delete', connection))).toBe(
+      'Deleted provided model connection House',
+    );
+    // A row recorded without its name still reads as a sentence.
+    expect(describeAuditEntry(entry('agent.operator_model_connection.delete', {}))).toBe(
+      'Deleted a provided model connection',
+    );
+  });
+
+  it('reads a default allowance as a number, unlimited, or only named accounts', () => {
+    const limit = (user_daily_requests: number | null, global_concurrency: number | null) =>
+      describeAuditEntry(
+        entry('agent.operator_model_connection.set_limit', {
+          ...connection,
+          model: 'house-fast',
+          user_daily_requests,
+          global_concurrency,
+        }),
+      );
+    expect(limit(1500, null)).toBe(
+      'Set the default allowance for house-fast on provided model connection House: 1,500 requests a day per account',
+    );
+    expect(limit(null, 8)).toBe(
+      'Set the default allowance for house-fast on provided model connection House: unlimited requests a day per account, at most 8 in flight across accounts',
+    );
+    expect(limit(0, null)).toBe(
+      'Set the default allowance for house-fast on provided model connection House: only accounts given their own allowance',
+    );
+  });
+
+  it('names the account whose own allowance was set or cleared', () => {
+    const details = { ...connection, model: 'house-fast' };
+    expect(
+      describeAuditEntry(
+        entry('agent.operator_model_user_limit.set', { ...details, daily_requests: 1 }, account),
+      ),
+    ).toBe('Gave ada (u-222222…) 1 request a day of house-fast on provided model connection House');
+    expect(
+      describeAuditEntry(
+        entry('agent.operator_model_user_limit.set', { ...details, daily_requests: null }, account),
+      ),
+    ).toBe(
+      'Gave ada (u-222222…) unlimited requests a day of house-fast on provided model connection House',
+    );
+    expect(
+      describeAuditEntry(
+        entry('agent.operator_model_user_limit.set', { ...details, daily_requests: 0 }, account),
+      ),
+    ).toBe('Gave ada (u-222222…) no requests of house-fast on provided model connection House');
+    expect(
+      describeAuditEntry(entry('agent.operator_model_user_limit.clear', details, account)),
+    ).toBe(
+      'Put ada (u-222222…) back on the default allowance for house-fast on provided model connection House',
+    );
+  });
+});
+
 describe('every declared action', () => {
   it('has a sentence of its own on this page', () => {
     // actions.json is the backend's registry, checked against it by

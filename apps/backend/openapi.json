@@ -4049,7 +4049,7 @@
           },
           "model_connection_required": {
             "default": false,
-            "description": "True while none of this owner's enabled model connections has a model verified for any Agent: nothing can run until one is set up.",
+            "description": "True while neither one of this owner's enabled model connections nor a connection the deployment provides has a model this owner can run: nothing can run until one is set up.",
             "title": "Model Connection Required",
             "type": "boolean"
           },
@@ -4073,6 +4073,14 @@
               "type": "string"
             },
             "title": "Plugin Runtimes",
+            "type": "array"
+          },
+          "provided_sources": {
+            "description": "Connections this deployment provides to every admitted owner, each with this owner's daily request allowance per model. A model chosen from one is submitted with the source's id as `model_connection_id`.",
+            "items": {
+              "$ref": "#/components/schemas/ProvidedModelSource"
+            },
+            "title": "Provided Sources",
             "type": "array"
           },
           "repos": {
@@ -4950,7 +4958,7 @@
           "model_connection_id": {
             "anyOf": [
               {
-                "pattern": "^mconn_[0-9a-f]{32}$",
+                "pattern": "^[mo]conn_[0-9a-f]{32}$",
                 "type": "string"
               },
               {
@@ -6461,7 +6469,7 @@
           "model_connection_id": {
             "anyOf": [
               {
-                "pattern": "^mconn_[0-9a-f]{32}$",
+                "pattern": "^[mo]conn_[0-9a-f]{32}$",
                 "type": "string"
               },
               {
@@ -7864,7 +7872,7 @@
           "model_connection_id": {
             "anyOf": [
               {
-                "pattern": "^mconn_[0-9a-f]{32}$",
+                "pattern": "^[mo]conn_[0-9a-f]{32}$",
                 "type": "string"
               },
               {
@@ -16819,6 +16827,21 @@
           "runtime": {
             "$ref": "#/components/schemas/RuntimeUsage"
           },
+          "source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "personal",
+                  "provided"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
           "version": {
             "anyOf": [
               {
@@ -17626,6 +17649,7 @@
         "description": "One connection, as the claim of a turn running on it hands it to a host.\n\n``revision`` is the connection's credential revision. It is part of the\nmember process's fixed launch, so a turn after the key, Base URL or\nprotocols changed starts a new process rather than borrowing one that holds\nthe old key. ``api_key`` is the owner's own secret; it is masked in every\ndurable output of the turn and written only into the member's private\nenvironment and activation tmpfs.",
         "properties": {
           "api_key": {
+            "default": "",
             "title": "Api Key",
             "type": "string"
           },
@@ -17654,6 +17678,11 @@
             "title": "Protocol",
             "type": "string"
           },
+          "relayed": {
+            "default": false,
+            "title": "Relayed",
+            "type": "boolean"
+          },
           "revision": {
             "minimum": 1.0,
             "title": "Revision",
@@ -17664,8 +17693,7 @@
           "connection_id",
           "revision",
           "base_url",
-          "protocol",
-          "api_key"
+          "protocol"
         ],
         "title": "ModelConnectionAccess",
         "type": "object"
@@ -18120,6 +18148,559 @@
           }
         },
         "title": "OkResponse",
+        "type": "object"
+      },
+      "OperatorModelConnectionCreate": {
+        "additionalProperties": false,
+        "description": "A new provided connection, saved disabled once every model has been verified.",
+        "properties": {
+          "api_key": {
+            "maxLength": 4160,
+            "title": "Api Key",
+            "type": "string"
+          },
+          "base_url": {
+            "maxLength": 1024,
+            "title": "Base Url",
+            "type": "string"
+          },
+          "default_model": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Model"
+          },
+          "end_user_header": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End User Header"
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 64,
+            "title": "Models",
+            "type": "array"
+          },
+          "name": {
+            "maxLength": 200,
+            "title": "Name",
+            "type": "string"
+          },
+          "user_concurrency": {
+            "default": 4,
+            "maximum": 64.0,
+            "minimum": 1.0,
+            "title": "User Concurrency",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "base_url",
+          "api_key",
+          "models"
+        ],
+        "title": "OperatorModelConnectionCreate",
+        "type": "object"
+      },
+      "OperatorModelConnectionList": {
+        "description": "Every provided connection, and whether any host can run a turn on one.",
+        "properties": {
+          "connections": {
+            "items": {
+              "$ref": "#/components/schemas/OperatorModelConnectionView"
+            },
+            "title": "Connections",
+            "type": "array"
+          },
+          "feature_enabled": {
+            "default": true,
+            "title": "Feature Enabled",
+            "type": "boolean"
+          },
+          "relay_hosts": {
+            "default": 0,
+            "title": "Relay Hosts",
+            "type": "integer"
+          }
+        },
+        "title": "OperatorModelConnectionList",
+        "type": "object"
+      },
+      "OperatorModelConnectionUpdate": {
+        "additionalProperties": false,
+        "description": "Change some fields; an omitted field keeps its value. ``api_key`` rotates the key.\n\nA new key or Base URL, or an added model, is verified before it is saved.\nAn empty ``default_model`` or ``end_user_header`` clears it.",
+        "properties": {
+          "api_key": {
+            "anyOf": [
+              {
+                "maxLength": 4160,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "maxLength": 1024,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "default_model": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Model"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "end_user_header": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End User Header"
+          },
+          "is_default": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Default"
+          },
+          "models": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 64,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Models"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "user_concurrency": {
+            "anyOf": [
+              {
+                "maximum": 64.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Concurrency"
+          }
+        },
+        "title": "OperatorModelConnectionUpdate",
+        "type": "object"
+      },
+      "OperatorModelConnectionView": {
+        "description": "One provided connection, as an administrator reads it. Never its key.",
+        "properties": {
+          "base_url": {
+            "title": "Base Url",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "default_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Model"
+          },
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "end_user_header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End User Header"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "is_default": {
+            "default": false,
+            "title": "Is Default",
+            "type": "boolean"
+          },
+          "key_refused_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key Refused At"
+          },
+          "limits": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/OperatorModelLimit"
+            },
+            "title": "Limits",
+            "type": "object"
+          },
+          "model_status": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Model Status",
+            "type": "array"
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "user_concurrency": {
+            "default": 4,
+            "description": "Requests one owner may have in flight at once. Counted by each model relay process on its own requests.",
+            "title": "User Concurrency",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "base_url",
+          "models",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "OperatorModelConnectionView",
+        "type": "object"
+      },
+      "OperatorModelLimit": {
+        "description": "The default allowance of one model, and its cap on requests in flight across owners.",
+        "properties": {
+          "global_concurrency": {
+            "anyOf": [
+              {
+                "maximum": 1024.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Requests to this model in flight across all owners. Counted by each model relay process on its own requests: a deployment that runs several relay processes allows this many in each.",
+            "title": "Global Concurrency"
+          },
+          "user_daily_requests": {
+            "anyOf": [
+              {
+                "maximum": 10000000.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Daily Requests"
+          }
+        },
+        "title": "OperatorModelLimit",
+        "type": "object"
+      },
+      "OperatorModelLimitWrite": {
+        "additionalProperties": false,
+        "description": "Set one model's default allowance and concurrency cap.",
+        "properties": {
+          "global_concurrency": {
+            "anyOf": [
+              {
+                "maximum": 1024.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Requests to this model in flight across all owners. Counted by each model relay process on its own requests: a deployment that runs several relay processes allows this many in each.",
+            "title": "Global Concurrency"
+          },
+          "model": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "user_daily_requests": {
+            "anyOf": [
+              {
+                "maximum": 10000000.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Daily Requests"
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "title": "OperatorModelLimitWrite",
+        "type": "object"
+      },
+      "OperatorModelUsageResponse": {
+        "description": "Accepted requests per day, account and model, newest day first.",
+        "properties": {
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/OperatorModelUsageRow"
+            },
+            "title": "Rows",
+            "type": "array"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "title": "OperatorModelUsageResponse",
+        "type": "object"
+      },
+      "OperatorModelUsageRow": {
+        "description": "Requests the model relay accepted from one account for one model on one UTC day.",
+        "properties": {
+          "account_id": {
+            "title": "Account Id",
+            "type": "string"
+          },
+          "day": {
+            "format": "date",
+            "title": "Day",
+            "type": "string"
+          },
+          "email": {
+            "default": "",
+            "title": "Email",
+            "type": "string"
+          },
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "requests": {
+            "title": "Requests",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "day",
+          "account_id",
+          "model",
+          "requests"
+        ],
+        "title": "OperatorModelUsageRow",
+        "type": "object"
+      },
+      "OperatorModelUserLimitWrite": {
+        "additionalProperties": false,
+        "description": "Give one account an allowance of its own on one model.",
+        "properties": {
+          "account": {
+            "maxLength": 320,
+            "minLength": 1,
+            "title": "Account",
+            "type": "string"
+          },
+          "daily_requests": {
+            "anyOf": [
+              {
+                "maximum": 10000000.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Daily Requests"
+          },
+          "model": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account",
+          "model"
+        ],
+        "title": "OperatorModelUserLimitWrite",
+        "type": "object"
+      },
+      "OperatorModelUserList": {
+        "description": "A page of accounts, by account id.",
+        "properties": {
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "users": {
+            "items": {
+              "$ref": "#/components/schemas/OperatorModelUserRow"
+            },
+            "title": "Users",
+            "type": "array"
+          }
+        },
+        "title": "OperatorModelUserList",
+        "type": "object"
+      },
+      "OperatorModelUserRow": {
+        "description": "One account with an allowance of its own, or with use today.",
+        "properties": {
+          "account_id": {
+            "title": "Account Id",
+            "type": "string"
+          },
+          "email": {
+            "default": "",
+            "title": "Email",
+            "type": "string"
+          },
+          "limits": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Limits",
+            "type": "object"
+          },
+          "used_today": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Used Today",
+            "type": "object"
+          }
+        },
+        "required": [
+          "account_id"
+        ],
+        "title": "OperatorModelUserRow",
         "type": "object"
       },
       "OwnJoinRequestListResponse": {
@@ -19263,6 +19844,105 @@
           "message"
         ],
         "title": "ProtocolResultView",
+        "type": "object"
+      },
+      "ProvidedModelAllowance": {
+        "description": "One owner's allowance on one provided model, for the current UTC day.",
+        "properties": {
+          "daily_requests": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Daily Requests"
+          },
+          "used_today": {
+            "default": 0,
+            "title": "Used Today",
+            "type": "integer"
+          }
+        },
+        "title": "ProvidedModelAllowance",
+        "type": "object"
+      },
+      "ProvidedModelSource": {
+        "description": "One connection the deployment provides, as the composer offers it to this owner.\n\nThe same shape as an owner's own connection option, plus the owner's\nallowances. Only the models this owner may use are listed: one whose\nallowance is zero is absent, as if it were not provided.",
+        "properties": {
+          "allowances": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ProvidedModelAllowance"
+            },
+            "title": "Allowances",
+            "type": "object"
+          },
+          "default_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Model"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "is_default": {
+            "default": false,
+            "title": "Is Default",
+            "type": "boolean"
+          },
+          "model_efforts": {
+            "additionalProperties": {
+              "additionalProperties": {
+                "$ref": "#/components/schemas/ModelEffortOffer"
+              },
+              "type": "object"
+            },
+            "title": "Model Efforts",
+            "type": "object"
+          },
+          "model_runtimes": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": "Model Runtimes",
+            "type": "object"
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "resets_at": {
+            "format": "date-time",
+            "title": "Resets At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "models",
+          "resets_at"
+        ],
+        "title": "ProvidedModelSource",
         "type": "object"
       },
       "ProviderTokens": {
@@ -30637,6 +31317,636 @@
           }
         },
         "summary": "Get Measurement"
+      }
+    },
+    "/admin/agent/operator-model-connections": {
+      "get": {
+        "description": "Every provided connection, with its limits and each model's verification.",
+        "operationId": "list_connections_admin_agent_operator_model_connections_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorModelConnectionList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Connections",
+        "tags": [
+          "operator-model-connections"
+        ]
+      },
+      "post": {
+        "description": "Verify every model, then add the connection, disabled; nothing is stored if one fails.",
+        "operationId": "create_connection_admin_agent_operator_model_connections_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperatorModelConnectionCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorModelConnectionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerificationRefusalBody"
+                }
+              }
+            },
+            "description": "A model has no agent that can use it; nothing was saved."
+          },
+          "429": {
+            "description": "The owner's hourly checks cannot cover the models to verify."
+          },
+          "504": {
+            "description": "Verification outlasted the save's bound; nothing was saved."
+          }
+        },
+        "summary": "Create Connection",
+        "tags": [
+          "operator-model-connections"
+        ]
+      }
+    },
+    "/admin/agent/operator-model-connections/{connection_id}": {
+      "delete": {
+        "description": "Delete a provided connection: its key is erased and its running processes are closed.\n\nTurns that name it are refused from now on, never moved elsewhere.",
+        "operationId": "delete_connection_admin_agent_operator_model_connections__connection_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Connection",
+        "tags": [
+          "operator-model-connections"
+        ]
+      },
+      "patch": {
+        "description": "Edit, rotate the key of, enable or disable a provided connection.\n\nA new key or Base URL verifies every model the connection would list, and\nadded models are verified; the edit is committed only if all pass and the\nconnection did not change meanwhile (409). A field sent with the value it\nalready has is not a change. Enabling is refused (409) while a listed\nmodel has no default allowance.",
+        "operationId": "update_connection_admin_agent_operator_model_connections__connection_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperatorModelConnectionUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorModelConnectionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerificationRefusalBody"
+                }
+              }
+            },
+            "description": "A model has no agent that can use it; nothing was saved."
+          },
+          "429": {
+            "description": "The owner's hourly checks cannot cover the models to verify."
+          },
+          "504": {
+            "description": "Verification outlasted the save's bound; nothing was saved."
+          }
+        },
+        "summary": "Update Connection",
+        "tags": [
+          "operator-model-connections"
+        ]
+      }
+    },
+    "/admin/agent/operator-model-connections/{connection_id}/limits": {
+      "put": {
+        "description": "Set one model's default allowance and its cap on requests in flight across owners.",
+        "operationId": "set_limit_admin_agent_operator_model_connections__connection_id__limits_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperatorModelLimitWrite"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorModelConnectionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Limit",
+        "tags": [
+          "operator-model-connections"
+        ]
+      }
+    },
+    "/admin/agent/operator-model-connections/{connection_id}/usage": {
+      "get": {
+        "description": "Requests the model relay accepted, per UTC day, account and model.\n\nCounted outside the sandbox, one per inference request the relay let\nthrough; not tokens and not a bill. The last seven days when no range is\ngiven, and at most ``_MAX_USAGE_DAYS`` of them.",
+        "operationId": "usage_admin_agent_operator_model_connections__connection_id__usage_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorModelUsageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Usage",
+        "tags": [
+          "operator-model-connections"
+        ]
+      }
+    },
+    "/admin/agent/operator-model-connections/{connection_id}/user-limits": {
+      "delete": {
+        "description": "Return one account to a model's default allowance.",
+        "operationId": "clear_user_limit_admin_agent_operator_model_connections__connection_id__user_limits_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 1,
+              "title": "Account Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "model",
+            "required": true,
+            "schema": {
+              "maxLength": 256,
+              "minLength": 1,
+              "title": "Model",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clear User Limit",
+        "tags": [
+          "operator-model-connections"
+        ]
+      },
+      "put": {
+        "description": "Give one account its own allowance on one model, in place of the model's default.",
+        "operationId": "set_user_limit_admin_agent_operator_model_connections__connection_id__user_limits_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperatorModelUserLimitWrite"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorModelUserRow"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set User Limit",
+        "tags": [
+          "operator-model-connections"
+        ]
+      }
+    },
+    "/admin/agent/operator-model-connections/{connection_id}/users": {
+      "get": {
+        "description": "Accounts with an allowance of their own on this connection, or with use today.",
+        "operationId": "list_users_admin_agent_operator_model_connections__connection_id__users_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorModelUserList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Users",
+        "tags": [
+          "operator-model-connections"
+        ]
       }
     },
     "/admin/agent/profiling-control": {

@@ -2,14 +2,17 @@ import { useCallback, useMemo, useRef, useState } from 'react';
 import { useT } from '@/components/providers';
 import type { AgentConfigApi } from '@/lib/api/agents';
 import {
+  isUsedUp,
+  listedChoices,
   modelPicker,
   NO_MODEL,
-  offeredChoices,
   resolvedChoice,
   sameChoice,
   storedChoice,
   type ModelChoice,
 } from './modelSource';
+import { providedAllowance, resetTime } from './providedModels';
+import { useAllowanceReset } from './useAllowanceReset';
 
 /** The pick a draft kept, with its source; see `NewTaskDraft`. */
 interface DraftedPick {
@@ -34,11 +37,11 @@ interface DraftedPick {
  * the composer already refuses to do. With nothing resolved the control
  * stays empty and Run waits, exactly as it does for an unset repository.
  *
- * Both values carry their source (see `modelSource`). A model on the owner's
- * own connection that cannot run here — another agent was chosen, or the
- * connection was disabled or no longer lists it — stays on screen marked
- * unavailable and holds Run. It never gives way to the resolved model: that
- * would bill another account.
+ * Both values carry their source (see `modelSource`). A model on a source
+ * that cannot run here — another agent was chosen, the connection was
+ * disabled or no longer lists it, or a provided model has nothing left of
+ * today's allowance — stays on screen marked so and holds Run. It never gives
+ * way to the resolved model: that would bill another account.
  */
 export function useComposerModel(drafted: DraftedPick | null, runtime: string) {
   const t = useT();
@@ -57,7 +60,13 @@ export function useComposerModel(drafted: DraftedPick | null, runtime: string) {
     // its connection disappears and the server resolves another default.
     setResolved((current) => (current.connectionId ? current : resolvedChoice(loaded)));
   }, []);
-  const offered = useMemo(() => offeredChoices(config, runtime), [config, runtime]);
+  const listed = useMemo(() => listedChoices(config, runtime), [config, runtime]);
+  // What can run now: a provided model used up for today is listed, not offered.
+  // Worked out on every draw, as the picker's own options are: it depends on
+  // the clock, and a list kept from before the day's count started over would
+  // hold Run for a model the picker shows as back.
+  useAllowanceReset(config);
+  const offered = listed.filter((option) => !isUsedUp(config, option));
   let choice = NO_MODEL;
   let unavailable: ModelChoice | null = null;
   for (const candidate of [chosen, resolved]) {
@@ -74,8 +83,18 @@ export function useComposerModel(drafted: DraftedPick | null, runtime: string) {
   }
   // Named apart from the repository, so Run's title says which control to
   // look at, and a Run without one points at the empty control.
-  const missingModel = !choice.model && (offered.length > 0 || unavailable !== null);
-  const picker = modelPicker(config, offered, unavailable ?? choice, choose, t, { runtime });
+  const missingModel = !choice.model && (listed.length > 0 || unavailable !== null);
+  const picker = modelPicker(config, listed, unavailable ?? choice, choose, t, { runtime });
+  // Said beside the composer while a pick that cannot run holds Run.
+  let unavailableHint = '';
+  if (unavailable) {
+    const { connectionId: source, model } = unavailable;
+    const allowance = providedAllowance(config, source, model);
+    const label = picker.optionLabels[picker.value];
+    unavailableHint = allowance?.exhausted
+      ? t('modelSource.usedUpHint', { model, time: resetTime(allowance.resetsAt) })
+      : t('modelSource.unavailableHint', { label, runtime });
+  }
   const modelControl = useMemo(
     () => ({
       attach: (element: HTMLButtonElement | null) => {
@@ -100,10 +119,7 @@ export function useComposerModel(drafted: DraftedPick | null, runtime: string) {
       model: choice.model,
       ...(choice.connectionId ? { model_connection_id: choice.connectionId } : {}),
     },
-    // Said beside the composer while a personal pick holds Run.
-    unavailableHint: unavailable
-      ? t('modelSource.unavailableHint', { label: picker.optionLabels[picker.value], runtime })
-      : '',
+    unavailableHint,
     adoptModels,
     missingModel,
     picker,

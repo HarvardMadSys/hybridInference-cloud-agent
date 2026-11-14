@@ -5,6 +5,7 @@ import { useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 import { useAuth } from '@/components/providers';
+import { useT } from '@/components/providers/LocaleProvider';
 import { hasAgentPermission } from '@/components/providers/AuthProvider';
 import type { AgentRunnerHostPool } from '@/lib/api/admin';
 import { getAgentRunnerHosts, setAgentHostSettings, setAgentRuntimeVersion } from '@/lib/api/admin';
@@ -25,13 +26,18 @@ import {
   useApplicationSettings,
 } from './ApplicationSettings';
 import CloudLabSettings from './CloudLabSettings';
+import { ProvidedModelsPanel } from './ProvidedModels';
 import SandboxArchiveSettingsCard from './SandboxArchiveSettings';
 import { SettingsSearch } from './SettingsSearchPanel';
 import { useRuntimeUpgrades } from './useRuntimeUpgrades';
 import { useRuntimeVersions } from './useRuntimeVersions';
 import { isLegacyDeploymentHash, legacyDeploymentSetting } from './legacyDeploymentLinks';
 import { HOSTED_CATEGORIES, applicationCategoryName } from './settingsOrganization';
-import { buildSettingsSearchItems, type SettingsSearchItem } from './settingsSearchIndex';
+import {
+  buildSettingsSearchItems,
+  providedModelsSearchItem,
+  type SettingsSearchItem,
+} from './settingsSearchIndex';
 import { AdminNavigation } from '../AdminNavigation';
 import { ADMIN_PAGE, AdminPageHeader } from '../AdminPageHeader';
 import { GlobalSettingsCard, type NamedHost } from '../hosts/HostSettings';
@@ -45,6 +51,9 @@ const OTHER_SETTINGS_TABS = [
   { id: 'sandbox', label: 'Sandbox' },
   { id: 'cloudlab', label: 'CloudLab' },
 ] as const;
+
+/** The Models tab sits after Sandbox, among the tabs that are not application settings. */
+const MODELS_TAB_AFTER = 2;
 
 export default function AdminSettingsPage() {
   const { state } = useAuth();
@@ -77,6 +86,7 @@ function AccessDenied() {
 }
 
 function SettingsView() {
+  const t = useT();
   const queryTab = useSearchParams().get('tab');
   const content = useRef<HTMLDivElement>(null);
   const [searchTarget, setSearchTarget] = useState<string | null>(null);
@@ -136,7 +146,10 @@ function SettingsView() {
     ...(applicationCategories.length
       ? applicationCategories.map((category) => ({ id: categoryTabId(category), label: category }))
       : [{ id: 'application', label: 'Application' }]),
-    ...OTHER_SETTINGS_TABS,
+    ...OTHER_SETTINGS_TABS.slice(0, MODELS_TAB_AFTER),
+    // The models this deployment provides, in the administrator's language.
+    { id: 'models', label: t('adminModels.tab') },
+    ...OTHER_SETTINGS_TABS.slice(MODELS_TAB_AFTER),
   ];
   // Preserve a requested category in the URL while its definitions are loading.
   // Missing, legacy, or unknown tabs display the first available category.
@@ -278,18 +291,21 @@ function SettingsView() {
   const definitions = pool?.host_setting_definitions ?? [];
   const showHostStatus = selectedTab === 'versions' || selectedTab === 'sandbox';
   const versionMenu = runtimeMenu(servers.map(({ host }) => host));
-  const searchItems = buildSettingsSearchItems({
-    snapshot: applicationSettings.snapshot,
-    hostDefinitions: definitions,
-    runtimes: [
-      ...new Set([
-        ...versionMenu.map(([runtime]) => runtime),
-        ...Object.keys(pool?.runtime_versions ?? {}),
-      ]),
-    ],
-    archiveAvailable: archiveSettings !== null,
-    isSettingVisible: applicationSettings.isSettingVisible,
-  });
+  const searchItems = [
+    ...buildSettingsSearchItems({
+      snapshot: applicationSettings.snapshot,
+      hostDefinitions: definitions,
+      runtimes: [
+        ...new Set([
+          ...versionMenu.map(([runtime]) => runtime),
+          ...Object.keys(pool?.runtime_versions ?? {}),
+        ]),
+      ],
+      archiveAvailable: archiveSettings !== null,
+      isSettingVisible: applicationSettings.isSettingVisible,
+    }),
+    providedModelsSearchItem(t),
+  ];
 
   const selectSearchResult = (item: SettingsSearchItem) => {
     if (item.applicationKey) {
@@ -627,6 +643,7 @@ function SettingsView() {
               />
             )}
           </div>
+          <ProvidedModelsPanel selected={selectedTab === 'models'} onAccessDenied={fail} />
           <div
             role="tabpanel"
             id="admin-settings-panel-cloudlab"

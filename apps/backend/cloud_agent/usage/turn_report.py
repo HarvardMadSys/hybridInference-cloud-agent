@@ -13,6 +13,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from cloud_agent.domain.thread_stats import normalized_runtime_input_tokens, reported_token_totals
+from cloud_agent_shared.model_connections import is_operator_connection_id
 
 
 class RuntimeUsage(BaseModel):
@@ -35,8 +36,11 @@ class JobUsageResponse(BaseModel):
     """What one owner's run reported about its model use."""
 
     runtime: RuntimeUsage
-    #: The turn ran on its owner's own model connection: that provider bills it.
+    #: The turn ran on a model connection: that connection's provider bills it.
     external_provider: bool = False
+    #: Whose connection that was: the owner's own (``personal``) or one the
+    #: deployment provides (``provided``), which the deployment pays for.
+    source: Literal["personal", "provided"] | None = None
     version: str | None = Field(
         default=None,
         description=(
@@ -51,6 +55,7 @@ def summarize_job_usage(
     runtime_inputs: dict[str, Any],
     runtime: str | None,
     external_provider: bool = False,
+    source: Literal["personal", "provided"] | None = None,
 ) -> JobUsageResponse:
     """Use one accounting definition for owner and admin reads of a turn.
 
@@ -67,7 +72,15 @@ def summarize_job_usage(
             }
         ),
         external_provider=external_provider,
+        source=source,
     )
 
 
-__all__ = ["JobUsageResponse", "RuntimeUsage", "summarize_job_usage"]
+def usage_source(connection_id: object) -> Literal["personal", "provided"] | None:
+    """Whose connection a turn named: ``None`` for a turn that named none."""
+    if not connection_id:
+        return None
+    return "provided" if is_operator_connection_id(connection_id) else "personal"
+
+
+__all__ = ["JobUsageResponse", "RuntimeUsage", "summarize_job_usage", "usage_source"]

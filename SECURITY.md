@@ -28,5 +28,7 @@ Two deployment requirements bear repeating:
   untrusted users.
 - The sandbox never holds a platform or administration credential. It holds
   the owner's own provider key for the turn it runs, and short-lived scoped
-  tokens. Putting an admin token into a sandbox removes the security property
-  that this design rests on.
+  tokens. On a model the deployment provides it holds no provider key at all,
+  only a placeholder that the control plane's model relay accepts while that
+  turn runs. Putting an admin token, or the deployment's own provider key,
+  into a sandbox removes the security property that this design rests on.

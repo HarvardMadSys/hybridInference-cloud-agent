@@ -178,7 +178,7 @@ async def test_admin_reads_another_owner_but_owner_routes_are_unchanged(setup):
     assert body["usage"]["runtime"]["input_tokens"] == 200  # two attempts, not six blocks
     assert body["usage"]["runtime"]["normalized_input_tokens"] == 400
     # The agent's report alone: no Gateway ledger, conversation total or cost.
-    assert set(body["usage"]) == {"runtime", "external_provider", "version"}
+    assert set(body["usage"]) == {"runtime", "external_provider", "source", "version"}
     assert "capabilities" not in body
     assert "private" not in admin.text
     assert "grant_id" not in admin.text

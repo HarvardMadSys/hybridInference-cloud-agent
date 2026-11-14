@@ -64,6 +64,67 @@ describe('offered reasoning levels', () => {
   });
 });
 
+describe('reasoning levels on a model the deployment provides', () => {
+  const PROVIDED = 'oconn_0123456789abcdef0123456789abcdef';
+  const provided = {
+    ...declared,
+    provided_sources: [
+      {
+        id: PROVIDED,
+        name: 'House models',
+        is_default: true,
+        default_model: 'house-thinker',
+        models: ['house-thinker', 'deepseek-like', 'house-plain'],
+        model_runtimes: {
+          'house-thinker': ['claude-code', 'pi'],
+          'deepseek-like': ['claude-code'],
+          'house-plain': ['pi'],
+        },
+        model_efforts: {
+          'house-thinker': {
+            'claude-code': { status: 'supported', levels: ['low', 'high'] },
+            pi: { status: 'unknown', levels: [], reason: 'not_declared' },
+          },
+          'deepseek-like': { 'claude-code': { status: 'supported', levels: ['low'] } },
+        },
+        allowances: {},
+        resets_at: '2999-01-01T00:00:00Z',
+      },
+    ],
+  } as AgentConfigApi;
+
+  it('are offered per agent exactly as on the owner’s own connection', () => {
+    expect(offeredEfforts(provided, 'claude-code', 'house-thinker', PROVIDED)).toEqual([
+      'low',
+      'high',
+    ]);
+    expect(effortOffer(provided, 'pi', 'house-thinker', PROVIDED)?.status).toBe('unknown');
+    expect(offeredEfforts(provided, 'pi', 'house-thinker', PROVIDED)).toEqual([]);
+    expect(
+      effortFits(effortOffer(provided, 'claude-code', 'house-thinker', PROVIDED), 'high'),
+    ).toBe(true);
+  });
+
+  it('belong to the source, not to a namesake model on another one', () => {
+    expect(offeredEfforts(provided, 'claude-code', 'deepseek-like', PROVIDED)).toEqual(['low']);
+    expect(offeredEfforts(provided, 'claude-code', 'deepseek-like', CONNECTION)).toEqual([
+      'high',
+      'max',
+    ]);
+  });
+
+  it('are nothing for an agent that cannot run the model, and unknown when undeclared', () => {
+    expect(effortOffer(provided, 'claude-code', 'house-plain', PROVIDED)).toBeNull();
+    expect(effortOffer(provided, 'pi', 'house-plain', PROVIDED)).toMatchObject({
+      status: 'unknown',
+      reason: 'not_read',
+    });
+    expect(
+      effortOffer(provided, 'pi', 'house-thinker', 'oconn_ffffffffffffffffffffffffffffffff'),
+    ).toBeNull();
+  });
+});
+
 describe('a follow-up level against the turn it inherits from', () => {
   it('sends nothing when unchanged, the level when changed, "auto" to clear one', () => {
     expect(effortOverride('high', 'high')).toEqual({});

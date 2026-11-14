@@ -103,7 +103,8 @@ export function ModelIdsField({
   /** A model ID the form or the server found malformed. */
   invalid: boolean;
   disabled: boolean;
-  suggest: ModelSuggest;
+  /** Left out where there is no provider list to ask: IDs are typed by hand. */
+  suggest?: ModelSuggest;
   onModels: (models: string[]) => void;
   onDraft: (draft: string) => void;
 }) {
@@ -184,20 +185,22 @@ export function ModelIdsField({
       <p id={`${id}-hint`} className="mt-1 text-xs leading-5 text-muted">
         {t('connections.modelsHint', { max })}
       </p>
-      <ModelSuggestions
-        {...suggest}
-        models={models}
-        draft={draft}
-        max={max}
-        disabled={disabled}
-        onPick={(model) => {
-          if (full) return;
-          setMalformed(false);
-          onModels(withModel(models, model));
-          // The line was narrowing the list; picking is what it was typed for.
-          onDraft('');
-        }}
-      />
+      {suggest ? (
+        <ModelSuggestions
+          {...suggest}
+          models={models}
+          draft={draft}
+          max={max}
+          disabled={disabled}
+          onPick={(model) => {
+            if (full) return;
+            setMalformed(false);
+            onModels(withModel(models, model));
+            // The line was narrowing the list; picking is what it was typed for.
+            onDraft('');
+          }}
+        />
+      ) : null}
     </div>
   );
 }

@@ -144,6 +144,10 @@ class ResidentLaunch:
     # fixed at process start and part of reuse identity, so a process never
     # holds a token the turn's redactor does not mask.
     inference_local_token: str = field(default="", repr=False)
+    # ``"1"`` on a connection the deployment provides: ``inference_base_url``
+    # is then this host's model relay and ``credential`` the residency's
+    # placeholder for it, never a provider key. Fixed at process start.
+    inference_relayed: str = ""
 
     def __post_init__(self) -> None:
         if not self.thread_id or not self.runtime_id or not self.model:
@@ -666,6 +670,8 @@ class ResidentTransportFactory:
             pidfile = f"{MEMBER_TMPFS_ROOT}/{launch.slot_id}/resident-{secrets.token_hex(16)}.pid"
             argv, env = steps.with_platform_instructions(argv, env, instructions)
             if model_base_url.metered:
+                # On a provided connection this is the host's model relay,
+                # which ``meter_launch`` tells the launcher by its scheme.
                 argv, env = meter_launch(argv, env, launch.inference_base_url)
             process = self._manager.spawn(
                 spec,

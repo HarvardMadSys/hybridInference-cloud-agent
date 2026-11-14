@@ -1060,6 +1060,32 @@ RELEASE_STALE_RESIDENCIES_MEMBERS_SQL = f"""
                           COALESCE(m.residency_grant_id, '') AS grant_id
                 """
 
+# -- repositories/operator_models.py ------------------------------------------
+
+#: A provided connection a residency may still run on: live, enabled, and at
+#: the revision the residency was started with. ``b`` is its binding.
+_OPERATOR_STILL_CURRENT = """EXISTS (
+    SELECT 1 FROM agent_operator_model_connections c
+    WHERE c.id = b.operator_connection_id
+      AND c.deleted_at IS NULL AND c.enabled
+      AND c.credential_revision = b.credential_revision
+)"""
+
+#: Executed by ``release_stale_operator_residencies``.
+RELEASE_STALE_OPERATOR_RESIDENCIES_MEMBERS_SQL = f"""
+                UPDATE agent_thread_sandbox_memberships m
+                SET residency_status = 'none', residency_last_active_at = NOW()
+                FROM agent_sandboxes g, agent_operator_connection_residencies b
+                WHERE b.thread_id = m.thread_id
+                  AND b.residency_generation = m.residency_generation
+                  AND b.operator_connection_id = $1
+                  AND m.residency_status <> 'none'
+                  AND g.id = m.sandbox_id
+                  AND NOT {_OPERATOR_STILL_CURRENT}
+                RETURNING m.thread_id, m.residency_generation AS generation, g.host,
+                          COALESCE(m.residency_grant_id, '') AS grant_id
+                """
+
 
 __all__ = [
     "ABANDON_THREAD_SANDBOX_GROUP_SQL",
@@ -1113,6 +1139,7 @@ __all__ = [
     "RELEASE_CLAIM_MEMBERS_SQL",
     "RELEASE_RESIDENCY_MEMBERS_SQL",
     "RELEASE_SHARED_RESIDENCY_IF_QUIESCENT_MEMBERS_SQL",
+    "RELEASE_STALE_OPERATOR_RESIDENCIES_MEMBERS_SQL",
     "RELEASE_STALE_RESIDENCIES_MEMBERS_SQL",
     "RELEASE_THREADS_RESIDENCIES_SQL",
     "RENEW_ADMIN_SANDBOX_DELETION_CLAIM_GROUP_SQL",

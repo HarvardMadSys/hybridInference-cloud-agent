@@ -242,6 +242,81 @@ describe('follow-up model sources', () => {
   });
 });
 
+describe('a conversation on a model the deployment provides', () => {
+  const PROVIDED = 'oconn_0123456789abcdef0123456789abcdef';
+  const RESETS = '2999-01-01T00:00:00Z';
+
+  function providing(used: number) {
+    vi.mocked(getAgentConfig).mockResolvedValue({
+      ...CONFIG,
+      provided_sources: [
+        {
+          id: PROVIDED,
+          name: 'House models',
+          is_default: true,
+          default_model: 'shared',
+          models: ['shared', 'house-fast'],
+          model_runtimes: { shared: ['codex'], 'house-fast': ['codex'] },
+          allowances: {
+            shared: { daily_requests: 30, used_today: used },
+            'house-fast': { daily_requests: null, used_today: 0 },
+          },
+          resets_at: RESETS,
+        },
+      ],
+    });
+  }
+
+  it('names the provided source the turn ran on, and inherits it without naming it again', async () => {
+    providing(12);
+    render(<JobDetail job={makeJob({ modelConnectionId: PROVIDED })} />);
+    // `shared` is on three sources: the control says which one this chat runs on.
+    await waitFor(() =>
+      expect(screen.getByLabelText('Model for this turn')).toHaveAccessibleDescription(
+        'shared · House models',
+      ),
+    );
+    fireEvent.click(screen.getByLabelText('Model for this turn'));
+    expect(
+      screen.getByRole('option', { name: 'shared · House models 18 left today' }),
+    ).toHaveAttribute('aria-selected', 'true');
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+    await send('Go on');
+    await waitFor(() => expect(sentBody()).toMatchObject({ prompt: 'Go on' }));
+    expect(sentBody()).not.toHaveProperty('model');
+    expect(sentBody()).not.toHaveProperty('model_connection_id');
+  });
+
+  it('switches a personal conversation onto a provided model by its source id', async () => {
+    providing(0);
+    render(<JobDetail job={makeJob()} />);
+    await screen.findByLabelText('Model for this turn');
+    chooseModel('house-fast');
+    await send('Use the house model');
+    await waitFor(() =>
+      expect(sentBody()).toMatchObject({ model: 'house-fast', model_connection_id: PROVIDED }),
+    );
+  });
+
+  it('holds Send once today’s allowance is used up, and never falls back to a namesake', async () => {
+    providing(30);
+    render(<JobDetail job={makeJob({ modelConnectionId: PROVIDED })} />);
+    expect(
+      await screen.findByText(/shared · House models \(used up today\), which is unavailable/),
+    ).toBeVisible();
+    fireEvent.change(screen.getByLabelText('Add a follow-up'), { target: { value: 'Go on' } });
+    expect(screen.getByRole('button', { name: /^(Send|Queue)$/ })).toBeDisabled();
+    fireEvent.keyDown(screen.getByLabelText('Add a follow-up'), { key: 'Enter' });
+    expect(submitThreadMessage).not.toHaveBeenCalled();
+    // The used-up model stays listed, disabled, with when it comes back.
+    fireEvent.click(screen.getByLabelText('Model for this turn'));
+    expect(screen.getByRole('option', { name: /resets at/ })).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    );
+  });
+});
+
 it('refreshes an explicitly switched personal source and blocks click, Enter and form submission after deletion', async () => {
   render(<JobDetail job={makeJob()} />);
   await screen.findByLabelText('Model for this turn');

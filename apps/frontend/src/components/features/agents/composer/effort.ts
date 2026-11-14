@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { AgentConfigApi, ModelEffortOfferApi } from '@/lib/api/agents';
+import { findSource } from './providedModels';
 
 // Which reasoning levels a turn may run at.
 //
 // **What the model's provider declares, narrowed to what the agent can send.**
 // The server derives it from the provider's own model listing, per model, per
 // agent, for the API that agent's turn finally calls, and answers it in
-// `/config` (`model_connections[].model_efforts`). Nothing here guesses a
+// `/config` (`model_efforts` on each of the owner's connections and on each
+// source the deployment provides). Nothing here guesses a
 // level from a model's name or offers a fixed list. Auto -- no level, the
 // provider's default -- is always offered and is the default; a provider that
 // declares nothing offers Auto alone, and the composer says why.
@@ -14,7 +16,10 @@ import type { AgentConfigApi, ModelEffortOfferApi } from '@/lib/api/agents';
 /** The picker's value for Auto. The composer state holds `''` for it. */
 export const AUTO_EFFORT = 'auto';
 
-/** What the server offers one agent for one connection model; `null` when it cannot run it. */
+/**
+ * What the server offers one agent for one model on one source, the owner's
+ * own connection or a provided one; `null` when it cannot run it.
+ */
 export function effortOffer(
   config: AgentConfigApi | null,
   runtime: string,
@@ -22,7 +27,7 @@ export function effortOffer(
   connectionId: string | null = null,
 ): ModelEffortOfferApi | null {
   if (!config || !model || !connectionId) return null;
-  const connection = config.model_connections?.find((option) => option.id === connectionId);
+  const connection = findSource(config, connectionId);
   if (!connection?.model_runtimes?.[model]?.includes(runtime)) return null;
   return (
     connection.model_efforts?.[model]?.[runtime] ?? {

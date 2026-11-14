@@ -25,6 +25,30 @@ export interface ModelConnectionOptionApi {
   model_efforts?: Record<string, Record<string, ModelEffortOfferApi>>;
 }
 
+/** This owner's allowance on one provided model, for the current UTC day. */
+export interface ProvidedModelAllowanceApi {
+  /** Requests the owner may send today; `null` is unlimited. */
+  daily_requests: number | null;
+  /** Requests the deployment's relay has accepted from this owner today. */
+  used_today: number;
+}
+
+/**
+ * A connection the deployment provides to every admitted owner (`oconn_…`),
+ * as a composer offers it. The same shape as an owner's own connection, plus
+ * this owner's allowances. Only the models this owner may use are listed.
+ */
+export interface ProvidedModelSourceApi extends ModelConnectionOptionApi {
+  /** Whether a new owner with no history starts here. */
+  is_default: boolean;
+  /** The model a new owner starts on, when this owner may use it. */
+  default_model: string | null;
+  /** Per listed model: this owner's allowance and today's use. */
+  allowances: Record<string, ProvidedModelAllowanceApi>;
+  /** When today's counts start over: the next midnight UTC, as ISO time. */
+  resets_at: string;
+}
+
 /**
  * What the model's provider declared for the API one agent's turn calls.
  * `supported`: `levels` are the declared ones that agent can send, weakest
@@ -66,13 +90,22 @@ export interface AgentConfigApi {
    * until the owner chooses, rather than picking the first model in the list.
    */
   default_model?: string | null;
-  /** The owner's connection `default_model` ran on. */
+  /** The source `default_model` ran on: the owner's connection or a provided one. */
   default_model_connection_id?: string | null;
   /** This owner's enabled model connections. Absent before the feature. */
   model_connections?: ModelConnectionOptionApi[];
+  /**
+   * Connections this deployment provides, each with this owner's allowance. A
+   * model chosen from one is submitted with the source's id as
+   * `model_connection_id`. Absent on a control plane that predates them.
+   */
+  provided_sources?: ProvidedModelSourceApi[];
   /** Whether this deployment lets owners add and run on their own connections. */
   model_connections_enabled?: boolean;
-  /** No enabled connection can run anything yet; setup is gated separately. */
+  /**
+   * Neither an enabled connection of the owner's nor a provided one can run
+   * anything yet; setup is gated separately.
+   */
   model_connection_required?: boolean;
   /**
    * Whether this user has done what the deployment asks before choosing a

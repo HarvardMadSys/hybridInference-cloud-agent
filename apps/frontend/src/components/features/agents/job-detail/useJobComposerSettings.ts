@@ -13,6 +13,7 @@ import {
   type ModelChoice,
 } from '../composer/modelSource';
 import type { AgentJob } from '../types';
+import { useAllowanceReset } from '../composer/useAllowanceReset';
 import { useComposerConfig } from '../composer/useComposerConfig';
 
 /**
@@ -77,6 +78,8 @@ export function useJobComposerSettings(job: AgentJob, inherited: InheritedModel)
   );
   // An explicitly selected source can also disappear while Settings is open.
   // Keep its identity, refuse every submit path, and never substitute a same-name model.
+  // A provided model used up for today comes back when its count starts over.
+  useAllowanceReset(config);
   const choiceUnavailable = isModelUnavailable(config, job.runtime, choice, refreshing);
 
   // Against the model this turn would run — the switched-to one, or the

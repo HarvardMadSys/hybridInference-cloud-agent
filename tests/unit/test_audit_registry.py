@@ -60,6 +60,8 @@ _COMPUTED = {
     ("storage/repositories/account_policy.py", "write_audit"),  # record_account_audit(action=...)
     ("storage/repositories/audit.py", "insert_audit_row"),  # record_admin_action(action=...)
     ("api/deps.py", "record_admin_action"),  # log_admin_action(action=...)
+    # _audit(request, store, actor, "<name>", ...), see _provided_model_actions
+    ("api/admin_operator_models.py", "log_admin_action"),
 }
 
 
@@ -120,6 +122,18 @@ def _compute_actions() -> set[str]:
     }
 
 
+def _provided_model_actions() -> set[str]:
+    """The names ``admin_operator_models._audit(request, store, actor, "<name>", ...)`` writes."""
+    tree = ast.parse((BACKEND / "api" / "admin_operator_models.py").read_text())
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _name(node) == "_audit" and len(node.args) > 3:
+            literals = _literals(node.args[3])
+            assert literals is not None, "an audit action there must be spelled out"
+            names.update(literals)
+    return names
+
+
 def test_every_literal_action_a_writer_names_is_declared() -> None:
     literal, _ = _writes()
     assert literal, "the scan found no audit writes; the writer names above have drifted"
@@ -134,6 +148,9 @@ def test_every_computed_action_is_known_and_declared() -> None:
     assert sorted(compute - set(ACTIONS)) == []
     accounts = {f"agent.local_account.{name}" for name in ADMIN_ACTIONS}
     assert sorted(accounts - set(ACTIONS)) == []
+    provided = _provided_model_actions()
+    assert len(provided) == 9, "admin_operator_models writes a different set of actions?"
+    assert sorted(provided - set(ACTIONS)) == []
 
 
 def test_reads_and_checks_are_not_audited() -> None:
@@ -158,6 +175,15 @@ def _frozen_table() -> tuple[tuple[str, str, str | None, str | None, str | None,
 #: frozen copy has nothing to backfill for them and does not list them.
 _DECLARED_AFTER_0114 = {
     "agent.local_account.import",
+    "agent.operator_model_connection.create",
+    "agent.operator_model_connection.update",
+    "agent.operator_model_connection.rotate_key",
+    "agent.operator_model_connection.enable",
+    "agent.operator_model_connection.disable",
+    "agent.operator_model_connection.delete",
+    "agent.operator_model_connection.set_limit",
+    "agent.operator_model_user_limit.set",
+    "agent.operator_model_user_limit.clear",
     "agent.local_account.provision_invite",
     "agent.local_account.provision_revoke",
 }

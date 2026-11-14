@@ -49,6 +49,15 @@ MODEL_CONNECTION_CAPABILITY = "model-connections-v1"
 MODEL_PROTOCOL_COMPAT_CAPABILITY = "model-protocol-translation-v1"
 #: What a host running this release advertises for owner connections.
 HOST_MODEL_CONNECTION_CAPABILITIES = (MODEL_CONNECTION_CAPABILITY, MODEL_PROTOCOL_COMPAT_CAPABILITY)
+#: A host advertises this when its sandboxes reach the control plane's model
+#: relay (``AGENT_SANDBOX_MODEL_RELAY_URL`` names it on every group bridge) and
+#: its runner can launch a member on a *relayed* connection: one the deployment
+#: provides, whose key never leaves the control plane. A host without it gets
+#: such a claim back.
+MODEL_RELAY_CAPABILITY = "model-relay-v1"
+#: Where a host's sandboxes reach the model relay; its presence is what makes
+#: the host advertise :data:`MODEL_RELAY_CAPABILITY`.
+MODEL_RELAY_URL_ENV = "AGENT_SANDBOX_MODEL_RELAY_URL"
 
 CHAT_COMPLETIONS = "chat_completions"
 RESPONSES = "responses"
@@ -76,7 +85,15 @@ COMPAT_UPSTREAMS: dict[str, str] = {
 DIRECT = "direct"
 TRANSLATED = "translated"
 
-CONNECTION_ID = re.compile(r"mconn_[0-9a-f]{32}")
+#: An owner's own connection.
+OWNER_CONNECTION_ID = re.compile(r"mconn_[0-9a-f]{32}")
+#: A connection the deployment provides to every admitted owner. Its key stays
+#: in the control plane: a turn on one is *relayed*.
+OPERATOR_CONNECTION_ID = re.compile(r"oconn_[0-9a-f]{32}")
+#: Either kind, as a turn names its source.
+CONNECTION_ID = re.compile(r"[mo]conn_[0-9a-f]{32}")
+#: The same, as a JSON-schema pattern for the routes that accept one.
+CONNECTION_ID_PATTERN = r"^[mo]conn_[0-9a-f]{32}$"
 #: A translated member's loopback token: an HMAC-SHA256 digest, in hex.
 LOCAL_TOKEN = re.compile(r"[0-9a-f]{64}")
 #: A model id as the upstream spells it. Provider ids carry slashes, colons,
@@ -176,6 +193,25 @@ def anthropic_url(base_url: str, path: str) -> str:
     return anthropic_base_url(base_url) + path
 
 
+def is_operator_connection_id(value: object) -> bool:
+    """Whether ``value`` names a connection the deployment provides."""
+    return isinstance(value, str) and OPERATOR_CONNECTION_ID.fullmatch(value) is not None
+
+
+def relayed_base_url(base_url: str, relay_url: str) -> str:
+    """Where a member on a relayed connection is told its provider is.
+
+    The connection's own path on the host's model relay: the relay forwards a
+    request to the connection's real origin at the path it arrived on, so
+    every rule about paths (``anthropic_base_url``'s above all) holds
+    unchanged. ``relay_url`` is the host's own configuration, an origin.
+    """
+    scheme, _, rest = base_url.partition("://")
+    del scheme
+    _, slash, path = rest.partition("/")
+    return relay_url.rstrip("/") + (slash + path if path else "")
+
+
 def valid_api_key(value: str) -> bool:
     """Whether ``value`` is a key a header, a config file and an env var all carry intact."""
     return 0 < len(value) <= MAX_API_KEY_CHARS and all(33 <= ord(ch) <= 126 for ch in value)
@@ -199,7 +235,15 @@ class ModelConnectionAccess(BaseModel):
     base_url: str = Field(..., min_length=8, max_length=MAX_BASE_URL_CHARS)
     #: What the connection's URL speaks: the upstream protocol of the plan.
     protocol: str
-    api_key: Annotated[str, MASKED] = Field(..., repr=False)
+    #: The owner's key. On a relayed connection there is none: the claim
+    #: carries nothing here, and the member's CLI holds its residency's model
+    #: relay placeholder instead, which only that relay accepts.
+    api_key: Annotated[str, MASKED] = Field("", repr=False, exclude_if=lambda value: not value)
+    #: The deployment provides this connection and keeps its key: the member
+    #: reaches ``base_url``'s path on the host's model relay, never the
+    #: provider. Left out when false, so an owner connection's claim is what
+    #: it was before relayed connections existed.
+    relayed: bool = Field(False, exclude_if=lambda value: not value)
     #: What the member's CLI speaks, when the plan translates; empty is direct,
     #: and then left out, so a direct claim is what it was before translation.
     client_protocol: str = Field("", exclude_if=lambda value: not value)
@@ -236,9 +280,19 @@ class ModelConnectionAccess(BaseModel):
     @field_validator("api_key")
     @classmethod
     def _api_key(cls, value: str) -> str:
-        if not valid_api_key(value):
+        if value and not valid_api_key(value):
             raise ValueError("a model connection's API key must be printable ASCII")
         return value
+
+    @model_validator(mode="after")
+    def _source_kind(self) -> ModelConnectionAccess:
+        # An owner connection always carries its key and is never relayed; a
+        # provided one is always relayed, with or without a placeholder.
+        if self.relayed != (OPERATOR_CONNECTION_ID.fullmatch(self.connection_id) is not None):
+            raise ValueError("a provided connection, and only one, is relayed")
+        if not self.relayed and not self.api_key:
+            raise ValueError("an owner's model connection carries its key")
+        return self
 
     @model_validator(mode="after")
     def _translated_pair(self) -> ModelConnectionAccess:
@@ -276,11 +330,13 @@ class ModelConnectionAccess(BaseModel):
         if self.plan.translated:
             fields["inference_client_protocol"] = self.client_protocol
             fields["inference_local_token"] = self.local_token
+        if self.relayed:
+            fields["inference_relayed"] = "1"
         return fields
 
     def secrets(self) -> dict[str, str]:
         """The key, and on a translated plan the member's token, for the output redactor."""
-        values = {f"model-connection:{self.connection_id}": self.api_key}
+        values = {f"model-connection:{self.connection_id}": self.api_key} if self.api_key else {}
         if self.local_token:
             values[f"model-connection-translator:{self.connection_id}"] = self.local_token
         return values
@@ -292,6 +348,7 @@ __all__ = [
     "CHAT_COMPLETIONS",
     "COMPAT_UPSTREAMS",
     "CONNECTION_ID",
+    "CONNECTION_ID_PATTERN",
     "DIRECT",
     "HOST_MODEL_CONNECTION_CAPABILITIES",
     "LOCAL_TOKEN",
@@ -301,6 +358,10 @@ __all__ = [
     "MODEL_CONNECTION_CAPABILITY",
     "MODEL_ID",
     "MODEL_PROTOCOL_COMPAT_CAPABILITY",
+    "MODEL_RELAY_CAPABILITY",
+    "MODEL_RELAY_URL_ENV",
+    "OPERATOR_CONNECTION_ID",
+    "OWNER_CONNECTION_ID",
     "PROTOCOLS",
     "RESPONSES",
     "RUNTIME_PROTOCOLS",
@@ -309,7 +370,9 @@ __all__ = [
     "ProtocolPlan",
     "anthropic_base_url",
     "anthropic_url",
+    "is_operator_connection_id",
     "protocol_plan",
+    "relayed_base_url",
     "runtime_plans",
     "runtime_protocol",
     "valid_api_key",

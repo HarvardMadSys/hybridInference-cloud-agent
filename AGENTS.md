@@ -47,7 +47,7 @@ database stamped with the chain that predates it.
 
 | Module | What it owns |
 |---|---|
-| `apps/backend/cloud_agent/app.py` | The three listeners: the main API, the MCP-only one and the GitHub relay |
+| `apps/backend/cloud_agent/app.py` | The four listeners: the main API, the MCP-only one, the GitHub relay and the model relay |
 | `apps/backend/cloud_agent/api/` | One router module per surface — jobs, hosts, admin, session, MCP relay |
 | `apps/backend/cloud_agent/schemas/` | Domain-organized wire models, explicitly exported by `cloud_agent.schemas` |
 | `apps/backend/cloud_agent/application/` | Flows that run without a request: job admission and creation, native Fork materialization, residency credentials |
@@ -61,6 +61,7 @@ database stamped with the chain that predates it.
 | `apps/backend/cloud_agent/mcp/`, `api/mcp_connections.py`, `api/mcp_relay.py` | Per-user connections, protocol hosting, authorization and the MCP relay |
 | `apps/backend/cloud_agent/mcp/runtime.py` | Process-local MCP host, fenced session maintenance, and shutdown |
 | `apps/backend/cloud_agent/source_control/` (`github_relay_policy.py`, `source_control.py`), `api/github_relay.py` | The GitHub relay and its policy, and the GitHub/GitLab credentials behind them |
+| `apps/backend/cloud_agent/api/model_relay.py`, `api/admin_operator_models.py`, `domain/operator_models.py` | The model relay, the models a deployment provides and each owner's request allowance on them |
 | `apps/backend/cloud_agent/schemas/admin_observability.py` | The cross-user admin reading surface and its audit |
 | `apps/backend/cloud_agent_host/service/enrollment.py` | Host registration and the persisted host credential |
 | `apps/backend/cloud_agent_host/service/host_service.py`, `turn/turn_child.py` | The host service that claims, heartbeats and drains on SIGTERM, and the child process that executes one turn (`runner.py` is their command line) |
@@ -197,11 +198,16 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   retries safe and stops duplicate pull requests. [Code
   structure](docs/developer/code-structure.md#vocabulary) has the full
   glossary.
-- **Model connection.** Every turn runs on one of its owner's model
-  connections: a provider Base URL, the owner's own API key and verified
-  model ids (FreeInference is one such provider, used with the owner's key).
-  The claim and the residency of the owner's turn hand the key to the host;
-  the member's CLI runs on it. A turn runs at Auto (the provider's default)
+- **Model connection.** Every turn runs on a model connection: a provider
+  Base URL, an API key and verified model ids. Usually it is one of its
+  owner's own, with the owner's own key (FreeInference is one such provider,
+  used with the owner's key). The claim and the residency of the owner's turn
+  hand the key to the host; the member's CLI runs on it. A deployment may also
+  *provide* connections: an administrator saves the endpoint and the
+  deployment's key, and every admitted owner may run on it. That key stays in
+  the control plane: the member's CLI holds a residency placeholder and
+  reaches the provider through the model relay
+  ([design](docs/agents/specs/2026-11-12-platform-model-relay.zh-CN.md)). A turn runs at Auto (the provider's default)
   unless its owner picks a reasoning level the provider's own model listing
   declares for that model and API and the agent's CLI can send
   ([design](docs/agents/specs/2026-11-05-upstream-reasoning-effort.md)). MCP servers are
@@ -209,8 +215,10 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   relay with a separate scoped credential. A chat member's CLI holds its
   residency's MCP credential, which the relay resolves on every call to the
   turn that residency is running, so follow-ups keep the live process.
-  **There is no per-task dollar budget and no local quota or billing** — the
-  owner's provider keeps the key's quota and bill. The Usage pages show the
+  **There is no per-task dollar budget and no billing** — the
+  provider keeps the key's quota and bill. The one local limit is on provided
+  connections: each owner may send each provided model a number of requests
+  per UTC day, counted by the model relay; no tokens and no money are counted. The Usage pages show the
   tokens agents reported for calls attributable to a turn, labelled
   `runtime_reported`; they are not a provider bill and may undercount it. If
   a task seems to need a budget field, stop — the plan's C5 section records
@@ -234,17 +242,19 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   - the one named resolver on TCP/UDP 53;
   - the MCP relay's service port on the group's own bridge, which reaches the
     MCP-only listener for tools;
+  - the model relay's service port on the group's own bridge, on a host
+    configured with one, which reaches the model relay for provided models;
   - the exact public IPv4 address and port of each SSH server its owner
     registered, checked and enabled for one of the group's chats;
   - and nothing else: not the host, private or special-purpose addresses,
-    other groups, other ports, UDP 443, or IPv6. Neither relay is a
+    other groups, other ports, UDP 443, or IPv6. No relay is a
     caller-selected forward proxy, and there is no proxy at all.
 
 ## 7. Security boundaries — do not relax without review
 
 - A sandbox group reaches public IPv4 on TCP 80/443, the one named resolver,
-  its own MCP relay, and the exact public IPv4 address and port of each SSH
-  server its owner registered, checked and enabled for one of the group's
+  its own MCP relay, the model relay where its host has one, and the exact
+  public IPv4 address and port of each SSH server its owner registered, checked and enabled for one of the group's
   chats — and nothing else: none of the host's addresses, no
   private, link-local/metadata, CGNAT, multicast or reserved range, nothing in
   `AGENT_EGRESS_PROTECTED_CIDRS`, no other group, and no IPv6. Per-group
@@ -268,7 +278,9 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   stops reading, not writing: siblings share one writable workspace, `.git`
   included, so code a member plants there — a Git hook or `core.fsmonitor`,
   a build or test script — runs with the credentials of whichever member
-  executes it next. Model calls use the owner's own provider key and billing.
+  executes it next. Model calls use the owner's own provider key and billing,
+  or, on a provided model, the deployment's key, which only the model relay
+  holds (provided models below).
   No credential GitHub accepts enters a sandbox. A member's `GH_TOKEN` is its
   residency's `agh.` placeholder, which only the GitHub relay accepts: while
   the residency serves a running turn it exchanges it for the owner's own
@@ -396,6 +408,42 @@ requirement, and rules 4 and 5 remain permanent service boundaries.
   the MCP connection policy and the sandbox's protected ranges, pinned, with no
   redirects and no upstream body echoed. See the
   [model connection design](docs/agents/specs/2026-10-27-user-model-connections.zh-CN.md).
+- **Provided models (2026-11-12).** An administrator may save a provider's
+  Base URL, the deployment's own key and up to eight model ids, and every
+  admitted owner may run turns on it without any setup. The key is encrypted
+  under the settings root key in its own domain, is write-only, and never
+  leaves the control plane: it is in no claim, residency, host, sandbox,
+  response, log or audit row. A turn's claim marks the connection *relayed*
+  and carries no key; the member's CLI is launched at the connection's path
+  on its host's model tunnel and holds its residency's `amd.` placeholder,
+  which no provider accepts. Only the model relay accepts it, on a listener
+  of its own that serves nothing else, and only while that residency is the
+  chat's hot one, serving a running, leased, unstopped turn on an enrolled
+  host, on that connection, at the revision its process started on. Stop, a
+  superseded attempt, a rotated residency, a removed host, and a connection
+  disabled, deleted or moved to another Base URL take effect on the next
+  request, with nothing to revoke at the provider; a rotated key closes no
+  process. The relay is not a proxy: the destination is the connection's
+  Base URL, dialled under the rules of a connection check (public IPv4 HTTPS,
+  pinned, no redirect, no proxy); it forwards only the inference and
+  model-listing paths an agent CLI calls, matched whole, for a model the
+  connection lists; and it refuses any credential that is not its own
+  placeholder, so an owner's key never comes this way. Each owner has a daily
+  request allowance per provided model (a default per model, or the account's
+  own number; zero withholds the model), decided and counted in one statement
+  per request, checked again when a turn is admitted and claimed, and two caps
+  on requests in flight. No tokens or money are counted: the provider's own
+  budget on that key is the limit on spend, and one owner's large requests can
+  use it up for everyone. Accepted: an owner can relay their own running
+  turn's requests to something outside the sandbox, within their own
+  allowance and under their own name; a sibling member can cause a member's
+  placeholder to be used, as with the other residency credentials; and the
+  requests and answers of provided models pass through the control plane,
+  which stores and logs none of their content. Nothing falls back between a
+  provided connection and an owner's own. Saving and editing verify like an
+  owner's connection, with the administrator's explicit action, and every
+  change is in the admin audit trail without the key. See the
+  [design](docs/agents/specs/2026-11-12-platform-model-relay.zh-CN.md).
 - Public multi-tenant use requires Kata isolation, non-root, dropped
   capabilities, seccomp, and resource limits — plain Docker containers are for
   trusted internal repositories only.

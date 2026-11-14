@@ -62,6 +62,10 @@ class AllCapabilities:
         """The connection is unchanged, so a residency binds at its current revision."""
         return True
 
+    async def operator_sources_for_user(self, *, user_id: str) -> list[dict[str, Any]]:
+        """Legacy fixtures' deployment provides no model of its own."""
+        return []
+
     async def scan_key_ciphertexts(self, *, sandbox_id: str, limit: int) -> list[str]:
         """Legacy fixtures' sandbox groups were never handed a model connection key."""
         return []

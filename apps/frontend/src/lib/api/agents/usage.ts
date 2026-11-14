@@ -39,8 +39,15 @@ export interface AgentJobUsageApi {
     /** Cache-inclusive input, null when the agent's counters cannot establish it. */
     normalized_input_tokens?: number | null;
   };
-  /** The turn ran on its owner's own model connection: that provider bills it. */
+  /** The turn ran on a model connection, not on anything this service meters by cost. */
   external_provider?: boolean;
+  /**
+   * Whose connection that was: the owner's own (`personal`), which their
+   * provider bills, or one the deployment provides (`provided`). Null for a
+   * turn that named no connection, and absent on a control plane that
+   * predates provided models; both read as `personal`.
+   */
+  source?: 'personal' | 'provided' | null;
   /**
    * Orders two reads of this job's usage, asked for or pushed: the one whose
    * version compares greater saw everything the other did. Opaque.

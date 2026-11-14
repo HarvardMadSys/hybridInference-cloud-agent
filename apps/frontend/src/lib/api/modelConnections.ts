@@ -118,7 +118,7 @@ interface ErrorBody {
  * refused verification, and which fields an invalid request named (never
  * the values). The shared error parser keeps only the type and the message.
  */
-async function connectionJson<T>(resp: Response): Promise<T> {
+export async function connectionJson<T>(resp: Response): Promise<T> {
   if (resp.ok) return resp.json() as Promise<T>;
   let error: ErrorBody | undefined;
   try {

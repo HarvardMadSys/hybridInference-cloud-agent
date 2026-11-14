@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from cloud_agent.domain.operator_models import Allowance
+
 
 class ModelConnectionRepository(Protocol):
     """Persist model connections per owner.
@@ -117,5 +119,35 @@ class ModelConnectionRepository(Protocol):
 
         Returns ``thread_id``, ``generation``, ``host`` and ``grant_id`` per
         released residency, for the caller to close its process.
+        """
+        ...
+
+    async def operator_connection(self, *, connection_id: str) -> dict[str, Any] | None:
+        """A connection the deployment provides, deleted ones included; ``None`` otherwise.
+
+        Not scoped to an owner: it is every admitted owner's. What one owner
+        may use of it is :meth:`operator_allowance`.
+        """
+        ...
+
+    async def operator_allowance(
+        self, *, connection_id: str, user_id: str, model: str
+    ) -> Allowance:
+        """``user_id``'s daily request allowance on one provided model, with today's use."""
+        ...
+
+    async def bind_operator_residency(
+        self,
+        *,
+        user_id: str,
+        connection_id: str,
+        revision: int,
+        thread_id: str,
+        generation: int,
+    ) -> bool:
+        """Record that a residency's process runs on this provided connection revision.
+
+        Fenced as :meth:`bind_residency` is. Nothing is kept for scanning: no
+        key of the connection ever enters the sandbox.
         """
         ...

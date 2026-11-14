@@ -250,6 +250,12 @@ def network_from_env(env: dict[str, str] | None = None) -> SandboxNetwork:
     relays: list[RelayEndpoint] = []
     if relay := _relay(source.get("AGENT_SANDBOX_MCP_URL") or "", var="AGENT_SANDBOX_MCP_URL"):
         relays.append(relay)
+    if relay := _relay(
+        source.get("AGENT_SANDBOX_MODEL_RELAY_URL") or "", var="AGENT_SANDBOX_MODEL_RELAY_URL"
+    ):
+        # The model relay's tunnel: where a member on a connection the
+        # deployment provides sends its model requests, with a placeholder.
+        relays.append(relay)
     if (source.get("AGENT_SANDBOX_GITHUB_RELAY_CA_FILE") or "").strip():
         # The GitHub relay's tunnel answers for both names on every bridge;
         # git and gh reach it as GitHub itself, over TLS on 443.

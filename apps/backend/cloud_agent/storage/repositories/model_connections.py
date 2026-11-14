@@ -13,9 +13,16 @@ from cloud_agent.storage._sql.rows import load_json
 from cloud_agent.storage._sql.sandbox_transitions import (
     RELEASE_STALE_RESIDENCIES_MEMBERS_SQL,
 )
+from cloud_agent.storage.repositories.operator_models import (
+    bind_operator_residency,
+    read_operator_allowance,
+    read_operator_connection,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+    from cloud_agent.domain.operator_models import Allowance
 
 _COLUMNS = (
     "id, user_id, name, base_url, models, api_key_ciphertext, "
@@ -435,3 +442,39 @@ class PostgresModelConnectionRepository:
                 user_id,
             )
         return [dict(row) for row in rows]
+
+    # -- connections the deployment provides, as a turn reads them ---------------
+
+    async def operator_connection(self, *, connection_id: str) -> dict[str, Any] | None:
+        """One provided connection, tombstones included, or ``None``."""
+        async with self._pool.acquire() as conn:
+            return await read_operator_connection(conn, connection_id)
+
+    async def operator_allowance(
+        self, *, connection_id: str, user_id: str, model: str
+    ) -> Allowance:
+        """``user_id``'s allowance on one provided model, with today's use."""
+        async with self._pool.acquire() as conn:
+            return await read_operator_allowance(
+                conn, connection_id=connection_id, user_id=user_id, model=model
+            )
+
+    async def bind_operator_residency(
+        self,
+        *,
+        user_id: str,
+        connection_id: str,
+        revision: int,
+        thread_id: str,
+        generation: int,
+    ) -> bool:
+        """Stamp the residency with the provided connection revision it starts on."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            return await bind_operator_residency(
+                conn,
+                user_id=user_id,
+                connection_id=connection_id,
+                revision=revision,
+                thread_id=thread_id,
+                generation=generation,
+            )
